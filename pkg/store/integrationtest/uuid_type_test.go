@@ -16,11 +16,12 @@
 
 // Regression test for https://github.com/ptone/scion/issues/1634
 //
-// google/uuid.UUID values passed to raw SQL queries must be encoded as
-// PostgreSQL uuid (OID 2950), not text (OID 25). Without the pgx type
-// registration in OpenPostgres, the recursive CTE in
-// GetEffectiveGroupsForAgent fails with SQLSTATE 42883 ("operator does not
-// exist: uuid = text") on Postgres while silently passing on SQLite.
+// GetEffectiveGroupsForAgent seeds a recursive CTE with uuid.UUID args.
+// On Postgres, an untyped `SELECT $1 AS id` infers text when the parameter
+// is bound as text (google/uuid.UUID's driver.Valuer returns a string,
+// which can happen even after OpenPostgres registers uuid with pgx).
+// The join `gc.parent_group_id = e.id` then fails with SQLSTATE 42883
+// ("operator does not exist: uuid = text"). The seed now uses `$1::uuid`.
 package integrationtest
 
 import (
@@ -76,9 +77,9 @@ func TestUUID_GetEffectiveGroupsForAgent_Postgres(t *testing.T) {
 		Role:       store.GroupMemberRoleMember,
 	}))
 
-	// This is the call that fails with SQLSTATE 42883 when uuid.UUID is not
-	// registered with pgx. The recursive CTE passes uuid.UUID values as
-	// positional SQL args; without registration, pgx sends them as text.
+	// This is the call that fails with SQLSTATE 42883 when the CTE seed
+	// parameter is bound as text. Casting the seed to uuid on Postgres
+	// makes the CTE column type uuid regardless of how pgx encodes the arg.
 	effective, err := cs.GetEffectiveGroupsForAgent(ctx, agent.ID)
 	require.NoError(t, err, "GetEffectiveGroupsForAgent must not fail with uuid/text mismatch on Postgres")
 

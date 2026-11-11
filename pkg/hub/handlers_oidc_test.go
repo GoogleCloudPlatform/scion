@@ -19,8 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -37,75 +35,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testOIDCIssuerURL = "https://scion.example.com"
-
 // testOIDCServer creates a Server with an OIDCKeyManager configured for testing.
 // The key manager is set after server creation, so routes are NOT registered
 // via the mux. Use this for direct handler tests.
 func testOIDCServer(t *testing.T) *Server {
 	t.Helper()
 	srv, _ := testServer(t)
-
-	// Generate a test RSA key pair.
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	kid := computeKeyID(&privKey.PublicKey)
-	signingKey := &OIDCSigningKey{
-		KeyID:      kid,
-		PrivateKey: privKey,
-		PublicKey:  &privKey.PublicKey,
-		Active:     true,
-	}
-
-	// Create the RS256 signer (needed by identity token endpoint).
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
-	)
-	require.NoError(t, err)
-
-	mgr := &OIDCKeyManager{
-		activeKey: signingKey,
-		allKeys:   []*OIDCSigningKey{signingKey},
-		signer:    signer,
-		issuerURL: testOIDCIssuerURL,
-	}
-
-	srv.oidcKeyManager = mgr
-	srv.oidcIssuerURL = testOIDCIssuerURL
+	installTestOIDCKeyManager(t, srv)
 	return srv
 }
 
-// testOIDCServerWithRoutes creates a Server with OIDC enabled via config so
-// that routes are registered during New(). Use for mux-routing tests.
-func testOIDCServerWithRoutes(t *testing.T) *Server {
-	t.Helper()
-	s, err := newTestStore(":memory:")
+// TestNewServer_AgentEndpointDoesNotAffectOIDCIssuerDefault proves that the
+// agent-endpoint override — used only for the SCION_HUB_ENDPOINT value
+// injected into agents — has no effect on the OIDC issuer default, which
+// must keep falling back to the Hub's regular endpoint when oidc.issuer_url
+// is not set explicitly.
+func TestNewServer_AgentEndpointDoesNotAffectOIDCIssuerDefault(t *testing.T) {
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
-	cfg.OIDCConfig = config.OIDCProviderConfig{
-		Enabled:   true,
-		IssuerURL: testOIDCIssuerURL,
-	}
+	cfg.HubEndpoint = testOIDCIssuerURL
+	cfg.AgentEndpoint = "http://192.0.2.10:8080"
+	cfg.OIDCConfig = config.OIDCProviderConfig{Enabled: true} // IssuerURL left empty on purpose
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() with OIDC failed: %v", err)
 	}
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	return srv
+
+	if srv.oidcIssuerURL != testOIDCIssuerURL {
+		t.Errorf("oidcIssuerURL = %q, want it to default to HubEndpoint (%q), not AgentEndpoint", srv.oidcIssuerURL, testOIDCIssuerURL)
+	}
 }
 
 func TestHandleOIDCDiscovery(t *testing.T) {
@@ -152,7 +119,7 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/.well-known/openid-configuration", nil)
 			w := httptest.NewRecorder()
 
-			srv.handleOIDCDiscovery(w, req)
+			srv.oidcArea().HandleOIDCDiscovery(w, req)
 
 			assert.Equal(t, tc.wantStatus, w.Code)
 
@@ -175,6 +142,7 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 				expectedClaims := []string{
 					"iss", "sub", "aud", "iat", "exp", "nbf", "jti",
 					"project_id", "agent_name", "ancestry", "root_user",
+					"email", "email_verified", "name", "scion_token_kind",
 				}
 				assert.Equal(t, expectedClaims, doc.ClaimsSupported)
 			}
@@ -221,7 +189,7 @@ func TestHandleJWKS(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/.well-known/jwks.json", nil)
 			w := httptest.NewRecorder()
 
-			srv.handleJWKS(w, req)
+			srv.oidcArea().HandleJWKS(w, req)
 
 			assert.Equal(t, tc.wantStatus, w.Code)
 
@@ -262,12 +230,16 @@ func TestOIDCEndpoints_Unauthenticated(t *testing.T) {
 	srv := testOIDCServerWithRoutes(t)
 
 	// These requests do NOT include any auth headers.
+	// wantKey must be in the routed JSON body and notKey must not, which pins
+	// each route to its own handler (discovery document vs key set).
 	tests := []struct {
-		name string
-		path string
+		name    string
+		path    string
+		wantKey string
+		notKey  string
 	}{
-		{name: "discovery endpoint", path: "/.well-known/openid-configuration"},
-		{name: "JWKS endpoint", path: "/.well-known/jwks.json"},
+		{name: "discovery endpoint", path: "/.well-known/openid-configuration", wantKey: "jwks_uri", notKey: "keys"},
+		{name: "JWKS endpoint", path: "/.well-known/jwks.json", wantKey: "keys", notKey: "jwks_uri"},
 	}
 
 	for _, tc := range tests {
@@ -285,6 +257,11 @@ func TestOIDCEndpoints_Unauthenticated(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, w.Code,
 				"%s should return 200 without auth", tc.path)
+
+			var body map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "%s body: %s", tc.path, w.Body.String())
+			assert.Contains(t, body, tc.wantKey, "%s should serve its own document", tc.path)
+			assert.NotContains(t, body, tc.notKey, "%s should not serve the other OIDC document", tc.path)
 		})
 	}
 }
@@ -391,7 +368,7 @@ func doIdentityTokenRequest(t *testing.T, srv *Server, claims *AgentTokenClaims,
 	}
 
 	w := httptest.NewRecorder()
-	srv.handleAgentIdentityToken(w, req)
+	srv.oidcArea().HandleAgentIdentityToken(w, req)
 	return w
 }
 
@@ -512,6 +489,7 @@ func TestHandleAgentIdentityToken(t *testing.T) {
 				assert.Equal(t, "test-agent", tokenClaims.AgentName, "agent_name should be the agent slug")
 				assert.Equal(t, claims.Ancestry, tokenClaims.Ancestry, "ancestry should match")
 				assert.Equal(t, claims.Ancestry[0], tokenClaims.RootUser, "root_user should be ancestry[0]")
+				assert.Equal(t, "agent", tokenClaims.TokenKind, "scion_token_kind should be agent")
 
 				// Verify exp = now + token_lifetime (within 5 second tolerance)
 				expectedExpiry := time.Now().Add(15 * time.Minute)
@@ -607,6 +585,21 @@ func TestHandleAgentIdentityToken_RateLimiting(t *testing.T) {
 	// 3rd request should be rate limited.
 	w := doIdentityTokenRequest(t, srv, claims, body)
 	assert.Equal(t, http.StatusTooManyRequests, w.Code, "request exceeding burst should be rate limited")
+}
+
+// TestHandleAgentIdentityToken_NoRateLimiter checks that a server with no
+// identity-token rate limiter still issues tokens: the OIDC adapter must
+// return a nil limiter interface, never a typed nil.
+func TestHandleAgentIdentityToken_NoRateLimiter(t *testing.T) {
+	srv, _, claims := testOIDCIdentityServer(t)
+	srv.oidcTokenRateLimiter = nil
+
+	w := doIdentityTokenRequest(t, srv, claims, identityTokenRequest{Audience: "https://api.example.com"})
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp identityTokenResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.Token)
 }
 
 func TestHandleAgentIdentityToken_ForbiddenMessage(t *testing.T) {

@@ -1,0 +1,174 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package tunnelclient
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net"
+	"net/url"
+	"regexp"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
+)
+
+// RedactEndpoint returns the hub endpoint as it is shown in status
+// records, status output and error lines: scheme, host, port and path
+// only, never userinfo, a query or a fragment, with trailing slashes
+// removed. An endpoint that does not parse as a URL with a host, or that
+// holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is shown as "the configured hub endpoint".
+func RedactEndpoint(endpoint string) string {
+	u, ok := urlredact.HostAndPath(strings.TrimSpace(endpoint))
+	if !ok || u.Scheme == "" || u.Host == "" {
+		return "the configured hub endpoint"
+	}
+	r := url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimRight(u.Path, "/")}
+	return r.String()
+}
+
+// NormalizeEndpoint returns the form of a hub endpoint used to identify a
+// session locally: the redacted endpoint (RedactEndpoint) with the ASCII
+// letters of scheme and host lowercased and the scheme's default port
+// dropped. It follows the CLI's rule for comparing hub URLs. Input that is
+// not a URL with a host gives "invalid:" and a short digest of the input,
+// so different invalid inputs never compare equal and no input text is
+// kept.
+//
+// Normalisation here is for session reuse and comparison. The CLI's
+// credential lookup normalises endpoints with config.NormalizeEndpoint;
+// under it a different scheme, host, port or path never matches a stored
+// login. The connection uses the endpoint as configured.
+func NormalizeEndpoint(endpoint string) string {
+	s := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		// Not a URL with a host: a key distinct per input that holds
+		// none of the input's text.
+		sum := sha256.Sum256([]byte(strings.ToLower(s)))
+		return "invalid:" + hex.EncodeToString(sum[:8])
+	}
+	u.Scheme = asciiLower(u.Scheme)
+	host := asciiLower(u.Hostname())
+	port := u.Port()
+	if (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	r := url.URL{Scheme: u.Scheme, Path: strings.TrimRight(u.Path, "/")}
+	switch {
+	case port != "":
+		r.Host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		r.Host = "[" + host + "]"
+	default:
+		r.Host = host
+	}
+	return r.String()
+}
+
+// asciiLower returns s with only its ASCII letters lowercased, as
+// config.NormalizeEndpoint lowercases a hub URL: Unicode case mapping would
+// fold some characters into ASCII ones (U+212A KELVIN SIGN becomes "k") and
+// give two different hosts one key.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
+// scrubMask replaces what scrubEndpoint masks.
+const scrubMask = "***"
+
+// scrubMinLen is the length below which scrubEndpoint does not mask a part
+// of the endpoint on its own, as urlredact does (its minSecretLen): masking
+// a shorter string would rewrite unrelated text.
+const scrubMinLen = 3
+
+// scrubEndpoint removes the endpoint's userinfo, query and fragment from
+// text (for example, a transport error that quotes the URL, or the conduit
+// URL built from it), by the shared rule (urlredact.RedactURLIn): the
+// endpoint is shown by its scheme, host, port and path. An endpoint that
+// urlredact.HostAndPath rejects (it does not parse, or holds an '@' the
+// rule cannot place) is shown as its scheme and scrubMask. When the
+// endpoint parses, accepted or not, its credential (a password, or a user
+// name given without one), its whole query and every query value, of
+// scrubMinLen bytes or more, are also masked wherever they appear on their
+// own.
+func scrubEndpoint(text, endpoint string) string {
+	ep := strings.TrimSpace(endpoint)
+	shown := urlredact.MaskWhole(ep, scrubMask)
+	if u, ok := urlredact.HostAndPath(ep); ok {
+		shown = u.String()
+	}
+	text = urlredact.RedactURLIn(text, ep, shown, scrubMask)
+	u, err := url.Parse(ep)
+	if err != nil {
+		return text
+	}
+	var secrets []string
+	// The credential: the password, or a user name given without one,
+	// which may itself be a token (as urlredact.RedactUserInfo reads it).
+	if u.User != nil {
+		secret, hasPassword := u.User.Password()
+		if !hasPassword {
+			secret = u.User.Username()
+		}
+		secrets = append(secrets, secret)
+	}
+	secrets = append(secrets, u.RawQuery)
+	for _, vs := range u.Query() {
+		secrets = append(secrets, vs...)
+	}
+	for _, v := range secrets {
+		if len(v) >= scrubMinLen {
+			text = strings.ReplaceAll(text, v, scrubMask)
+		}
+	}
+	return text
+}
+
+// SessionKey identifies a session locally: the normalised endpoint and the
+// credential identity. Two invocations share a session only when both
+// match.
+type SessionKey struct {
+	Endpoint string
+	Kind     string
+	Subject  string
+}
+
+// KeyFor returns the session key for endpoint and id.
+func KeyFor(endpoint string, id Identity) SessionKey {
+	return SessionKey{Endpoint: NormalizeEndpoint(endpoint), Kind: id.Kind, Subject: id.Subject}
+}
+
+var (
+	// agentRefPattern is an agent slug ([a-z0-9-], as pkg/api slugs) or
+	// an agent id.
+	agentRefPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
+	// projectRefPattern is a project slug or a project id (hosted ids
+	// join a uuid and a name with "__").
+	projectRefPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]{0,198}[a-z0-9])?$`)
+)
+
+// validAgentRef reports whether s has the form of an agent slug or id.
+func validAgentRef(s string) bool { return agentRefPattern.MatchString(s) }
+
+// validProjectRef reports whether s has the form of a project slug or id.
+func validProjectRef(s string) bool { return projectRefPattern.MatchString(s) }

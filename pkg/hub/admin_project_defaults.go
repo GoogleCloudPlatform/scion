@@ -16,9 +16,11 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // handleAdminProjectDefaults handles GET/PUT /api/v1/admin/project-defaults.
@@ -26,7 +28,9 @@ import (
 // GET returns the current project defaults (merged with compiled defaults).
 // PUT accepts a partial update to the project_defaults opsettings section.
 //
-// Both endpoints are admin-gated (same auth check as handleAdminMaintenance).
+// The route guard checks hub.project_defaults.read; writes also require
+// hub.project_defaults.update. A user access token needs both selectors, and
+// writes only the keys projectDefaultsTokenKeys classifies as configuration.
 // The section follows the maintenance pattern: DB-only, no settings.yaml
 // representation, with a dedicated admin API endpoint.
 func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +58,7 @@ func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Reque
 		}
 		s.handlePutProjectDefaults(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 
@@ -62,32 +66,51 @@ func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Reque
 // the DB row with the compiled default. When no DB row exists, the compiled
 // default is returned (default_scratchpad: true).
 func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
-	enabled := true // compiled default
-
-	if ops := s.GetOperationalSettings(); ops != nil {
-		enabled = ops.ProjectDefaultScratchpad()
-	} else {
-		s.mu.RLock()
-		if s.config.DefaultScratchpad != nil {
-			// File/SQLite mode: read from settings.yaml via ApplySnapshot.
-			enabled = *s.config.DefaultScratchpad
-		}
-		s.mu.RUnlock()
-	}
-
+	enabled := s.defaultScratchpadEnabled()
 	writeJSON(w, http.StatusOK, opsettings.ProjectDefaultsSettings{
 		DefaultScratchpad: &enabled,
 	})
 }
 
+// defaultScratchpadEnabled reports the hub's project_defaults
+// default_scratchpad: the operational settings when present, else the
+// server config, else the compiled default (true). While it is on, every
+// project's scratchpad shared dir is a Required Mount.
+func (s *Server) defaultScratchpadEnabled() bool {
+	if ops := s.GetOperationalSettings(); ops != nil {
+		return ops.ProjectDefaultScratchpad()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config.DefaultScratchpad != nil {
+		// No OperationalSettings: read from settings.yaml via ApplySnapshot.
+		return *s.config.DefaultScratchpad
+	}
+	return true
+}
+
 // handlePutProjectDefaults accepts a partial update to the project_defaults
-// section. It writes the section via OperationalSettings.Update() (which
-// handles validation, persistence, and cross-replica propagation) or falls
-// back to a simple validation-only response in file/SQLite mode.
+// section: a key the body omits keeps its stored value, and an explicit
+// null clears it (mergeSectionOnCurrent). It writes the section via
+// OperationalSettings.Update() (which handles validation, persistence, and
+// cross-replica propagation) or falls back to a 501 when the hub has no
+// OperationalSettings.
 func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request) {
-	var body opsettings.ProjectDefaultsSettings
-	if err := readJSON(r, &body); err != nil {
+	rawBody, err := readRawBody(w, r)
+	if err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
+	var body opsettings.ProjectDefaultsSettings
+	if err := json.Unmarshal(rawBody, &body); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedProjectDefaultsKeys(rawBody)) {
 		return
 	}
 
@@ -100,14 +123,11 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 
 	// Validate the document against the section schema.
 	if errs := opsettings.Validate("project_defaults", doc); len(errs) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":  "validation_failed",
-			"errors": errs,
-		})
+		writeSettingsValidation(w, "", sectionValidationEntries("project_defaults", errs), nil)
 		return
 	}
 
-	// In postgres mode, persist via OperationalSettings.
+	// With OperationalSettings (any DB driver), persist via the DB.
 	if ops := s.GetOperationalSettings(); ops != nil {
 		caller := GetUserIdentityFromContext(r.Context())
 		updatedBy := ""
@@ -115,11 +135,36 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 			updatedBy = caller.Email()
 		}
 
-		// last-writer-wins (-1) — no CAS needed for this endpoint.
-		if _, err := ops.Update(r.Context(), "project_defaults", doc, updatedBy, -1, "managed"); err != nil {
+		// Merged on the current row: a key the body omits keeps its stored
+		// value and an explicit null clears it; the row revision read is
+		// the CAS base, so a concurrent write is a 409 (ptone/scion#3720).
+		fp, err := parseFieldPresence(rawBody)
+		if err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		merged, baseRev, err := mergeSectionOnCurrent(r.Context(), ops, "project_defaults", doc, fp)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to update project defaults: "+err.Error(), nil)
 			return
+		}
+		if errs := opsettings.Validate("project_defaults", merged); len(errs) > 0 {
+			writeSettingsValidation(w, "", sectionValidationEntries("project_defaults", errs), nil)
+			return
+		}
+		if _, same := unchangedManagedRow(r.Context(), ops, "project_defaults", merged, baseRev); !same {
+			if _, err := ops.Update(r.Context(), "project_defaults", merged, updatedBy, baseRev, "managed"); err != nil {
+				if errors.Is(err, store.ErrRevisionConflict) {
+					writeSettingsRevisionConflict(w, "Project defaults changed concurrently; reload and save again.",
+						[]map[string]interface{}{settingsConflictEntry("project_defaults", baseRev,
+							s.getCurrentRevision(ops, "project_defaults"))}, nil)
+					return
+				}
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to update project defaults: "+err.Error(), nil)
+				return
+			}
 		}
 
 		// Read back the applied state.
@@ -130,8 +175,8 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// File/SQLite mode: no persistent storage for this section.
+	// No OperationalSettings: no persistent storage for this section.
 	// Return 501 to signal that writes are not supported.
 	writeError(w, http.StatusNotImplemented, "not_implemented",
-		"Updating project defaults is not supported in file/SQLite mode", nil)
+		"Updating project defaults requires DB-backed operational settings", nil)
 }

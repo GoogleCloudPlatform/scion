@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# scripts/single-node-vm/tests/lib/kubectl — a fake `kubectl` for the
+# hybrid-tier test harness, put on PATH alongside the stub `gcloud`.
+# Never contacts a real cluster.
+#
+# Every invocation is appended to $KUBECTL_STUB_LOG (including the
+# KUBECONFIG value it was called with, so a test can assert every call
+# used the task-private temp file and never the operator's default).
+# Objects are stored as the minimal JSON `kubectl get -o json` would
+# return, under $KUBECTL_STUB_STATE_DIR, so hybrid-tier.sh's own JSON
+# parsing code runs unmodified against this stub's output.
+#
+# KUBECONFIG must be set on every call, exactly like a real kubectl
+# would need it pointed somewhere: this stub fails loudly if it's
+# missing, the same way the gcloud stub fails loudly on a missing
+# --project, rather than silently falling back to a default.
+
+set -euo pipefail
+
+: "${KUBECTL_STUB_LOG:?KUBECTL_STUB_LOG must be set}"
+: "${KUBECTL_STUB_STATE_DIR:?KUBECTL_STUB_STATE_DIR must be set}"
+: "${KUBECONFIG:?KUBECONFIG must be set -- every kubectl call must point at the task-private temp file explicitly}"
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
+
+mkdir -p "${KUBECTL_STUB_STATE_DIR}/pv" "${KUBECTL_STUB_STATE_DIR}/pvc" "${KUBECTL_STUB_STATE_DIR}/namespace" "${KUBECTL_STUB_STATE_DIR}/pods"
+
+printf 'KUBECONFIG=%s %s\n' "$KUBECONFIG" "$*" >> "$KUBECTL_STUB_LOG"
+
+get_flag() {
+  local key="$1"
+  shift
+  local a prev=""
+  for a in "$@"; do
+    case "$prev" in
+      "-${key}") printf '%s' "$a"; return 0 ;;
+    esac
+    case "$a" in
+      "--${key}="*) printf '%s' "${a#--"${key}"=}"; return 0 ;;
+    esac
+    prev="$a"
+  done
+  return 1
+}
+
+case "${1:-} ${2:-}" in
+  "get pv")
+    name="${3:-}"
+    f="${KUBECTL_STUB_STATE_DIR}/pv/${name}.json"
+    if [[ -f "${f}.get-error" ]]; then
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error getting persistentvolume ${name}}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    echo "Error from server (NotFound): persistentvolumes \"${name}\" not found" >&2
+    exit 1
+    ;;
+  "get namespace")
+    name="${3:-}"
+    f="${KUBECTL_STUB_STATE_DIR}/namespace/${name}.json"
+    if [[ -f "${f}.get-error" ]]; then
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error getting namespace ${name}}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    echo "Error from server (NotFound): namespaces \"${name}\" not found" >&2
+    exit 1
+    ;;
+  "get pvc")
+    name="${3:-}"
+    ns="$(get_flag n "$@")" || ns="default"
+    key="${ns}__${name}"
+    f="${KUBECTL_STUB_STATE_DIR}/pvc/${key}.json"
+    if [[ -f "${f}.get-error" ]]; then
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error getting persistentvolumeclaim ${name}}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    echo "Error from server (NotFound): persistentvolumeclaims \"${name}\" not found" >&2
+    exit 1
+    ;;
+  "delete pv")
+    name="${3:-}"
+    f="${KUBECTL_STUB_STATE_DIR}/pv/${name}.json"
+    if [[ -f "${f}.delete-fail" ]]; then
+      echo "Error from server: simulated delete failure for persistentvolume ${name}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "Error from server (NotFound): persistentvolumes \"${name}\" not found" >&2
+    exit 1
+    ;;
+  "delete namespace")
+    name="${3:-}"
+    f="${KUBECTL_STUB_STATE_DIR}/namespace/${name}.json"
+    if [[ -f "${f}.delete-fail" ]]; then
+      echo "Error from server: simulated delete failure for namespace ${name}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "Error from server (NotFound): namespaces \"${name}\" not found" >&2
+    exit 1
+    ;;
+  "delete pvc")
+    name="${3:-}"
+    ns="$(get_flag n "$@")" || ns="default"
+    key="${ns}__${name}"
+    f="${KUBECTL_STUB_STATE_DIR}/pvc/${key}.json"
+    if [[ -f "${f}.delete-fail" ]]; then
+      echo "Error from server: simulated delete failure for persistentvolumeclaim ${name}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "Error from server (NotFound): persistentvolumeclaims \"${name}\" not found" >&2
+    exit 1
+    ;;
+  "get pods")
+    ns="$(get_flag n "$@")" || ns="default"
+    f="${KUBECTL_STUB_STATE_DIR}/pods/${ns}.json"
+    if [[ -f "${f}.get-error" ]]; then
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error listing pods in ${ns}}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+    else
+      echo '{"items": []}'
+    fi
+    exit 0
+    ;;
+  "apply -f"|"create -f")
+    manifest="$(cat)"
+    obj_json="$("$PYTHON" "${LIB_DIR}/k8s-manifest-to-json.py" <<<"$manifest")"
+    kind="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['kind'])" "$obj_json")"
+    name="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['metadata']['name'])" "$obj_json")"
+    case "$kind" in
+      PersistentVolume)
+        printf '%s' "$obj_json" > "${KUBECTL_STUB_STATE_DIR}/pv/${name}.json"
+        ;;
+      PersistentVolumeClaim)
+        ns="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['metadata'].get('namespace',''))" "$obj_json")"
+        printf '%s' "$obj_json" > "${KUBECTL_STUB_STATE_DIR}/pvc/${ns}__${name}.json"
+        ;;
+      Namespace)
+        printf '%s' "$obj_json" > "${KUBECTL_STUB_STATE_DIR}/namespace/${name}.json"
+        ;;
+      *)
+        echo "kubectl-stub: unrecognized kind in applied manifest: ${kind}" >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+
+echo "kubectl-stub: unhandled invocation: $*" >&2
+exit 1

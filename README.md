@@ -8,7 +8,7 @@ Scion is an open-source orchestration platform for teams of AI agents and the pe
 
 As agents take on longer, more complex projects, the challenge becomes how they work together: who owns a task, what context they share, when they ask for help, and how you follow their progress. Scion provides the running environments, communication, identity, and visibility to explore those questions in practice.
 
-Run harnesses such as Claude Code, Gemini CLI, Codex, and OpenCode as independent processes, with per-agent configuration and credentials. Choose shared workspaces or separate Git worktrees and clones to suit the work. Start with a local CLI or the Workstation web UI, then move to a hosted Hub when your team needs shared access and remote execution.
+Run harnesses such as Claude Code, Antigravity, Codex, and OpenCode as independent processes, with per-agent configuration and credentials. Choose shared workspaces or separate Git worktrees and clones to suit the work. Start with a local CLI or the Workstation web UI, then move to a hosted Hub when your team needs shared access and remote execution.
 
 Scion's philosophy is **less is more**. Agents learn the `scion` CLI through skills and help text; you describe responsibilities and collaboration patterns in instructions. Teams can grow, delegate, review, and regroup as a task unfolds. Use Scion as a practical testbed for emerging patterns in agent collaboration, with the freedom to choose your models, tools, and infrastructure. Read more in [Philosophy](https://googlecloudplatform.github.io/scion/philosophy/).
 
@@ -63,9 +63,11 @@ scion server start
 
 Your browser opens to the onboarding wizard at `http://127.0.0.1:8080/onboarding`, which walks you through runtime detection (Docker, Podman, or Apple Container), identity configuration, container image setup, and creating your first workspace.
 
-After onboarding, start your first agent:
+The server is the hub that every `scion` command on your machine runs agents through. After onboarding, initialize a repository (it links to the local hub without a prompt) and start your first agent:
 
 ```bash
+cd my-project
+scion init
 scion start my-agent "Your task here"
 ```
 
@@ -77,7 +79,7 @@ Follow the [Installation Guide](https://googlecloudplatform.github.io/scion/gett
 
 ### Initialize your machine and a project
 
-> **Tip:** If you used `scion server start` above, the onboarding wizard handles machine initialization automatically — you can skip this section.
+> **Tip:** If you used `scion server start` above, the onboarding wizard handles machine initialization (`scion init --machine`) automatically; you still run `scion init` in each repository. If you set up the machine by hand, still run `scion server start`: agents always run through a hub.
 
 Navigate to your project and create a Scion project (the `.scion` directory that holds agent config):
 
@@ -89,9 +91,9 @@ scion init
 
 > **Tip:** Add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees.
 
-Scion auto-detects your OS and configures the default runtime (Docker on Linux/Windows, Container on macOS). Override this in `.scion/settings.yaml`.
+Scion auto-detects the container runtime: the first available of Podman, then Docker (on macOS: Podman, Docker, then Apple Container). Override this in `.scion/settings.yaml`.
 
-**NOTE** This project is evolving rapidly. Local mode, Hub-based workflows, and Kubernetes runtime are all supported and in active use. Expect continued iteration — APIs and configuration may change between releases.
+**NOTE** This project is evolving rapidly. Workstation and hosted Hubs, and the Kubernetes runtime, are all supported and in active use. Expect continued iteration — APIs and configuration may change between releases.
 
 ### Start Agents
 
@@ -119,7 +121,7 @@ scion start debug "Help me debug this error" --attach
 - **Workspaces with deliberate sharing** — Run agents in containers with their own configuration and credentials. Choose shared directories, Git worktrees, or separate clones according to the project's coordination needs.
 - **People in the conversation** — Follow work in native web chat or connect Telegram, Discord, Slack, Google Chat, and Microsoft Teams. Attach to supported interactive harness sessions when you want to work directly with an agent.
 - **Reusable expertise** — Package instructions and tools in [templates](https://googlecloudplatform.github.io/scion/local/templates/) and versioned skills. Publish, discover, and resolve skills through the Skill Bank and connected registries.
-- **Local to hosted execution** — Use Docker, Podman, Apple Container, Kubernetes, or Cloud Run. Choose local, Workstation, single-node hosted, or HA hosted operation, with a managed-agent API path for supported providers.
+- **Local to hosted execution** — Use Docker, Podman, Apple Container, Kubernetes, or Cloud Run. Choose Workstation, single-node hosted, or HA hosted operation, with a managed-agent API path for supported providers.
 - **Visibility and control** — Inspect logs, session metrics, and system health. Hosted deployments add roles, access boundaries, scoped secrets, and federated identity to control how people and agents work together.
 - **Open interfaces** — Integrate through the CLI, APIs, lifecycle hooks, MCP configuration, and the A2A bridge. Build on Apache-2.0-licensed code and contribute new patterns back to the project.
 
@@ -131,10 +133,10 @@ scion start debug "Help me debug this error" --attach
 | **Project** | A project namespace and collection of agents, commonly 1:1 with a git repo |
 | **Template** | An agent blueprint — system prompt plus a collection of skills |
 | **Runtime** | The execution technology: Docker, Podman, Apple Container, Kubernetes, or Cloud Run |
-| **Hub** | The control plane for Workstation and hosted operation, managing shared state, identity, and dispatch |
+| **Hub** | The control plane every agent runs through (the workstation server on your machine, or a hosted Hub), managing state, identity, and dispatch |
 | **Runtime Broker** | A service that provisions and runs containerized agents on behalf of a Hub |
 
-Not all concepts apply in every scenario — local mode is simpler. See [Concepts](https://googlecloudplatform.github.io/scion/concepts/) for the full picture.
+Not all concepts apply in every scenario — a single-user workstation needs only agents, projects, templates and the local Hub. See [Concepts](https://googlecloudplatform.github.io/scion/concepts/) for the full picture.
 
 ## Documentation
 

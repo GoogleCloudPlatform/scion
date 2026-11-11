@@ -80,6 +80,38 @@ func TestYAMLConfigProvider_SaveAndLoad(t *testing.T) {
 	}
 }
 
+// Save replaces the file as a whole rather than merging into it, so a key
+// deleted from the loaded map is gone after the next Save. The integration
+// config PUT relies on this for a settings key sent as null
+// (ptone/scion#3913).
+func TestYAMLConfigProvider_SaveReplacesDeletedKey(t *testing.T) {
+	p, err := NewYAMLConfigProvider(filepath.Join(t.TempDir(), "telegram.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if err := p.Save(ctx, map[string]string{"inbound_mode": "webhook", "db_path": "/var/tg.db"}); err != nil {
+		t.Fatalf("first Save() failed: %v", err)
+	}
+	cfg, err := p.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	delete(cfg, "db_path")
+	if err := p.Save(ctx, cfg); err != nil {
+		t.Fatalf("second Save() failed: %v", err)
+	}
+
+	loaded, err := p.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() after delete failed: %v", err)
+	}
+	if len(loaded) != 1 || loaded["inbound_mode"] != "webhook" {
+		t.Errorf("expected only inbound_mode=webhook after the delete, got %v", loaded)
+	}
+}
+
 func TestYAMLConfigProvider_EmptyPath(t *testing.T) {
 	_, err := NewYAMLConfigProvider("")
 	if err == nil {
@@ -642,57 +674,6 @@ func TestPluginSecretKeyMap_A2ABridge(t *testing.T) {
 func TestIsSecretConfigKey_A2AApiKey(t *testing.T) {
 	if !IsSecretConfigKey("api_key") {
 		t.Error("expected api_key to be a secret config key")
-	}
-}
-
-func TestAddSelfManagedPluginToSettings(t *testing.T) {
-	_, settingsPath := setupTestHome(t)
-
-	// Seed a minimal settings.yaml.
-	if err := os.WriteFile(settingsPath, []byte("server:\n  plugins: {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	entry := SelfManagedPluginEntry{
-		Name:       "a2a-bridge",
-		Address:    "localhost:9090",
-		ConfigFile: "~/.scion/scion-a2a-bridge-admin.yaml",
-	}
-
-	if err := AddSelfManagedPluginToSettings(entry); err != nil {
-		t.Fatalf("AddSelfManagedPluginToSettings() error: %v", err)
-	}
-
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var raw map[string]interface{}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		t.Fatal(err)
-	}
-
-	server := raw["server"].(map[string]interface{})
-	plugins := server["plugins"].(map[string]interface{})
-	broker := plugins["broker"].(map[string]interface{})
-
-	a2aEntry, ok := broker["a2a-bridge"].(map[string]interface{})
-	if !ok {
-		t.Fatal("a2a-bridge entry not found in broker map")
-	}
-
-	if sm, ok := a2aEntry["self_managed"].(bool); !ok || !sm {
-		t.Error("expected self_managed = true")
-	}
-	if mode, ok := a2aEntry["mode"].(string); !ok || mode != "self-managed" {
-		t.Errorf("expected mode = self-managed, got %v", a2aEntry["mode"])
-	}
-	if addr, ok := a2aEntry["address"].(string); !ok || addr != "localhost:9090" {
-		t.Errorf("expected address = localhost:9090, got %v", a2aEntry["address"])
-	}
-	if cf, ok := a2aEntry["config_file"].(string); !ok || cf != "~/.scion/scion-a2a-bridge-admin.yaml" {
-		t.Errorf("expected config_file, got %v", a2aEntry["config_file"])
 	}
 }
 

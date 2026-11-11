@@ -19,6 +19,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 var (
@@ -37,9 +39,17 @@ func EnableDebug() {
 
 // DebugEnabled returns true if debug mode is enabled.
 // Debug mode is enabled if:
-// - EnableDebug() was called (e.g., --debug flag)
-// - SCION_DEBUG environment variable is set
+//   - EnableDebug() was called (e.g., --debug flag)
+//   - the shared default log level is debug: SCION_LOG_LEVEL=debug, or the
+//     deprecated SCION_DEBUG alias (see package loglevel)
 func DebugEnabled() bool {
+	return debugEnabledFor("")
+}
+
+// debugEnabledFor is DebugEnabled for a component (a DebugfTagged tag):
+// a per-component level such as SCION_LOG_LEVEL=info,hubsync=debug enables
+// debug output for that tag only.
+func debugEnabledFor(component string) bool {
 	debugMu.RLock()
 	if debugInitialized {
 		result := debugEnabled
@@ -48,8 +58,8 @@ func DebugEnabled() bool {
 	}
 	debugMu.RUnlock()
 
-	// Not explicitly set, check environment
-	return os.Getenv("SCION_DEBUG") != ""
+	// Not explicitly set: consult the shared level state.
+	return loglevel.DebugEnabled(component)
 }
 
 // Debugf prints a debug message to stderr if debug mode is enabled.
@@ -63,8 +73,10 @@ func Debugf(format string, args ...interface{}) {
 
 // DebugfTagged prints a debug message with a custom tag to stderr if debug mode is enabled.
 // Example: DebugfTagged("hubsync", "syncing %d agents", count) -> [hubsync] syncing 5 agents
+// The tag is also a component name for per-component levels, so
+// SCION_LOG_LEVEL=info,hubsync=debug enables only these lines.
 func DebugfTagged(tag, format string, args ...interface{}) {
-	if DebugEnabled() {
+	if debugEnabledFor(tag) {
 		fmt.Fprintf(os.Stderr, "["+tag+"] "+format+"\n", args...)
 	}
 }

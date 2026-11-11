@@ -1,0 +1,276 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package artifacts
+
+import (
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// RefScheme prefixes an artifact reference: scion://artifact/<id>[@<seq>].
+const RefScheme = "scion://artifact/"
+
+// FormatRef returns the reference string of an artifact, pinned to version
+// seq when seq > 0.
+func FormatRef(id string, seq int) string {
+	if seq > 0 {
+		return RefScheme + id + "@" + strconv.Itoa(seq)
+	}
+	return RefScheme + id
+}
+
+// ErrBadRef is returned by ParseRef for a malformed reference.
+var ErrBadRef = errors.New("artifact reference must be scion://artifact/<id>[@<seq>] or a bare id")
+
+// ParseRef parses scion://artifact/<id>[@<seq>] or a bare <id>[@<seq>].
+// seq is 0 when the reference names the current version. The id must be a
+// UUID in its canonical 36-character form (any case), the form the
+// service assigns; the returned id is lowercase.
+func ParseRef(ref string) (id string, seq int, err error) {
+	s := strings.TrimSpace(ref)
+	s = strings.TrimPrefix(s, RefScheme)
+	if at := strings.LastIndexByte(s, '@'); at >= 0 {
+		n, ok := parseSeq(s[at+1:])
+		if !ok {
+			return "", 0, ErrBadRef
+		}
+		s, seq = s[:at], n
+	}
+	u, perr := uuid.Parse(s)
+	if perr != nil || len(s) != 36 {
+		return "", 0, ErrBadRef
+	}
+	return u.String(), seq, nil
+}
+
+// ArtifactResponse is the body of GET /api/v1/artifacts/{id} and of a
+// successful publish.
+type ArtifactResponse struct {
+	Artifact ArtifactInfo `json:"artifact"`
+	// Version is the current version, or the version a write created or
+	// finalized.
+	Version *VersionInfo `json:"version,omitempty"`
+	// Warnings are notes about the write that did not fail it.
+	Warnings []string `json:"warnings,omitempty"`
+	// CanManage, on a GET of the artifact or of one of its versions, is
+	// true when the caller may share and change it (see canAdministerWith).
+	CanManage bool `json:"canManage,omitempty"`
+	// CanShare, on a GET of the artifact or of one of its versions, is true
+	// when the caller may share it: CanManage, or a steward of an artifact
+	// owned by an agent (design D25), who may give view, review and edit
+	// grants, create share links, change the expiry and delete, but not
+	// give admin or move it.
+	CanShare bool `json:"canShare,omitempty"`
+	// ShareAuthority, when the caller is a steward and CanManage is false,
+	// names the steward clause: "project_owner" (an owner of the home
+	// project) or "delegator" (the user who delegated to the owning agent).
+	ShareAuthority string `json:"shareAuthority,omitempty"`
+	// CanRetire, on a GET of the artifact or of one of its versions, is
+	// true when the caller may delete it: the decision DELETE /{id} makes
+	// for the same request (retireAuthority): the owner, an admin grantee,
+	// a steward, or an owner or admin of its home project (the custodian
+	// clause), each a user whose credential permits artifact.manage there.
+	CanRetire bool `json:"canRetire,omitempty"`
+	// CanPublish, on a GET of the artifact or of one of its versions, is
+	// true when the caller may publish new versions of it of any kind
+	// (edit, upload or review; see canWriteErr): the decision POST
+	// /{id}/versions makes for the same request.
+	CanPublish bool `json:"canPublish,omitempty"`
+	// CanReview, on a GET of the artifact or of one of its versions, is
+	// true when the caller may append versions of kind review only, through
+	// a review grant (ptone/scion#4538). It is false whenever CanPublish is
+	// true, since a publisher may review too.
+	CanReview bool `json:"canReview,omitempty"`
+	// ScopeDeleted, on a GET of the artifact or of one of its versions, is
+	// true when the artifact's home project no longer exists, as on list
+	// rows. It is advisory: when the host cannot tell, it is left unset
+	// (see scopeDeleted).
+	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
+	// Archive, on a GET of the artifact or of one of its versions while
+	// the archive route is on, says whether Version can be downloaded as
+	// one zip from /versions/{seq}/archive (ptone/scion#7106).
+	Archive *ArchiveInfo `json:"archive,omitempty"`
+}
+
+// CreateVersionRequest is the body of POST /api/v1/artifacts (create an
+// artifact with a pending first version, or append to the caller's
+// artifact with the same key) and of POST /api/v1/artifacts/{id}/versions
+// (append a pending version). Title, Key and Scope apply to the first form
+// only.
+type CreateVersionRequest struct {
+	Title string `json:"title,omitempty"`
+	Key   string `json:"key,omitempty"`
+	Scope string `json:"scope,omitempty"`
+	// Kind is the version kind; "" means publish.
+	Kind  string `json:"kind,omitempty"`
+	Entry string `json:"entry"`
+	Note  string `json:"note,omitempty"`
+	// Files is the version's manifest.
+	Files []ManifestFile `json:"files"`
+	// Force skips the open-review check (ptone/scion#6849): without it a
+	// publish while reviews of the current version are open is refused
+	// with 409 review_open. Later steps of the create can still refuse it.
+	// It has no effect on a review, while the experiment is off, or when
+	// nothing is open.
+	Force bool `json:"force,omitempty"`
+}
+
+// FinalizeRequest is the optional JSON body of a finalize request.
+type FinalizeRequest struct {
+	// Base is the version a review was started from. It is required to
+	// finalize a review and ignored otherwise.
+	Base int `json:"base,omitempty"`
+}
+
+// ManifestFile is one file of a version manifest.
+type ManifestFile struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	// MediaType is optional; the service derives one from the path and the
+	// bytes when it is empty or generic.
+	MediaType string `json:"mediaType,omitempty"`
+}
+
+// PendingVersionResponse answers a request that created a pending
+// version.
+type PendingVersionResponse struct {
+	Artifact ArtifactInfo `json:"artifact"`
+	Version  *VersionInfo `json:"version"`
+	Upload   UploadInfo   `json:"upload"`
+	// Warnings are notes about the create that did not fail it, such as a
+	// publish forced over open reviews.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// UploadInfo tells the publisher what to upload before finalizing.
+type UploadInfo struct {
+	// Required lists the manifest paths whose bytes must be uploaded with
+	// PUT .../versions/{seq}/files/{path}. A file identical to one of the
+	// artifact's current version needs no upload, and of several files with
+	// the same bytes only one is listed (uploading it covers the others).
+	Required []string `json:"required"`
+}
+
+// VersionListResponse is the body of GET /api/v1/artifacts/{id}/versions:
+// the ready versions, newest first, without their files.
+type VersionListResponse struct {
+	Versions []VersionInfo `json:"versions"`
+	// Discarded lists the versions in the same page that stopped being
+	// pending without becoming ready (ptone/scion#4577), so gaps in the
+	// numbering are explained. Each carries only DiscardedVersionInfo's
+	// fields.
+	Discarded []DiscardedVersionInfo `json:"discarded"`
+	// NextBefore, when set, is the before= value of the next page. A page
+	// covers ready and discarded versions together, so it can hold fewer
+	// than limit ready versions; clients follow NextBefore.
+	NextBefore int `json:"nextBefore,omitempty"`
+}
+
+// DiscardedVersionInfo is a discarded version as the versions list shows
+// it: only its number, state, reason and the time its number was taken.
+// It never names who submitted it, its note, kind or files, which stay as
+// hidden as before.
+type DiscardedVersionInfo struct {
+	Seq int `json:"seq"`
+	// State is VersionStateFailed.
+	State string `json:"state"`
+	// Reason is one of the FailReason codes; FailReasonDiscarded for a
+	// version discarded before reasons were recorded.
+	Reason string `json:"reason"`
+	// CreatedAt is when the version number was taken.
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ArtifactInfo describes an artifact.
+type ArtifactInfo struct {
+	ID         string `json:"id"`
+	Ref        string `json:"ref"`
+	ScopeKind  string `json:"scopeKind"`
+	ScopeRef   string `json:"scopeRef"`
+	OwnerKind  string `json:"ownerKind"`
+	OwnerRef   string `json:"ownerRef"`
+	Key        string `json:"key,omitempty"`
+	Title      string `json:"title"`
+	CurrentSeq int    `json:"currentSeq"`
+	// ExpiresAt is when the artifact expires and is deleted, or absent
+	// when it is kept until deleted.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	// OwnerDeleted is true when the hub found the artifact's owner gone
+	// (a deleted agent or user; see the owner liveness reconciler). The
+	// artifact is otherwise unchanged.
+	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
+}
+
+// VersionInfo describes one version and its files.
+type VersionInfo struct {
+	Seq           int        `json:"seq"`
+	Ref           string     `json:"ref"`
+	Kind          string     `json:"kind"`
+	EntryPath     string     `json:"entryPath"`
+	Note          string     `json:"note,omitempty"`
+	TotalBytes    int64      `json:"totalBytes"`
+	FileCount     int        `json:"fileCount"`
+	CreatedByKind string     `json:"createdByKind,omitempty"`
+	CreatedByRef  string     `json:"createdByRef,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	State         string     `json:"state"`
+	Files         []FileInfo `json:"files,omitempty"`
+}
+
+// FileInfo describes one file of a version.
+type FileInfo struct {
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	SHA256    string `json:"sha256"`
+	MediaType string `json:"mediaType"`
+	// Origin is "remote" for an image the hub fetched at publish time and
+	// omitted for uploaded files. SourceURL is the URL it was fetched from
+	// and FetchStatus is "ok" or "failed".
+	Origin      string `json:"origin,omitempty"`
+	SourceURL   string `json:"sourceUrl,omitempty"`
+	FetchStatus string `json:"fetchStatus,omitempty"`
+}
+
+func artifactInfo(a *Artifact) ArtifactInfo {
+	return ArtifactInfo{
+		ID: a.ID, Ref: FormatRef(a.ID, 0), ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
+		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef, Key: a.Key, Title: a.Title,
+		CurrentSeq: a.CurrentSeq, ExpiresAt: a.ExpiresAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		OwnerDeleted: a.OrphanedAt != nil,
+	}
+}
+
+func versionInfo(v *Version, files []File) *VersionInfo {
+	out := &VersionInfo{
+		Seq: v.Seq, Ref: FormatRef(v.ArtifactID, v.Seq), Kind: v.Kind, EntryPath: v.EntryPath, Note: v.Note,
+		TotalBytes: v.TotalBytes, FileCount: v.FileCount, CreatedByKind: v.CreatedByKind,
+		CreatedByRef: v.CreatedByRef, CreatedAt: v.CreatedAt, State: v.State, Files: []FileInfo{},
+	}
+	for _, f := range files {
+		fi := FileInfo{Path: f.Path, Size: f.Size, SHA256: f.SHA256, MediaType: f.MediaType}
+		if f.Origin == FileOriginRemote {
+			fi.Origin, fi.SourceURL, fi.FetchStatus = f.Origin, f.SourceURL, f.FetchStatus
+		}
+		out.Files = append(out.Files, fi)
+	}
+	return out
+}

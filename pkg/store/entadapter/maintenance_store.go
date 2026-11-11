@@ -16,9 +16,14 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
@@ -37,7 +42,63 @@ func NewMaintenanceStore(client *ent.Client) *MaintenanceStore {
 
 // abortResult is the result message stamped on operations/runs that were
 // interrupted by a server restart. Kept identical to the SQLite backend.
-const abortResult = `{"error":"aborted: server was restarted while operation was running"}`
+const abortResult = `{"error":"` + abortText + `"}`
+
+// abortText is the error text of an operation or run interrupted by a
+// server restart.
+const abortText = "aborted: server was restarted while operation was running"
+
+// abortTextJSON is abortText as a JSON string.
+var abortTextJSON, _ = json.Marshal(abortText)
+
+// SecretHubIDMigrationKey is the maintenance migration key of the
+// migration of secrets stored in the Hub database into GCP Secret Manager.
+const SecretHubIDMigrationKey = "secret-hub-id-migration"
+
+// secretHubIDMigrationPreDecodeDescription is the description the
+// secret-hub-id-migration row was seeded with before the migration decoded
+// and verified values (ptone/scion#6989). A row that still carries it was
+// seeded by a release whose migration copied stored forms without
+// decoding them; reopenPreDecodeSecretMigration uses it as the one-time
+// marker.
+const secretHubIDMigrationPreDecodeDescription = `Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend.`
+
+// AppliedConfigTZCleanupKey is the maintenance operation key of the
+// applied-config TZ cleanup.
+const AppliedConfigTZCleanupKey = "applied-config-tz-cleanup"
+
+// AutoExposeEnvNormalizeKey is the maintenance operation key of the
+// auto-expose env normalization.
+const AutoExposeEnvNormalizeKey = "auto-expose-env-normalize"
+
+// TemplateBlobGCKey is the maintenance operation key of the template blob
+// garbage collection (ptone/scion#4221).
+const TemplateBlobGCKey = "template-blob-gc"
+
+// PassthroughTranslationReviewKey is the maintenance operation key of the
+// sandbox passthrough translation review.
+const PassthroughTranslationReviewKey = "passthrough-translation-review"
+
+// GroupParticipantModeCleanupKey is the maintenance operation key of the
+// one-time cleanup of legacy group conversation participant rows
+// (ptone/scion#5520).
+const GroupParticipantModeCleanupKey = "group-participant-mode-cleanup"
+
+// ProjectStorageMigrateKey is the maintenance operation key of the one-shot
+// project storage migration.
+const ProjectStorageMigrateKey = "project-storage-migrate"
+
+// ChatStarReconcileKey is the maintenance operation key of the starred
+// messages reconciliation.
+const ChatStarReconcileKey = "chat-star-reconcile"
+
+// ChatRetentionPreviewKey is the maintenance operation key of the chat
+// retention preview (a dry run of the chat retention sweep).
+const ChatRetentionPreviewKey = "chat-retention-preview"
+
+// ChatRetentionRunKey is the maintenance operation key of a manual chat
+// retention sweep.
+const ChatRetentionRunKey = "chat-retention-run"
 
 // defaultSeedOperations are the built-in maintenance operations and migrations.
 // In the SQLite backend these were seeded by migration SQL that minted ids via
@@ -45,9 +106,45 @@ const abortResult = `{"error":"aborted: server was restarted while operation was
 // Ent schema default (uuid.New) — see SeedMaintenanceOperations.
 var defaultSeedOperations = []store.MaintenanceOperation{
 	{
-		Key:         "secret-hub-id-migration",
+		Key:         SecretHubIDMigrationKey,
 		Title:       "Secret Hub ID Namespace Migration",
-		Description: `Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend.`,
+		Description: `Moves secrets whose value is stored in the Hub database into GCP Secret Manager, under the per-instance hub ID namespace. Each value is decoded with the Hub's local key, written, and read back before the secret is switched to Secret Manager; a secret that is not verified keeps its local copy. Secrets already in Secret Manager are checked, and a value that an earlier run copied in its encoded form is decoded and rewritten; this repair needs the local key that encoded it, so keep that key until the migration completes. A run that leaves any secret undecoded or unverified fails and can be run again. Values are never logged. Supports a dry run. Only needed for GCP Secret Manager backend.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
+		Key:         "applied-config-env-cleanup",
+		Title:       "Applied Config Env Cleanup",
+		Description: `Removes env entries that a since-fixed merge-back could have saved into agents' applied config. From agent.appliedConfig.env it removes GITHUB_TOKEN, any key named like a secret or secret-flagged env var in the agent's user, project, runtime broker or hub scope, and any other key whose saved value no longer matches a live plain source (the template's default env, the agent's explicit config, or a plain env var in one of those scopes). From the agent's explicit config env (inline config and the saved create inputs) it removes only GITHUB_TOKEN and secret-named keys. The same rules apply to the config snapshots of finished reincarnation records; records still in progress are skipped until a later run. Values are never logged. Supports a dry run. Safe to re-run; agents with nothing to remove are left untouched.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
+		Key:         AppliedConfigTZCleanupKey,
+		Title:       "Applied Config TZ Cleanup",
+		Description: `Optional. Converts the TZ that older hubs saved in agent.appliedConfig.env into an explicit timezone pin (source "legacy") in one pass and reports how many agents it converted. On its own, skipping this changes nothing, because the hub already does this for each agent the next time that agent's timezone is read; it matters only relative to applied-config-env-cleanup. Safe to re-run; a second run converts 0. A re-run replaces the stored result of the previous run, including its list of adopted agents; adopted pins stay identifiable by timezone source "legacy". Order with applied-config-env-cleanup: both orders are safe. Run this first to keep every saved TZ as a pin. If applied-config-env-cleanup runs first, it removes saved TZ values that match no live plain source (for example a TZ copied in from a runtime profile or the hub default); those agents then follow the user, project or hub timezone settings instead of being pinned. A TZ that matches the agent's explicit config is kept by that cleanup and converted here.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
+		Key:         AutoExposeEnvNormalizeKey,
+		Title:       "Auto-Expose Env Normalize",
+		Description: `Re-derives SCION_AUTO_EXPOSE_PORTS for agents whose inline config still holds a value an older hub stamped there (the agent's create inputs do not set it). The stamp is removed from the agent's inline and applied env, then the project annotation or template value, if any, is applied exactly as reincarnate would; with neither, the agent inherits the hub default at its next start. Explicit values, agents created before create inputs were recorded, and every other env key are left untouched. A running agent's container keeps the old value until the agent is next provisioned or reincarnated. Safe to re-run; a second run changes nothing.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
+		Key:         UTCTimestampNormalizeKey,
+		Title:       "UTC Timestamp Normalize",
+		Description: `Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column except webchat_message_star.starred_at (a fixed-width column that keeps its nine fraction digits) and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Tables that cannot be read because of rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) are repaired automatically at hub start, after a snapshot of the database; on SQLite the hub also runs this operation once at start, after the same snapshot, when other stored timestamps are not canonical. It rewrites the remaining non-canonical values, including such rows written later. Back up the database before a manual run. Run it only on this release or later. Safe to re-run; canonical values are left untouched and values are never logged.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
+		Key:         GroupParticipantModeCleanupKey,
+		Title:       "Group Conversation Participant Cleanup",
+		Description: `One-time cleanup of legacy conversation participant rows. In group conversations it removes active agent participant rows whose agent's message mode does not allow group membership without a human adding the agent (none, lineage, branch, or an unrecognized mode), and rows of agents that are deleted or missing. Rows of lineage and branch agents are removed even if a human added them, because older rows do not record who added them. Project and hub mode agents, users, direct conversations and rows already left are untouched. A removed row is marked as left, as when a participant leaves. Only lineage and branch agents can be added back this way, by a human allowed to message them: scion conversation join conv:<conversation-id> agent <agent-id> (or POST /api/v1/conversations/{id}/participants); a none mode agent cannot. Report only by default: the log lists each matching conversation and agent ID and counts by reason, and a run without dryRun is still marked completed. To remove the rows, run it through the API with {"params":{"apply":"true"}}; apply must be the string "true" (a boolean true is ignored and the run only reports). Safe to re-run; a second applied run removes 0.`,
+		Category:    store.MaintenanceCategoryMigration,
+	},
+	{
+		Key:         ProjectStorageMigrateKey,
+		Title:       "Project Storage Migration",
+		Description: `Run once on a hub whose workspace storage is shared (nfs, cloudrun-volume or gke-shared-volume); on local storage it does nothing. For each project it moves the files the hub kept in its legacy trees into the project storage layout the agents mount: the hub-managed project tree on the share and the hub's local ~/.scion/projects/<slug> go to projects/<project id>/workspace, the project configuration in the old .scion (settings.yaml, project-id, project-slug, templates/ and harness-configs/; for a git checkout only untracked entries; never broker records) is copied to projects/<project id>/.scion first, and the hub's local project-configs/<slug>__<id>/shared-dirs/<name> go to projects/<project id>/shared-dirs/<name>. A tree is renamed when its target does not exist; otherwise only files missing from the target are copied, no file in the target is ever overwritten, each conflict is listed, and the source is kept beside itself as <name>.migrated-<time>. Symlinks and special files in a source are never followed or copied; they are listed. Migrated entries are given the agents' uid:gid from the storage config (shared-dir content also gets group write); where the export refuses the change (root squash) the project is reported as migrated with ownership not normalised. While it moves a project's files it holds the project's provisioning locks, so agent starts for that project wait and may fail cleanly; run it before starting agents. A git checkout's .git is copied last under a temporary name and renamed into place only when complete; an interrupted run resumes when run again. Old trees are migrated only when the project ID they record matches (a tree recording another project is never migrated; one recording none only with {"params":{"adoptUnverified":"<slug>,..."}} or "true"). After every step of a project succeeded and its workspace on the shared storage holds content, the project's legacy copy in object storage (the project-level copy under hubs/<hub>/workspaces/<project id>/) is deleted; per-agent sync objects are kept. Supports a dry run that changes nothing and lists the plan. Safe to re-run: a second run reports moves=0. The project Files tab shows a notice until this has run.`,
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
@@ -78,6 +175,42 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Key:         "build-harness-config-image",
 		Title:       "Build Harness Config Image",
 		Description: "Builds a container image from a harness-config's bundled Dockerfile. The base image is resolved from the configured image registry.",
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         TemplateBlobGCKey,
+		Title:       "Template Blob Garbage Collection",
+		Description: "Deletes stored template and harness-config file blobs that no version references any more, and abandoned staged uploads, once they are older than the grace period (default 24h, minimum 1h; set the grace parameter, e.g. 48h, to change it for one run). Blobs a template or harness-config references are never deleted. The hub also runs this every hour. Safe to re-run.",
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         PassthroughTranslationReviewKey,
+		Title:       "Sandbox Passthrough Translation Review",
+		Description: `Reviews agents whose GCP identity passthrough was translated to the broker's host service account on a cloudrun-sandbox profile: agents annotated scion.dev/gcp-identity-translated-from=passthrough whose GCP identity is in assign mode with a translation service account record (others are reported as skipped). For each agent it checks whether the principal recorded as the source of the agent's service account assignment (the agent's creator when none is recorded) currently passes the passthrough requirements on the agent's broker: broker owner or admin, and iam.serviceAccounts.actAs on the broker's host service account. It also reports whether the agent holds the broker's current host service account, whether its service account record is the one bound to that broker, and when that record was created. Report only by default. With the block parameter set to the string "true", each agent whose review is fail has its GCP identity set to block, its service account assignment deactivated and the annotation scion.dev/gcp-identity-review=blocked added; a blocked agent is restored by recreating it. Agents whose review is error (the check could not be made, or the principal's account is not active) or skipped are never changed. Requires gcpIamCheckMode=enforce. Safe to re-run.`,
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         ChatStarReconcileKey,
+		Title:       "Starred Messages Reconciliation",
+		Description: `Checks every starred message association in batches until a full pass finds nothing to change. A star whose message moved to another conversation (a direct message promoted by an older release) is updated to the message's current conversation and project, keeping its owner and save time. A star whose owner, message, project or conversation no longer exists, or whose message or conversation was deleted, is removed. Permissions and account status are never considered, so a star hidden by an access change is kept. The hub does the same work in small steps every 10 minutes; run this to completion before enabling the starred messages experiment again after the hub ran an older release. The run fails, and should be run again, if stars were still changing after 3 full passes. Works with the experiment on or off. Takes no parameters. Safe to re-run.`,
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         ChatRetentionPreviewKey,
+		Title:       "Chat Retention Preview",
+		Description: `Shows what the chat retention sweep would delete, without deleting anything. It walks the same selections as the sweep, with the same chunk size and pause: first the messages of conversations and topics deleted more than deleted_conversation_grace_days ago, then, when a retention window is set, the messages older than the window. Pending and deferred messages are skipped, as the sweep skips them. The result is recorded as a dry-run preview in the chat retention run history (Admin > Server Config), with the number of messages per project and phase, the policy and who ran it; it never holds a message ID or content. Optional parameter: messages_retention_days, as a string of whole days from 7 to 36500, previews that window instead of the saved one, for example {"params":{"messages_retention_days":"365"}}. Works whether or not the sweep is enabled. Available only while the hub.chat_retention experiment is on. Safe to re-run.`,
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         ChatRetentionRunKey,
+		Title:       "Chat Retention Run",
+		Description: `Runs the chat retention sweep once, now, with the saved settings: it permanently deletes the messages of conversations and topics deleted more than deleted_conversation_grace_days ago and, when a retention window is set, the messages older than the window, with their dependent rows and the bytes of attachments left with no message. It is the same sweep as the background ticks, without their per-tick time budget; the pause between chunks stays, so a large backlog takes hours. It waits for a running sweep tick to finish first. The run is recorded in the chat retention run history (Admin > Server Config) with the counts per project, the policy and who ran it. Refused while the retention sweep is not enabled. Takes no parameters. Take a database backup first. Available only while the hub.chat_retention experiment is on.`,
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         "update-binary",
+		Title:       "Update Binary from Release",
+		Description: "Downloads the latest release binary from GitHub, verifies it, swaps the current binary, and restarts the hub service. Only available for binary-tier deployments.",
 		Category:    store.MaintenanceCategoryOperation,
 	},
 }
@@ -123,29 +256,87 @@ func entMaintenanceRunToStore(e *ent.MaintenanceOperationRun) *store.Maintenance
 // SeedMaintenanceOperations inserts the built-in operations and migrations that
 // are missing from the store. It is idempotent and replaces the SQLite
 // randomblob() UUID seeds with Go-side ids generated by the Ent default.
+//
+// Existing keys are skipped with INSERT ... ON CONFLICT (key) DO NOTHING
+// rather than by swallowing every constraint error, so an existing key is
+// skipped without masking any other constraint violation. It also stays safe
+// if two seeders do race (e.g. on SQLite, or outside Migrate's advisory lock,
+// which already serializes seeding on Postgres).
+//
+// CreateBulk, not a single-row Create: ent's single-row Create+OnConflict
+// reads the row back via RETURNING and fails with sql.ErrNoRows when DO
+// NOTHING skips the insert, while CreateBulk's read-back accepts zero returned
+// rows (same reason as armLaunchReaper in launch_reaper.go).
 func (s *MaintenanceStore) SeedMaintenanceOperations(ctx context.Context) error {
+	if len(defaultSeedOperations) == 0 {
+		return nil
+	}
+	builders := make([]*ent.MaintenanceOperationCreate, 0, len(defaultSeedOperations))
 	for _, op := range defaultSeedOperations {
-		exists, err := s.client.MaintenanceOperation.Query().
-			Where(maintenanceoperation.KeyEQ(op.Key)).
-			Exist(ctx)
-		if err != nil {
-			return err
-		}
-		if exists {
-			continue
-		}
 		// ID is intentionally left unset so the Ent schema default (uuid.New)
 		// mints it — the Go replacement for the SQLite randomblob() seed.
-		err = s.client.MaintenanceOperation.Create().
+		builders = append(builders, s.client.MaintenanceOperation.Create().
 			SetKey(op.Key).
 			SetTitle(op.Title).
 			SetDescription(op.Description).
 			SetCategory(op.Category).
-			SetStatus(store.MaintenanceStatusPending).
-			Exec(ctx)
-		if err != nil && !ent.IsConstraintError(err) {
-			return err
+			SetStatus(store.MaintenanceStatusPending))
+	}
+	// Must stay Exec, never Save: when DO NOTHING skips rows, RETURNING yields
+	// fewer ids than builders and ent assigns them to the nodes by position,
+	// so Save would hand back nodes carrying the wrong ids.
+	if err := s.client.MaintenanceOperation.CreateBulk(builders...).
+		OnConflictColumns(maintenanceoperation.FieldKey).
+		DoNothing().
+		Exec(ctx); err != nil {
+		return err
+	}
+	return s.reopenPreDecodeSecretMigration(ctx)
+}
+
+// reopenPreDecodeSecretMigration runs once per database, the first time a
+// release with the decoding secret-hub-id-migration starts on it. A row
+// still carrying secretHubIDMigrationPreDecodeDescription gets the current
+// description, and if that earlier migration had completed, the row is
+// also moved back to pending, without the earlier run's start, end,
+// starter and result: the earlier run may have left encoded values
+// in Secret Manager, so the panel must offer the migration (and its dry
+// run) again. Nothing runs automatically. A running or failed row keeps
+// its status. Once the description is replaced the marker is gone, so a
+// later start changes nothing.
+func (s *MaintenanceStore) reopenPreDecodeSecretMigration(ctx context.Context) error {
+	var current string
+	for _, op := range defaultSeedOperations {
+		if op.Key == SecretHubIDMigrationKey {
+			current = op.Description
 		}
+	}
+	if current == "" || current == secretHubIDMigrationPreDecodeDescription {
+		return nil
+	}
+	if _, err := s.client.MaintenanceOperation.Update().
+		Where(
+			maintenanceoperation.KeyEQ(SecretHubIDMigrationKey),
+			maintenanceoperation.DescriptionEQ(secretHubIDMigrationPreDecodeDescription),
+			maintenanceoperation.StatusEQ(store.MaintenanceStatusCompleted),
+		).
+		SetStatus(store.MaintenanceStatusPending).
+		ClearStartedAt().
+		ClearCompletedAt().
+		ClearStartedBy().
+		ClearResult().
+		SetDescription(current).
+		Save(ctx); err != nil {
+		return fmt.Errorf("reopening the secret migration: %w", mapError(err))
+	}
+	if _, err := s.client.MaintenanceOperation.Update().
+		Where(
+			maintenanceoperation.KeyEQ(SecretHubIDMigrationKey),
+			maintenanceoperation.DescriptionEQ(secretHubIDMigrationPreDecodeDescription),
+		).
+		SetDescription(current).
+		Save(ctx); err != nil {
+		return fmt.Errorf("updating the secret migration description: %w", mapError(err))
 	}
 	return nil
 }
@@ -323,17 +514,58 @@ func (s *MaintenanceStore) ListMaintenanceRuns(ctx context.Context, operationKey
 // "failed" and resets stalled "running" migrations back to "pending" so they
 // can be retried. Called at server startup to clean up operations interrupted
 // by a restart.
+//
+// A run whose Result is a JSON object keeps its keys (what the run recorded
+// before the restart, for example a checkpoint) and gains "error" (the
+// abort text) and "aborted": true; any other Result is replaced by the
+// abort text alone. Each run is updated on its own, only while it is still
+// running and its Result is the one read, so a Result written in between is
+// never overwritten: the run is then read again and updated once more if it
+// is still running (a run that changes again is left for the next start, with
+// a warning). The returned run count is the number of those updates
+// that matched.
 func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int64, int64, error) {
 	now := time.Now()
 
-	runs, err := s.client.MaintenanceOperationRun.Update().
+	running, err := s.client.MaintenanceOperationRun.Query().
 		Where(maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning)).
-		SetStatus(store.MaintenanceStatusFailed).
-		SetCompletedAt(now).
-		SetResult(abortResult).
-		Save(ctx)
+		Select(maintenanceoperationrun.FieldID, maintenanceoperationrun.FieldResult).
+		All(ctx)
 	if err != nil {
 		return 0, 0, err
+	}
+	var runs int64
+	for _, r := range running {
+		n, err := s.abortRunningRun(ctx, r.ID, r.Result, now)
+		if err != nil {
+			return runs, 0, err
+		}
+		if n == 0 {
+			// The run finished, or its Result changed, after it was read.
+			cur, err := s.client.MaintenanceOperationRun.Query().
+				Where(
+					maintenanceoperationrun.IDEQ(r.ID),
+					maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
+				).
+				Select(maintenanceoperationrun.FieldID, maintenanceoperationrun.FieldResult).
+				Only(ctx)
+			switch {
+			case ent.IsNotFound(err):
+				// No longer running: nothing to abort.
+			case err != nil:
+				return runs, 0, err
+			default:
+				if n, err = s.abortRunningRun(ctx, cur.ID, cur.Result, now); err != nil {
+					return runs, 0, err
+				}
+				if n == 0 {
+					// Changed again after the re-read: left running for the
+					// next start to abort.
+					slog.Warn("maintenance run changed while being aborted; left for the next start", "run_id", r.ID.String())
+				}
+			}
+		}
+		runs += int64(n)
 	}
 
 	migrations, err := s.client.MaintenanceOperation.Update().
@@ -347,8 +579,46 @@ func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int6
 		SetResult(abortResult).
 		Save(ctx)
 	if err != nil {
-		return int64(runs), 0, err
+		return runs, 0, err
 	}
 
-	return int64(runs), int64(migrations), nil
+	return runs, int64(migrations), nil
+}
+
+// abortRunningRun marks run id failed with the abort Result built from
+// result, only while the run is still running and its Result is still
+// result. It returns the number of rows updated (0 or 1).
+func (s *MaintenanceStore) abortRunningRun(ctx context.Context, id uuid.UUID, result string, now time.Time) (int, error) {
+	resultIs := maintenanceoperationrun.ResultEQ(result)
+	if result == "" {
+		// An unset Result reads as "" whether the column is NULL or empty.
+		resultIs = maintenanceoperationrun.Or(maintenanceoperationrun.ResultIsNil(), maintenanceoperationrun.ResultEQ(""))
+	}
+	return s.client.MaintenanceOperationRun.Update().
+		Where(
+			maintenanceoperationrun.IDEQ(id),
+			maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
+			resultIs,
+		).
+		SetStatus(store.MaintenanceStatusFailed).
+		SetCompletedAt(now).
+		SetResult(abortedRunResult(result)).
+		Save(ctx)
+}
+
+// abortedRunResult is the Result of a run aborted by a restart, given the
+// Result it had: a JSON object keeps its keys, with "error" set to the
+// abort text and "aborted" to true; anything else becomes abortResult.
+func abortedRunResult(prev string) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(prev), &obj); err != nil || obj == nil {
+		return abortResult
+	}
+	obj["error"] = abortTextJSON
+	obj["aborted"] = json.RawMessage("true")
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return abortResult
+	}
+	return string(out)
 }

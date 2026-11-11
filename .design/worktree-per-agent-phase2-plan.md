@@ -18,12 +18,12 @@ Q2/Q3/Q6 marked RESOLVED in §11; §8 (base teardown) and §12 (rollout) updated
 "keep base / GC deferred / clone-per-agent default."
 
 ### T2 — Delete-path teardown for the hub-managed worktree layout  [developer]
-The teardown primitives exist (`util.RemoveWorktree` / `PruneWorktreesIn` / `DeleteBranchIn`,
+The teardown primitives exist (`util.RemoveWorktree` / `RemoveWorktreeEntryIn` / `DeleteBranchIn`,
 `pkg/agent/provision.go`) and the broker delete path calls `mgr.Delete(..., removeBranch)`.
 **Verify and fix** that for a hub-managed worktree-per-agent agent, deletion:
 - removes the agent's worktree at `<ProjectDir>/workspace/worktrees/<agentID>` and (when
   `removeBranch`) its branch;
-- prunes the stale `.git/worktrees/<agentID>` registration in the shared base
+- removes the stale `.git/worktrees/<agentID>` registration (its own entry only) in the shared base
   (`<ProjectDir>/workspace`) — same hazard fixed in the #350 failure-cleanup;
 - **never** touches the shared base or sibling worktrees.
 Add a regression test (two agents; delete one; assert its worktree+registration gone and the

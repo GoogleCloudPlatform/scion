@@ -17,6 +17,8 @@ package hubclient
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Agent represents an agent from the Hub API.
@@ -56,47 +58,60 @@ type Agent struct {
 	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
 	CreatedBy         string            `json:"createdBy,omitempty"`
 	OwnerID           string            `json:"ownerId,omitempty"`
-	Visibility        string            `json:"visibility,omitempty"`
-	MessageMode       string            `json:"messageMode,omitempty"`
-	StateVersion      int64             `json:"stateVersion,omitempty"`
-	ExitCode          *int              `json:"exitCode,omitempty"`
-	ExitReason        string            `json:"exitReason,omitempty"`
+	// Ancestry is the ordered chain of ancestor principal IDs (users and/or
+	// agents) recorded at creation time, used for transitive relationship
+	// queries such as `scion list --ancestors` (ptone/scion#2146).
+	Ancestry     []string `json:"ancestry,omitempty"`
+	MessageMode  string   `json:"messageMode,omitempty"`
+	StateVersion int64    `json:"stateVersion,omitempty"`
+	ExitCode     *int     `json:"exitCode,omitempty"`
+	ExitReason   string   `json:"exitReason,omitempty"`
+	// Deletion is the hub's view of an active or failed delete of this agent
+	// (design ptone/scion#2483 §2.2). It is nil when no delete is active or
+	// failed.
+	Deletion *DeletionInfo `json:"deletion,omitempty"`
+	// Message is the Hub's human-readable status message for the agent,
+	// for example the reason a launch failed.
+	Message string `json:"message,omitempty"`
+	// Launch describes the agent's current or most recent launch. It is
+	// absent when the Hub does not report launches or the agent has none.
+	Launch *AgentLaunch `json:"launch,omitempty"`
+	// ProvisionedOnly is true when the agent was provisioned but not
+	// started (ptone/scion#2929). Absent from Hubs that predate it (decodes
+	// as false). No omitempty: re-encoding keeps an explicit false so a
+	// merging consumer clears a previously seen true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
+
+	// PinnedRuntimeTarget is the agent's pinned placement on a flat Runtime
+	// Broker (read-only; nil for an unpinned agent).
+	PinnedRuntimeTarget *api.PinnedRuntimeTarget `json:"pinnedRuntimeTarget,omitempty"`
+
+	// Authority is the agent's authority state as the Hub computed it at
+	// read: always on a single-agent Get, and on listed agents only when
+	// ListAgentsOptions.IncludeAuthority is set. Nil from Hubs that predate
+	// it.
+	Authority *api.AgentAuthority `json:"authority,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (a *Agent) UnmarshalJSON(data []byte) error {
-	type Alias Agent
-	aux := &struct {
-		Grove   string `json:"grove"`
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(a),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if a.Project == "" && aux.Grove != "" {
-		a.Project = aux.Grove
-	}
-	if a.ProjectID == "" && aux.GroveID != "" {
-		a.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (a Agent) MarshalJSON() ([]byte, error) {
-	type Alias Agent
-	return json.Marshal(&struct {
-		Alias
-		Grove   string `json:"grove,omitempty"`
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(a),
-		Grove:   a.Project,
-		GroveID: a.ProjectID,
-	})
+// AgentLaunch is the Hub's view of an agent's current or most recent launch.
+type AgentLaunch struct {
+	ID        string `json:"id"`
+	State     string `json:"state"`  // "active" | "ended"
+	Active    bool   `json:"active"` // the launch is in flight
+	Kind      string `json:"kind"`   // create | start | restart
+	Step      string `json:"step,omitempty"`
+	Error     string `json:"error,omitempty"` // launch error code, e.g. image_pull_failed
+	Cause     string `json:"cause,omitempty"` // runtime cause code behind a runtime_error, e.g. runtime_forbidden
+	EndReason string `json:"endReason,omitempty"`
+	// ResumePhase is the resume memory of a failed start (ptone/scion#4669):
+	// the resting phase the agent is treated as being in for a later start or
+	// resume (store.EffectiveRestingPhase), set only when it differs from the
+	// agent's phase.
+	ResumePhase string `json:"resumePhase,omitempty"`
+	// Deadline and RemainingSeconds are present only while the launch is
+	// active. RemainingSeconds is never negative.
+	Deadline         *time.Time `json:"deadline,omitempty"`
+	RemainingSeconds *int       `json:"remainingSeconds,omitempty"`
 }
 
 // AgentConfig represents agent configuration.
@@ -108,6 +123,23 @@ type AgentConfig struct {
 	Model         string            `json:"model,omitempty"`
 	Profile       string            `json:"profile,omitempty"`
 	Task          string            `json:"task,omitempty"`
+	// GCPIdentity is the GCP identity the Hub applied to the agent. Nil when
+	// the Hub recorded none or predates the field.
+	GCPIdentity *GCPIdentity `json:"gcpIdentity,omitempty"`
+}
+
+// GCPIdentity is the GCP identity applied to an agent, as recorded in its
+// applied config (appliedConfig.gcpIdentity).
+type GCPIdentity struct {
+	// MetadataMode is "block", "passthrough" or "assign".
+	MetadataMode string `json:"metadataMode"`
+	// ServiceAccountID is the registered service account, set for "assign".
+	ServiceAccountID string `json:"serviceAccountId,omitempty"`
+	// ServiceAccountEmail is the service account email, set for "assign".
+	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"`
+	// ProjectID is the GCP project the service account lives in. It is not
+	// a Scion project ID.
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // DirectConnect contains direct connection info.
@@ -145,47 +177,16 @@ type Project struct {
 	ProjectType            string            `json:"projectType,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (p *Project) UnmarshalJSON(data []byte) error {
-	type Alias Project
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		GroveType string `json:"groveType"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if p.ID == "" && aux.GroveID != "" {
-		p.ID = aux.GroveID
-	}
-	if p.Name == "" && aux.GroveName != "" {
-		p.Name = aux.GroveName
-	}
-	if p.ProjectType == "" && aux.GroveType != "" {
-		p.ProjectType = aux.GroveType
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
+// MarshalJSON implements custom marshaling to also emit the canonical
+// "projectId" alias for "id".
 func (p Project) MarshalJSON() ([]byte, error) {
 	type Alias Project
 	return json.Marshal(&struct {
 		Alias
 		ProjectID string `json:"projectId,omitempty"`
-		GroveID   string `json:"groveId,omitempty"`
-		GroveName string `json:"groveName,omitempty"`
-		GroveType string `json:"groveType,omitempty"`
 	}{
 		Alias:     Alias(p),
 		ProjectID: p.ID,
-		GroveID:   p.ID,
-		GroveName: p.Name,
-		GroveType: p.ProjectType,
 	})
 }
 
@@ -198,36 +199,90 @@ type ProjectProvider struct {
 	LocalPath  string    `json:"localPath,omitempty"`
 	LinkedBy   string    `json:"linkedBy,omitempty"` // User ID who performed the link
 	LinkedAt   time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
+
+	// AgentLimit is the broker's effective max_agents_per_broker ceiling
+	// (ptone/scion#2161). Unset (nil) when the hub has no quota enforcement
+	// configured, no max_agents_per_broker definition exists, resolution
+	// failed for this provider, or the broker is unlimited. The field is
+	// never 0: a non-positive effective limit means unlimited and is
+	// omitted.
+	AgentLimit *int64 `json:"agentLimit,omitempty"`
+	// AgentCount is the number of active max_agents_per_broker reservations
+	// on this broker (ptone/scion#2161) — broker-wide, across every project
+	// linked to it, and distinct from a project's own agentCount (e.g.
+	// Project.AgentCount). It is exact when the broker has a limit. When the
+	// broker is unlimited, reservations are only backfilled by the periodic
+	// broker-quota-reconcile job, so the value may lag by up to the reconcile
+	// interval. Unset (nil) when the hub has no quota enforcement configured,
+	// no max_agents_per_broker definition exists, or resolution failed for
+	// this provider; a broker with no agents reports 0, not unset.
+	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource reports which precedence step produced AgentLimit
+	// (ptone/scion#2061 P2, design.md §5.9): "broker", "entitlement",
+	// "hub_default", "unlimited", or "not_enforced" (Amendment A1: the P1b
+	// enforcement switch is off — AgentLimit is then informational only, not
+	// enforced on create). Empty when resolution didn't run or failed, the
+	// same conditions that leave AgentLimit and AgentCount unset.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
 // ProjectSettings represents project configuration settings.
+//
+// bucket, runtimes, harnesses and profiles are not stored at the project
+// layer: GET never returns them, and a PUT that sets any of them (to a
+// non-null value) is refused with 400. They are configured in server or
+// Runtime Broker settings, so this type has no fields for them
+// (ptone/scion#5360).
 type ProjectSettings struct {
-	ActiveProfile          string                 `json:"activeProfile,omitempty"`
-	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
-	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
-	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
-	DefaultModel           string                 `json:"defaultModel,omitempty"`
-	DefaultThinkingLevel   *int                   `json:"defaultThinkingLevel,omitempty"`
-	TelemetryEnabled       *bool                  `json:"telemetryEnabled,omitempty"`
-	AutoExposePortsEnabled *bool                  `json:"autoExposePortsEnabled,omitempty"`
-	Bucket                 *BucketConfig          `json:"bucket,omitempty"`
-	Runtimes               map[string]interface{} `json:"runtimes,omitempty"`
-	Harnesses              map[string]interface{} `json:"harnesses,omitempty"`
-	Profiles               map[string]interface{} `json:"profiles,omitempty"`
+	// ActiveProfile names the broker profile new agents in the project run
+	// under when the request names none. On PUT, an absent (null) field
+	// keeps the stored value and an empty string clears it, so a client that
+	// does not manage the profile (the web settings page) cannot wipe it.
+	ActiveProfile          *string `json:"activeProfile,omitempty"`
+	DefaultTemplate        string  `json:"defaultTemplate,omitempty"`
+	DefaultHarnessConfig   string  `json:"defaultHarnessConfig,omitempty"`
+	DefaultHarnessAuth     string  `json:"defaultHarnessAuth,omitempty"`
+	DefaultModel           string  `json:"defaultModel,omitempty"`
+	DefaultThinkingLevel   *int    `json:"defaultThinkingLevel,omitempty"`
+	TelemetryEnabled       *bool   `json:"telemetryEnabled,omitempty"`
+	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits
-	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
-	DefaultMaxModelCalls int                  `json:"defaultMaxModelCalls,omitempty"`
+	// DefaultMaxTurns and DefaultMaxModelCalls: nil inherits (no project
+	// value), 0 is an explicit "no limit" (Unlimited) and n >= 1 a limit.
+	// On the settings PUT, null clears them (ptone/scion#3925).
+	DefaultMaxTurns      *int                 `json:"defaultMaxTurns,omitempty"`
+	DefaultMaxModelCalls *int                 `json:"defaultMaxModelCalls,omitempty"`
 	DefaultMaxDuration   string               `json:"defaultMaxDuration,omitempty"`
 	DefaultResources     *ProjectResourceSpec `json:"defaultResources,omitempty"`
 
 	// Default GCP identity for new agents
 	DefaultGCPIdentityMode             string `json:"defaultGCPIdentityMode,omitempty"`             // "block", "passthrough", or "assign"
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
+	// DefaultGCPIdentityServiceAccountIDByProfile maps a broker profile name
+	// to a registered GCP service account ID. When an agent is created with
+	// no explicit GCP identity, the entry for the profile the agent runs
+	// under assigns that service account, ahead of DefaultGCPIdentityMode and
+	// DefaultGCPIdentityServiceAccountID. On PUT, an absent (null) field
+	// keeps the stored map and an empty object clears it. No omitempty: a
+	// nil map marshals to null (keep) and an empty map to {} (clear).
+	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile"`
 
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
 	DefaultAgentRole string `json:"defaultAgentRole,omitempty"`
+}
+
+// ProjectGCPIdentityDefaultsUpdate is a partial project settings PUT body
+// that carries only the default GCP identity fields. A nil field is left out
+// of the body and keeps its stored value; a pointer to "" (or to an empty
+// map) is sent and clears the field. ProjectSettings cannot express this,
+// because its string fields drop "" (omitempty) and a full ProjectSettings
+// round trip would resend every other setting.
+type ProjectGCPIdentityDefaultsUpdate struct {
+	Mode                      *string            `json:"defaultGCPIdentityMode,omitempty"`
+	ServiceAccountID          *string            `json:"defaultGCPIdentityServiceAccountID,omitempty"`
+	ServiceAccountIDByProfile *map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile,omitempty"`
 }
 
 // ResolvedHubDefault reports whether a hub-level default exists for a project
@@ -302,13 +357,6 @@ type ProjectResourceList struct {
 	Memory string `json:"memory,omitempty"`
 }
 
-// BucketConfig represents cloud storage configuration.
-type BucketConfig struct {
-	Provider string `json:"provider"`
-	Name     string `json:"name"`
-	Prefix   string `json:"prefix,omitempty"`
-}
-
 // RuntimeBroker represents a runtime broker from the Hub API.
 type RuntimeBroker struct {
 	ID              string              `json:"id"`
@@ -328,36 +376,25 @@ type RuntimeBroker struct {
 	Created         time.Time           `json:"created"`
 	Updated         time.Time           `json:"updated"`
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (b *RuntimeBroker) UnmarshalJSON(data []byte) error {
-	type Alias RuntimeBroker
-	aux := &struct {
-		Groves []BrokerProjectInfo `json:"groves"`
-		*Alias
-	}{
-		Alias: (*Alias)(b),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if len(b.Projects) == 0 && len(aux.Groves) > 0 {
-		b.Projects = aux.Groves
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (b RuntimeBroker) MarshalJSON() ([]byte, error) {
-	type Alias RuntimeBroker
-	return json.Marshal(&struct {
-		Alias
-		Groves []BrokerProjectInfo `json:"groves,omitempty"`
-	}{
-		Alias:  Alias(b),
-		Groves: b.Projects,
-	})
+	// RuntimeTarget is the stored descriptor of a flat Runtime Broker's
+	// single runtime target; nil for a profile-based Runtime Broker.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// RuntimeTargetPresentation is the publishable configuration a flat
+	// Runtime Broker instance last reported (FC4-a): its defaults for new
+	// agents, not the configuration of any agent and not a check of
+	// cluster permissions. Nil for a legacy Runtime Broker or when none
+	// was reported. RuntimeTargetPresentationObservedAt is when the Hub
+	// last saw it ("as reported at").
+	RuntimeTargetPresentation           *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	RuntimeTargetPresentationObservedAt *time.Time                     `json:"runtimeTargetPresentationObservedAt,omitempty"`
+	// VersionStatus compares Version with the fleet hub version: match,
+	// mismatch or unknown. Empty for a plugin record, or from an older Hub.
+	VersionStatus string `json:"versionStatus,omitempty"`
+	// Health is the broker's last self-reported health as the Hub stored
+	// it (fixed words only, api.NormalizeBrokerHealthReport); nil when the
+	// broker never reported it. Its control_channel check says whether the
+	// Hub can send the broker commands.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -365,6 +402,74 @@ type BrokerCapabilities struct {
 	WebPTY bool `json:"webPty"`
 	Sync   bool `json:"sync"`
 	Attach bool `json:"attach"`
+	// Reprovision indicates the broker supports the reincarnation
+	// reprovision primitive (design §3.4; store.BrokerCapabilities.Reprovision
+	// and runtimebroker.BrokerCapabilities.Reprovision are its counterparts).
+	Reprovision bool `json:"reprovision"`
+	// AsyncLaunch indicates the broker understands the non-blocking agent
+	// create path and the launch-report protocol (design t1-async-create-v11.md
+	// §3.2, §7 P1b-1).
+	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates the broker can run a start or restart of an
+	// existing agent as an asynchronous launch (ptone/scion#4669). Brokers
+	// that implement the async start (design wave 3, D2) set it in their
+	// heartbeat and registration. Mirrors store.BrokerCapabilities.AsyncStart.
+	AsyncStart bool `json:"asyncStart,omitempty"`
+	// EmptyPerAgentWorkspace indicates the broker can provision the
+	// empty-per-agent workspace sharing mode (design #2703;
+	// store.BrokerCapabilities.EmptyPerAgentWorkspace is its counterpart).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates the broker can take part in a cross-broker agent
+	// move (store.BrokerCapabilities.AgentMove is its counterpart).
+	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
+	// is its counterpart).
+	AttachmentDelivery bool `json:"attachmentDelivery"`
+	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
+	// empty-per-agent workspace in place
+	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982;
+	// store.BrokerCapabilities.ChangedFields is its counterpart).
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates the broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890;
+	// store.BrokerCapabilities.ClearedFields is its counterpart).
+	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates the broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605; store.BrokerCapabilities.UnlimitedCountLimits is
+	// its counterpart).
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates the broker applies the resources
+	// sub-field entries of cleared_fields at start (ptone/scion#5676;
+	// store.BrokerCapabilities.ClearedResourceSubfields is its
+	// counterpart).
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): HubAgentDefaults.Telemetry as a default
+	// below the agent's own config telemetry (requester inline telemetry
+	// from older hubs, and the stored config), and TelemetryPolicy on
+	// create/start/restart as policy above everything. A hub may stop writing those values into
+	// InlineConfig only for a broker that reports this (ptone/scion#4222).
+	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY, the node env
+	// layer of image_registry that beats every settings value for agents
+	// this broker runs (ptone/scion#3916). It is a node configuration value
+	// carried with the capabilities, not a feature flag; empty means none
+	// (store.BrokerCapabilities.NodeImageRegistry is its counterpart).
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -374,6 +479,29 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Attach reports whether this profile's runtime supports interactive
+	// attach, mirroring store.BrokerProfile.Attach. A pointer: nil means
+	// the field was never reported (an older broker or profile record),
+	// which must be read as supported, not as an explicit false.
+	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings and MappingsReported mirror
+	// store.BrokerProfile: the GCP service accounts this profile maps to a
+	// Kubernetes ServiceAccount, and whether the list was reported at all.
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	MappingsReported       bool                     `json:"mappingsReported,omitempty"`
+	// The remaining report fields mirror store.BrokerProfile.
+	MappingsComplete         bool       `json:"mappingsComplete,omitempty"`
+	MappingsIncompleteReason string     `json:"mappingsIncompleteReason,omitempty"`
+	AmbiguousGSAs            []string   `json:"ambiguousGSAs,omitempty"`
+	MappingsReportedAt       *time.Time `json:"mappingsReportedAt,omitempty"`
+}
+
+// BrokerProfileSAMapping mirrors store.BrokerProfileSAMapping.
+type BrokerProfileSAMapping struct {
+	GSA       string `json:"gsa"`
+	KSA       string `json:"ksa,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Source    string `json:"source,omitempty"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
@@ -385,99 +513,35 @@ type BrokerProjectInfo struct {
 	LocalPath   string `json:"localPath,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (i *BrokerProjectInfo) UnmarshalJSON(data []byte) error {
-	type Alias BrokerProjectInfo
-	aux := &struct {
-		GroveID   string `json:"groveId"`
-		GroveName string `json:"groveName"`
-		*Alias
-	}{
-		Alias: (*Alias)(i),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if i.ProjectID == "" && aux.GroveID != "" {
-		i.ProjectID = aux.GroveID
-	}
-	if i.ProjectName == "" && aux.GroveName != "" {
-		i.ProjectName = aux.GroveName
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (i BrokerProjectInfo) MarshalJSON() ([]byte, error) {
-	type Alias BrokerProjectInfo
-	return json.Marshal(&struct {
-		Alias
-		GroveID   string `json:"groveId,omitempty"`
-		GroveName string `json:"groveName,omitempty"`
-	}{
-		Alias:     Alias(i),
-		GroveID:   i.ProjectID,
-		GroveName: i.ProjectName,
-	})
-}
-
 // Template represents a template from the Hub API.
 type Template struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	Slug          string          `json:"slug"`
-	DisplayName   string          `json:"displayName,omitempty"`
-	Description   string          `json:"description,omitempty"`
-	Harness       string          `json:"harness"`
-	ContentHash   string          `json:"contentHash,omitempty"`
-	Image         string          `json:"image,omitempty"`
-	Config        *TemplateConfig `json:"config,omitempty"`
-	Scope         string          `json:"scope"`
-	ScopeID       string          `json:"scopeId,omitempty"`
-	ProjectID     string          `json:"projectId,omitempty"` // Deprecated: use ScopeID
-	StorageURI    string          `json:"storageUri,omitempty"`
-	StorageBucket string          `json:"storageBucket,omitempty"`
-	StoragePath   string          `json:"storagePath,omitempty"`
-	Files         []TemplateFile  `json:"files,omitempty"`
-	BaseTemplate  string          `json:"baseTemplate,omitempty"`
-	Locked        bool            `json:"locked,omitempty"`
-	Status        string          `json:"status"`
-	OwnerID       string          `json:"ownerId,omitempty"`
-	CreatedBy     string          `json:"createdBy,omitempty"`
-	UpdatedBy     string          `json:"updatedBy,omitempty"`
-	Visibility    string          `json:"visibility,omitempty"`
-	Created       time.Time       `json:"created"`
-	Updated       time.Time       `json:"updated"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (t *Template) UnmarshalJSON(data []byte) error {
-	type Alias Template
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (t Template) MarshalJSON() ([]byte, error) {
-	type Alias Template
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
+	Harness     string `json:"harness"`
+	ContentHash string `json:"contentHash,omitempty"`
+	Image       string `json:"image,omitempty"`
+	// AgentConfig is the read-only snapshot of the template's own
+	// scion-agent.yaml that the Hub derives on commit (ptone/scion#4217).
+	AgentConfig   *api.ScionConfig `json:"agentConfig,omitempty"`
+	Scope         string           `json:"scope"`
+	ScopeID       string           `json:"scopeId,omitempty"`
+	ProjectID     string           `json:"projectId,omitempty"` // Deprecated: use ScopeID
+	StorageURI    string           `json:"storageUri,omitempty"`
+	StorageBucket string           `json:"storageBucket,omitempty"`
+	StoragePath   string           `json:"storagePath,omitempty"`
+	Files         []TemplateFile   `json:"files,omitempty"`
+	BaseTemplate  string           `json:"baseTemplate,omitempty"`
+	SourceURL     string           `json:"sourceUrl,omitempty"`
+	Locked        bool             `json:"locked,omitempty"`
+	Status        string           `json:"status"`
+	OwnerID       string           `json:"ownerId,omitempty"`
+	CreatedBy     string           `json:"createdBy,omitempty"`
+	UpdatedBy     string           `json:"updatedBy,omitempty"`
+	Created       time.Time        `json:"created"`
+	Updated       time.Time        `json:"updated"`
 }
 
 // TemplateFile represents a file within a template.
@@ -486,30 +550,6 @@ type TemplateFile struct {
 	Size int64  `json:"size"`
 	Hash string `json:"hash"`
 	Mode string `json:"mode,omitempty"`
-}
-
-// TemplateConfig holds template configuration.
-type TemplateConfig struct {
-	Harness     string            `json:"harness,omitempty"`
-	Image       string            `json:"image,omitempty"`
-	ConfigDir   string            `json:"configDir,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Detached    bool              `json:"detached,omitempty"`
-	CommandArgs []string          `json:"commandArgs,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	Kubernetes  *KubernetesConfig `json:"kubernetes,omitempty"`
-}
-
-// KubernetesConfig holds Kubernetes-specific configuration.
-type KubernetesConfig struct {
-	Resources    *ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string     `json:"nodeSelector,omitempty"`
-}
-
-// ResourceRequirements defines compute resource requirements.
-type ResourceRequirements struct {
-	Limits   map[string]string `json:"limits,omitempty"`
-	Requests map[string]string `json:"requests,omitempty"`
 }
 
 // User represents a user from the Hub API.
@@ -522,7 +562,7 @@ type User struct {
 	Status      string           `json:"status"`
 	Preferences *UserPreferences `json:"preferences,omitempty"`
 	Created     time.Time        `json:"created"`
-	LastLogin   time.Time        `json:"lastLogin,omitempty"`
+	LastLogin   time.Time        `json:"lastLogin,omitzero"`
 }
 
 // UserPreferences holds user preferences.
@@ -530,6 +570,7 @@ type UserPreferences struct {
 	DefaultTemplate string `json:"defaultTemplate,omitempty"`
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
 	Theme           string `json:"theme,omitempty"`
+	Timezone        string `json:"timezone,omitempty"`
 }
 
 // EnvVar represents an environment variable from the Hub API.
@@ -579,19 +620,6 @@ type ResolvedSecret struct {
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
-func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
-	type Alias ResolvedSecret
-	aux := (*Alias)(s)
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.Source == "grove" {
-		s.Source = "project"
-	}
-	return nil
-}
-
 // HarnessConfig represents a harness config from the Hub API.
 type HarnessConfig struct {
 	ID            string             `json:"id"`
@@ -614,7 +642,6 @@ type HarnessConfig struct {
 	OwnerID       string             `json:"ownerId,omitempty"`
 	CreatedBy     string             `json:"createdBy,omitempty"`
 	UpdatedBy     string             `json:"updatedBy,omitempty"`
-	Visibility    string             `json:"visibility,omitempty"`
 	Created       time.Time          `json:"created"`
 	Updated       time.Time          `json:"updated"`
 }
@@ -629,16 +656,13 @@ type CloneProjectRequest struct {
 
 // HarnessConfigData holds harness-specific configuration.
 type HarnessConfigData struct {
-	Harness                 string            `json:"harness,omitempty"`
-	Image                   string            `json:"image,omitempty"`
-	User                    string            `json:"user,omitempty"`
-	Model                   string            `json:"model,omitempty"`
-	Args                    []string          `json:"args,omitempty"`
-	Env                     map[string]string `json:"env,omitempty"`
-	AuthSelectedType        string            `json:"authSelectedType,omitempty"`
-	ModelAliases            map[string]string `json:"modelAliases,omitempty"`
-	ThinkingBudgetMap       map[string]int    `json:"thinkingBudgetMap,omitempty"`
-	ThinkingBudgetFlag      string            `json:"thinkingBudgetFlag,omitempty"`
-	ThinkingBudgetConfigKey string            `json:"thinkingBudgetConfigKey,omitempty"`
-	NoAuthBehavior          string            `json:"noAuthBehavior,omitempty"`
+	Harness          string            `json:"harness,omitempty"`
+	Image            string            `json:"image,omitempty"`
+	User             string            `json:"user,omitempty"`
+	Model            string            `json:"model,omitempty"`
+	Args             []string          `json:"args,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	AuthSelectedType string            `json:"authSelectedType,omitempty"`
+	ModelAliases     map[string]string `json:"modelAliases,omitempty"`
+	NoAuthBehavior   string            `json:"noAuthBehavior,omitempty"`
 }

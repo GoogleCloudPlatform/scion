@@ -135,6 +135,7 @@ func TestWebhookServer_MethodNotAllowed(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Equal(t, http.MethodPost, resp.Header.Get("Allow"))
 }
 
 func TestWebhookServer_NoSecretAllowsAll(t *testing.T) {
@@ -268,4 +269,9 @@ func TestWebhookHandler_Direct(t *testing.T) {
 
 	assert.Equal(t, int64(10), received.UpdateID)
 	assert.Equal(t, "direct test", received.Message.Text)
+}
+
+func TestWebhookServer_ServeWithoutListen(t *testing.T) {
+	ws := NewWebhookServer(":0", "", func(u Update) {}, slog.Default())
+	assert.Error(t, ws.Serve(), "Serve must refuse to run before Listen")
 }

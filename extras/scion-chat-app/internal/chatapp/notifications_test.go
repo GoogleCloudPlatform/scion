@@ -27,30 +27,72 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// TestHandleBrokerMessage_UserMessageRouting verifies that user-targeted
-// messages with the full scion broker topic prefix are correctly routed
-// to handleUserMessage.
-func TestHandleBrokerMessage_UserMessageRouting(t *testing.T) {
-	log := slog.Default()
-	relay := NewNotificationRelay(nil, nil, log)
-
-	// Message with empty RecipientID triggers early return in handleUserMessage
-	// without touching the store, so we can test topic routing safely.
-	msg := &messages.StructuredMessage{
-		Sender: "agent:test-agent",
-		Msg:    "hello from agent",
+// TestHandleBrokerMessage_UserTopicAcceptance verifies that a user-targeted
+// message is delivered on the canonical scion.project.* topic — the shape
+// published by the hub — and that a scion.grove.*-prefixed topic delivers
+// nothing, since it is not a project topic. A nil-error assertion alone
+// would pass even if a delivery were silently dropped or an undelivered
+// case were silently delivered, so each case asserts the exact delivery
+// count.
+func TestHandleBrokerMessage_UserTopicAcceptance(t *testing.T) {
+	tests := []struct {
+		name           string
+		topic          string
+		wantDeliveries int
+	}{
+		{"canonical", "scion.project.project-abc.user.hub-user-1.messages", 1},
+		{"legacy prefix rejected", "scion.grove.project-abc.user.hub-user-1.messages", 0},
 	}
 
-	// Full scion-prefixed topic should route to handleUserMessage.
-	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-123.user.user-456.messages", msg)
-	if err != nil {
-		t.Errorf("expected nil error for user message topic, got: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+
+			if err := store.SetUserMapping(&state.UserMapping{
+				PlatformUserID: "users/12345",
+				Platform:       "googlechat",
+				HubUserID:      "hub-user-1",
+				HubUserEmail:   "test@example.com",
+				RegisteredBy:   "auto",
+			}); err != nil {
+				t.Fatalf("setting user mapping: %v", err)
+			}
+
+			if err := store.SetSpaceLink(&state.SpaceLink{
+				SpaceID:     "spaces/AAQAx",
+				Platform:    "googlechat",
+				ProjectID:   "project-abc",
+				ProjectSlug: "my-project",
+				LinkedBy:    "test",
+			}); err != nil {
+				t.Fatalf("setting space link: %v", err)
+			}
+
+			fm := &fakeMessenger{}
+			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			relay := NewNotificationRelay(store, fm, log)
+
+			msg := &messages.StructuredMessage{
+				Sender:      "agent:test-agent",
+				RecipientID: "hub-user-1",
+				Msg:         "hello from agent",
+				Type:        messages.TypeInstruction,
+			}
+
+			err := relay.HandleBrokerMessage(context.Background(), tc.topic, msg)
+			if err != nil {
+				t.Fatalf("expected nil error for topic %q, got: %v", tc.topic, err)
+			}
+			if len(fm.messages) != tc.wantDeliveries {
+				t.Fatalf("topic %q: got %d deliveries, want %d", tc.topic, len(fm.messages), tc.wantDeliveries)
+			}
+		})
 	}
 }
 
 // TestHandleBrokerMessage_IgnoredTopics verifies that unrecognized or
-// malformed topics are silently ignored.
+// malformed topics produce a nil error rather than being treated as a
+// processing failure.
 func TestHandleBrokerMessage_IgnoredTopics(t *testing.T) {
 	log := slog.Default()
 	relay := NewNotificationRelay(nil, nil, log)
@@ -126,8 +168,8 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 	if err := store.SetSpaceLink(&state.SpaceLink{
 		SpaceID:     "spaces/AAQAx",
 		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
 		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
@@ -145,7 +187,7 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 	}
 
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+		"scion.project.project-abc.user.hub-user-1.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -198,8 +240,8 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 	if err := store.SetSpaceLink(&state.SpaceLink{
 		SpaceID:     "spaces/AAQAx",
 		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
 		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
@@ -226,7 +268,7 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 			}
 
 			err := relay.HandleBrokerMessage(context.Background(),
-				"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+				"scion.project.project-abc.user.hub-user-1.messages", msg)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -248,6 +290,49 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 				t.Error("expected notification card to have a subtitle with activity status")
 			}
 		})
+	}
+}
+
+// The retired assistant-reply mirror carries one user's turn text. An older
+// hub may still forward it; it must not reach any space or user.
+func TestHandleUserMessage_DiscardsRetiredAssistantReply(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "users/12345",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "test@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("setting user mapping: %v", err)
+	}
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:     "spaces/AAQAx",
+		Platform:    "googlechat",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
+		LinkedBy:    "test",
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	fm := &fakeMessenger{}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	relay := NewNotificationRelay(store, fm, log)
+
+	msg := &messages.StructuredMessage{
+		Sender:      "agent:simon",
+		RecipientID: "hub-user-1",
+		Msg:         "private end-of-turn text",
+		Type:        messages.TypeAssistantReply,
+	}
+	if err := relay.HandleBrokerMessage(context.Background(),
+		"scion.project.project-abc.user.hub-user-1.messages", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fm.messages) != 0 {
+		t.Fatalf("assistant-reply must be discarded, got %d message(s) sent (first to %q)",
+			len(fm.messages), fm.messages[0].SpaceID)
 	}
 }
 
@@ -286,131 +371,6 @@ func TestExtractActivity_UsesStatusField(t *testing.T) {
 				t.Errorf("extractActivity() = %q, want %q", got, tc.wantAct)
 			}
 		})
-	}
-}
-
-func TestHandleUserMessage_AssistantReplyTruncated(t *testing.T) {
-	store := newTestStore(t)
-
-	if err := store.SetUserMapping(&state.UserMapping{
-		PlatformUserID: "users/12345",
-		Platform:       "googlechat",
-		HubUserID:      "hub-user-1",
-		HubUserEmail:   "test@example.com",
-		RegisteredBy:   "auto",
-	}); err != nil {
-		t.Fatalf("setting user mapping: %v", err)
-	}
-
-	if err := store.SetSpaceLink(&state.SpaceLink{
-		SpaceID:     "spaces/AAQAx",
-		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
-		LinkedBy:    "test",
-	}); err != nil {
-		t.Fatalf("setting space link: %v", err)
-	}
-
-	fm := &fakeMessenger{}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	relay := NewNotificationRelay(store, fm, log)
-
-	longText := strings.Repeat("x", 2000)
-	msg := &messages.StructuredMessage{
-		Sender:      "agent:claude-agent",
-		RecipientID: "hub-user-1",
-		Msg:         longText,
-		Type:        messages.TypeAssistantReply,
-	}
-
-	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(fm.messages) == 0 {
-		t.Fatal("expected a message to be sent")
-	}
-
-	got := fm.messages[0]
-	if got.Card == nil {
-		t.Fatal("expected a card in the message")
-	}
-
-	wantTitle := "\U0001F916 claude-agent"
-	if got.Card.Header.Title != wantTitle {
-		t.Errorf("card title = %q, want %q", got.Card.Header.Title, wantTitle)
-	}
-	if got.Card.Header.Subtitle != "" {
-		t.Errorf("assistant-reply should use direct message card (no subtitle), got subtitle = %q", got.Card.Header.Subtitle)
-	}
-
-	if len(got.Card.Sections) == 0 {
-		t.Fatal("expected at least one card section")
-	}
-	cardContent := got.Card.Sections[0].Widgets[0].Content
-	if len(cardContent) > 600 {
-		t.Errorf("card content should be truncated, got %d chars", len(cardContent))
-	}
-	if !strings.Contains(cardContent, "chars truncated") {
-		t.Error("truncated card should contain truncation notice")
-	}
-}
-
-func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
-	store := newTestStore(t)
-
-	if err := store.SetUserMapping(&state.UserMapping{
-		PlatformUserID: "users/12345",
-		Platform:       "googlechat",
-		HubUserID:      "hub-user-1",
-		HubUserEmail:   "test@example.com",
-		RegisteredBy:   "auto",
-	}); err != nil {
-		t.Fatalf("setting user mapping: %v", err)
-	}
-
-	if err := store.SetSpaceLink(&state.SpaceLink{
-		SpaceID:     "spaces/AAQAx",
-		Platform:    "googlechat",
-		ProjectID:   "grove-abc",
-		ProjectSlug: "my-grove",
-		LinkedBy:    "test",
-	}); err != nil {
-		t.Fatalf("setting space link: %v", err)
-	}
-
-	fm := &fakeMessenger{}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	relay := NewNotificationRelay(store, fm, log)
-
-	shortText := "Task completed successfully."
-	msg := &messages.StructuredMessage{
-		Sender:      "agent:claude-agent",
-		RecipientID: "hub-user-1",
-		Msg:         shortText,
-		Type:        messages.TypeAssistantReply,
-	}
-
-	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(fm.messages) == 0 {
-		t.Fatal("expected a message to be sent")
-	}
-
-	got := fm.messages[0]
-	if got.Card == nil {
-		t.Fatal("expected a card")
-	}
-	cardContent := got.Card.Sections[0].Widgets[0].Content
-	if cardContent != shortText {
-		t.Errorf("short message should not be truncated, got %q, want %q", cardContent, shortText)
 	}
 }
 
@@ -684,7 +644,7 @@ func TestHandleBrokerMessage_UserTargetedAlwaysPassesThrough(t *testing.T) {
 
 	// User-targeted topic should always pass through regardless of filter settings.
 	err := relay.HandleBrokerMessage(context.Background(),
-		"scion.grove.proj-3.user.hub-user-9.messages", msg)
+		"scion.project.proj-3.user.hub-user-9.messages", msg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -728,5 +688,15 @@ func TestHandleFilteredMessage_UnlinkedProjectDropped(t *testing.T) {
 
 	if len(fm.messages) != 0 {
 		t.Errorf("expected no messages for unlinked project, got %d", len(fm.messages))
+	}
+}
+
+func TestNotificationStyle_WaitingForInputHeader(t *testing.T) {
+	header, style := notificationStyle("WAITING_FOR_INPUT")
+	if header != "Waiting on Parent" {
+		t.Errorf("header = %q, want %q", header, "Waiting on Parent")
+	}
+	if style.icon != "\u231b" {
+		t.Errorf("icon = %q, want %q", style.icon, "\u231b")
 	}
 }

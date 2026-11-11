@@ -21,15 +21,18 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -40,53 +43,6 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourc
 
 func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
 	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
-}
-
-// testTemplateBootstrapServer creates a hub Server backed by an in-memory
-// SQLite store and a mock storage, suitable for template bootstrap tests.
-func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping: sqlite driver not registered")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	srv, err := New(cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-
-	stor := newMockStorage("test-bucket")
-	srv.SetStorage(stor)
-
-	return srv, s, stor
-}
-
-// makeTemplateDir creates a temp directory with template files and returns
-// the parent templates directory. The template is created as a subdirectory
-// named templateName.
-func makeTemplateDir(t *testing.T, templateName string, files map[string]string) string {
-	t.Helper()
-	templatesDir := t.TempDir()
-	templateDir := filepath.Join(templatesDir, templateName)
-	for relPath, content := range files {
-		full := filepath.Join(templateDir, relPath)
-		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return templatesDir
 }
 
 func TestBootstrapTemplatesFromDir_ImportsTemplates(t *testing.T) {
@@ -253,23 +209,19 @@ func TestBootstrapTemplatesFromDir_SkipsUnchangedTemplate(t *testing.T) {
 
 func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	// Deliberately not calling srv.SetStorage()
 
 	ctx := context.Background()
@@ -449,19 +401,30 @@ func TestSyncExistingTemplate_ForceReconcilesStorage(t *testing.T) {
 		}
 	}
 
-	// Storage reflects the new set: removed file is gone, new file is present.
-	storagePath := got.StoragePath
-	if _, exists := stor.objects[storagePath+"/file-remove.txt"]; exists {
-		t.Error("expected file-remove.txt to be deleted from storage")
+	// Storage holds a blob for every file of the new set. Templates use the
+	// blob layout (ptone/scion#4221): the commit never deletes blobs, so the
+	// removed and the replaced files' blobs stay until the blob garbage
+	// collector removes them, and nothing is written at <path>/<file>.
+	if got.Layout != store.TemplateLayoutBlobs {
+		t.Fatalf("expected blob layout, got %q", got.Layout)
 	}
-	if _, exists := stor.objects[storagePath+"/file-new.txt"]; !exists {
-		t.Error("expected file-new.txt to be uploaded to storage")
+	for _, content := range []string{"keep original", "after", "new"} {
+		if _, exists := stor.objects[blobObjectPath(got, content)]; !exists {
+			t.Errorf("expected blob for %q in storage", content)
+		}
 	}
-	if _, exists := stor.objects[storagePath+"/file-update.txt"]; !exists {
-		t.Error("expected file-update.txt to remain in storage after re-upload")
+	for _, content := range []string{"before", "stale"} {
+		if _, exists := stor.objects[blobObjectPath(got, content)]; !exists {
+			t.Errorf("expected unreferenced blob for %q to be kept for garbage collection", content)
+		}
 	}
-	if len(stor.objects) != 3 {
-		t.Errorf("expected 3 storage objects after reconcile, got %d", len(stor.objects))
+	for _, p := range []string{"file-keep.txt", "file-update.txt", "file-new.txt", "file-remove.txt"} {
+		if _, exists := stor.objects[got.StoragePath+"/"+p]; exists {
+			t.Errorf("unexpected path-layout object for %s", p)
+		}
+	}
+	if len(stor.objects) != 5 {
+		t.Errorf("expected 5 storage objects (3 referenced + 2 unreferenced blobs), got %d", len(stor.objects))
 	}
 }
 
@@ -486,16 +449,19 @@ func TestSyncExistingTemplate_ForceWithoutChangesStillReuploads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Manually drop the storage object to simulate drift.
-	storagePath := existing.StoragePath
-	delete(stor.objects, storagePath+"/only.txt")
+	// Manually drop the file's blob to simulate drift.
+	blobPath := blobObjectPath(existing, "same content")
+	if _, exists := stor.objects[blobPath]; !exists {
+		t.Fatalf("expected blob %s after bootstrap", blobPath)
+	}
+	delete(stor.objects, blobPath)
 
 	if _, err := srv.syncExistingTemplate(ctx, existing, templateDir, true); err != nil {
 		t.Fatalf("syncExistingTemplate failed: %v", err)
 	}
 
-	if _, exists := stor.objects[storagePath+"/only.txt"]; !exists {
-		t.Error("expected only.txt to be re-uploaded by forced sync")
+	if _, exists := stor.objects[blobPath]; !exists {
+		t.Error("expected only.txt's blob to be re-uploaded by forced sync")
 	}
 }
 
@@ -522,8 +488,10 @@ func TestSyncExistingTemplate_ActivatesPendingRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Status is a commit-owned column (ptone/scion#4967), so it is seeded
+	// through the content writer.
 	existing.Status = resourceStatusPending
-	if err := s.UpdateTemplate(ctx, existing); err != nil {
+	if err := setTemplateContentForTest(ctx, s, existing); err != nil {
 		t.Fatalf("seed pending status: %v", err)
 	}
 	existing, err = s.GetTemplateBySlug(ctx, "recover", store.TemplateScopeGlobal, "")
@@ -592,12 +560,12 @@ func TestSyncExistingTemplate_PopulatesNewHashForLaterAgents(t *testing.T) {
 	}
 }
 
-// TestSyncExistingTemplate_PreservesTypedConfig guards the ResourceStore
+// TestSyncExistingTemplate_PreservesMetadata guards the ResourceStore
 // record↔model round-trip: a content-changing sync must update Files/ContentHash
-// while leaving the template's typed Config payload (and other fields not
-// derived from the directory) intact. A naive collapse that reconstructs the
-// model from the shared ResourceRecord would null these out.
-func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
+// while leaving the template's fields not derived from the directory intact.
+// A naive collapse that reconstructs the model from the shared ResourceRecord
+// would null these out.
+func TestSyncExistingTemplate_PreservesMetadata(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -610,13 +578,11 @@ func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
 		t.Fatalf("bootstrap failed: %v", err)
 	}
 
-	// Attach a typed Config payload + other non-dir-derived fields, as a
-	// hub-side edit would.
+	// Attach non-dir-derived fields, as a hub-side edit would.
 	existing, err := s.GetTemplateBySlug(ctx, "typed", store.TemplateScopeGlobal, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	existing.Config = &store.TemplateConfig{Image: "custom-image:1", Model: "opus"}
 	existing.BaseTemplate = "base-xyz"
 	existing.DisplayName = "Typed Template"
 	if err := s.UpdateTemplate(ctx, existing); err != nil {
@@ -647,12 +613,6 @@ func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
 	if got.ContentHash == originalHash {
 		t.Error("expected ContentHash to change after sync")
 	}
-	if got.Config == nil {
-		t.Fatal("expected typed Config to survive sync, got nil")
-	}
-	if got.Config.Image != "custom-image:1" || got.Config.Model != "opus" {
-		t.Errorf("typed Config not preserved: got %+v", got.Config)
-	}
 	if got.BaseTemplate != "base-xyz" {
 		t.Errorf("expected BaseTemplate preserved, got %q", got.BaseTemplate)
 	}
@@ -661,7 +621,7 @@ func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_NameBased(t *testing.T) {
 	tests := []struct {
 		name     string
 		expected string
@@ -679,9 +639,9 @@ func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			got := detectHarnessFromConfig(dir, tt.name)
+			got := deriveTemplateIndexForTest(t, dir, tt.name)
 			if got.Harness != tt.expected {
-				t.Errorf("detectHarnessFromConfig(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
+				t.Errorf("deriveTemplateIndexFromCollected(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
 			}
 			if got.DefaultHarnessConfig != "" {
 				t.Errorf("expected empty DefaultHarnessConfig for name-based, got %q", got.DefaultHarnessConfig)
@@ -690,7 +650,7 @@ func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_FromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `harness_config: claude
@@ -699,7 +659,7 @@ func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "claude" {
 		t.Errorf("expected Harness 'claude' from config, got %q", got.Harness)
 	}
@@ -708,7 +668,7 @@ func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_DefaultHarnessConfig(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `default_harness_config: gemini-web
@@ -717,7 +677,7 @@ func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "gemini-cli" {
 		t.Errorf("expected Harness 'gemini-cli', got %q", got.Harness)
 	}
@@ -726,7 +686,7 @@ func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_HarnessField(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_HarnessField(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `harness: codex
@@ -735,7 +695,7 @@ func TestDetectHarnessFromConfig_HarnessField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "codex" {
 		t.Errorf("expected Harness 'codex' from config, got %q", got.Harness)
 	}
@@ -744,7 +704,7 @@ func TestDetectHarnessFromConfig_HarnessField(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_CustomDefaultHarnessConfig(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_CustomDefaultHarnessConfig(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `default_harness_config: adk
@@ -753,62 +713,13 @@ func TestDetectHarnessFromConfig_CustomDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "" {
 		t.Errorf("expected empty Harness for unknown config name 'adk', got %q", got.Harness)
 	}
 	if got.DefaultHarnessConfig != "adk" {
 		t.Errorf("expected DefaultHarnessConfig 'adk', got %q", got.DefaultHarnessConfig)
 	}
-}
-
-// setupWorkspaceProject creates a server, store, project, and workspace temp dir
-// linked via an embedded broker provider. Returns the server, store, project,
-// and the workspace root path. Templates should be placed under the returned
-// workspace root.
-func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Store, *store.Project, string) {
-	t.Helper()
-	srv, s, _ := testTemplateBootstrapServer(t)
-	ctx := context.Background()
-
-	workspaceRoot := t.TempDir()
-
-	project := &store.Project{
-		ID:        tid("project-ws-" + projectName),
-		Name:      projectName,
-		Slug:      projectName,
-		GitRemote: "https://github.com/test/" + projectName,
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	brokerID := tid("broker-ws-" + projectName)
-	broker := &store.RuntimeBroker{
-		ID:       brokerID,
-		Name:     "ws-broker",
-		Slug:     "ws-broker",
-		Endpoint: "http://localhost:9090",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create broker: %v", err)
-	}
-
-	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   brokerID,
-		BrokerName: broker.Name,
-		LocalPath:  workspaceRoot,
-		Status:     "online",
-		LastSeen:   time.Now(),
-	}); err != nil {
-		t.Fatalf("failed to add project provider: %v", err)
-	}
-
-	srv.SetEmbeddedBrokerID(brokerID)
-
-	return srv, s, project, workspaceRoot
 }
 
 func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
@@ -847,6 +758,57 @@ func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
 	}
 	if result.Items[0].Scope != store.TemplateScopeProject {
 		t.Errorf("expected project scope, got %q", result.Items[0].Scope)
+	}
+}
+
+func TestImportTemplatesFromWorkspace_LinkedProject(t *testing.T) {
+	for _, scionDir := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scionDir=%t", scionDir), func(t *testing.T) {
+			f := newWorkspaceLayoutFixture(t)
+			f.srv.SetStorage(newMockStorage("test-bucket"))
+			ctx := context.Background()
+			project := createTestGitProject(t, f.srv, "Linked Import", "github.com/test/linked-import")
+			b := addProviderBroker(t, f.s, project.ID, "embedded")
+			f.srv.SetEmbeddedBrokerID(b.ID)
+			checkout := t.TempDir()
+			templateDir := filepath.Join(checkout, config.DotScion, "templates", "example")
+			if err := os.MkdirAll(templateDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(templateDir, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			localPath := checkout
+			if scionDir {
+				localPath = filepath.Join(checkout, config.DotScion) + string(os.PathSeparator)
+			}
+			if err := f.s.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status, LocalPath: localPath,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			discovered, _, err := f.srv.discoverFromWorkspace(ctx, project, "/.scion/templates", f.srv.templateImportKind())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(discovered, []string{"example"}) {
+				t.Fatalf("expected discovery [example], got %v", discovered)
+			}
+			imported, err := f.srv.importTemplatesFromWorkspace(ctx, project, "/.scion/templates")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(imported, []string{"example"}) {
+				t.Fatalf("expected import [example], got %v", imported)
+			}
+			tmpl, err := f.s.GetTemplateBySlug(ctx, "example", store.TemplateScopeProject, project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tmpl.Scope != store.TemplateScopeProject || tmpl.ProjectID != project.ID {
+				t.Fatalf("unexpected template scope: %q, project: %q", tmpl.Scope, tmpl.ProjectID)
+			}
+		})
 	}
 }
 
@@ -1133,7 +1095,7 @@ func TestBootstrapTemplatesFromDir_BackfillsDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpl.DefaultHarnessConfig = ""
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1182,6 +1144,13 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 	if _, _, err := sb.Set(ctx, secInput); err != nil {
 		t.Fatal(err)
 	}
+
+	// Stub git ls-remote so branch disambiguation never execs real git against
+	// github.com (ptone/scion#3670). The stub pins that resolution goes through
+	// the seam with the project token URL; the resolved ref ("main" +
+	// "templates") is the same as the naive parse. Matcher coverage lives in
+	// pkg/config's TestResolveGitHubRef_UsesLsRemoteSeam.
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
 
 	// Hijack the HTTP client's Transport to mock the tarball fetch.
 	// NOTE: This test mutates http.DefaultClient.Transport globally and MUST NOT be run in parallel (t.Parallel()).
@@ -1254,6 +1223,7 @@ system_prompt: system-prompt.md
 	if capturedAuthHeader != "Bearer my-secret-token-12345" {
 		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
 	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
 
 	// Verify template was saved to store
 	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
@@ -1305,6 +1275,9 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Stub git ls-remote (see TestImportTemplatesFromRemote_WithProjectGithubToken).
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
+
 	// Hijack the HTTP client's Transport to mock the tarball fetch.
 	// NOTE: mutates http.DefaultClient.Transport globally; MUST NOT run in parallel.
 	oldTransport := http.DefaultClient.Transport
@@ -1354,6 +1327,7 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	if capturedAuthHeader != "Bearer my-secret-token-12345" {
 		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
 	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
 
 	existing, err := s.GetHarnessConfigBySlug(ctx, "my-config", store.HarnessConfigScopeProject, projectID)
 	if err != nil {
@@ -1367,10 +1341,308 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	}
 }
 
-type mockRoundTripper struct {
-	roundTrip func(req *http.Request) (*http.Response, error)
+// TestImportTemplatesFromRemote_SparseCheckoutFallback_WithProjectGithubToken
+// covers the git fallback taken when the GitHub tarball download fails: the
+// import must go through pkg/config's sparse-checkout seam (stubbed here, so
+// no real `git fetch` runs against github.com, ptone/scion#3750) with the
+// project GITHUB_TOKEN and the parsed ref, and import what it checked out.
+func TestImportTemplatesFromRemote_SparseCheckoutFallback_WithProjectGithubToken(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	projectID := tid("test-project-id")
+	if err := s.CreateProject(ctx, &store.Project{
+		ID:        projectID,
+		Name:      "test-project",
+		Slug:      "test-project",
+		GitRemote: "https://github.com/chiefkarlin/scion-experiments",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "", "test-secret"))
+	if _, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "my-secret-token-12345",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeProject,
+		ScopeID:    projectID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lsRemote := stubGitLsRemote(t, testLsRemoteHeads)
+	checkout := stubGitSparseCheckout(t, map[string]string{
+		"my-template/scion-agent.yaml": "schema_version: \"1\"\ndescription: \"From sparse checkout\"\nagent_instructions: agents.md\n",
+		"my-template/agents.md":        "# Agents instructions",
+	})
+
+	// Make the tarball download fail so FetchRemoteTemplate falls back to the
+	// sparse checkout. NOTE: mutates http.DefaultClient.Transport globally;
+	// MUST NOT run in parallel.
+	oldTransport := http.DefaultClient.Transport
+	defer func() { http.DefaultClient.Transport = oldTransport }()
+	tarballRequests := 0
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "github.com" {
+				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
+			}
+			tarballRequests++
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewReader(nil)), Request: req}, nil
+		},
+	}
+
+	imported, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/chiefkarlin/scion-experiments/tree/main/templates")
+	if err != nil {
+		t.Fatalf("importTemplatesFromRemote failed: %v", err)
+	}
+	if len(imported) != 1 || imported[0] != "my-template" {
+		t.Errorf("expected imported templates [my-template], got %v", imported)
+	}
+	if tarballRequests != 1 {
+		t.Errorf("expected exactly one tarball request before the fallback, got %d", tarballRequests)
+	}
+	assertLsRemoteCalledWithToken(t, lsRemote)
+
+	calls := checkout.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly one stubbed sparse checkout, got %d", len(calls))
+	}
+	wantParts := config.GitHubURLParts{Owner: "chiefkarlin", Repo: "scion-experiments", Branch: "main", Path: "templates"}
+	if calls[0].Parts != wantParts {
+		t.Errorf("sparse checkout parts = %+v, want %+v", calls[0].Parts, wantParts)
+	}
+	if calls[0].Token != "my-secret-token-12345" {
+		t.Errorf("expected sparse checkout to receive the project GITHUB_TOKEN")
+	}
+
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 || result.Items[0].Name != "my-template" {
+		t.Fatalf("expected [my-template] in project store, got %+v", result.Items)
+	}
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 files uploaded to storage, got %d", len(stor.objects))
+	}
 }
 
-func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	return m.roundTrip(req)
+// testLsRemoteHeads is canned `git ls-remote --heads` output for
+// chiefkarlin/scion-experiments. It models a remote that can exist in real
+// git (no ref is both a branch and a directory of branches); only "main" is a
+// prefix of "main/templates" and "main/harness-configs".
+const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/main\n" +
+	"2222222222222222222222222222222222222222\trefs/heads/release/1.0\n" +
+	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
+
+// assertLsRemoteCalledWithToken checks that branch resolution went through the
+// stubbed ls-remote seam exactly once, for the anonymous repository URL, and
+// was given the project token separately. If a regression bypassed the seam,
+// real git would run and this fails.
+func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
+	t.Helper()
+	wantURL := "https://github.com/chiefkarlin/scion-experiments.git"
+	if got := stub.URLs(); len(got) != 1 || got[0] != wantURL {
+		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", wantURL, got)
+	}
+	if got := stub.Tokens(); len(got) != 1 || got[0] != "my-secret-token-12345" {
+		t.Errorf("expected the project token to be passed to ls-remote once, got %d token(s)", len(got))
+	}
+}
+
+// TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted covers AC1 of
+// ptone/scion#3544 for the workstation template path: the bundled default
+// template is re-materialized on disk every start but, once deleted, is not
+// re-imported. A user template next to it keeps today's behaviour.
+func TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	templatesDir := filepath.Join(globalDir, "templates")
+	scope := string(store.TemplateScopeGlobal)
+
+	materialize := func() {
+		t.Helper()
+		if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		userTmpl := filepath.Join(templatesDir, "my-template")
+		if err := os.MkdirAll(userTmpl, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	materialize()
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatalf("default not imported: %v", err)
+	}
+	user, err := s.GetTemplateBySlug(ctx, "my-template", scope, "")
+	if err != nil {
+		t.Fatalf("user template not imported: %v", err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 2 {
+		materialize()
+		if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+			t.Fatalf("restart %d bootstrap: %v", i, err)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("restart %d: deleted default template was re-imported (err=%v)", i, err)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "my-template", scope, ""); err != nil {
+			t.Fatalf("restart %d: user template not re-imported: %v", i, err)
+		}
+	}
+
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.Templates, []string{"default"}) {
+		t.Errorf("ledger templates = %+v, want [default]", doc)
+	}
+}
+
+// TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins is the
+// template sibling of the harness-config corrupt-ledger test.
+func TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	templatesDir := filepath.Join(globalDir, "templates")
+	scope := string(store.TemplateScopeGlobal)
+
+	if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	// An existing user template, imported in the first pass and edited
+	// before the second, proves existing rows are still synced.
+	existingTmpl := filepath.Join(templatesDir, "existing-template")
+	if err := os.MkdirAll(existingTmpl, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existingTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatal(err)
+	}
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	existingBefore, err := s.GetTemplateBySlug(ctx, "existing-template", scope, "")
+	if err != nil {
+		t.Fatalf("existing user template not imported: %v", err)
+	}
+
+	if _, err := s.UpsertHubSetting(ctx, builtinSeedLedgerSection, json.RawMessage(`"not-a-ledger"`),
+		"test", -1, "seeded"); err != nil {
+		t.Fatal(err)
+	}
+	corrupt, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existingTmpl, "scion-agent.yaml"), []byte("harness: claude\n# edited\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userTmpl := filepath.Join(templatesDir, "my-template")
+	if err := os.MkdirAll(userTmpl, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err == nil {
+		t.Fatal("expected an error for an unreadable ledger")
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "my-template", scope, ""); err != nil {
+		t.Errorf("user template not imported with a corrupt ledger: %v", err)
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted default template re-created with a corrupt ledger (err=%v)", err)
+	}
+	existingAfter, err := s.GetTemplateBySlug(ctx, "existing-template", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existingAfter.ContentHash == existingBefore.ContentHash {
+		t.Error("existing template was not synced with a corrupt ledger (content hash unchanged)")
+	}
+	after, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != corrupt.Revision || string(after.Value) != string(corrupt.Value) {
+		t.Errorf("corrupt ledger row was overwritten: rev %d -> %d, value %s", corrupt.Revision, after.Revision, after.Value)
+	}
+}
+
+// TestBootstrapTemplatesFromDir_MarksExistingBuiltinWhenSyncFails verifies
+// that an existing built-in row counts as seeded even if its content sync
+// fails (mark before sync, same rule as the hosted path): after a failed
+// sync the name is in the ledger, so deleting the row sticks.
+func TestBootstrapTemplatesFromDir_MarksExistingBuiltinWhenSyncFails(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	scope := string(store.TemplateScopeGlobal)
+
+	dir := makeTemplateDir(t, "default", map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+	})
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a hub that predates the ledger.
+	if err := s.DeleteHubSetting(ctx, builtinSeedLedgerSection); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change the content so the sync must upload, and make uploads fail.
+	if err := os.WriteFile(filepath.Join(dir, "default", "scion-agent.yaml"), []byte("harness: claude\n# v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetStorage(&failingUploadStorage{mockStorage: stor})
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap with failing sync: %v", err)
+	}
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.Templates, []string{"default"}) {
+		t.Fatalf("ledger after failed sync = %+v, want templates [default]", doc)
+	}
+
+	// Delete the row, then bootstrap with a working sync: it stays deleted.
+	srv.SetStorage(stor)
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted default template re-created (err=%v)", err)
+	}
 }

@@ -1,0 +1,4 @@
+/* Applied only when the stylesheet itself loads. */
+#title {
+  color: rgb(0, 0, 255);
+}

@@ -143,18 +143,24 @@ type MountDescriptor struct {
 // SelectWorkspaceBackend returns the appropriate WorkspaceBackend based on
 // configuration and workspace sharing mode. The selection rules (design §3.1):
 //
-//   - nfsBackend when cfg.Backend == "nfs" AND mode is SharedPlain or WorktreePerAgent.
+//   - nfsBackend when cfg.Backend == "nfs" AND mode is SharedPlain, WorktreePerAgent
+//     or EmptyPerAgent. For EmptyPerAgent the resolved path is still the
+//     project's workspace path; the caller mounts the agent's own directory
+//     next to it (<project>/agents/<agent name>/workspace) and must never
+//     mount the resolved path itself (design #2703 P3).
 //   - cloudrunVolumeBackend when cfg.Backend == "cloudrun-volume" AND mode is SharedPlain or WorktreePerAgent.
 //   - gkeSharedVolumeBackend when cfg.Backend == "gke-shared-volume" AND mode is SharedPlain or WorktreePerAgent.
 //   - localBackend otherwise — including ClonePerAgent even when Backend is a shared type
-//     (the deliberate node-local escape hatch).
+//     (the deliberate node-local escape hatch), and EmptyPerAgent on
+//     gke-shared-volume and cloudrun-volume (Cloud Run rejects the mode at
+//     the runtime).
 //   - Backend empty or "local" always yields localBackend.
 func SelectWorkspaceBackend(cfg *config.V1WorkspaceStorageConfig, mode store.WorkspaceSharingMode) WorkspaceBackend {
 	if cfg != nil {
 		switch cfg.Backend {
 		case "nfs":
 			switch mode {
-			case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent:
+			case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent, store.SharingModeEmptyPerAgent:
 				return NewNFSBackend(cfg.NFS)
 			}
 		case "cloudrun-volume":

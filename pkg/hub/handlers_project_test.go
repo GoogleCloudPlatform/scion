@@ -26,10 +26,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -38,7 +41,7 @@ import (
 )
 
 func TestHubManagedProjectPath(t *testing.T) {
-	path, err := hubManagedProjectPath("my-test-project")
+	path, err := localProjectPath("my-test-project")
 	require.NoError(t, err)
 
 	homeDir, err := os.UserHomeDir()
@@ -49,72 +52,48 @@ func TestHubManagedProjectPath(t *testing.T) {
 	assert.Equal(t, expected, path)
 }
 
-func TestHubManagedProjectPath_PrefersProjectsOverGroves(t *testing.T) {
+func TestHubManagedProjectPath_NeverFallsBackToLegacyDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	slug := "both-dirs-exist"
 	globalDir := filepath.Join(tmpHome, ".scion")
 
-	// Create both directories with workspace content
-	projectsDir := filepath.Join(globalDir, "projects", slug)
-	require.NoError(t, os.MkdirAll(projectsDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(projectsDir, "metadata.json"), []byte("{}"), 0644))
-
-	grovesDir := filepath.Join(globalDir, "groves", slug)
-	require.NoError(t, os.MkdirAll(grovesDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
-
-	// hubManagedProjectPath should prefer projects/ over legacy groves/
-	path, err := hubManagedProjectPath(slug)
-	require.NoError(t, err)
-	assert.Equal(t, projectsDir, path, "should prefer projects path over groves path")
-}
-
-func TestHubManagedProjectPath_FallsBackToGrovesWhenProjectsEmpty(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	slug := "projects-empty-groves-has-content"
-	globalDir := filepath.Join(tmpHome, ".scion")
-
-	// Create projects/{slug} with only infrastructure dirs (no real content)
+	// projects/{slug} has no real content yet, and a pre-migration
+	// ~/.scion/groves/{slug} still holds real workspace content. Before this
+	// project resolved a legacy fallback here; now MigrateLegacyGlobalLayout
+	// is responsible for moving any such content into projects/ at boot,
+	// before this function is ever reached, so it must always resolve to
+	// projects/ and never read groves/ itself.
 	projectsDir := filepath.Join(globalDir, "projects", slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, ".scion"), 0755))
 
-	// Create groves/{slug} with actual workspace content (legacy)
 	grovesDir := filepath.Join(globalDir, "groves", slug)
 	require.NoError(t, os.MkdirAll(grovesDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
 
-	// hubManagedProjectPath should fall back to groves/ for backward compatibility
-	path, err := hubManagedProjectPath(slug)
+	path, err := localProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, grovesDir, path, "should fall back to legacy groves path when projects dir only contains infrastructure dirs")
+	assert.Equal(t, projectsDir, path, "should always resolve to the projects path, never the legacy directory")
 }
 
-func TestHubManagedProjectPath_DefaultsToProjectsWhenNeitherHasContent(t *testing.T) {
+func TestHubManagedProjectPath_UsesProjectsDirWhenEmpty(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	slug := "neither-has-content"
 	globalDir := filepath.Join(tmpHome, ".scion")
 
-	// Create both directories with only infrastructure dirs
-	grovesDir := filepath.Join(globalDir, "groves", slug)
-	require.NoError(t, os.MkdirAll(filepath.Join(grovesDir, ".scion"), 0755))
-
 	projectsDir := filepath.Join(globalDir, "projects", slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
 
-	// When neither has content, should default to projects/
-	path, err := hubManagedProjectPath(slug)
+	path, err := localProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, projectsDir, path, "should default to projects path when neither dir has workspace content")
+	assert.Equal(t, projectsDir, path, "should resolve to the projects path even when it only contains infrastructure dirs")
 }
 
 func TestHubManagedProjectPath_EmptySlug(t *testing.T) {
-	_, err := hubManagedProjectPath("")
+	_, err := localProjectPath("")
 	require.Error(t, err, "empty slug should return an error")
 	assert.Contains(t, err.Error(), "slug must not be empty")
 }
@@ -137,7 +116,7 @@ func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	assert.Empty(t, project.GitRemote, "hub-managed project should have no git remote")
 
 	// Verify the filesystem was initialized
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	scionDir := filepath.Join(workspacePath, ".scion")
@@ -169,7 +148,7 @@ func TestCreateProject_GitBacked_NoFilesystemInit(t *testing.T) {
 	assert.Equal(t, "github.com/test/repo", project.GitRemote)
 
 	// Verify no filesystem was created for git-backed project
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	_, err = os.Stat(workspacePath)
@@ -191,9 +170,9 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	expectedPath, err := hubManagedProjectPath("hub-managed")
+	expectedPath, err := localProjectPath("hub-managed")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 		"Workspace should be set for hub-managed projects")
@@ -216,12 +195,12 @@ func TestPopulateAgentConfig_HubManagedProject_RemoteBroker_WorkspaceSet(t *test
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	// populateAgentConfig sets Workspace for hub-managed projects.
 	// For remote brokers, the createAgent handler later swaps this to
 	// WorkspaceStoragePath. Here we verify the initial workspace is set.
-	expectedPath, err := hubManagedProjectPath("hub-managed-remote")
+	expectedPath, err := localProjectPath("hub-managed-remote")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace)
 }
@@ -241,7 +220,7 @@ func TestPopulateAgentConfig_GitProject_NoWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.Empty(t, agent.AppliedConfig.Workspace,
 		"Workspace should not be set for git-backed projects")
@@ -279,7 +258,7 @@ func TestPopulateAgentConfig_StampsHarnessConfigID(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(ctx, agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, nil))
 
 	if agent.AppliedConfig.HarnessConfigID != hcID {
 		t.Errorf("expected HarnessConfigID %q, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
@@ -317,7 +296,7 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{}, // no explicit harness-config
 	}
 
-	srv.populateAgentConfig(ctx, agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, template))
 
 	if agent.AppliedConfig.HarnessConfigID != hcID {
 		t.Errorf("expected HarnessConfigID %q from template default, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
@@ -327,234 +306,78 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 	}
 }
 
-func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
+// TestPopulateAgentConfig_NoTelemetryWrittenToRecord: create writes no
+// telemetry into the agent record (ptone/scion#4222). Template telemetry is
+// ignored (ptone/scion#4524), and the hub default and the project policy are
+// resolved per dispatch (dispatchTelemetry), so a create without request
+// telemetry leaves InlineConfig.Telemetry nil.
+func TestPopulateAgentConfig_NoTelemetryWrittenToRecord(t *testing.T) {
 	srv, _ := testServer(t)
 
-	project := &store.Project{
-		ID:   "project-telem",
-		Name: "Telemetry Project",
-		Slug: "telemetry-project",
+	hubEnabled := true
+	srv.config.TelemetryConfig = &api.TelemetryConfig{
+		Enabled: &hubEnabled,
+		Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://hub-otel.example.com"},
 	}
-
-	enabled := true
-	tmplTelemetry := &api.TelemetryConfig{
-		Enabled: &enabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://otel.example.com",
-			Provider: "gcp",
-		},
-	}
-
+	tmplEnabled := true
 	template := &store.Template{
-		ID:   "tmpl-telem",
-		Slug: "telem-template",
-		Config: &store.TemplateConfig{
-			Telemetry: tmplTelemetry,
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-telem",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	srv.populateAgentConfig(context.Background(), agent, project, template)
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig,
-		"InlineConfig should be created to hold template telemetry")
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry,
-		"Telemetry should be merged from template")
-	assert.Equal(t, &enabled, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.Equal(t, "https://otel.example.com", agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-	assert.Equal(t, "gcp", agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Provider)
-}
-
-func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
-	srv, _ := testServer(t)
-
-	project := &store.Project{
-		ID:   "project-telem2",
-		Name: "Telemetry Project 2",
-		Slug: "telemetry-project-2",
-	}
-
-	enabled := true
-	tmplTelemetry := &api.TelemetryConfig{
-		Enabled: &enabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://template-otel.example.com",
-		},
-	}
-
-	inlineTelemetry := &api.TelemetryConfig{
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://inline-otel.example.com",
-		},
-	}
-
-	template := &store.Template{
-		ID:   "tmpl-telem2",
-		Slug: "telem-template-2",
-		Config: &store.TemplateConfig{
-			Telemetry: tmplTelemetry,
-		},
-	}
-
-	agent := &store.Agent{
-		ID: "agent-telem2",
-		AppliedConfig: &store.AgentAppliedConfig{
-			InlineConfig: &api.ScionConfig{
-				Telemetry: inlineTelemetry,
+		ID:   "tmpl-no-tel",
+		Slug: "no-tel-template",
+		AgentConfig: &api.ScionConfig{
+			Telemetry: &api.TelemetryConfig{
+				Enabled: &tmplEnabled,
+				Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://template-otel.example.com"},
 			},
 		},
 	}
-
-	srv.populateAgentConfig(context.Background(), agent, project, template)
-
-	// Inline telemetry should NOT be overwritten by template telemetry
-	assert.Equal(t, "https://inline-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
-		"Explicit inline telemetry should take precedence over template")
-}
-
-func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Set hub-level telemetry config
-	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-			Provider: "gcp",
-		},
-	}
-
 	project := &store.Project{
-		ID:   "project-hub-tel",
-		Name: "Hub Telemetry Project",
-		Slug: "hub-telemetry-project",
+		ID:          "project-no-tel",
+		Slug:        "no-tel-project",
+		Annotations: map[string]string{projectSettingTelemetryEnabled: "false"},
 	}
+	agent := &store.Agent{ID: "agent-no-tel", AppliedConfig: &store.AgentAppliedConfig{}}
 
-	agent := &store.Agent{
-		ID:            "agent-hub-tel",
-		AppliedConfig: &store.AgentAppliedConfig{},
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
+
+	if agent.AppliedConfig.InlineConfig != nil {
+		assert.Nil(t, agent.AppliedConfig.InlineConfig.Telemetry,
+			"neither template, hub nor project telemetry may be written into the agent record")
 	}
-
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig,
-		"InlineConfig should be created to hold hub telemetry")
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry,
-		"Telemetry should be populated from hub config")
-	assert.Equal(t, &hubEnabled, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.Equal(t, "https://hub-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
 }
 
-func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) {
+// TestPopulateAgentConfig_RequesterTelemetryKept: the requester's own inline
+// telemetry is kept as given; nothing (template, hub, project) is merged
+// into it.
+func TestPopulateAgentConfig_RequesterTelemetryKept(t *testing.T) {
 	srv, _ := testServer(t)
 
-	// Set hub-level telemetry config
 	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-		},
+	srv.config.TelemetryConfig = &api.TelemetryConfig{Enabled: &hubEnabled}
+	project := &store.Project{
+		ID:          "project-req-tel",
+		Slug:        "req-tel-project",
+		Annotations: map[string]string{projectSettingTelemetryEnabled: "true"},
 	}
-
-	tmplEnabled := true
-	template := &store.Template{
-		ID:   "tmpl-hub-tel",
-		Slug: "hub-tel-template",
-		Config: &store.TemplateConfig{
-			Telemetry: &api.TelemetryConfig{
-				Enabled: &tmplEnabled,
-				Cloud: &api.TelemetryCloudConfig{
-					Endpoint: "https://template-otel.example.com",
+	disabled := false
+	agent := &store.Agent{
+		ID: "agent-req-tel",
+		AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{
+				Telemetry: &api.TelemetryConfig{
+					Enabled: &disabled,
+					Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://inline-otel.example.com"},
 				},
 			},
 		},
 	}
 
-	project := &store.Project{ID: "project-hub-tel2", Slug: "hub-tel-project-2"}
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	agent := &store.Agent{
-		ID:            "agent-hub-tel2",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	srv.populateAgentConfig(context.Background(), agent, project, template)
-
-	// Template telemetry should win over hub telemetry
-	assert.Equal(t, "https://template-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
-		"Template telemetry should take precedence over hub default")
-}
-
-func TestPopulateAgentConfig_ProjectTelemetryEnabledOverride(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Set hub-level telemetry config with enabled=true
-	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-		},
-	}
-
-	// Project disables telemetry
-	project := &store.Project{
-		ID:   "project-tel-override",
-		Slug: "tel-override-project",
-		Annotations: map[string]string{
-			projectSettingTelemetryEnabled: "false",
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-tel-override",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
-	// Hub cloud config should still be present
-	assert.Equal(t, "https://hub-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-	// But enabled should be overridden by project setting
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.False(t, *agent.AppliedConfig.InlineConfig.Telemetry.Enabled,
-		"Project TelemetryEnabled=false should override hub Enabled=true")
-}
-
-func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// No hub telemetry config, no template — only project sets enabled
-	project := &store.Project{
-		ID:   "project-tel-only",
-		Slug: "tel-only-project",
-		Annotations: map[string]string{
-			projectSettingTelemetryEnabled: "true",
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-tel-only",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig)
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.True(t, *agent.AppliedConfig.InlineConfig.Telemetry.Enabled,
-		"Project TelemetryEnabled=true should create telemetry config with Enabled=true")
+	tel := agent.AppliedConfig.InlineConfig.Telemetry
+	require.NotNil(t, tel)
+	require.NotNil(t, tel.Enabled)
+	assert.False(t, *tel.Enabled, "the project policy is not written over the requester's value")
+	assert.Equal(t, "https://inline-otel.example.com", tel.Cloud.Endpoint)
 }
 
 // TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks tests that creating an agent
@@ -591,20 +414,17 @@ func TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-
-	assert.NotNil(t, resp.Agent)
-	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
-		"Agent should be assigned to the explicitly selected broker")
+	// The explicitly selected broker is remote and has no checkout of the
+	// hub-managed project, so the create is refused (ptone/scion#5813);
+	// broker resolution, and so the auto-link, runs before that refusal.
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Verify the broker was auto-linked as a provider
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked as a provider")
 	assert.Equal(t, broker.ID, provider.BrokerID)
-	assert.Equal(t, "agent-create", provider.LinkedBy)
+	assert.Equal(t, DevUserID, provider.LinkedBy, "the link records the linking user")
 
 	// Verify the broker was set as the default
 	updatedProject, err := s.GetProject(ctx, project.ID)
@@ -658,15 +478,14 @@ func TestCreateProject_HubManaged_AutoProvide(t *testing.T) {
 		"projectId": project.ID,
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
-		"Agent should use the auto-provided default broker")
+	// The auto-provided default broker is remote and has no checkout of the
+	// hub-managed project: the create resolves to it and is then refused
+	// (ptone/scion#5813).
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Cleanup hub-managed project filesystem
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
@@ -693,6 +512,67 @@ func TestDeleteProject_HubManaged_RemovesFilesystem(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "workspace should be deleted from filesystem")
 
 	// Verify project deleted from database
+	ctx := context.Background()
+	_, err = s.GetProject(ctx, project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "project should be deleted from database")
+}
+
+// TestDeleteProject_NFSSharedDirStorage_RemovesExportTree is Phase 2 item 3
+// (ptone/scion#1802): when the hub's own global settings.yaml has
+// server.shared_dir_storage backend "nfs", deleting a project must remove
+// that project's shared-dir tree from the NFS export via the same
+// symlink-safe resolver used by creation, not just leak it.
+func TestDeleteProject_NFSSharedDirStorage_RemovesExportTree(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	hostBase := filepath.Join(tmpHome, "nfs-export")
+	require.NoError(t, os.MkdirAll(hostBase, 0o2775))
+
+	settingsYAML := `schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: ` + tmpHome + `
+      shares:
+        - id: nfs-export
+          pv_name: pv
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	srv, s := testServer(t)
+	// The hub resolves shared dirs from its in-memory server.project_storage
+	// (synthesized from the settings above at startup), never per request.
+	useNFSSharedDirStorage(srv, hostBase)
+	project := createTestGitProject(t, srv, "NFS Delete Test", "github.com/test/nfs-delete-repo")
+
+	// Pre-populate the project's shared-dir tree on the "export" exactly as
+	// resolveSharedDirs would have, with real content inside it.
+	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "note.txt"), []byte("hello"), 0o644))
+
+	// A sibling project's tree must survive.
+	siblingID := "11111111-2222-3333-4444-555555555555"
+	siblingLeaf := filepath.Join(hostBase, "projects", siblingID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(siblingLeaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(siblingLeaf, "keep.txt"), []byte("keep"), 0o644))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	// The project's storage is removed in the background after the commit.
+	srv.storageCleanupWG.Wait()
+
+	_, err := os.Stat(filepath.Join(hostBase, "projects", project.ID))
+	assert.True(t, os.IsNotExist(err), "the deleted project's NFS shared-dir tree must be removed")
+
+	info, err := os.Stat(filepath.Join(siblingLeaf, "keep.txt"))
+	require.NoError(t, err, "a sibling project's shared-dir tree must survive untouched")
+	assert.False(t, info.IsDir())
+
 	ctx := context.Background()
 	_, err = s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "project should be deleted from database")
@@ -735,9 +615,10 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Delete project — agents are always cascade-deleted
+	// Delete project with force — live agents are cascade-deleted
+	// (without force the delete is refused, ptone/scion#4811)
 	rec := doRequest(t, srv, http.MethodDelete,
-		"/api/v1/projects/"+project.ID, nil)
+		"/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify dispatcher was called for both agents
@@ -763,8 +644,9 @@ func TestDeleteProject_AlwaysCascadeDeletesAgents(t *testing.T) {
 
 	project, _, _ := setupOnlineBrokerAgent(t, s, "project-nodelflag")
 
-	// Delete project without explicit deleteAgents param — agents should still be deleted
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+	// Delete project without explicit deleteAgents param — with force,
+	// agents should still be deleted (ptone/scion#4811)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Dispatcher should have been called (cascade delete is always on)
@@ -838,7 +720,7 @@ func TestAutoLinkProviders_HubManagedProject_NoLocalPath(t *testing.T) {
 		"LocalPath should NOT be set for hub-managed project auto-linked provider")
 
 	// Cleanup hub-managed project filesystem
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
@@ -945,6 +827,52 @@ func TestDeleteProject_HubManaged_DispatchesCleanupToBrokers(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+// TestDeleteProject_Forced_BrokerKeepsDirIsAuditedNotFailed: on a forced
+// delete a remote broker that still has agents of the project keeps its
+// project directory and answers the cleanup with 409. The hub logs and
+// audits that as kept on that broker; the forced delete succeeds and is
+// never rolled back.
+func TestDeleteProject_Forced_BrokerKeepsDirIsAuditedNotFailed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, broker, agent := setupOnlineBrokerAgent(t, s, "forced-kept")
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		LinkedBy:   "test",
+	}))
+	mockClient := &mockRuntimeBrokerClient{cleanupErr: &brokerStatusError{
+		StatusCode: http.StatusConflict,
+		Body:       `{"error":{"code":"conflict","message":"the project still has agents on this Runtime Broker"}}`,
+	}}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
+	logs := &syncLogBuffer{}
+	srv.projectsLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	_, err := s.GetProject(ctx, project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the forced delete stands")
+	_, err = s.GetAgent(ctx, agent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.Equal(t, 1, mockClient.cleanupCalls)
+
+	out := logs.String()
+	kept := false
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, `msg="`+projectfs.AuditMessage+`"`) && strings.Contains(l, "tree=project-dir") &&
+			strings.Contains(l, "outcome=kept") && strings.Contains(l, "deleter=hub") &&
+			strings.Contains(l, "project_id="+project.ID) && strings.Contains(l, "Runtime Broker "+broker.ID) {
+			kept = true
+		}
+	}
+	assert.True(t, kept, "the broker's kept project directory must be audited as kept:\n%s", out)
+	assert.Contains(t, out, `msg="project directory kept on broker"`)
+	assert.NotContains(t, out, "failed to cleanup project on broker", "a 409 is the kept outcome, not a failure")
+}
+
 // TestDeleteProject_HubManaged_SkipsEmbeddedBroker verifies that the embedded broker
 // (co-located hub+broker) is not called for cleanup since the hub handles its own copy.
 func TestDeleteProject_HubManaged_SkipsEmbeddedBroker(t *testing.T) {
@@ -1008,9 +936,12 @@ func TestDeleteProject_HubManaged_SkipsEmbeddedBroker(t *testing.T) {
 	assert.Contains(t, mockClient.cleanupSlugs, "cleanup-embedded")
 }
 
-// TestDeleteProject_GitBacked_NoCleanupDispatched verifies that deleting a git-backed
-// project does NOT trigger broker cleanup (those directories are externally managed).
-func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
+// TestDeleteProject_GitBacked_LinkedProvider_NoCleanupDispatched verifies that
+// deleting a git-backed project does NOT trigger cleanup on a broker where the
+// project is linked at a local path (that directory is externally managed).
+// Providers without a local path are covered by
+// TestDeleteProject_GitBacked_SlugProvider_DispatchesCleanup.
+func TestDeleteProject_GitBacked_LinkedProvider_NoCleanupDispatched(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1036,6 +967,7 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  "/srv/checkouts/nocleanup",
 		LinkedBy:   "test",
 	}))
 
@@ -1049,7 +981,7 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// CleanupProject should NOT be called for git-backed projects
-	assert.Equal(t, 0, mockClient.cleanupCalls, "CleanupProject should not be called for git-backed projects")
+	assert.Equal(t, 0, mockClient.cleanupCalls, "CleanupProject should not be called for a git project linked at a local path")
 }
 
 // TestResolveRuntimeBroker_HubManagedProject_NoLocalPath verifies that when a broker
@@ -1084,12 +1016,16 @@ func TestResolveRuntimeBroker_HubManagedProject_NoLocalPath(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	// The broker is remote and has no checkout of the hub-managed project,
+	// so the create itself is refused (ptone/scion#5813); broker resolution,
+	// and so the auto-link, runs before that refusal.
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Verify the auto-linked provider does NOT have LocalPath set
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked")
-	assert.Equal(t, "agent-create", provider.LinkedBy)
+	assert.Equal(t, DevUserID, provider.LinkedBy, "the link records the linking user")
 	assert.Empty(t, provider.LocalPath,
 		"LocalPath should NOT be set when auto-linking during agent creation for hub-managed project")
 }
@@ -1273,14 +1209,14 @@ func TestDeleteProject_CascadesEnvVarsSecretsHarnessConfigs(t *testing.T) {
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: api.NewUUID(), Name: "project-hc", Slug: "project-hc",
 		Harness: "claude", Scope: store.ScopeProject, ScopeID: project.ID,
-		Status: store.HarnessConfigStatusActive, Visibility: store.VisibilityPrivate,
+		Status: store.HarnessConfigStatusActive,
 	}))
 
 	// Create project-scoped templates
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
 		ID: api.NewUUID(), Name: "project-tmpl", Slug: "project-tmpl",
 		Harness: "claude", Scope: store.ScopeProject, ScopeID: project.ID,
-		Status: store.TemplateStatusActive, Visibility: store.VisibilityPrivate,
+		Status: store.TemplateStatusActive,
 	}))
 
 	// Also create a hub-scoped env var that should NOT be deleted
@@ -1401,10 +1337,13 @@ func TestProjectRegister_CreatesMembershipGroup(t *testing.T) {
 	assert.Equal(t, store.GroupMemberRoleOwner, members[0].Role)
 }
 
-// TestProjectRegister_ExistingProject_CreatesMembershipGroup verifies that
-// registering against an existing project (linking) still creates the membership
-// group and adds the linking user as owner.
-func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
+// TestProjectRegister_ExistingProject_BackfillsGroupWithoutAddingCaller
+// verifies that registering against an existing project (linking) backfills
+// the membership group for projects created before group support was added,
+// but does not grant the calling/linking identity membership in that group —
+// group membership continues to reflect the project's own ownership records,
+// not who happened to resolve it via register.
+func TestProjectRegister_ExistingProject_BackfillsGroupWithoutAddingCaller(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1426,7 +1365,9 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	_, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.ErrorIs(t, err, store.ErrNotFound, "members group should not exist yet")
 
-	// Register (link) via the API — this should backfill the group
+	// Register (link) via the API, as an identity authorized to update this
+	// project (the default test identity is a hub super-admin) — this should
+	// backfill the group.
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		ID:   project.ID,
 		Name: project.Name,
@@ -1443,7 +1384,8 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	require.NoError(t, err, "members group should have been created on link")
 	assert.Equal(t, project.ID, group.ProjectID)
 
-	// Both the original creator and the linking user should be owners
+	// Only the original creator should be an owner — the caller who merely
+	// linked the already-existing project is not granted membership.
 	members, err := s.GetGroupMembers(ctx, group.ID)
 	require.NoError(t, err)
 
@@ -1454,13 +1396,466 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 		}
 	}
 	assert.True(t, ownerIDs[creatorID], "original creator should be an owner")
-	assert.True(t, ownerIDs[DevUserID], "linking user should be an owner")
+	assert.False(t, ownerIDs[DevUserID], "linking caller should not be granted membership")
+}
+
+// ==========================================================================
+// Register-existing-project authorization
+//
+// Register both creates new projects and resolves + mutates existing ones
+// (by client-supplied id, slug, or git remote). The create path is gated by
+// hub-scope project.create; the resolve-existing path additionally requires
+// project-update authorization on the resolved project before any mutation
+// (group backfill, provider link, default-broker set). These tests cover
+// that additional gate.
+// ==========================================================================
+
+// TestProjectRegister_ExistingProject_DeniesNonMemberWithoutBroker verifies
+// that a hub member who holds only the hub-scope project.create permission,
+// and has no binding on a specific existing project, is denied when register
+// resolves that project by ID — and that no membership is granted as a
+// side effect of the denied request.
+func TestProjectRegister_ExistingProject_DeniesNonMemberWithoutBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-owner-1"), Email: "register-owner-1@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-project-1"), Name: "Other's Project", Slug: "others-project-1",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	membersBefore, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+
+	other := &store.User{
+		ID: tid("register-authz-other-1"), Email: "register-other-1@test.com",
+		DisplayName: "Other Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, other))
+	ensureHubMembership(ctx, s, other.ID) // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:   project.ID,
+		Name: project.Name,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member with no binding on an existing project should be denied register; body: %s", rec.Body.String())
+
+	// No membership change on the target project's group.
+	membersAfter, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	assert.Len(t, membersAfter, len(membersBefore), "denied register must not change group membership")
+	for _, m := range membersAfter {
+		assert.NotEqual(t, other.ID, m.MemberID, "denied caller must not be added to the project's members group")
+	}
+}
+
+// TestProjectRegister_ExistingProject_DeniesNonMemberWithBroker verifies that
+// the same deny holds when a brokerId is included in the request, and that no
+// provider row or default-broker assignment lands as a result of the denied
+// request.
+func TestProjectRegister_ExistingProject_DeniesNonMemberWithBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-owner-2"), Email: "register-owner-2@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-project-2"), Name: "Other's Project 2", Slug: "others-project-2",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	broker := &store.RuntimeBroker{
+		ID: tid("register-authz-broker-1"), Name: "Register Authz Broker", Slug: "register-authz-broker-1",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	other := &store.User{
+		ID: tid("register-authz-other-2"), Email: "register-other-2@test.com",
+		DisplayName: "Other Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, other))
+	ensureHubMembership(ctx, s, other.ID) // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:       project.ID,
+		Name:     project.Name,
+		BrokerID: broker.ID,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member with no binding on an existing project should be denied register; body: %s", rec.Body.String())
+
+	// No provider row was created for the target project.
+	_, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "denied register must not link the broker as a provider")
+
+	// The project's default runtime broker must remain unset.
+	stored, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.DefaultRuntimeBrokerID, "denied register must not set a default runtime broker")
+
+	// No membership change either.
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	members, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	for _, m := range members {
+		assert.NotEqual(t, other.ID, m.MemberID, "denied caller must not be added to the project's members group")
+	}
+}
+
+// TestProjectRegister_ExistingProject_OwnerCanLinkBroker verifies that the
+// project owner registering/linking their own already-existing project still
+// succeeds: the broker is linked as a provider and the default runtime
+// broker is set.
+func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-owner-3"), Email: "register-owner-3@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-project-3"), Name: "My Own Project", Slug: "my-own-project-3",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	broker := &store.RuntimeBroker{
+		ID: tid("register-authz-broker-2"), Name: "Owner Link Broker", Slug: "owner-link-broker-2",
+		Status: store.BrokerStatusOnline, CreatedBy: owner.ID,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:       project.ID,
+		Name:     project.Name,
+		BrokerID: broker.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "project owner should be able to link a broker to their own project; body: %s", rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.False(t, resp.Created, "should find existing project")
+
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	require.NoError(t, err, "owner's broker link should create a provider row")
+	assert.Equal(t, broker.ID, provider.BrokerID)
+	assert.Equal(t, owner.ID, provider.LinkedBy, "the link records the linking user")
+
+	stored, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, broker.ID, stored.DefaultRuntimeBrokerID, "owner's broker link should set the default runtime broker")
+}
+
+// TestProjectRegister_NewProject_MemberWithCreateSucceeds verifies that a hub
+// member holding only hub-scope project.create (not hub-admin/super-admin)
+// can still register a brand-new project. This is the create path, which
+// this gate must not regress.
+func TestProjectRegister_NewProject_MemberWithCreateSucceeds(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID: tid("register-authz-newproject-member"), Email: "register-newproject-member@test.com",
+		DisplayName: "New Project Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, member))
+	ensureHubMembership(ctx, s, member.ID) // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:      "Brand New Member Project",
+		GitRemote: "https://github.com/test/register-authz-newproject",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "member with project.create should be able to register a new project; body: %s", rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.True(t, resp.Created, "expected a new project to be created")
+	assert.Equal(t, member.ID, resp.Project.OwnerID)
+}
+
+// TestProjectRegister_GitRemoteMatch_DeniedFallsThroughToNewCallerOwnedProject
+// verifies that when register resolves an existing project only via an
+// INCIDENTAL single git-remote match (not an explicit id), and the caller
+// cannot update that project, register does not 403 — this is a legitimate
+// hub link/sync/provide flow, and GetProjectsByGitRemote already supports
+// more than one project sharing a remote. Instead it falls through to the
+// ordinary create-new-project path and provisions a new, caller-owned
+// project carrying the same git remote, running the full create path (quota
+// reservation and owner role binding included), and never mutates or
+// describes the other user's project in the response.
+func TestProjectRegister_GitRemoteMatch_DeniedFallsThroughToNewCallerOwnedProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-gitremote-owner"), Email: "register-gitremote-owner@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	remote := "github.com/test/register-authz-gitremote-fallthrough"
+	existing := &store.Project{
+		ID: tid("register-authz-gitremote-existing"), Name: "Existing Remote Project", Slug: "register-authz-gitremote-existing",
+		GitRemote: util.NormalizeGitRemote(remote), OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, existing))
+	srv.seedProjectCreatorMembership(ctx, existing)
+
+	membersSlug := "project:" + existing.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	membersBefore, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+
+	other := seedHubMemberNoProjects(t, s, "register-authz-gitremote-other") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:      "New Project Same Remote",
+		GitRemote: remote,
+	})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a denied incidental git-remote match must fall through to create, not 403; body: %s", rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.True(t, resp.Created, "expected a new project to be created")
+	assert.NotEqual(t, existing.ID, resp.Project.ID, "the new project must not be the other user's existing project")
+	assert.Equal(t, other.ID, resp.Project.OwnerID, "the new project must be owned by the caller")
+	assert.Equal(t, util.NormalizeGitRemote(remote), resp.Project.GitRemote)
+	assert.Empty(t, resp.Matches, "the response must not describe or list the other user's existing project")
+
+	// The other user's existing project is untouched.
+	membersAfter, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	assert.Len(t, membersAfter, len(membersBefore), "the other user's project group must be unchanged")
+	for _, m := range membersAfter {
+		assert.NotEqual(t, other.ID, m.MemberID, "the caller must not be added to the other user's project")
+	}
+
+	// The new project ran the full create path: the caller has an owner role
+	// binding on it (createProjectOwnerRoleBinding), not just a bare row.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, other.ID)
+	require.NoError(t, err)
+	var foundOwnerBinding bool
+	for _, rb := range bindings {
+		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == resp.Project.ID {
+			foundOwnerBinding = true
+		}
+	}
+	assert.True(t, foundOwnerBinding, "the caller should hold a role binding on their new project")
+}
+
+// TestProjectRegister_SlugMatch_DeniesNonMemberWithoutBroker verifies that a
+// denied match via the slug/global-project lookup (no git remote, name
+// matches an existing project's slug) still 403s outright rather than
+// falling through to create — this is a known, documented limitation for
+// this change: it does not broaden member registration against the global
+// project.
+func TestProjectRegister_SlugMatch_DeniesNonMemberWithoutBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-slug-owner"), Email: "register-slug-owner@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	name := "Register Authz Slug Project"
+	project := &store.Project{
+		ID: tid("register-authz-slug-project"), Name: name, Slug: api.Slugify(name),
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	other := seedHubMemberNoProjects(t, s, "register-authz-slug-other") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: name, // no id, no gitRemote -> resolves via slug lookup
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a denied slug/global-project match must still 403 (known limitation, not fixed here); body: %s", rec.Body.String())
+}
+
+// TestProjectRegister_ExistingProject_DeprecatedBrokerFlow_DeniesNonMember
+// pins that the project-update authz gate short-circuits BEFORE the
+// deprecated embedded-broker flow runs: a caller who cannot update the
+// resolved existing project is denied even when the request also carries an
+// embedded broker payload, and no broker is created/mutated as a result.
+//
+// NOTE: this only pins the gate short-circuit. A separate, pre-existing
+// ownership question in the embedded-broker flow itself (when the caller CAN
+// update the project) is out of scope here and tracked elsewhere.
+func TestProjectRegister_ExistingProject_DeprecatedBrokerFlow_DeniesNonMember(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("register-authz-embedded-owner"), Email: "register-embedded-owner@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("register-authz-embedded-project"), Name: "Embedded Broker Project", Slug: "register-authz-embedded-project",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	brokerName := "register-authz-embedded-broker"
+	other := seedHubMemberNoProjects(t, s, "register-authz-embedded-other") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:   project.ID,
+		Name: project.Name,
+		Broker: &RegisterProjectBrokerInfo{
+			Name:    brokerName,
+			Version: "1.0.0",
+		},
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"denied caller must not reach the embedded-broker flow; body: %s", rec.Body.String())
+
+	_, err := s.GetRuntimeBrokerByName(ctx, brokerName)
+	assert.ErrorIs(t, err, store.ErrNotFound, "denied register must not create a broker via the embedded-broker flow")
+
+	assert.NotContains(t, rec.Body.String(), "secretKey", "denied register must not return a broker secret")
+}
+
+// ==========================================================================
+// POST /api/v1/projects (createProject) — client-supplied-ID idempotency
+//
+// createProject's client-supplied-ID branch resolves an existing project the
+// same way register does, and runs the same group-backfill sink. It needs
+// the identical project-update authz gate before any mutation, and must not
+// grant the caller membership on a project that already exists.
+// ==========================================================================
+
+// TestProjectCreate_ExistingID_DeniesNonMemberWithoutBinding verifies that a
+// hub member who holds only hub-scope project.create, and has no binding on
+// a specific existing project, is denied when createProject's idempotent
+// client-supplied-ID branch resolves that project — and that no membership
+// or owner role binding is granted as a side effect of the denied request.
+func TestProjectCreate_ExistingID_DeniesNonMemberWithoutBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("create-authz-owner-1"), Email: "create-owner-1@test.com",
+		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID: tid("create-authz-project-1"), Name: "Other's Project", Slug: "create-authz-others-project-1",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err)
+	membersBefore, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+
+	other := seedHubMemberNoProjects(t, s, "create-authz-other-1") // grants hub-scope project.create only
+
+	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		ID:   project.ID,
+		Name: project.Name,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member with no binding on an existing project should be denied create's idempotent resolve; body: %s", rec.Body.String())
+
+	// No membership change on the target project's group.
+	membersAfter, err := s.GetGroupMembers(ctx, group.ID)
+	require.NoError(t, err)
+	assert.Len(t, membersAfter, len(membersBefore), "denied create must not change group membership")
+	for _, m := range membersAfter {
+		assert.NotEqual(t, other.ID, m.MemberID, "denied caller must not be added to the project's members group")
+	}
+
+	// No owner role binding was created for the denied caller on this project.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, other.ID)
+	require.NoError(t, err)
+	for _, rb := range bindings {
+		assert.False(t, rb.ScopeType == store.RoleScopeProject && rb.ScopeID == project.ID,
+			"denied caller must not receive any role binding on the target project; got %+v", rb)
+	}
+}
+
+// TestProjectCreate_ExistingID_OwnerIdempotentSucceeds verifies that the
+// create-new-project path still works for a hub member holding only
+// project.create, and that the SAME member re-POSTing with the same
+// client-supplied ID (now their own already-existing project) still
+// succeeds idempotently.
+func TestProjectCreate_ExistingID_OwnerIdempotentSucceeds(t *testing.T) {
+	srv, s := testServer(t)
+
+	member := seedHubMemberNoProjects(t, s, "create-authz-idem-owner") // grants hub-scope project.create only
+
+	projectID := tid("create-authz-idem-project")
+	body := CreateProjectRequest{
+		ID:   projectID,
+		Name: "Idempotent Owner Project",
+	}
+
+	rec1 := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects", body)
+	require.Equal(t, http.StatusCreated, rec1.Code, "member with project.create should be able to create a new project; body: %s", rec1.Body.String())
+
+	var project1 store.Project
+	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&project1))
+	assert.Equal(t, projectID, project1.ID)
+	assert.Equal(t, member.ID, project1.OwnerID)
+
+	// Re-POST with the same client-supplied ID, as the same (owning) member.
+	rec2 := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects", body)
+	require.Equal(t, http.StatusOK, rec2.Code, "owner's idempotent re-create of their own project should succeed; body: %s", rec2.Body.String())
+
+	var project2 store.Project
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&project2))
+	assert.Equal(t, project1.ID, project2.ID)
 }
 
 // TestCreateProjectMembersGroup_OwnerNotInStore verifies that when the project
 // owner does not yet exist in the users table (e.g. legacy proxy auth on a
-// fresh Postgres deployment), the members group is still created without an
-// OwnerID rather than failing with an FK constraint violation.
+// fresh Postgres deployment), the members group is still created. The group
+// never carries an OwnerID (ptone/scion#2599), so there is no FK to violate.
 func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1478,8 +1873,8 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// createProjectMembersGroup should not return an error even though
-	// the owner user does not exist. It should retry without OwnerID.
+	// createProjectMembersGroup must succeed even though the owner user
+	// does not exist.
 	srv.createProjectMembersGroup(ctx, project)
 
 	// The members group must still have been created.
@@ -1487,8 +1882,7 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
 	require.NoError(t, err, "members group should have been created despite missing owner")
 	assert.Equal(t, project.ID, group.ProjectID)
-	// OwnerID should be empty because the referenced user did not exist.
-	assert.Empty(t, group.OwnerID, "group OwnerID should be empty when owner user is not in store")
+	assert.Empty(t, group.OwnerID, "members group never carries an OwnerID")
 }
 
 // =============================================================================
@@ -1510,6 +1904,8 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	body := CreateProjectRequest{
 		Name:          "Shared WS Project",
@@ -1533,7 +1929,7 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 	assert.True(t, project.IsSharedWorkspace(), "project should report as shared workspace")
 
 	// Verify workspace was cloned (it's a git repo)
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -1615,7 +2011,7 @@ func TestCreateProject_WorktreePerAgent_StampsLabel(t *testing.T) {
 	assert.False(t, project.IsSharedWorkspace(), "project should not report as shared workspace")
 }
 
-func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
+func TestCreateProject_WorktreePerAgent_NonGit_Rejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
@@ -1623,14 +2019,11 @@ func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
 		WorkspaceMode: "worktree-per-agent",
 	}
 
+	// Design #2703 §2.4: worktree-per-agent requires a git remote (it was
+	// silently ignored before).
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-
-	assert.Empty(t, project.Labels[store.LabelWorkspaceMode],
-		"worktree-per-agent label should not be set on non-git projects")
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a git remote")
 }
 
 func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T) {
@@ -1651,9 +2044,9 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	expectedPath, err := hubManagedProjectPath("shared-ws")
+	expectedPath, err := localProjectPath("shared-ws")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 		"Workspace should be set for shared-workspace git projects")
@@ -1681,7 +2074,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.Equal(t, "develop", agent.AppliedConfig.Branch,
 		"Branch should default to project's default-branch label for shared workspace")
@@ -1692,7 +2085,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{Branch: "custom-branch"},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent2, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent2, project, nil))
 
 	assert.Equal(t, "custom-branch", agent2.AppliedConfig.Branch,
 		"Explicit branch should not be overridden by shared workspace default")
@@ -1713,7 +2106,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent3, projectNoLabel, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent3, projectNoLabel, nil))
 
 	assert.Equal(t, "main", agent3.AppliedConfig.Branch,
 		"Branch should default to 'main' when no default-branch label is set")
@@ -1738,7 +2131,7 @@ func TestPopulateAgentConfig_WorktreePerAgent_SetsCloneNotWorkspace(t *testing.T
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.NotNil(t, agent.AppliedConfig.GitClone,
 		"GitClone should be set for worktree-per-agent projects (broker decides how to use it)")
@@ -1764,6 +2157,8 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	project := &store.Project{
 		ID:        "project-clone-test",
 		Name:      "Clone Test",
@@ -1780,7 +2175,7 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the workspace was created with a git repo
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -1791,11 +2186,63 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	_, err = os.Stat(scionDir)
 	assert.NoError(t, err, ".scion directory should exist in cloned workspace")
 
+	// The source repository does not ignore .scion/agents/; the seeded clone
+	// must still pass the provisioning ignore check, without a tracked
+	// .gitignore change.
+	ignored := util.IsIgnored(workspacePath, ".scion/agents/")
+	assert.True(t, ignored, ".scion/agents/ should be git-ignored in the seeded shared workspace")
+	_, err = os.Stat(filepath.Join(workspacePath, ".gitignore"))
+	assert.True(t, os.IsNotExist(err), "seeding should not create a tracked .gitignore")
+
 	// Verify git identity
 	cmd := exec.Command("git", "-C", workspacePath, "config", "user.name")
 	output, err := cmd.Output()
 	require.NoError(t, err)
 	assert.Equal(t, "Scion", strings.TrimSpace(string(output)))
+}
+
+func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// The source repository's tracked .gitignore un-ignores .scion/agents/, so
+	// the seed cannot make agent state ignored and must fail the clone.
+	sourceDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, ".gitignore"), []byte("!.scion/agents/\n"), 0644))
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		{"add", ".gitignore"},
+		{"commit", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = sourceDir
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+
+	allowLocalCloneFixture(t, sourceDir)
+
+	project := &store.Project{
+		ID:        "project-clone-unignored",
+		Name:      "Clone Unignored",
+		Slug:      "clone-unignored-" + api.NewUUID()[:8],
+		GitRemote: "local/test/unignored",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode:   store.WorkspaceModeShared,
+			"scion.dev/clone-url":      sourceDir,
+			"scion.dev/default-branch": "master",
+		},
+	}
+	workspacePath, err := localProjectPath(project.Slug)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
+
+	err = srv.cloneSharedWorkspaceProject(context.Background(), project)
+	require.Error(t, err)
+	assert.Equal(t, "shared workspace clone failed: could not set up the .scion/agents/ ignore rule", err.Error())
+	assert.NotContains(t, err.Error(), workspacePath, "the error reaches API responses and must not name the host path")
+	_, statErr := os.Stat(workspacePath)
+	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up when the ignore rule cannot be set up")
 }
 
 func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {
@@ -1816,7 +2263,7 @@ func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {
 	assert.Contains(t, err.Error(), "shared workspace clone failed")
 
 	// Verify the workspace directory was cleaned up
-	workspacePath, pathErr := hubManagedProjectPath(project.Slug)
+	workspacePath, pathErr := localProjectPath(project.Slug)
 	require.NoError(t, pathErr)
 	_, statErr := os.Stat(workspacePath)
 	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up on clone failure")
@@ -1934,6 +2381,13 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	}
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
 
+	// The creator (the dev user) proves access to the repository with their
+	// own GitHub token; a repo-name match alone does not associate.
+	giveUserGitHubToken(t, srv, st, DevUserID, "ghp_dev_creator")
+	fakeCreatorAccess(srv, map[string]githubapp.RepoAccess{
+		"ghp_dev_creator|myorg/myrepo": {Push: true, Pull: true},
+	})
+
 	// Create a project whose git remote matches the installation's repo.
 	// Use a local git repo as clone source so the clone actually succeeds.
 	sourceDir := t.TempDir()
@@ -1947,6 +2401,8 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	body := CreateProjectRequest{
 		Name:          "Auto Assoc Project",
@@ -1965,7 +2421,7 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Clean up the cloned workspace
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -2130,43 +2586,81 @@ func TestCreateProject_ListByGitRemote_ReturnsMultiple(t *testing.T) {
 	assert.Len(t, resp.Projects, 2, "listing by git remote should return all matching projects")
 }
 
-func TestProjectRouteDeprecationHeaders(t *testing.T) {
+// TestLegacyGroveRoutesRemoved is the negative test for design.md §2 row 7
+// (and §7.2): the legacy /api/v1/groves aliases are gone, so both the
+// collection route and a sub-path now 404 like any other unknown route,
+// instead of silently continuing to serve the canonical project handlers.
+func TestLegacyGroveRoutesRemoved(t *testing.T) {
 	srv, _ := testServer(t)
 
 	canonical := doRequest(t, srv, http.MethodGet, "/api/v1/projects", nil)
 	require.Equal(t, http.StatusOK, canonical.Code, "body: %s", canonical.Body.String())
-	assert.Empty(t, canonical.Header().Get("Deprecation"))
-	assert.Empty(t, canonical.Header().Get("Sunset"))
-	assert.Empty(t, canonical.Header().Get("Link"))
 
 	legacy := doRequest(t, srv, http.MethodGet, "/api/v1/groves", nil)
-	require.Equal(t, http.StatusOK, legacy.Code, "body: %s", legacy.Body.String())
-	assert.Equal(t, "true", legacy.Header().Get("Deprecation"))
-	assert.Equal(t, legacyGroveRouteSunset, legacy.Header().Get("Sunset"))
-	assert.Contains(t, legacy.Header().Get("Link"), "/api/v1/projects/")
+	assert.Equal(t, http.StatusNotFound, legacy.Code, "body: %s", legacy.Body.String())
+
+	legacySub := doRequest(t, srv, http.MethodGet, "/api/v1/groves/some-project", nil)
+	assert.Equal(t, http.StatusNotFound, legacySub.Code, "body: %s", legacySub.Body.String())
 }
 
-func TestRegisterProjectRequestLegacyIDAliases(t *testing.T) {
-	var legacyCamel RegisterProjectRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","groveId":"legacy-camel"}`), &legacyCamel))
-	assert.Equal(t, "legacy-camel", legacyCamel.ID)
+func TestRegisterProjectRequestCanonicalIDOnly(t *testing.T) {
+	var canonical RegisterProjectRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"canonical","name":"Canonical","gitRemote":"github.com/acme/canonical"}`), &canonical))
+	assert.Equal(t, "canonical", canonical.ID)
 
-	var legacySnake RegisterProjectRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","grove_id":"legacy-snake"}`), &legacySnake))
-	assert.Equal(t, "legacy-snake", legacySnake.ID)
-
-	var canonicalWins RegisterProjectRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"id":"canonical","name":"Canonical","gitRemote":"github.com/acme/canonical","groveId":"legacy"}`), &canonicalWins))
-	assert.Equal(t, "canonical", canonicalWins.ID)
+	// groveId/grove_id are no longer recognized aliases: the request decodes
+	// with an empty ID rather than falling back to the legacy field.
+	var legacyIgnored RegisterProjectRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","groveId":"legacy-camel"}`), &legacyIgnored))
+	assert.Empty(t, legacyIgnored.ID)
 }
 
-func TestProjectRegisterAcceptsLegacyJSONID(t *testing.T) {
+func TestListProjectsResponse_JSON_NoLegacyKeys(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var m map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&m))
+
+	if _, ok := m["projects"]; !ok {
+		t.Errorf("missing 'projects' field")
+	}
+	if _, ok := m["groves"]; ok {
+		t.Errorf("legacy 'groves' key present in response, want absent: %v", m["groves"])
+	}
+}
+
+func TestRegisterProjectResponse_JSON_NoLegacyKeys(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]interface{}{
-		"groveId":   tid("legacy_register_id"),
-		"gitRemote": "https://github.com/test/legacy-register.git",
-		"name":      "Legacy Register",
+		"name":      "No Legacy Keys",
+		"gitRemote": "https://github.com/test/no-legacy-keys.git",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var m map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&m))
+
+	if _, ok := m["project"]; !ok {
+		t.Errorf("missing 'project' field")
+	}
+	if _, ok := m["grove"]; ok {
+		t.Errorf("legacy 'grove' key present in response, want absent: %v", m["grove"])
+	}
+}
+
+func TestProjectRegisterAcceptsCanonicalJSONID(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := map[string]interface{}{
+		"id":        tid("canonical_register_id"),
+		"gitRemote": "https://github.com/test/canonical-register.git",
+		"name":      "Canonical Register",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body)
@@ -2175,5 +2669,5 @@ func TestProjectRegisterAcceptsLegacyJSONID(t *testing.T) {
 	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.NotNil(t, resp.Project)
-	assert.Equal(t, tid("legacy_register_id"), resp.Project.ID)
+	assert.Equal(t, tid("canonical_register_id"), resp.Project.ID)
 }

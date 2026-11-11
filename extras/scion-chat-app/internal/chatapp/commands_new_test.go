@@ -40,11 +40,11 @@ func (s *stubAgentService) Create(ctx context.Context, req *hubclient.CreateAgen
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (s *stubAgentService) Start(ctx context.Context, id string) error {
+func (s *stubAgentService) Start(ctx context.Context, id string) (*hubclient.LifecycleResponse, error) {
 	if s.startFunc != nil {
-		return s.startFunc(ctx, id)
+		return &hubclient.LifecycleResponse{}, s.startFunc(ctx, id)
 	}
-	return nil
+	return &hubclient.LifecycleResponse{}, nil
 }
 
 func (s *stubAgentService) SendStructuredMessage(ctx context.Context, id string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
@@ -749,5 +749,33 @@ func TestHandleAdminCommand_DispatchesNewCommands(t *testing.T) {
 				t.Errorf("expected response to contain %q, got text=%q", tt.wantContain, text)
 			}
 		})
+	}
+}
+
+func TestCmdSubscribe_WaitingForInputOptionLabel(t *testing.T) {
+	router, _, _ := newTestRouterWithHub(t, newStubClient())
+
+	resp, err := router.cmdSubscribe(context.Background(), testEvent(), []string{"my-agent"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Message == nil || resp.Message.Card == nil {
+		t.Fatal("expected card response with activity filter")
+	}
+	var found bool
+	for _, section := range resp.Message.Card.Sections {
+		for _, w := range section.Widgets {
+			for _, opt := range w.Options {
+				if opt.Value == "WAITING_FOR_INPUT" {
+					found = true
+					if opt.Label != "Waiting on Parent" {
+						t.Errorf("WAITING_FOR_INPUT label = %q, want %q", opt.Label, "Waiting on Parent")
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected a WAITING_FOR_INPUT option in the subscribe card")
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -28,11 +27,10 @@ import (
 
 func newFederationTestServer(t *testing.T, mock *httptest.Server) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 	fedClient := mock.Client()
 	fedClient.Timeout = federationTimeout
 	fedClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -174,8 +172,8 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 	if resolveErr.Code != "trust_violation" {
 		t.Errorf("expected code trust_violation, got %s", resolveErr.Code)
 	}
-	if !strings.Contains(resolveErr.Message, "content hash mismatch") {
-		t.Errorf("expected mismatch message, got: %s", resolveErr.Message)
+	if resolveErr.Message != "skill content hash not trusted" {
+		t.Errorf("expected the fixed trust phrase, got: %s", resolveErr.Message)
 	}
 }
 
@@ -215,8 +213,8 @@ func TestFederateResolve_NoPinConfigured(t *testing.T) {
 	if resolveErr.Code != "trust_violation" {
 		t.Errorf("expected code trust_violation, got %s", resolveErr.Code)
 	}
-	if !strings.Contains(resolveErr.Message, "no pinned hash") {
-		t.Errorf("expected 'no pinned hash' message, got: %s", resolveErr.Message)
+	if resolveErr.Message != "skill content hash not trusted" {
+		t.Errorf("expected the fixed trust phrase, got: %s", resolveErr.Message)
 	}
 }
 

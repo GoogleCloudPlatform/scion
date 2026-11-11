@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -79,8 +79,10 @@ AUTH = scion_harness.AuthSpec(
         ),
         scion_harness.env_method(
             "vertex-ai",
-            any_of=["GOOGLE_CLOUD_PROJECT"],
-            hint="set GOOGLE_CLOUD_PROJECT (with ADC or GCP service account) for Vertex AI",
+            all_of=["GOOGLE_CLOUD_PROJECT"],
+            any_of=list(scion_harness.vertex_location_keys()),
+            hint="set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION/CLOUD_ML_REGION "
+                 "(with ADC or GCP service account) for Vertex AI",
         ),
     ],
 )
@@ -120,7 +122,9 @@ def _update_gemini_settings(settings_path: str, gemini_auth_type: str) -> None:
     scion_harness.atomic_write_json(expanded, settings)
 
 
-def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
+def _build_env_overlay(
+    method: str, env_key: str, warn_fn: Callable[[str], None] | None = None,
+) -> dict[str, str]:
     """Build the env vars overlay for outputs/env.json."""
     if method == "api-key" and env_key:
         return {env_key: os.environ.get(env_key, "")}
@@ -131,11 +135,21 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
             overlay["GOOGLE_CLOUD_PROJECT"] = project
         return overlay
     if method == "vertex-ai":
-        return {
-            "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
-            "GOOGLE_CLOUD_REGION": os.environ.get("GOOGLE_CLOUD_REGION", ""),
-            "GOOGLE_CLOUD_LOCATION": os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION", ""),
-        }
+        # Gemini reads only GOOGLE_CLOUD_LOCATION. Fill it from any accepted
+        # location key in the shared precedence order (LOCATION > REGION >
+        # CLOUD_ML_REGION). Empty keys are left out, as in auth-file.
+        _, location = scion_harness.resolve_vertex_location(
+            lambda k: os.environ.get(k, ""), warn_fn=warn_fn,
+        )
+        overlay: dict[str, str] = {}
+        for key, value in (
+            ("GOOGLE_CLOUD_PROJECT", os.environ.get("GOOGLE_CLOUD_PROJECT", "")),
+            ("GOOGLE_CLOUD_REGION", os.environ.get("GOOGLE_CLOUD_REGION", "")),
+            ("GOOGLE_CLOUD_LOCATION", location),
+        ):
+            if value:
+                overlay[key] = value
+        return overlay
     return {}
 
 
@@ -179,17 +193,41 @@ def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> bool:
     return _is_meaningful_system_prompt(system_prompt)
 
 
-def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
-    """Apply resolved model from SCION_MODEL to ~/.gemini/settings.json.
+def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
+    """Resolve the effective Gemini model name.
 
-    SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
-    and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before the
-    container starts). This function writes the concrete model into
-    ~/.gemini/settings.json so the Gemini CLI uses it.
+    Precedence:
+      1. SCION_MODEL (the hub/broker-resolved value), via
+         scion_harness.resolve_model(ctx). An explicit model always wins. A
+         bare size alias that leaked through unresolved (resume/restart paths
+         with no alias table on the Go side) is mapped through this harness's
+         config.yaml model_aliases here.
+      2. harness_config.model (config.yaml's default tier, e.g. "medium"),
+         normalized through the same alias table via
+         scion_harness.normalize_model_alias(), so a tier never reaches
+         settings.json unresolved.
+      3. "" -- no model; the caller clears any stale model.name so the Gemini
+         CLI falls back to its own built-in default rather than a value left
+         over from an image pin or a previous provision.
     """
-    model = os.environ.get("SCION_MODEL", "").strip()
-    if not model:
-        return
+    resolved = scion_harness.resolve_model(ctx)
+    if resolved:
+        return resolved
+    return scion_harness.normalize_model_alias(
+        str(ctx.harness_config.get("model") or ""), ctx.harness_config
+    )
+
+
+def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
+    """Write the resolved model into ~/.gemini/settings.json model.name.
+
+    The image's settings.json deliberately carries no model.name (it used to
+    pin one outside the alias table; ptone/scion#2674). The model is owned
+    here: see _resolve_model() for precedence. When nothing resolves, any
+    existing model.name is removed so a refreshed settings.json never keeps
+    a stale model.
+    """
+    model = _resolve_model(ctx)
 
     settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
     settings: dict[str, Any] = {}
@@ -203,12 +241,23 @@ def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
 
     model_section = settings.get("model")
     if not isinstance(model_section, dict):
+        if not model:
+            return
         model_section = {}
         settings["model"] = model_section
 
-    model_section["name"] = model
+    if model:
+        if model_section.get("name") == model:
+            ctx.info(f"model={model}")
+            return
+        model_section["name"] = model
+        ctx.info(f"model={model}")
+    else:
+        if "name" not in model_section:
+            return
+        stale = model_section.pop("name")
+        ctx.info(f"model unset; removed stale settings.json model.name={stale!r}")
     scion_harness.atomic_write_json(settings_path, settings)
-    ctx.info(f"model={model}")
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
@@ -217,7 +266,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     gemini_auth_type = _GEMINI_AUTH_TYPE_MAP.get(resolved.method, "")
     _update_gemini_settings(GEMINI_SETTINGS_FILE, gemini_auth_type)
 
-    env = _build_env_overlay(resolved.method, resolved.env_key)
+    env = _build_env_overlay(resolved.method, resolved.env_key, ctx.warn)
     telemetry = ctx.telemetry
     config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
     enabled = isinstance(config, dict) and config.get("enabled", True)
@@ -236,6 +285,16 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         "GEMINI_TELEMETRY_USE_COLLECTOR": "false",
         "GEMINI_TELEMETRY_OUTFILE": "",
     })
+    # ptone/scion#2234: gemini-cli's usage (gen_ai.api.calls /
+    # scion.usage.tokens) is derived by sciontool's receiver from the native
+    # gemini_cli.api_response / gemini_cli.api_error log events, vetted
+    # against a captured fixture (pkg/sciontool/telemetry/testdata/usage/
+    # gemini-cli-0.62.0.pb.json). Set only when telemetry is enabled, the
+    # same as codex and claude: narrow to usage (D4), and unset means no
+    # usage is published at all (D10) -- the unvetted AfterModel hook calls
+    # stay off either way.
+    if enabled:
+        env["SCION_USAGE_SOURCE"] = "native"
     settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
     try:
         settings = scion_harness.load_json(settings_path) if os.path.isfile(settings_path) else {}
@@ -264,8 +323,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.write_outputs(resolved, env=env, extra=extra)
     ctx.info(f"method={resolved.method}")
 
-    # Apply the resolved model to ~/.gemini/settings.json. SCION_MODEL
-    # arrives already resolved by the Go side.
+    # Apply the resolved model to ~/.gemini/settings.json: SCION_MODEL,
+    # else the harness-config default tier (see _resolve_model).
     _apply_model(ctx)
 
     harness_cfg = ctx.harness_config

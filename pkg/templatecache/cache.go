@@ -26,13 +26,18 @@ package templatecache
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 const (
@@ -108,10 +113,13 @@ func newIndex(maxSize int64) *CacheIndex {
 	}
 }
 
+// Dir returns the directory the cache stores its entries in.
+func (c *Cache) Dir() string { return c.basePath }
+
 // Get retrieves a cached template by content hash. It returns the path to the
 // cached directory and true if the content is present on disk.
 func (c *Cache) Get(contentHash string) (string, bool) {
-	if contentHash == "" {
+	if validateEntryName(contentHash) != nil {
 		return "", false
 	}
 
@@ -123,8 +131,14 @@ func (c *Cache) Get(contentHash string) (string, bool) {
 		return "", false
 	}
 
+	root, err := c.openRoot()
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = root.Close() }()
+
 	templatePath := filepath.Join(c.basePath, contentHash)
-	if _, err := os.Stat(templatePath); err != nil {
+	if _, err := root.Stat(contentHash); err != nil {
 		// Files missing: drop stale index entry so accounting stays honest.
 		delete(c.index.Entries, contentHash)
 		c.index.TotalSize -= entry.Size
@@ -142,9 +156,41 @@ func (c *Cache) Get(contentHash string) (string, bool) {
 // files maps relative file paths to their content. It returns the path to the
 // stored directory. If the content is already present, the existing directory
 // is reused and its last-used time refreshed.
+//
+// contentHash must be a single path element (see validateEntryName), and
+// every key in files must be a canonical relative path (see
+// transfer.ValidateRelPath). All entry directory operations go through an
+// os.Root opened on the cache directory, and files are written through an
+// os.Root opened on the entry directory, so cache entries are only ever
+// created inside the cache directory.
 func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error) {
+	return c.PutWithModes(contentHash, files, nil)
+}
+
+// PutWithModes is Put with a file mode per path: each file is written with
+// exactly the mode modes names for it (ptone/scion#5652), independent of
+// the process umask. A path modes does not name is written 0644, as Put
+// writes every file. Callers normalise modes first (transfer.NormalizeMode)
+// and key entries with EntryKey, which covers the modes, so an entry
+// written with other modes is not reused for them.
+func (c *Cache) PutWithModes(contentHash string, files map[string][]byte, modes map[string]os.FileMode) (string, error) {
+	if err := validateEntryName(contentHash); err != nil {
+		return "", fmt.Errorf("invalid contentHash: %w", err)
+	}
+	for relativePath := range files {
+		if err := transfer.ValidateRelPath(relativePath); err != nil {
+			return "", fmt.Errorf("invalid key in files: %w", err)
+		}
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	root, err := c.openRoot()
+	if err != nil {
+		return "", fmt.Errorf("failed to open cache directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 
 	templatePath := filepath.Join(c.basePath, contentHash)
 
@@ -154,7 +200,8 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 	}
 
 	// Already present: just refresh the entry.
-	if _, err := os.Stat(templatePath); err == nil {
+	_, statErr := root.Stat(contentHash)
+	if statErr == nil {
 		if _, ok := c.index.Entries[contentHash]; !ok {
 			c.index.Entries[contentHash] = &CacheEntry{}
 			c.index.TotalSize += totalSize
@@ -164,31 +211,27 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 		_ = c.saveIndex()
 		return templatePath, nil
 	}
+	if !errors.Is(statErr, fs.ErrNotExist) {
+		return "", fmt.Errorf("failed to check cached template: %w", statErr)
+	}
 
 	// Evict old entries if needed to make room.
-	if err := c.evictIfNeeded(totalSize); err != nil {
+	if err := c.evictIfNeeded(root, totalSize); err != nil {
 		return "", fmt.Errorf("failed to make room in cache: %w", err)
 	}
 
-	tmpPath := templatePath + ".tmp"
-	if err := os.MkdirAll(tmpPath, 0755); err != nil {
+	tmpName := contentHash + ".tmp"
+	if err := root.MkdirAll(tmpName, 0755); err != nil {
 		return "", fmt.Errorf("failed to create template directory: %w", err)
 	}
 
-	for relativePath, content := range files {
-		filePath := filepath.Join(tmpPath, relativePath)
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			_ = os.RemoveAll(tmpPath)
-			return "", fmt.Errorf("failed to create directory for %s: %w", relativePath, err)
-		}
-		if err := os.WriteFile(filePath, content, 0644); err != nil {
-			_ = os.RemoveAll(tmpPath)
-			return "", fmt.Errorf("failed to write file %s: %w", relativePath, err)
-		}
+	if err := writeFilesInDir(root, tmpName, files, modes); err != nil {
+		_ = root.RemoveAll(tmpName)
+		return "", err
 	}
 
-	if err := os.Rename(tmpPath, templatePath); err != nil {
-		_ = os.RemoveAll(tmpPath)
+	if err := root.Rename(tmpName, contentHash); err != nil {
+		_ = root.RemoveAll(tmpName)
 		return "", fmt.Errorf("failed to commit cached template: %w", err)
 	}
 
@@ -205,10 +248,63 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 	return templatePath, nil
 }
 
+// EntryKey returns the cache entry name for a resource with the given
+// files: transfer.ComputeContentHashV2 over each file's path, normalised
+// mode and content hash (ptone/scion#5658). Two file sets share an entry
+// only when they have the same paths, contents and executable bits, so a
+// rename-only or chmod-only change is never served from the entry of the
+// version before it.
+//
+// The broker computes the key itself, from the metadata manifest for a
+// lookup and from the downloaded files for a store, so it does not depend
+// on which content hash version the hub records (v1 while the
+// hub.content_hash_v2 experiment is off, on a hub before ptone/scion#5658,
+// or for a row not committed since; v2 otherwise). For the
+// same reason it replaces the interim key of ptone/scion#5652, which
+// derived a key from the hub's content hash and the executable paths.
+// Entries stored under the earlier keys (a bare v1 content hash, or that
+// interim key) are never looked up again; they stay until LRU eviction
+// removes them, so a lookup by an agent's recorded TemplateHash still
+// finds them meanwhile.
+//
+// The key has the "sha256:<64 hex>" form of a content hash
+// (transfer.IsContentHash), because the broker treats a hydrated template
+// directory's name as the template hash it records for the agent
+// (agent-info TemplateHash) and later looks up in this cache. That recorded
+// hash is therefore this key, which equals the hub's ContentHash only when
+// the hub records v2; it is only ever used as a cache key.
+func EntryKey(files []transfer.FileInfo) string {
+	return transfer.ComputeContentHashV2(files)
+}
+
+// writeFilesInDir writes files beneath the directory name inside parent,
+// through an os.Root opened from parent.
+func writeFilesInDir(parent *os.Root, name string, files map[string][]byte, modes map[string]os.FileMode) error {
+	dir, err := parent.OpenRoot(name)
+	if err != nil {
+		return fmt.Errorf("failed to open template directory: %w", err)
+	}
+	defer func() { _ = dir.Close() }()
+
+	for relativePath, content := range files {
+		mode, ok := modes[relativePath]
+		if !ok {
+			mode = transfer.ModeRegular
+		}
+		if err := transfer.WriteFileInRootMode(dir, relativePath, content, mode); err != nil {
+			return fmt.Errorf("failed to write file %s: %w", relativePath, err)
+		}
+	}
+	return nil
+}
+
 // evictIfNeeded evicts least-recently-used entries to make room for newSize
 // bytes. Must be called with the lock held. Because entries are keyed by content
 // hash, each directory is owned by exactly one entry — no shared-hash refcounting.
-func (c *Cache) evictIfNeeded(newSize int64) error {
+// Directories are removed through root, which must be opened on the cache
+// directory; index entries whose key is not a single path element are dropped
+// from the index without touching the filesystem.
+func (c *Cache) evictIfNeeded(root *os.Root, newSize int64) error {
 	if c.index.TotalSize+newSize <= c.maxSize {
 		return nil
 	}
@@ -230,14 +326,39 @@ func (c *Cache) evictIfNeeded(newSize int64) error {
 		if c.index.TotalSize <= targetSize {
 			break
 		}
-		templatePath := filepath.Join(c.basePath, e.Hash)
-		if err := os.RemoveAll(templatePath); err != nil {
-			fmt.Printf("Warning: failed to remove cached template %s: %v\n", templatePath, err)
+		if validateEntryName(e.Hash) == nil {
+			if err := root.RemoveAll(e.Hash); err != nil {
+				templatePath := filepath.Join(c.basePath, e.Hash)
+				fmt.Printf("Warning: failed to remove cached template %s: %v\n", templatePath, err)
+			}
 		}
 		delete(c.index.Entries, e.Hash)
 		c.index.TotalSize -= e.Entry.Size
 	}
 
+	return nil
+}
+
+// openRoot opens an os.Root on the cache directory. All operations on entry
+// directories go through it, so they stay inside the cache directory.
+func (c *Cache) openRoot() (*os.Root, error) {
+	return os.OpenRoot(c.basePath)
+}
+
+// validateEntryName returns an error unless name is usable as the name of a
+// cache entry directory: a single, local path element that is not "." or ".."
+// and contains no separator or NUL byte. The error never includes name.
+func validateEntryName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("name is empty")
+	case name == "." || name == "..":
+		return errors.New("name is a relative directory reference")
+	case strings.ContainsAny(name, "/\\\x00"):
+		return errors.New("name contains a separator or NUL byte")
+	case !filepath.IsLocal(name) || filepath.Base(name) != name:
+		return errors.New("name is not a single local path element")
+	}
 	return nil
 }
 
@@ -284,7 +405,7 @@ func (c *Cache) saveIndex() error {
 // hash's cached directory is stale and must be evicted so that subsequent
 // resolves for the old hash fall through to a fresh download.
 func (c *Cache) Invalidate(contentHash string) {
-	if contentHash == "" {
+	if validateEntryName(contentHash) != nil {
 		return
 	}
 
@@ -296,8 +417,10 @@ func (c *Cache) Invalidate(contentHash string) {
 		return
 	}
 
-	templatePath := filepath.Join(c.basePath, contentHash)
-	_ = os.RemoveAll(templatePath)
+	if root, err := c.openRoot(); err == nil {
+		_ = root.RemoveAll(contentHash)
+		_ = root.Close()
+	}
 	delete(c.index.Entries, contentHash)
 	if entry != nil {
 		c.index.TotalSize -= entry.Size
@@ -315,10 +438,16 @@ func (c *Cache) Clear() error {
 		return err
 	}
 
+	root, err := c.openRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
 	for _, entry := range entries {
 		if entry.IsDir() || entry.Name() == indexFileName {
 			path := filepath.Join(c.basePath, entry.Name())
-			if err := os.RemoveAll(path); err != nil {
+			if err := root.RemoveAll(entry.Name()); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", path, err)
 			}
 		}

@@ -58,26 +58,6 @@ func TestRenderDeliveryText_PlainBypass(t *testing.T) {
 	}
 }
 
-func TestRenderDeliveryText_RawBypass(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Version:   messages.Version,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender:    "user:alice",
-		Recipient: "agent:bot",
-		Msg:       "keystroke data",
-		Type:      messages.TypeInstruction,
-		Raw:       true,
-	}
-	result := RenderDeliveryText(RenderDeliveryInput{
-		MessageID: "msg-102",
-		Msg:       msg,
-		CreatedAt: time.Now().UTC(),
-	})
-	if result != "keystroke data" {
-		t.Errorf("raw delivery = %q, want %q", result, "keystroke data")
-	}
-}
-
 func TestRenderDeliveryText_UsesRealMessageID(t *testing.T) {
 	// RenderDeliveryText passes the real persisted ID via PersistedIdentity
 	// into MapLegacyEnvelope, so both the Message and its Addressees carry

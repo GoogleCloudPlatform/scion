@@ -22,23 +22,14 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 func setupTestNonceCacheStore(t *testing.T) *NonceCacheStore {
 	t.Helper()
-	client, err := ent.Open("sqlite3", "file:"+t.Name()+"?mode=memory&cache=shared&_fk=1")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	ctx := context.Background()
-	err = client.Schema.Create(ctx)
-	require.NoError(t, err)
-
-	return NewNonceCacheStore(client)
+	return NewNonceCacheStore(enttest.NewClient(t))
 }
 
 func TestNonceCacheStore_NewNonce(t *testing.T) {

@@ -1,0 +1,701 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hubclient
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+)
+
+// errArtifactRedirect is returned when an artifact file redirect target is invalid.
+var errArtifactRedirect = errors.New("artifact file: invalid redirect")
+
+// ArtifactService handles artifact operations (/api/v1/artifacts).
+type ArtifactService interface {
+	// Publish uploads one file as a new artifact and returns it with its
+	// first version.
+	Publish(ctx context.Context, req *PublishArtifactRequest) (*ArtifactResponse, error)
+
+	// Get returns an artifact and its current version.
+	Get(ctx context.Context, id string) (*ArtifactResponse, error)
+
+	// List returns one page of the artifacts the caller owns, is granted,
+	// or that are shared to a project it is a member of, newest first.
+	// opts may be nil.
+	List(ctx context.Context, opts *ListArtifactsOptions) (*ArtifactListResponse, error)
+
+	// OpenFile opens a file of version seq of an artifact (0 = the current
+	// version). The caller must close the returned reader.
+	OpenFile(ctx context.Context, id string, seq int, filePath string) (io.ReadCloser, error)
+
+	// CreateVersion starts a two-step publish. With id "" it posts to the
+	// collection: a new artifact, or a new version of the caller's
+	// artifact with req.Key in the scope. With an id it appends a version
+	// to that artifact. The response lists the files to upload.
+	CreateVersion(ctx context.Context, id string, req *CreateVersionRequest) (*PendingVersionResponse, error)
+
+	// UploadFile uploads one file of pending version seq.
+	UploadFile(ctx context.Context, id string, seq int, filePath string, content io.Reader, size int64, sha256 string) error
+
+	// FinalizeVersion makes pending version seq ready and current.
+	FinalizeVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
+
+	// FinalizeReview finalizes pending review version seq, naming base, the
+	// version the review was started from. The hub refuses it with 409
+	// stale_review unless base is still the current version.
+	FinalizeReview(ctx context.Context, id string, seq, base int) (*ArtifactResponse, error)
+
+	// ListVersions returns the ready versions of an artifact, newest
+	// first, without their files.
+	ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error)
+
+	// ListVersionHistory returns the ready versions of an artifact, as
+	// ListVersions does, and the discarded ones (versions that stopped
+	// being pending without becoming ready), both newest first.
+	ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error)
+
+	// GetVersion returns an artifact with version seq and its files.
+	GetVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
+
+	// CreateLink creates a share link for an artifact, lasting ttlHours
+	// (0 = the hub's default). Only users may create links.
+	CreateLink(ctx context.Context, id string, ttlHours int) (*ArtifactLinkCreated, error)
+
+	// ListLinks returns an artifact's unexpired share links (without
+	// their tokens).
+	ListLinks(ctx context.Context, id string) ([]ArtifactLink, error)
+
+	// RevokeLink revokes one share link.
+	RevokeLink(ctx context.Context, id, linkID string) error
+
+	// Delete deletes an artifact (a soft delete: its grants and share
+	// links end with it, and its bytes are removed later).
+	Delete(ctx context.Context, id string) error
+
+	// MintView mints a short-lived view capability for version seq of an
+	// artifact whose entry is HTML (POST /api/v1/artifacts/{id}/versions/{seq}/view)
+	// and returns its path and expiry. It requires read access.
+	MintView(ctx context.Context, id string, seq int) (*ArtifactView, error)
+
+	// ListGrants lists an artifact's grants (GET /api/v1/artifacts/{id}/grants).
+	// The hub serves it to the artifact's administrators only.
+	ListGrants(ctx context.Context, id string) (*ArtifactGrantList, error)
+
+	// PutGrant adds a grant or changes the permission of the subject's
+	// existing grant (POST /api/v1/artifacts/{id}/grants). With
+	// req.Notify, the result says whether the user was told.
+	PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrantResult, error)
+
+	// DeleteGrant removes a grant (DELETE /api/v1/artifacts/{id}/grants/{grantId}).
+	DeleteGrant(ctx context.Context, id, grantID string) error
+}
+
+// ArtifactLink describes a share link. It never carries the token.
+type ArtifactLink struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+}
+
+// ArtifactLinkCreated answers CreateLink. URL is the hub-relative path of
+// the link; ShareURL, present only when the hub has a content host
+// (server.hub.content_url), is the absolute link on it. They are the
+// only places its token appears.
+type ArtifactLinkCreated struct {
+	Link                    ArtifactLink `json:"link"`
+	URL                     string       `json:"url"`
+	ShareURL                string       `json:"shareUrl,omitempty"`
+	ClampedToArtifactExpiry bool         `json:"clampedToArtifactExpiry,omitempty"`
+}
+
+// CreateVersionRequest mirrors the hub's version manifest.
+type CreateVersionRequest struct {
+	Title string         `json:"title,omitempty"`
+	Key   string         `json:"key,omitempty"`
+	Scope string         `json:"scope,omitempty"`
+	Kind  string         `json:"kind,omitempty"`
+	Entry string         `json:"entry"`
+	Note  string         `json:"note,omitempty"`
+	Files []ManifestFile `json:"files"`
+}
+
+// ManifestFile is one file of a version manifest.
+type ManifestFile struct {
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	SHA256    string `json:"sha256"`
+	MediaType string `json:"mediaType,omitempty"`
+}
+
+// PendingVersionResponse mirrors the hub's answer to CreateVersion.
+type PendingVersionResponse struct {
+	Artifact Artifact         `json:"artifact"`
+	Version  *ArtifactVersion `json:"version"`
+	Upload   struct {
+		Required []string `json:"required"`
+	} `json:"upload"`
+}
+
+// PublishArtifactRequest describes a single-file publish.
+type PublishArtifactRequest struct {
+	// Name is the file name (no directories); it becomes the entry path.
+	Name string
+	// Title is the artifact title; the hub defaults it to Name.
+	Title string
+	// Scope is the home project id; the hub defaults it to the caller's
+	// project (agents). Users must set it.
+	Scope string
+	// Content is the file's bytes.
+	Content io.Reader
+	// Size is the content length in bytes, or -1 when unknown.
+	Size int64
+	// SHA256 is the hex digest of Content. When set, the hub rejects a
+	// body that does not match.
+	SHA256 string
+	// ContentType is the declared media type; the hub prefers the type
+	// implied by Name's extension.
+	ContentType string
+}
+
+// ListArtifactsOptions filters and pages List.
+type ListArtifactsOptions struct {
+	// Query keeps artifacts whose title or key contains it.
+	Query string
+	// ReviewPending keeps artifacts whose current version is a review.
+	ReviewPending bool
+	// OwnedOnly keeps artifacts the caller owns.
+	OwnedOnly bool
+	// Limit is the page size (0 = the hub's default).
+	Limit int
+	// Cursor is the NextCursor of the previous page.
+	Cursor string
+	// Scope keeps artifacts homed in this project (a project id) or
+	// shared with it.
+	Scope string
+	// Shared keeps only artifacts shared with the caller (or, with Scope,
+	// with that project) from elsewhere.
+	Shared bool
+}
+
+// ArtifactListResponse mirrors the hub's list response body.
+type ArtifactListResponse struct {
+	Artifacts []ArtifactListItem `json:"artifacts"`
+	// NextCursor is empty on the last page.
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
+// ArtifactListItem is one listed artifact.
+type ArtifactListItem struct {
+	Artifact
+	ReviewPending bool `json:"reviewPending"`
+	// Access is why the caller sees the artifact: "owned", "project" or
+	// "shared".
+	Access string `json:"access,omitempty"`
+	// SharedWithScope is true, in a list narrowed with Scope, for an
+	// artifact homed elsewhere and shared with that project.
+	SharedWithScope bool `json:"sharedWithScope,omitempty"`
+	// ScopeDeleted is true when the artifact's home project no longer
+	// exists.
+	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
+}
+
+// ArtifactView is a minted view capability: URL is the hub path of the
+// version's entry under the capability, valid until ExpiresAt.
+type ArtifactView struct {
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	// RemoteImages is true when the entry references absolute http(s)
+	// images, which the view does not load.
+	RemoteImages bool `json:"remoteImages,omitempty"`
+}
+
+// ArtifactGrant is one grant on an artifact.
+type ArtifactGrant struct {
+	ID string `json:"id"`
+	// SubjectKind is "principal" (SubjectRef "user:<id>" or "agent:<id>")
+	// or "scope" (SubjectRef a project id).
+	SubjectKind string `json:"subjectKind"`
+	SubjectRef  string `json:"subjectRef"`
+	// Permission is "read", "review", "write" or "admin".
+	Permission string `json:"permission"`
+	// Home marks the grant to the artifact's home project.
+	Home      bool      `json:"home,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+}
+
+// ArtifactGrantList is the body of GET /api/v1/artifacts/{id}/grants.
+type ArtifactGrantList struct {
+	Grants []ArtifactGrant `json:"grants"`
+	// CrossProjectSharing reports whether grants to other projects are
+	// allowed on this hub.
+	CrossProjectSharing bool `json:"crossProjectSharing"`
+}
+
+// ArtifactGrantRequest is the body of POST /api/v1/artifacts/{id}/grants.
+type ArtifactGrantRequest struct {
+	SubjectKind string `json:"subjectKind"`
+	SubjectRef  string `json:"subjectRef"`
+	Permission  string `json:"permission"`
+	// Notify asks the hub to tell the user subject about the grant (Ask
+	// for review). It never blocks the grant.
+	Notify bool `json:"notify,omitempty"`
+}
+
+// ArtifactGrantResult is the response of POST /api/v1/artifacts/{id}/grants.
+type ArtifactGrantResult struct {
+	Grant ArtifactGrant `json:"grant"`
+	// Notified is true when the request asked for notify and the user was
+	// told.
+	Notified bool `json:"notified,omitempty"`
+	// NotifySkipped says why a request that asked for notify did not tell
+	// the user: self, not_permitted, unavailable, not_raised or
+	// rate_limited.
+	NotifySkipped string `json:"notifySkipped,omitempty"`
+}
+
+// ArtifactResponse mirrors the hub's artifact response body.
+type ArtifactResponse struct {
+	Artifact Artifact         `json:"artifact"`
+	Version  *ArtifactVersion `json:"version,omitempty"`
+	Warnings []string         `json:"warnings,omitempty"`
+}
+
+// Artifact describes an artifact.
+type Artifact struct {
+	ID         string    `json:"id"`
+	Ref        string    `json:"ref"`
+	ScopeKind  string    `json:"scopeKind"`
+	ScopeRef   string    `json:"scopeRef"`
+	OwnerKind  string    `json:"ownerKind"`
+	OwnerRef   string    `json:"ownerRef"`
+	Key        string    `json:"key,omitempty"`
+	Title      string    `json:"title"`
+	CurrentSeq int       `json:"currentSeq"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	// OwnerDeleted is true when the hub found the artifact's owner gone.
+	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
+}
+
+// ArtifactVersion describes one version of an artifact.
+type ArtifactVersion struct {
+	Seq           int            `json:"seq"`
+	Ref           string         `json:"ref"`
+	Kind          string         `json:"kind"`
+	EntryPath     string         `json:"entryPath"`
+	Note          string         `json:"note,omitempty"`
+	TotalBytes    int64          `json:"totalBytes"`
+	FileCount     int            `json:"fileCount"`
+	CreatedByKind string         `json:"createdByKind,omitempty"`
+	CreatedByRef  string         `json:"createdByRef,omitempty"`
+	CreatedAt     time.Time      `json:"createdAt"`
+	State         string         `json:"state"`
+	Files         []ArtifactFile `json:"files"`
+}
+
+// ArtifactDiscardedVersion is a discarded version as the versions list
+// shows it: its number, state, reason code and the time its number was
+// taken (ptone/scion#4577).
+type ArtifactDiscardedVersion struct {
+	Seq       int       `json:"seq"`
+	State     string    `json:"state"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ArtifactFile describes one file of a version.
+type ArtifactFile struct {
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	SHA256    string `json:"sha256"`
+	MediaType string `json:"mediaType"`
+	// Origin is "remote" for an image the hub fetched at publish time;
+	// SourceURL and FetchStatus describe that fetch.
+	Origin      string `json:"origin,omitempty"`
+	SourceURL   string `json:"sourceUrl,omitempty"`
+	FetchStatus string `json:"fetchStatus,omitempty"`
+}
+
+type artifactService struct {
+	c *client
+	// objectClient fetches the signed object-store URL a file read
+	// redirects to. It carries no hub credentials. Nil means a default
+	// client.
+	objectClient *http.Client
+}
+
+// Publish implements ArtifactService. It is sent once, never retried,
+// because a replay would create a second artifact.
+func (s *artifactService) Publish(ctx context.Context, req *PublishArtifactRequest) (*ArtifactResponse, error) {
+	q := url.Values{}
+	q.Set("name", req.Name)
+	if req.Title != "" {
+		q.Set("title", req.Title)
+	}
+	if req.Scope != "" {
+		q.Set("scope", req.Scope)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.c.transport.BaseURL+"/api/v1/artifacts?"+q.Encode(), req.Content)
+	if err != nil {
+		return nil, fmt.Errorf("create publish request: %w", err)
+	}
+	if req.Size >= 0 {
+		httpReq.ContentLength = req.Size
+	}
+	ct := req.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	httpReq.Header.Set("Content-Type", ct)
+	if req.SHA256 != "" {
+		httpReq.Header.Set("X-Content-SHA256", req.SHA256)
+	}
+	resp, err := s.longTransport().DoNoRetry(ctx, httpReq)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// Get implements ArtifactService.
+func (s *artifactService) Get(ctx context.Context, id string) (*ArtifactResponse, error) {
+	resp, err := s.c.get(ctx, "/api/v1/artifacts/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// List implements ArtifactService.
+func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) (*ArtifactListResponse, error) {
+	q := url.Values{}
+	q.Set("mine", "1")
+	if opts != nil {
+		if opts.Query != "" {
+			q.Set("q", opts.Query)
+		}
+		if opts.ReviewPending {
+			q.Set("review_pending", "1")
+		}
+		if opts.OwnedOnly {
+			q.Set("owner", "me")
+		}
+		if opts.Limit > 0 {
+			q.Set("limit", strconv.Itoa(opts.Limit))
+		}
+		if opts.Cursor != "" {
+			q.Set("cursor", opts.Cursor)
+		}
+		if opts.Scope != "" {
+			q.Set("scope", opts.Scope)
+		}
+		if opts.Shared {
+			q.Set("shared", "1")
+		}
+	}
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/artifacts", q, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactListResponse](resp)
+}
+
+// OpenFile implements ArtifactService. The hub either streams the bytes or
+// redirects to a short-lived signed object-store URL. The redirect is
+// followed here, by a client without hub credentials, so neither the hub
+// token nor transport credentials are sent to the object store.
+func (s *artifactService) OpenFile(ctx context.Context, id string, seq int, filePath string) (io.ReadCloser, error) {
+	p := "/api/v1/artifacts/" + url.PathEscape(id)
+	if seq > 0 {
+		p += "/versions/" + strconv.Itoa(seq)
+	}
+	p += "/files/" + escapePathSegments(filePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.c.transport.BaseURL+p, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create file request: %w", err)
+	}
+	resp, err := s.longTransport().DoNoRetry(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return resp.Body, nil
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		loc, lerr := resp.Location()
+		_ = resp.Body.Close()
+		if lerr != nil {
+			return nil, fmt.Errorf("artifact file redirect without a usable Location: %w", lerr)
+		}
+		return s.fetchObject(ctx, loc.String())
+	default:
+		if err := apiclient.CheckResponse(resp); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("artifact file: unexpected status %d", resp.StatusCode)
+	}
+}
+
+// fetchObject downloads signedURL, an object-store URL, with a client that
+// carries no credential and follows no further redirect. Only https is
+// followed, unless the hub itself is reached over plain http (a local
+// development hub), matching fetchRedirect's contract.
+func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io.ReadCloser, error) {
+	u, err := url.Parse(signedURL)
+	allowHTTP := strings.HasPrefix(s.c.transport.BaseURL, "http://")
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !allowHTTP)) || u.Host == "" {
+		return nil, errArtifactRedirect
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create object request: %w", err)
+	}
+	hc := s.objectClient
+	if hc == nil {
+		// No whole-exchange timeout: the caller's context bounds it.
+		// An object-store URL follows no further redirect.
+		hc = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	} else {
+		// Ensure the custom client also does not follow subsequent redirects.
+		clientCopy := *hc
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		hc = &clientCopy
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch artifact object: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("fetch artifact object: unexpected status %s", resp.Status)
+	}
+	return resp.Body, nil
+}
+
+func artifactPath(id string) string { return "/api/v1/artifacts/" + url.PathEscape(id) }
+
+// longTransport is the client's transport without its whole-exchange
+// timeout. Publishing, uploading, finalizing and reading file bytes can
+// legitimately take longer than that timeout (large files, or the hub
+// fetching a markdown entry's remote images before it answers), so these
+// calls are bounded by the caller's context instead. A publish that timed
+// out on the client while the hub completed it would invite a retry that
+// creates a second artifact or version.
+func (s *artifactService) longTransport() *apiclient.Transport {
+	t := *s.c.transport
+	hc := http.Client{}
+	if t.HTTPClient != nil {
+		hc = *t.HTTPClient
+	}
+	hc.Timeout = 0
+	t.HTTPClient = &hc
+	return &t
+}
+
+// CreateVersion implements ArtifactService. It is sent once, never retried,
+// because a replay would start a second version.
+func (s *artifactService) CreateVersion(ctx context.Context, id string, req *CreateVersionRequest) (*PendingVersionResponse, error) {
+	p := "/api/v1/artifacts"
+	if id != "" {
+		p = artifactPath(id) + "/versions"
+	}
+	resp, err := s.longTransport().PostNoRetry(ctx, p, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[PendingVersionResponse](resp)
+}
+
+// UploadFile implements ArtifactService.
+func (s *artifactService) UploadFile(ctx context.Context, id string, seq int, filePath string, content io.Reader, size int64, sha256 string) error {
+	p := artifactPath(id) + "/versions/" + strconv.Itoa(seq) + "/files/" + escapePathSegments(filePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.c.transport.BaseURL+p, content)
+	if err != nil {
+		return fmt.Errorf("create upload request: %w", err)
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if sha256 != "" {
+		req.Header.Set("X-Content-SHA256", sha256)
+	}
+	resp, err := s.longTransport().DoNoRetry(ctx, req)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// FinalizeVersion implements ArtifactService.
+func (s *artifactService) FinalizeVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error) {
+	resp, err := s.longTransport().PostNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/finalize", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// FinalizeReview implements ArtifactService.
+func (s *artifactService) FinalizeReview(ctx context.Context, id string, seq, base int) (*ArtifactResponse, error) {
+	resp, err := s.longTransport().PostNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/finalize",
+		map[string]int{"base": base}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// ListVersions implements ArtifactService.
+func (s *artifactService) ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error) {
+	versions, _, err := s.ListVersionHistory(ctx, id)
+	return versions, err
+}
+
+// ListVersionHistory implements ArtifactService.
+func (s *artifactService) ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error) {
+	var all []ArtifactVersion
+	var discarded []ArtifactDiscardedVersion
+	before := 0
+	for {
+		p := artifactPath(id) + "/versions"
+		if before > 0 {
+			p += "?before=" + strconv.Itoa(before)
+		}
+		resp, err := s.c.get(ctx, p, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		page, err := apiclient.DecodeRequired[struct {
+			Versions   []ArtifactVersion          `json:"versions"`
+			Discarded  []ArtifactDiscardedVersion `json:"discarded"`
+			NextBefore int                        `json:"nextBefore"`
+		}](resp)
+		if err != nil {
+			return nil, nil, err
+		}
+		all = append(all, page.Versions...)
+		discarded = append(discarded, page.Discarded...)
+		if page.NextBefore <= 0 || (before > 0 && page.NextBefore >= before) {
+			return all, discarded, nil
+		}
+		before = page.NextBefore
+	}
+}
+
+// GetVersion implements ArtifactService.
+func (s *artifactService) GetVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error) {
+	resp, err := s.c.get(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// CreateLink implements ArtifactService. It is sent once, never retried,
+// because a replay would create a second link.
+func (s *artifactService) CreateLink(ctx context.Context, id string, ttlHours int) (*ArtifactLinkCreated, error) {
+	body := map[string]int{}
+	if ttlHours > 0 {
+		body["ttlHours"] = ttlHours
+	}
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/links", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactLinkCreated](resp)
+}
+
+// ListLinks implements ArtifactService.
+func (s *artifactService) ListLinks(ctx context.Context, id string) ([]ArtifactLink, error) {
+	resp, err := s.c.get(ctx, artifactPath(id)+"/links", nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := apiclient.DecodeRequired[struct {
+		Links []ArtifactLink `json:"links"`
+	}](resp)
+	if err != nil {
+		return nil, err
+	}
+	return out.Links, nil
+}
+
+// RevokeLink implements ArtifactService.
+func (s *artifactService) RevokeLink(ctx context.Context, id, linkID string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id)+"/links/"+url.PathEscape(linkID), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// Delete implements ArtifactService.
+func (s *artifactService) Delete(ctx context.Context, id string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// MintView implements ArtifactService. It is sent once, never retried:
+// each call mints a new capability.
+func (s *artifactService) MintView(ctx context.Context, id string, seq int) (*ArtifactView, error) {
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/view", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactView](resp)
+}
+
+// ListGrants implements ArtifactService.
+func (s *artifactService) ListGrants(ctx context.Context, id string) (*ArtifactGrantList, error) {
+	resp, err := s.c.get(ctx, artifactPath(id)+"/grants", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactGrantList](resp)
+}
+
+// PutGrant implements ArtifactService. Adding or changing a grant is
+// idempotent for the same subject and permission, but it is sent once, as
+// the other mutating artifact calls are.
+func (s *artifactService) PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrantResult, error) {
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/grants", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactGrantResult](resp)
+}
+
+// DeleteGrant implements ArtifactService.
+func (s *artifactService) DeleteGrant(ctx context.Context, id, grantID string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id)+"/grants/"+url.PathEscape(grantID), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}

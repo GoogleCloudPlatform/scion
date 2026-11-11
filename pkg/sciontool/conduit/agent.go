@@ -1,0 +1,593 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package conduit is the agent end of a conduit session (design §3.3,
+// §3.10): sciontool dials the hub's /api/v1/conduit endpoint, keeps the
+// session alive across relay drains and failures, and serves inbound
+// streams after verifying each stream's grant: TCP to in-container
+// loopback ports, and PTY as a tmux client on a local pty.
+package conduit
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+)
+
+// Environment variables read by sciontool.
+const (
+	// EnvLaunchID carries the agent's launch id: the hub-minted run id
+	// of the run that created this container, the same value as its
+	// scion.run_id label. It is presented as
+	// Hello.capabilities.endpoint_incarnation.
+	EnvLaunchID = "SCION_LAUNCH_ID"
+	// EnvHubExperiments is the comma-separated list of hub experiments
+	// the agent acts on, set by the hub on every dispatch.
+	EnvHubExperiments = "SCION_HUB_EXPERIMENTS"
+	// ExperimentConduit in EnvHubExperiments means the hub serves conduit
+	// sessions. Without it sciontool never dials /api/v1/conduit.
+	ExperimentConduit = "hub.conduit"
+)
+
+// HubServesConduit reports whether the hub listed ExperimentConduit in
+// EnvHubExperiments, read through getenv.
+func HubServesConduit(getenv func(string) string) bool {
+	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {
+		if strings.TrimSpace(name) == ExperimentConduit {
+			return true
+		}
+	}
+	return false
+}
+
+// Close codes this package classifies that pkg/conduit does not define
+// (they belong to pkg/conduit/relay, which a target does not import).
+const (
+	closeTargetNotFound uint32 = 4404
+	closeSuperseded     uint32 = 4409
+	closeInternalError  uint32 = 1011
+)
+
+// credentialRefreshMinInterval rate-limits credential refreshes triggered
+// by 4401, so a hub that keeps refusing the credential (e.g. a deleted
+// agent) does not cause a refresh per attempt.
+const credentialRefreshMinInterval = time.Minute
+
+// RefusalStopAfter is how long 4409 refusals must persist, with no
+// admission in between, before the dialer stops. Until then each refusal
+// is retried after core.BackoffMax.
+const RefusalStopAfter = 10 * time.Minute
+
+// ErrUnsupported means the hub answered the conduit endpoint with 404: it
+// does not serve conduit sessions (an old hub, or hub.conduit off). The
+// caller falls back to the port-forward tunnel.
+var ErrUnsupported = errors.New("conduit: hub does not serve conduit sessions")
+
+// TerminalError stops the dialer: the hub refused this agent in a way a
+// reconnect cannot fix (4403 forbidden, 4404 not found, an HTTP 403 on the
+// upgrade, or 4409 refusals that persisted for RefusalStopAfter).
+type TerminalError struct {
+	Code   uint32 // close code, or 0 for an HTTP refusal
+	Status int    // HTTP status of a refused upgrade, else 0
+	Reason string
+}
+
+func (e *TerminalError) Error() string {
+	if e.Status != 0 {
+		return fmt.Sprintf("conduit: hub refused the session (HTTP %d): %s", e.Status, e.Reason)
+	}
+	return fmt.Sprintf("conduit: hub refused the session (code %d): %s", e.Code, e.Reason)
+}
+
+// Options configure an Agent.
+type Options struct {
+	// HubURL is the hub's http(s) base URL.
+	HubURL string
+	// AgentID and ProjectID identify this agent.
+	AgentID, ProjectID string
+	// LaunchID is the container's run id (EnvLaunchID); empty only for a
+	// container created by a broker that did not set it.
+	LaunchID string
+	// ClientVersion is reported in Hello.
+	ClientVersion string
+	// Token returns the current agent token.
+	Token func() string
+	// ApplyTransportHeaders adds the transport credential (IAP/OIDC), if
+	// any, to a hub request. Optional.
+	ApplyTransportHeaders func(http.Header) error
+	// RefreshCredential obtains a fresh agent token after the hub refused
+	// the current one (4401 / HTTP 401). Optional.
+	RefreshCredential func(ctx context.Context) error
+	// HTTPClient fetches grant keys; pass the hub client's HTTP client so
+	// transport settings live in one place (default http.DefaultClient).
+	HTTPClient *http.Client
+	// WS overrides the WebSocket dialer (tests, TLS).
+	WS *websocket.Dialer
+	// KeyRefreshInterval is the grant key refresh period
+	// (default and maximum KeyRefreshInterval).
+	KeyRefreshInterval time.Duration
+	// DialLocal dials an in-container loopback address (test seam;
+	// default net.Dialer). It is only ever called with a 127.0.0.1
+	// address.
+	DialLocal func(ctx context.Context, network, addr string) (net.Conn, error)
+	// SpawnPTY starts the tmux client for a PTY stream (test seam). When
+	// it is nil and NoPTY is unset, New installs the default: it runs
+	// `tmux attach-session` on a local pty as PTYUser, when this build
+	// supports ptys and tmux is on PATH at New. When it is still nil
+	// after New (NoPTY set, or no default available) the agent neither
+	// advertises nor serves the pty kind.
+	SpawnPTY PTYSpawner
+	// NoPTY opts out of pty streams: New installs no default SpawnPTY,
+	// so the agent neither advertises nor serves the pty kind even when
+	// tmux is on PATH. SpawnPTY must be nil when NoPTY is set.
+	NoPTY bool
+	// PTYUser is who the default SpawnPTY runs the tmux client as.
+	PTYUser PTYUser
+	// SSH is the embedded SSH server that serves ssh streams (design
+	// §3.8). When nil the agent neither advertises nor serves the ssh
+	// kind. New validates it.
+	SSH *sshd.Config
+	// OnSession is called after each session is admitted. Optional.
+	OnSession func(*conduitv1.Welcome)
+	// OnEnd is called after each attempt or session ends with the
+	// dialer's decision: the redial delay, or the error Run returns.
+	// Optional.
+	OnEnd func(end core.End, delay time.Duration, err error)
+	// Clock, Backoff and Session tune timers and the session config
+	// (tests).
+	Clock   clock.Clock
+	Backoff *core.Backoff
+	Session core.Config
+
+	// RPCRoutes lists the routes Session.RPCHandler serves, advertised
+	// as Hello.capabilities.rpc. It must be empty when
+	// Session.RPCHandler is nil.
+	RPCRoutes []string
+
+	// ptyBeforeAccept, when set, runs after a PTY stream's client is
+	// spawned and before the stream is accepted (test hook).
+	ptyBeforeAccept func(ctx context.Context)
+	// deadlineGrace, when set, replaces target.DeadlineGrace (test hook).
+	deadlineGrace time.Duration
+	// onRenewal, when set, receives the outcome of every renewal grant
+	// once it has been applied or refused (test hook).
+	onRenewal func(streamID uint32, err error)
+	// keyJitter, when set, replaces the ±10% key refresh jitter (test
+	// hook).
+	keyJitter func(time.Duration) time.Duration
+}
+
+// Agent is the agent's conduit dialer and stream target (TCP, PTY).
+type Agent struct {
+	opts   Options
+	url    string
+	clk    clock.Clock
+	keys   target.KeyHolder
+	replay grant.ReplayCache
+
+	// deadlines enforces the authorization deadlines of accepted streams
+	// and verifies their renewals.
+	deadlines *target.Deadlines
+	// enforceDeadlines is the enforcement mode from the last grant-key
+	// fetch: a user stream's open grant must then carry authz_until.
+	enforceDeadlines atomic.Bool
+	// keyKick asks the key refresh loop for an immediate fetch.
+	keyKick chan struct{}
+	// fetchMu serializes key fetches; lastKeyRefresh is when the last
+	// successful one completed (Unix nanoseconds, 0 before the first).
+	fetchMu        sync.Mutex
+	lastKeyRefresh atomic.Int64
+	// renewals holds renewals waiting for a key fetch (renewalWorker).
+	renewals chan pendingRenewal
+	// unknownKidMu serializes fetches made for unknown kids;
+	// lastUnknownKidFetch is when the last one started.
+	unknownKidMu        sync.Mutex
+	lastUnknownKidFetch time.Time
+
+	mu            sync.Mutex
+	lastCredRefsh time.Time
+	// refusedSince is when the current run of 4409 refusals began (zero
+	// while none is in progress); an admitted session resets it.
+	refusedSince time.Time
+	// live is the most recently admitted session (nil before the first).
+	live core.LocalSession
+	// authToken is a refreshed token not yet sent as AuthRefresh, and
+	// authSeq its refresh sequence number; sentSeq is the sequence number
+	// of the last token sent. A token not newer than both is stale and
+	// never sent.
+	authToken string
+	authSeq   uint64
+	sentSeq   uint64
+
+	// authSendMu serializes AuthRefresh sends, so the newest token is
+	// always the last one sent.
+	authSendMu sync.Mutex
+}
+
+// New validates opts and returns an Agent.
+func New(opts Options) (*Agent, error) {
+	if opts.AgentID == "" || opts.ProjectID == "" {
+		return nil, errors.New("conduit: agent and project ids are required")
+	}
+	if len(opts.RPCRoutes) > 0 && opts.Session.RPCHandler == nil {
+		return nil, errors.New("conduit: RPCRoutes set without Session.RPCHandler")
+	}
+	if opts.Token == nil {
+		return nil, errors.New("conduit: Token is required")
+	}
+	u, err := EndpointURL(opts.HubURL)
+	if err != nil {
+		return nil, err
+	}
+	if opts.KeyRefreshInterval <= 0 || opts.KeyRefreshInterval > KeyRefreshInterval {
+		opts.KeyRefreshInterval = KeyRefreshInterval
+	}
+	opts.HTTPClient = keyClient(opts.HTTPClient)
+	if opts.DialLocal == nil {
+		d := &net.Dialer{Timeout: localDialTimeout}
+		opts.DialLocal = d.DialContext
+	}
+	if opts.SSH != nil {
+		if err := opts.SSH.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if opts.NoPTY && opts.SpawnPTY != nil {
+		return nil, errors.New("conduit: NoPTY and SpawnPTY are mutually exclusive")
+	}
+	if opts.SpawnPTY == nil && !opts.NoPTY {
+		opts.SpawnPTY = defaultPTYSpawner(opts.PTYUser)
+	}
+	clk := opts.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	a := &Agent{
+		opts:     opts,
+		url:      u,
+		clk:      clk,
+		replay:   grant.NewMemoryReplayCache(clk.Now, 0),
+		keyKick:  make(chan struct{}, 1),
+		renewals: make(chan pendingRenewal, renewalQueueSize),
+	}
+	a.deadlines = &target.Deadlines{Keys: freshKeys{a}, Replay: a.replay, Clock: clk, Grace: opts.deadlineGrace}
+	return a, nil
+}
+
+// EndpointURL returns the ws(s) URL of the hub's conduit endpoint.
+func EndpointURL(hubURL string) (string, error) {
+	u, err := url.Parse(strings.TrimSuffix(hubURL, "/") + "/api/v1/conduit")
+	if err != nil {
+		return "", err
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("conduit: unsupported hub URL scheme %q", u.Scheme)
+	}
+	return u.String(), nil
+}
+
+// Run keeps a conduit session to the hub until ctx ends (ctx.Err()), the
+// hub turns out not to serve conduit (ErrUnsupported), or the hub refuses
+// the agent terminally (*TerminalError; for 4409 only once refusals have
+// persisted for RefusalStopAfter).
+func (a *Agent) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// The first key fetch runs at once: grants verify only against keys
+	// fetched from the hub, never against a Welcome's.
+	a.kickKeyRefresh()
+	go a.refreshKeysLoop(ctx)
+	go a.renewalWorker(ctx)
+
+	cfg := a.opts.Session
+	cfg.Clock = a.clk
+	cfg.StreamHandler = core.StreamHandlerFunc(a.handleStream)
+	cfg.OnStreamRenewal = a.handleRenewal
+	cfg.OnGrantKeysChanged = a.handleGrantKeysChanged
+	r := &core.Reconnector{
+		Dialer: &ws.Dialer{URL: a.url, Header: a.header, WS: a.opts.WS},
+		Config: cfg,
+		Hello:  a.hello,
+		OnSession: func(_ context.Context, s core.Session, w *conduitv1.Welcome) {
+			if ls, ok := s.(core.LocalSession); ok {
+				a.mu.Lock()
+				a.live = ls
+				a.mu.Unlock()
+			}
+			a.admitted()
+			log.Info("Conduit session established (session %s, relay %s, incarnation %q)",
+				w.GetSessionId(), w.GetRelayInstanceId(), w.GetEndpointIncarnation())
+			if a.opts.OnSession != nil {
+				a.opts.OnSession(w)
+			}
+		},
+		Backoff: a.opts.Backoff,
+		Decide: func(ctx context.Context, end core.End, delay time.Duration) (time.Duration, error) {
+			d, err := a.decide(ctx, end, delay)
+			if a.opts.OnEnd != nil {
+				a.opts.OnEnd(end, d, err)
+			}
+			return d, err
+		},
+	}
+	return r.Run(ctx)
+}
+
+// hello builds the Hello. The launch id is presented as the endpoint
+// incarnation; the hub decides the admitted one (Welcome).
+func (a *Agent) hello() *conduitv1.Hello {
+	return &conduitv1.Hello{
+		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_AGENT,
+		PrincipalId:   a.opts.AgentID,
+		ClientVersion: a.opts.ClientVersion,
+		Capabilities: &conduitv1.Capabilities{
+			StreamKinds:         a.streamKinds(),
+			Rpc:                 a.opts.RPCRoutes,
+			EndpointIncarnation: a.opts.LaunchID,
+			Features:            []string{core.FeatureStreamRenewal},
+		},
+	}
+}
+
+// runIDHeader carries the agent's run id on agent-token requests (the
+// sciontool hub client's RunIDHeader).
+const runIDHeader = "X-Scion-Run-Id"
+
+// header returns the upgrade request's credentials, read afresh for every
+// attempt so a refreshed token is used.
+func (a *Agent) header(context.Context) (http.Header, error) {
+	h := http.Header{}
+	h.Set("X-Scion-Agent-Token", a.opts.Token())
+	if a.opts.LaunchID != "" {
+		h.Set(runIDHeader, a.opts.LaunchID)
+	}
+	if a.opts.ApplyTransportHeaders != nil {
+		if err := a.opts.ApplyTransportHeaders(h); err != nil {
+			log.Debug("Conduit: no transport credential available: %v", err)
+		}
+	}
+	return h, nil
+}
+
+// Action is what the dialer does after an attempt or session ends.
+type Action int
+
+const (
+	// ActionBackoff redials after the default delay (exponential backoff
+	// with full jitter, or the GoAway reconnect window for a planned
+	// drain).
+	ActionBackoff Action = iota
+	// ActionMaxBackoff redials after BackoffMax (protocol errors).
+	ActionMaxBackoff
+	// ActionRefreshCredential refreshes the agent token, then redials
+	// after the default delay.
+	ActionRefreshCredential
+	// ActionRefused redials after BackoffMax, and stops with a
+	// *TerminalError once refusals have persisted for RefusalStopAfter
+	// (4409).
+	ActionRefused
+	// ActionStop stops with a *TerminalError.
+	ActionStop
+	// ActionUnsupported stops with ErrUnsupported (the hub has no
+	// conduit endpoint).
+	ActionUnsupported
+)
+
+// Classify maps how an attempt or session ended to the dialer's action:
+//
+//	4409                                          redial after BackoffMax; stop
+//	                                              after RefusalStopAfter of refusals
+//	4403, 4404, HTTP 403                          stop (terminal)
+//	HTTP 404                                      stop: hub has no conduit
+//	4401, HTTP 401                                refresh credential, redial
+//	4400                                          redial after BackoffMax
+//	4503                                          redial within the GoAway window
+//	4504, 1011, anything else                     exponential backoff, jitter
+func Classify(end core.End) Action {
+	var de *ws.DialError
+	if errors.As(end.DialErr, &de) {
+		switch de.StatusCode {
+		case http.StatusNotFound:
+			return ActionUnsupported
+		case http.StatusUnauthorized:
+			return ActionRefreshCredential
+		case http.StatusForbidden:
+			return ActionStop
+		}
+		return ActionBackoff
+	}
+	switch end.Code() {
+	case closeSuperseded:
+		return ActionRefused
+	case core.CloseForbidden, closeTargetNotFound:
+		return ActionStop
+	case core.CloseUnauthenticated:
+		return ActionRefreshCredential
+	case core.CloseProtocolError:
+		return ActionMaxBackoff
+	}
+	return ActionBackoff
+}
+
+// decide implements Reconnector.Decide.
+func (a *Agent) decide(ctx context.Context, end core.End, delay time.Duration) (time.Duration, error) {
+	cause := endCause(end)
+	switch Classify(end) {
+	case ActionUnsupported:
+		log.Info("Conduit: hub has no conduit endpoint (HTTP 404)")
+		return 0, ErrUnsupported
+	case ActionStop:
+		te := terminalError(end)
+		log.Error("Conduit: %v; not reconnecting", te)
+		return 0, te
+	case ActionRefused:
+		return a.refused(end, cause)
+	case ActionMaxBackoff:
+		log.Error("Conduit: protocol error (%v); reconnecting in %v", cause, core.BackoffMax)
+		return core.BackoffMax, nil
+	case ActionRefreshCredential:
+		a.refreshCredential(ctx, cause)
+	}
+	if end.DialErr != nil {
+		log.Warn("Conduit: connect failed (%v); retrying in %v", cause, delay)
+	} else {
+		log.Info("Conduit session ended (%v); reconnecting in %v", cause, delay)
+	}
+	return delay, nil
+}
+
+// admitted ends any run of 4409 refusals.
+func (a *Agent) admitted() {
+	a.mu.Lock()
+	a.refusedSince = time.Time{}
+	a.mu.Unlock()
+}
+
+// refused handles a 4409: it redials after BackoffMax until refusals have
+// persisted, with no admission in between, for RefusalStopAfter, then
+// stops with a *TerminalError.
+func (a *Agent) refused(end core.End, cause string) (time.Duration, error) {
+	now := a.clk.Now()
+	a.mu.Lock()
+	if a.refusedSince.IsZero() {
+		a.refusedSince = now
+	}
+	since := now.Sub(a.refusedSince)
+	a.mu.Unlock()
+	if since >= RefusalStopAfter {
+		te := terminalError(end)
+		log.Error("Conduit: %v for %v; not reconnecting", te, since)
+		return 0, te
+	}
+	log.Warn("Conduit: refused (%v); retrying in %v", cause, core.BackoffMax)
+	return core.BackoffMax, nil
+}
+
+// ErrNoLiveSession is returned by RefreshAuth when no session is live:
+// the next session is admitted with the current token anyway.
+var ErrNoLiveSession = errors.New("conduit: no live session")
+
+// RefreshAuth sends token to the hub as AuthRefresh on the live session,
+// so the hub re-validates the session's credential in band (design §3.3)
+// without disturbing its streams. Call it after each successful token
+// refresh, with seq numbering the refreshes in the order they completed
+// (hub.TokenRefreshResult.Seq). Tokens are sent in seq order, whatever
+// order the calls arrive in: a token whose seq is not greater than the
+// newest one already sent or queued is stale (the hub may already have
+// replaced it) and is dropped, and a call whose token a concurrent call
+// already sent returns nil.
+func (a *Agent) RefreshAuth(token string, seq uint64) error {
+	a.mu.Lock()
+	if seq <= a.sentSeq || seq <= a.authSeq {
+		a.mu.Unlock()
+		return nil
+	}
+	a.authToken, a.authSeq = token, seq
+	a.mu.Unlock()
+
+	a.authSendMu.Lock()
+	defer a.authSendMu.Unlock()
+	a.mu.Lock()
+	s, tok, sendSeq := a.live, a.authToken, a.authSeq
+	a.authToken = ""
+	if tok != "" {
+		a.sentSeq = sendSeq
+	}
+	a.mu.Unlock()
+	if tok == "" {
+		return nil
+	}
+	if s == nil {
+		return ErrNoLiveSession
+	}
+	select {
+	case <-s.Done():
+		return ErrNoLiveSession
+	default:
+	}
+	return s.RefreshAuth([]byte(tok), 0)
+}
+
+// refreshCredential refreshes the agent token, at most once per
+// credentialRefreshMinInterval.
+func (a *Agent) refreshCredential(ctx context.Context, cause string) {
+	if a.opts.RefreshCredential == nil {
+		return
+	}
+	a.mu.Lock()
+	now := a.clk.Now()
+	due := a.lastCredRefsh.IsZero() || now.Sub(a.lastCredRefsh) >= credentialRefreshMinInterval
+	if due {
+		a.lastCredRefsh = now
+	}
+	a.mu.Unlock()
+	if !due {
+		return
+	}
+	log.Info("Conduit: credential refused (%v); refreshing it", cause)
+	if err := a.opts.RefreshCredential(ctx); err != nil {
+		log.Warn("Conduit: credential refresh failed: %v", err)
+	}
+}
+
+func endCause(end core.End) string {
+	switch {
+	case end.DialErr != nil:
+		return end.DialErr.Error()
+	case end.GoAway != nil:
+		return fmt.Sprintf("code %d: %s", end.GoAway.GetCode(), end.GoAway.GetReason())
+	case end.SessionErr != nil:
+		return end.SessionErr.Error()
+	}
+	return "closed"
+}
+
+func terminalError(end core.End) *TerminalError {
+	var de *ws.DialError
+	if errors.As(end.DialErr, &de) {
+		return &TerminalError{Status: de.StatusCode, Reason: de.Error()}
+	}
+	te := &TerminalError{Code: end.Code()}
+	var ce *core.CloseError
+	switch {
+	case end.GoAway != nil:
+		te.Reason = end.GoAway.GetReason()
+	case errors.As(end.DialErr, &ce), errors.As(end.SessionErr, &ce):
+		te.Reason = ce.Reason
+	}
+	return te
+}

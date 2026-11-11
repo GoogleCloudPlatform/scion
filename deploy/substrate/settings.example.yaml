@@ -1,0 +1,81 @@
+# Example scion settings.yaml for the `substrate` runtime profile.
+#
+# This is the same `runtimes`/`profiles` shape deploy/substrate/broker.yaml's
+# ConfigMap renders into the broker container -- see that file for the
+# full field-by-field rationale (active_profile, profiles.local/remote
+# repointing, egress_allow validation, egress_trust_bundle). This copy
+# exists so the shape is easy to read and adapt on its own, outside a
+# ConfigMap, e.g. for a workstation broker or for diffing against a
+# deployed cluster's live settings.
+#
+# Like every other file in deploy/substrate/, placeholders are `${VAR}`,
+# resolved with `envsubst` (or equivalent) -- not committed with real
+# values. Nothing in this file is secret: broker-to-hub credentials are a
+# separate, out-of-band Secret (see README.md, "Secret creation"), never a
+# settings.yaml key.
+
+schema_version: "1"
+
+# Makes `substrate` the broker's DEFAULT runtime -- required so the
+# broker's own heartbeat/list path resolves an empty profile name to
+# substrate instead of falling through to Linux auto-detection (which
+# would try, and fail, to shell out to a docker binary). See broker.yaml's
+# ConfigMap comment.
+active_profile: substrate
+
+server:
+  broker:
+    # Not a secret: a stable UUID printed by `scion runtime-broker
+    # register`, not a credential. The credential is the separate
+    # hub-credentials Secret (see README.md).
+    broker_id: "${HUB_BROKER_ID}"
+    hub_endpoint: "${HUB_ENDPOINT}"
+
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: api.${ATE_SYSTEM_NAMESPACE}.svc:443
+      router_endpoint: http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:80
+      token_audience: api.${ATE_SYSTEM_NAMESPACE}.svc
+      cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}
+      sandbox_class: gvisor
+      sandbox_config_name: ${SANDBOX_CONFIG_NAME}
+      # Matched against the target WorkerPool object's own metadata.labels
+      # -- see deploy/substrate/cluster/README.md, "worker_selector".
+      worker_selector:
+        ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
+      snapshot_storage: ${SNAPSHOT_STORAGE_URI}
+      # Only public FQDNs (optionally wildcarded) are accepted, and
+      # rejects IPs/CIDRs, catch-alls, and internal-shaped or non-ICANN
+      # hostnames -- see README.md, "egress_allow entries are validated".
+      # Empty means the runtime is constructed but every actor's egress
+      # policy denies everything; add entries here, not per-actor.
+      #
+      # An actor's own git-clone remote and telemetry endpoint are added to
+      # its egress allowlist only when an entry here also covers them (exact
+      # match, or a wildcard one label above) -- see README.md, "An actor's
+      # own git-clone remote and telemetry endpoint". List your actual git
+      # host and telemetry collector here if agents need to reach them, e.g.:
+      #   egress_allow:
+      #     - github.com
+      #     - "*.githubusercontent.com"
+      #     - otel-collector.example.com
+      egress_allow: []
+      # Only needed if the cluster's egress gateway is the sdsmint (MITM)
+      # variant AND actors make HTTPS/TLS requests -- see README.md,
+      # "egress_trust_bundle: only needed under sdsmint". Leave unset on a
+      # plain-gateway install; setting it there breaks every actor.
+      # egress_trust_bundle: egress-mitm.ate.dev
+      template_ready_timeout: 10m
+
+profiles:
+  substrate:
+    runtime: substrate-prod
+  # See broker.yaml's ConfigMap comment for why local/remote are
+  # deliberately repointed here rather than left at their embedded
+  # docker/Kubernetes defaults.
+  local:
+    runtime: substrate-prod
+  remote:
+    runtime: substrate-prod

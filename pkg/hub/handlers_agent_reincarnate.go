@@ -1,0 +1,1358 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"slices"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// reincarnatePatchNeedsUpdateMsg is the 403 body for a user caller whose
+// reincarnate request has patch flags but who lacks agent.update.
+const reincarnatePatchNeedsUpdateMsg = "Reincarnate patch flags (--service-account, --role, --model, --thinking-level, --harness-auth, --image) need permission to update the agent (agent.update) in addition to lifecycle; a user access token also needs the agent:update scope"
+
+// maxHandoffBytes bounds the reincarnate request's handoff text (design §3.2).
+const maxHandoffBytes = 256 * 1024
+
+// ReincarnateAgentRequest is the request body for
+// POST /api/v1/projects/{projectId}/agents/{agentIdOrSlug}/reincarnate and
+// its ID-addressed twin POST /api/v1/agents/{agentId}/reincarnate (design
+// §3.2). Besides Handoff and DryRun it accepts the patch fields of
+// ptone/scion#3302 (ServiceAccount, Role, Image, Model, ThinkingLevel,
+// HarnessAuth). The remaining override fields are accepted on the wire (so
+// a newer CLI gets a clear 400) but rejected if set.
+type ReincarnateAgentRequest struct {
+	Handoff string `json:"handoff,omitempty"`
+	DryRun  bool   `json:"dryRun,omitempty"`
+	// TargetBroker (a broker ID, name or slug) asks to move the agent to
+	// that broker; it must mount the same NFS export as the current one.
+	// Empty, or the agent's current broker, is a plain reincarnation.
+	TargetBroker string `json:"targetBroker,omitempty"`
+	// ForceMove, with TargetBroker, allows a move whose workspace cannot
+	// travel through a shared NFS export: the workspace is provisioned fresh
+	// on the target and the source's local state is given up. A 400 without
+	// TargetBroker. Never downgrades a move the export mode can carry.
+	ForceMove bool `json:"forceMove,omitempty"`
+
+	// SharedDirBackends and AllowEmptySharedDir are the removed per-agent
+	// shared dir backend change (`scion reincarnate --shared-dir-backend`,
+	// `--allow-empty-shared-dir`). They stay on the wire only so a request
+	// from an older client that sets them gets a 400
+	// (removedSharedDirBackendOptionError) rather than being silently
+	// ignored: server.project_storage now places every agent's shared dirs.
+	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
+	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
+
+	// Patch fields (ptone/scion#3302): each changes the next generation's
+	// setting and is kept by later reincarnations. Empty (nil for
+	// ThinkingLevel) means unchanged.
+	//
+	// ServiceAccount is a GCP service account ID to assign ("assign"
+	// metadata mode), checked exactly as create checks it.
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	// Role is the agent role (none, readonly, baseline, full), checked
+	// exactly as create checks an explicit role.
+	Role          string `json:"role,omitempty"`
+	Image         string `json:"image,omitempty"`
+	Model         string `json:"model,omitempty"`
+	ThinkingLevel *int   `json:"thinkingLevel,omitempty"`
+	HarnessAuth   string `json:"harnessAuth,omitempty"`
+
+	// Overrides not yet supported; any non-zero value here is a 400.
+	HarnessConfig  string            `json:"harnessConfig,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TemplateHash   string            `json:"templateHash,omitempty"`
+	ResetOverrides bool              `json:"resetOverrides,omitempty"`
+	Rollback       bool              `json:"rollback,omitempty"`
+}
+
+// hasUnsupportedOverrides reports whether the request sets any override
+// field that is not yet supported.
+func (r ReincarnateAgentRequest) hasUnsupportedOverrides() bool {
+	return r.HarnessConfig != "" || len(r.Env) > 0 || r.TemplateHash != "" || r.ResetOverrides || r.Rollback
+}
+
+// ReincarnateAgentResponse is the response body for a reincarnate request:
+// 202 for a persisted (pending) reincarnation, or 200 for a dry run.
+type ReincarnateAgentResponse struct {
+	AgentID    string            `json:"agentId"`
+	Generation int               `json:"generation"` // target generation
+	State      string            `json:"state"`      // pending|planned (Phase 1)
+	Plan       ReincarnationPlan `json:"plan"`
+	// SourceBrokerID and TargetBrokerID are set when the request named a
+	// target broker. They are equal for a plain reincarnation.
+	SourceBrokerID string `json:"sourceBrokerId,omitempty"`
+	TargetBrokerID string `json:"targetBrokerId,omitempty"`
+	// MoveVerdict is the move eligibility verdict of a dry-run move.
+	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace, as recorded on its reincarnation record: "export" or
+	// "recreate" (a forced move). Empty for a plain reincarnation.
+	TransferMode string `json:"transferMode,omitempty"`
+}
+
+// FieldChange describes an old→new change to a single scalar field on the
+// reincarnation plan.
+type FieldChange struct {
+	Old string `json:"old,omitempty"`
+	New string `json:"new,omitempty"`
+}
+
+// KeyDiff describes an old→new change to a set of map keys (e.g. env var
+// names), by name only — never by value, since env values may be secrets.
+type KeyDiff struct {
+	Added   []string `json:"added,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Changed []string `json:"changed,omitempty"`
+}
+
+// ReincarnationPlan is the old→new diff returned by both a dry run and a real
+// reincarnate request (design §3.2).
+type ReincarnationPlan struct {
+	Template   FieldChange `json:"template"`
+	Image      FieldChange `json:"image"`
+	HarnessCfg FieldChange `json:"harnessConfig"`
+	Model      FieldChange `json:"model"`
+	EnvKeys    KeyDiff     `json:"envKeys"`
+	Branch     string      `json:"branch"`
+	Warnings   []string    `json:"warnings,omitempty"`
+
+	// Patched lists the request's patch fields (ptone/scion#3302), in
+	// display order. Its presence also tells a CLI the hub applied them.
+	Patched []string `json:"patched,omitempty"`
+	// Old and new values of patch fields not otherwise on the plan, set
+	// only when the request patched that field.
+	Role           *FieldChange `json:"role,omitempty"`
+	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
+	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
+	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
+}
+
+// removedSharedDirBackendOptionError is the 400 message for a reincarnate
+// request that still carries the removed per-agent shared dir backend
+// change, or "" when it carries none.
+func removedSharedDirBackendOptionError(req ReincarnateAgentRequest) string {
+	if len(req.SharedDirBackends) == 0 && !req.AllowEmptySharedDir {
+		return ""
+	}
+	return "sharedDirBackends and allowEmptySharedDir (--shared-dir-backend, --allow-empty-shared-dir) were removed: " +
+		"server.project_storage places every agent's shared dirs. Existing node-local shared dirs: " + config.ProjectStorageMigrationText
+}
+
+// authorizeAgentReincarnate gates POST .../reincarnate for every caller kind
+// (design §3.8, decision D2):
+//   - A user needs the agent lifecycle permission (ActionLifecycle), the same
+//     policy as stop/start/restart (design §3.8 Amendment A24). ActionUpdate
+//     (agent.update) has no UATScope in the permission registry, so the UAT
+//     project-constraint gate denied every User Access Token outright,
+//     including one scoped to agent:lifecycle or agent:manage -- only
+//     session/OAuth users and agent tokens could ever reincarnate. The
+//     built-in roles grant agent.update and agent.lifecycle together, so
+//     this does not widen access for any existing role.
+//   - An agent reincarnating ANOTHER agent needs project:agent:lifecycle
+//     within its own project and agent.lifecycle on the target, same as
+//     stop/start (authorizeAgentLifecycle).
+//   - An agent reincarnating ITSELF is allowed for any role, with no scope
+//     check, as long as the request patches nothing (D2's "no override"
+//     condition). A self request with a patch flag gets the full lifecycle
+//     check in handleReincarnateAgent once the body is read
+//     (ptone/scion#3302, decision D1).
+func (s *Server) authorizeAgentReincarnate(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if identity != nil && identity.Type() == "agent" {
+		if agentIdent, ok := identity.(AgentIdentity); ok && agent != nil && agentIdent.ID() == agent.ID {
+			// Self-reincarnation: any role, no scope required (D2).
+			return true
+		}
+	}
+	return s.authorizeAgentLifecycle(w, r, agent, ActionLifecycle)
+}
+
+// handleReincarnateAgent implements POST .../agents/{id}/reincarnate (design
+// §3.1, §3.2) for both the ID-addressed and project-scoped routes, which
+// resolve id/slug to an agent.ID before calling this. It validates, checks
+// broker capability, computes the reincarnation plan, and — for a non-dry-run
+// request — persists a pending AgentReincarnation record and returns 202
+// before any teardown, then completes the migration in a detached background
+// worker (see runReincarnationWorker).
+func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
+	agent, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if !s.authorizeAgentReincarnate(w, r, agent) {
+		return
+	}
+
+	// Start gate (design ptone/scion#2483 §2.1): a delete in progress, an
+	// incomplete create or an in-flight launch is refused, the last with
+	// 409 agent_launching, since the worker would stop and reprovision a
+	// launching agent.
+	if ref := s.startGate(ctx, agent, startEntryReincarnate); ref.refuses() {
+		ref.write(w)
+		return
+	}
+	// The delete claim the gate admitted; the worker pins the failed-marker
+	// clear just before its completion write to it (see
+	// clearFailedDeletion), so a delete that claims after this point keeps
+	// its marker.
+	admittedDeletionClaim := agent.DeletionClaim
+
+	var req ReincarnateAgentRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if len(req.Handoff) > maxHandoffBytes {
+		ValidationError(w, fmt.Sprintf("handoff exceeds %d bytes", maxHandoffBytes), nil)
+		return
+	}
+	if req.hasUnsupportedOverrides() {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"config overrides are not yet supported for scion reincarnate", nil)
+		return
+	}
+	if msg := removedSharedDirBackendOptionError(req); msg != "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, msg, nil)
+		return
+	}
+	if !validateReincarnatePatchRequest(w, req) {
+		return
+	}
+	// Decision D1 (ptone/scion#3302): the D2 self exemption in
+	// authorizeAgentReincarnate holds only for a request that patches
+	// nothing. A self request with a patch flag needs the same lifecycle
+	// authority as reincarnating another agent.
+	if req.hasPatch() && isSelfRequest(ctx, agent) {
+		if !s.authorizeAgentLifecycle(w, r, agent, ActionLifecycle) {
+			return
+		}
+	}
+	// Decision D4 (ptone/scion#3302): a patch flag edits the agent's
+	// config, so a user caller (session or UAT) also needs ActionUpdate on
+	// the target, the same gate the agent PATCH applies (applyAgentUpdate).
+	// A UAT needs the agent:update selector to patch. Agent callers
+	// stay on the lifecycle check (D1). Runs before any side effect, for a
+	// dry run too.
+	if req.hasPatch() && GetUserIdentityFromContext(ctx) != nil {
+		if !s.authorizeMsg(w, r, agentResource(agent), ActionUpdate, reincarnatePatchNeedsUpdateMsg) {
+			return
+		}
+	}
+
+	project, err := s.store.GetProject(ctx, agent.ProjectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Patch access checks (ptone/scion#3302): --role runs create's role
+	// lattice, --service-account create's assignment gate. Then the
+	// authority check: a requester other than the agent itself must pass
+	// CanDelegate and its ceiling must cover the role the next generation
+	// runs with (the patched role, else the stored one); it becomes the
+	// agent's recorded delegator when it changes the role
+	// (ptone/scion#3762), or when a user keeps the role of an agent whose
+	// own edge is missing or unrecorded, or whose chain has an unrecorded
+	// hop the chain walk reaches before any hop it does not accept
+	// (ptone/scion#3948). All of this runs before the
+	// broker and the agent state are examined and before anything is
+	// written, so a refused request claims nothing and a dry run reports
+	// the same refusal.
+	patch, ok := s.resolveReincarnatePatch(w, r, agent, project, req)
+	if !ok {
+		return
+	}
+	targetRole, _ := agentRoleAndScopes(agent)
+	storedRole := targetRole
+	if req.Role != "" {
+		targetRole = AgentRole(req.Role)
+	}
+	auth, ok := s.reincarnateAuthorityFor(w, r, agent, targetRole, targetRole != storedRole)
+	if !ok {
+		return
+	}
+	if !s.resolveRepairAssignment(w, r, agent, auth, targetRole != storedRole, patch) {
+		return
+	}
+
+	// A target broker other than the agent's current one is a move. The
+	// target is resolved without writing anything (no provider link).
+	var moveTarget *store.RuntimeBroker
+	targetBrokerID := ""
+	if req.ForceMove && req.TargetBroker == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"forceMove needs targetBroker: --force only applies to a move to another broker", nil)
+		return
+	}
+	if req.TargetBroker != "" {
+		// A move needs a source broker; refuse before resolving the target.
+		if agent.RuntimeBrokerID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"cannot move an agent that is not currently assigned to a broker", nil)
+			return
+		}
+		dst, ambiguous, err := s.resolveMoveTargetBroker(ctx, req.TargetBroker, agent.RuntimeBrokerID, project.ID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if len(ambiguous) > 0 {
+			writeMoveTargetAmbiguous(w, req.TargetBroker, ambiguous)
+			return
+		}
+		if dst == nil {
+			s.writeMoveTargetNotFound(ctx, w, req.TargetBroker, project)
+			return
+		}
+		targetBrokerID = dst.ID
+		if dst.ID != agent.RuntimeBrokerID {
+			moveTarget = dst
+		} else if req.ForceMove {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"--force applies only to a move to another broker", nil)
+			return
+		}
+	}
+	gate := s.reincarnateWorkspaceGate(ctx, agent, project, moveTarget, req.ForceMove)
+	workspaceModeErr, sameBrokerEmptyPerAgent := gate.workspaceModeErr, gate.sameBrokerEmptyPerAgent
+	if moveTarget != nil {
+		s.planReincarnateMove(w, r, req, agent, auth, project, moveTarget, workspaceModeErr, gate.cloneMode, admittedDeletionClaim, patch)
+		return
+	}
+	if workspaceModeErr != "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, workspaceModeErr, nil)
+		return
+	}
+
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"agent reincarnation requires hub mode with a runtime broker dispatcher", nil)
+		return
+	}
+	if agent.RuntimeBrokerID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"agent has no runtime broker assigned", nil)
+		return
+	}
+	// Flat placement pre-check for an in-place reincarnation, before the
+	// reincarnation record and the worker: a refusal stops nothing,
+	// reprovisions nothing and mints no credential.
+	if err := s.checkPinnedPlacement(agent); err != nil {
+		if !writeRuntimeTargetRefusal(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
+	if !s.checkBrokerAvailability(w, r, agent) {
+		return
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if broker.Capabilities == nil || !broker.Capabilities.Reprovision {
+		// AC-9: an old broker without the reprovision capability gets 412,
+		// and the agent is left completely untouched (checked before any
+		// plan is computed or anything is persisted).
+		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
+			"runtime broker does not support agent reincarnation; upgrade the broker", nil)
+		return
+	}
+	// miller79/scion#167: in-place reuse is safe only where the private
+	// workspace is a directory on the broker's own disk. Checked, like the
+	// capability below, before anything is planned or stopped, so a dry
+	// run reports the same verdict. An unrecorded runtime falls back to
+	// resolveAgentRuntime (the value enrichAgents displays), which returns
+	// "" when the broker's profiles are ambiguous: still refused.
+	if sameBrokerEmptyPerAgent && !api.IsLocalDiskRuntime(effectiveAgentRuntime(agent, broker)) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)", nil)
+		return
+	}
+	if sameBrokerEmptyPerAgent && !broker.Capabilities.ReprovisionEmptyPerAgent {
+		// An older broker advertises Reprovision and EmptyPerAgentWorkspace
+		// but its reprovision refuses empty-per-agent, which would only
+		// surface after the worker had stopped the agent. Refuse up front.
+		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
+			"runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker", nil)
+		return
+	}
+
+	// AC-8 / design §3.4 Amendment A3, moved ahead of the plan computation
+	// (design §3.4 Amendment A11 item 3): a reincarnation already in flight
+	// (or one that failed and is retryable — ReincarnationStateFailed is
+	// excluded, same as the real-path claim below) must 409 on a --dry-run
+	// request too, not just on a real one. Checked here, before any plan is
+	// computed, so a dry run against a busy agent reports the conflict
+	// instead of silently computing and returning a plan that a concurrent
+	// real request could invalidate before the caller ever acts on it.
+	if agent.ReincarnationState != store.ReincarnationStateNone && agent.ReincarnationState != store.ReincarnationStateFailed {
+		Conflict(w, "a reincarnation is already pending for this agent")
+		return
+	}
+
+	// AC-2's "dry-run changed nothing" and the real path's plan are computed
+	// by the exact same call — buildFreshAppliedConfig only reads from the
+	// store (templates, harness configs, pre-start hooks, skills settings),
+	// it never writes. Any store writes happen only below this point, and
+	// only for a non-dry-run request.
+	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, agent.RuntimeBrokerID), patch)
+	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	imageRegistry := resolveRegistry(fresh.Profile)
+	// Fail fast, as start and restart do, when the GCP identity the fresh
+	// config will run with is no longer allowed for this agent. Checked
+	// before the claim and the worker's stop, so a refused request leaves
+	// the agent as it was, and a dry run reports the same refusal.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
+
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
+	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
+	targetGeneration := agent.Generation + 1
+
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
+			AgentID:    agent.ID,
+			Generation: targetGeneration,
+			State:      "planned",
+			Plan:       plan,
+			// A named target here is the agent's current broker.
+			SourceBrokerID: brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID),
+			TargetBrokerID: targetBrokerID,
+		})
+		return
+	}
+
+	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, targetGeneration, req.Handoff, admittedDeletionClaim,
+		brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID), targetBrokerID, nil)
+}
+
+// startReincarnation claims the agent, records the reincarnation (with the
+// authority re-record auth, nil when the edge is kept: a self-reincarnation
+// or one that keeps the role (except a user repair, ptone/scion#3948)) and
+// starts the detached worker, answering 202. sourceBrokerID and targetBrokerID are
+// echoed in the response (both empty unless the request named a target);
+// move is non-nil for a cross-broker move. patch is the validated request
+// patch (nil when none); a --service-account patch records the requester as
+// the source of the new service-account assignment, in the claim
+// transaction, and so does a same-role repair whose requester passed the
+// assignment gate (auth.Assignment).
+func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, patch *reincarnatePatch, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
+	ctx := r.Context()
+
+	// A --service-account patch sets the next generation's account; the
+	// requester (already authorized by the assignment gate) is recorded as
+	// its source under the requester's frozen ceiling. This runs before
+	// anything is written.
+	var saAssignment *store.AgentServiceAccountAssignment
+	if patch != nil && patch.GCPIdentity != nil {
+		next := *agent
+		next.AppliedConfig = fresh
+		if !agentHasAssignModeIdentity(&next) || agentAssignedServiceAccountID(&next) == "" {
+			slog.ErrorContext(ctx, "reincarnate: service-account patch did not produce an assign-mode identity", "agent_id", agent.ID)
+			InternalError(w)
+			return
+		}
+		ceiling, prov, ok := s.saAssignmentSourceCeiling(w, r,
+			Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}, ActionUpdate)
+		if !ok {
+			return
+		}
+		saAssignment = newSAAssignment(&next, store.SAAssignmentOriginReincarnate, ceiling, prov)
+	} else if auth != nil && auth.Assignment != nil {
+		// A same-role repair re-records the assignment from the requester
+		// (resolveRepairAssignment).
+		saAssignment = auth.Assignment
+	}
+
+	// The claim is guarded by the agent row's own optimistic lock
+	// (state_version), and the claim and the reincarnation record commit
+	// together, so a version conflict or any other failure leaves no record
+	// stuck in "pending".
+	//
+	// The already-pending/already-starting check itself lives above, before
+	// the plan is computed, so it also gates --dry-run; a concurrent real
+	// request could slip in between that check and this claim, and the
+	// claim's state_version CAS catches that race.
+	agent.ReincarnationState = store.ReincarnationStatePending
+	// Design §3.4 Amendment A6.6: ReincarnationUpdatedAt (not Updated) is
+	// what the replica-safe sweep's agent-state backstop keys its staleness
+	// check on, because Updated is also bumped by every broker heartbeat.
+	claimedAt := time.Now()
+	agent.ReincarnationUpdatedAt = &claimedAt
+
+	requestedBy := ""
+	requesterIdentity := GetIdentityFromContext(ctx)
+	if requesterIdentity != nil {
+		requestedBy = requesterIdentity.ID()
+	}
+
+	rec := &store.AgentReincarnation{
+		AgentID:               agent.ID,
+		FromGeneration:        agent.Generation,
+		ToGeneration:          targetGeneration,
+		RequestedBy:           requestedBy,
+		State:                 store.AgentReincarnationStatePending,
+		PreviousAppliedConfig: agent.AppliedConfig,
+		Handoff:               handoff,
+		SourceBrokerID:        moveSourceID(move),
+		TargetBrokerID:        moveTargetID(move),
+		TransferMode:          moveTransferMode(move),
+	}
+	// A reincarnation starts the agent, so it is admitted like a start
+	// (ptone/scion#6033): reserve its project slot, and unless it moves its
+	// broker slot, with the cap check, before anything is claimed. Both
+	// reserves are idempotent for a slot the agent already holds. A move's
+	// target broker slot is checked when the worker moves the reservation.
+	capHold, err := s.reserveReincarnationCapacity(ctx, agent, move)
+	if err != nil {
+		writeQuotaReserveError(w, store.LimitMaxAgentsPerProject, err)
+		return
+	}
+
+	// The claim, the reincarnation record, the authority re-record, the
+	// reincarnate-claim hooks and the audit record commit in one
+	// transaction (reincarnateClaimTx), so a failure at any step leaves the
+	// agent unclaimed with no record behind it.
+	// The claim also requires that no start claim is held, live or
+	// unconfirmed: a start whose outcome is unknown may still create a
+	// container this reincarnation would then compete with.
+	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, saAssignment, auditActorFromContext(ctx)); err != nil {
+		// Undo the capacity this request reserved, conditionally: a start
+		// or a concurrent reincarnation that now owns the agent keeps it.
+		s.rollbackReincarnationCapacity(ctx, agent, capHold)
+		var held *store.ClaimHeldError
+		if errors.Is(err, store.ErrVersionConflict) {
+			Conflict(w, "agent was concurrently modified; retry")
+			return
+		}
+		if errors.As(err, &held) {
+			Conflict(w, "a start is in progress for this agent; retry once it completes")
+			return
+		}
+		if errors.Is(err, store.ErrClaimPredicate) {
+			Conflict(w, "a reincarnation is already pending for this agent")
+			return
+		}
+		if errors.Is(err, errAgentCreateWriteInvalid) {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: incomplete authority re-record", "agent_id", agent.ID, "error", err)
+			InternalError(w)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	// A reincarnation starts the agent (also one that was stopped): record
+	// that the agent is meant to run, now, before the worker's start, so a
+	// stop the user records during the reincarnation is newer and wins.
+	// Limits: the intent is written after the claim commits, so a stop
+	// recorded in that short gap is overwritten by this running intent; and
+	// if the write fails, the reincarnation proceeds with only a warning
+	// (the intent keeps its previous value).
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+		s.agentLifecycleLog.Warn("Reincarnate: failed to record run intent", "agent_id", agent.ID, "error", err)
+	}
+
+	// design §3.4 Amendment A3: the requester and the creator must both
+	// learn of a failure. The creator is already subscribed (from create);
+	// if the requester is a different principal than the agent itself and
+	// has no existing subscription, subscribe them now via the same
+	// mechanism create's --notify uses. failReincarnation's
+	// PublishAgentStatus on phase=error then reaches both through the
+	// ordinary subscription-dispatch path — no new delivery path needed.
+	// Deliberately after the record insert above: if that insert fails, the
+	// request errors out and there is no reincarnation to be notified about,
+	// so subscribing first would leave a subscription with nothing behind it.
+	s.ensureReincarnateRequesterSubscribed(ctx, agent, requesterIdentity, requestedBy)
+
+	// Detached background worker (design §3.1, §3.7): the request returns
+	// 202 before any teardown starts, and the worker runs on a context
+	// independent of this request's. A self-migration stops the calling
+	// container mid-flight, which would cancel r.Context() and abort the
+	// worker if it inherited it — exactly the self-deletion
+	// context-cancellation hazard §3.0 identifies for the rejected design.
+	// claimedAt (Nit, p2a-r1 review): the preamble's catch-up window start is
+	// this exact claim instant, not rec.RequestedAt — the store stamps that
+	// a few ms later inside CreateAgentReincarnation, after the gate in the
+	// three delivery paths could already have started deferring messages.
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim, move, capHold)
+
+	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
+		AgentID:        agent.ID,
+		Generation:     targetGeneration,
+		State:          store.AgentReincarnationStatePending,
+		Plan:           plan,
+		SourceBrokerID: sourceBrokerID,
+		TargetBrokerID: targetBrokerID,
+		TransferMode:   moveTransferMode(move),
+	})
+}
+
+// isSelfRequest reports whether the caller is the agent itself.
+func isSelfRequest(ctx context.Context, agent *store.Agent) bool {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil || identity.Type() != "agent" {
+		return false
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	return ok && agentIdent.ID() == agent.ID
+}
+
+func moveSourceID(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.SourceBrokerID
+}
+
+func moveTargetID(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.TargetBrokerID
+}
+
+// moveTransferMode is the transfer mode recorded for a move, "" for a plain
+// reincarnation.
+func moveTransferMode(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.TransferMode
+}
+
+// brokerIDIfSet returns id when target is non-empty, else "".
+func brokerIDIfSet(target, id string) string {
+	if target == "" {
+		return ""
+	}
+	return id
+}
+
+// planReincarnateMove answers a move of agent to dst: it runs the move
+// eligibility checks and returns the first refusal. Otherwise a dry run gets
+// 200 with the reincarnation plan and the verdict, writing no agent, broker,
+// project or quota state, and a real request starts the move (202; the
+// worker re-checks eligibility before its first side effect). The
+// passthrough re-check may record its authorization decision in the audit
+// log and call IAM, like every passthrough gate. A patch (validated and
+// authorized by the caller) is part of the plan and of the config the agent
+// is provisioned with on the target.
+func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req ReincarnateAgentRequest, agent *store.Agent, auth *reincarnateAuthority, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool, admittedDeletionClaim int64, patch *reincarnatePatch) {
+	ctx := r.Context()
+	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	in := moveEligibilityInput{
+		Agent:              agent,
+		Src:                src,
+		Dst:                dst,
+		WorkspaceModeError: workspaceModeErr,
+		CloneMode:          cloneMode,
+		SelfMove:           isSelfRequest(ctx, agent),
+		Probes:             s.moveProbesFor(r, project, agent.AppliedConfig),
+		Force:              req.ForceMove,
+		EmptyPerAgent:      project.IsEmptyPerAgent(),
+		WorkspaceMode:      string(project.SharingMode()),
+		GitRemote:          project.GitRemote,
+	}
+	if workspaceModeErr != "" {
+		v, ref := evaluateMoveEligibility(in)
+		writeMoveRefusal(w, ref, v)
+		return
+	}
+
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"agent reincarnation requires hub mode with a runtime broker dispatcher", nil)
+		return
+	}
+	if agent.ReincarnationState != store.ReincarnationStateNone && agent.ReincarnationState != store.ReincarnationStateFailed {
+		Conflict(w, "a reincarnation is already pending for this agent")
+		return
+	}
+
+	// buildFreshAppliedConfig only reads; the plan and the profile the
+	// agent would run under come from the same call the real path uses.
+	// The new generation runs on dst: resolve its registry there, for the
+	// new profile (ptone/scion#3916).
+	resolveRegistry := reincarnateImageRegistry(dispatcher, dst.ID)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, dst.ID), patch)
+	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	// A dry-run move reports the same GCP identity refusal as start and
+	// as an in-place reincarnate, so every dry-run variant agrees.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
+
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, resolveRegistry(fresh.Profile))
+	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
+	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
+	// The access probes judge the config the next generation runs with: a
+	// --service-account patch replaces a passthrough identity, so the
+	// passthrough gate (and the self-move passthrough refusal) follow the
+	// patched GCP identity, not the outgoing one.
+	in.Probes = s.moveProbesFor(r, project, fresh)
+	in.Branch = fresh.Branch
+	if fresh.GitClone != nil {
+		in.DefaultBranch = fresh.GitClone.Branch
+	}
+	v, ref := evaluateMoveEligibility(in)
+	if ref != nil {
+		writeMoveRefusal(w, ref, v)
+		return
+	}
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
+			AgentID:        agent.ID,
+			Generation:     agent.Generation + 1,
+			State:          "planned",
+			Plan:           plan,
+			SourceBrokerID: src.ID,
+			TargetBrokerID: dst.ID,
+			MoveVerdict:    &v,
+		})
+		return
+	}
+	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
+		SourceBrokerID:    src.ID,
+		TargetBrokerID:    dst.ID,
+		ProjectID:         project.ID,
+		SelfMove:          in.SelfMove,
+		AgentDirWorkspace: cloneMode,
+		Profile:           in.Profile,
+		Force:             req.ForceMove,
+		TransferMode:      v.TransferMode,
+	})
+}
+
+// emptyPerAgentWorkspaceMovable reports whether an empty-per-agent agent's
+// workspace can move to dst: its last start placed it on the shared export,
+// and the source and dst report the same export with equal identity
+// markers.
+func (s *Server) emptyPerAgentWorkspaceMovable(ctx context.Context, agent *store.Agent, dst *store.RuntimeBroker) bool {
+	if !isWorkspacePlacementOnExport(agent.WorkspacePlacement) {
+		return false
+	}
+	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return false
+	}
+	if !api.SameWorkspaceExport(src.WorkspaceStorage, dst.WorkspaceStorage) {
+		return false
+	}
+	srcID, dstID := src.WorkspaceStorage.NFS.ExportID, dst.WorkspaceStorage.NFS.ExportID
+	return srcID != "" && srcID == dstID
+}
+
+// linkedProjectPath resolves the local path a runtime broker has registered
+// for the agent's project via a ProjectProvider, exactly as the dispatcher's
+// resolveDispatchProjectInfo does for a real dispatch — used by
+// handleReincarnateAgent's eligibility gate to compute the effective
+// dispatched workspace (design §3.4 Amendment A23.1, review p1b-r1 R1).
+// Returns "" when the agent has no broker assigned yet, or when no provider
+// (or no LocalPath) is registered for it — the gate then evaluates the raw
+// Workspace, matching a non-linked (hub-native) dispatch.
+func (s *Server) linkedProjectPath(ctx context.Context, agent *store.Agent) string {
+	if agent.RuntimeBrokerID == "" {
+		return ""
+	}
+	provider, err := s.store.GetProjectProvider(ctx, agent.ProjectID, agent.RuntimeBrokerID)
+	if err != nil || provider == nil {
+		return ""
+	}
+	return provider.LocalPath
+}
+
+// ensureReincarnateRequesterSubscribed implements design §3.4 Amendment
+// A3.8: a reincarnate requester who is not the agent itself, and
+// who is not already subscribed to it, gets a notification subscription via
+// the same createNotifySubscription mechanism create's --notify flag uses.
+// The creator is already subscribed from create, so this closes the gap for
+// a coordinator or other requester who is not the creator — failReincarnation's
+// PublishAgentStatus on phase=error then reaches both through the ordinary
+// subscription-dispatch path.
+//
+// No-ops for a self-request (the agent does not need to subscribe to
+// itself) and for any identity type this can't resolve to a subscriber
+// (there is no "requester" concept for a nil identity, and this handler is
+// unreachable without one — authorizeAgentReincarnate already required it).
+// Best-effort: a lookup or write failure here must not fail the
+// reincarnate request itself, so errors are logged, not returned.
+func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent *store.Agent, identity Identity, requestedBy string) {
+	if identity == nil {
+		return
+	}
+
+	var subscriberType, subscriberID string
+	switch identity.Type() {
+	case "agent":
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok || agentIdent.ID() == agent.ID {
+			return // self-request: nothing to subscribe.
+		}
+		requesterAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
+		if err != nil {
+			s.agentLifecycleLog.Warn("reincarnate: failed to resolve requester agent for notify subscription",
+				"agent_id", agent.ID, "requester_id", agentIdent.ID(), "error", err)
+			return
+		}
+		subscriberType = store.SubscriberTypeAgent
+		subscriberID = requesterAgent.Slug
+	case "user", "dev":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			return
+		}
+		subscriberType = store.SubscriberTypeUser
+		subscriberID = userIdent.ID()
+	default:
+		return
+	}
+
+	existing, err := s.store.GetNotificationSubscriptions(ctx, agent.ID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("reincarnate: failed to check existing notify subscriptions",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+	for _, sub := range existing {
+		if sub.SubscriberType == subscriberType && sub.SubscriberID == subscriberID {
+			return // already subscribed (e.g. the creator, or a repeat requester).
+		}
+	}
+
+	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// effectiveAgentRuntime is the agent's recorded runtime, or, when none is
+// recorded yet, the one resolveAgentRuntime derives from the broker's
+// profiles ("" when ambiguous).
+func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) string {
+	if agent.Runtime != "" {
+		return agent.Runtime
+	}
+	return resolveAgentRuntime(agent, broker)
+}
+
+// reincarnateAuthorityFor decides what authority a reincarnation of agent
+// re-records. role is the role the next generation runs with: the stored
+// role, or the --role patch. roleChanged is true only when the patch names
+// a role other than the stored one.
+//
+// Every requester other than the agent itself must be able to delegate role:
+// it must pass CanDelegate for role, and its source ceiling must cover role
+// (childRoleWithinCeiling, role explicit). A self-reincarnation that changes
+// the role must pass the same checks for the new role, as create requires
+// of an agent granting a role; one that keeps the role is not checked.
+//
+// The edge is re-recorded when another requester changes the role: the
+// requester then becomes the recorded delegator, and it is refused (403)
+// when it descends from agent, because the new edge would close a loop in
+// the delegation chain (requesterDescendsFrom). It is also re-recorded,
+// with the user as the recorded delegator, when a user keeps the role of
+// an agent whose own edge is missing or unrecorded, or whose chain has an
+// unrecorded hop further up that the chain walk reaches before any hop it
+// does not accept (reincarnateChainUnrecorded): the reincarnate then
+// repairs the chain as a recreate by that user would (ptone/scion#3948).
+// It is re-recorded as well, with the owner as the recorded delegator, when
+// the agent's owner keeps the role of an agent whose recorded chain ends at
+// another user (owner reclaim, reincarnateOwnerReclaims). A re-record after
+// which the owner's unshared material is not delivered carries a plan
+// warning (ownerMaterialReRecordNotice).
+// In every other case, including any self-reincarnation, an agent
+// requester's reincarnation that keeps the role, and a user's that keeps
+// the role of an agent with a recorded own edge and either a fully recorded
+// chain or a chain whose first problem is a hop that is not accepted, it
+// returns nil: the existing edge with its frozen provenance and ceiling
+// stays in force, so restarting an agent does not change whose authority
+// it runs on.
+//
+// On a refusal the response is written (403, 503 for a ceiling or chain
+// lookup fault, or 500 for a nil agent) and ok is false; nothing has been
+// written to the store.
+func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent, role AgentRole, roleChanged bool) (auth *reincarnateAuthority, ok bool) {
+	if agent == nil {
+		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
+		InternalError(w)
+		return nil, false
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	agentIdent := GetAgentIdentityFromContext(ctx)
+	self := agentIdent != nil && agentIdent.ID() == agent.ID
+	if self && !roleChanged {
+		return nil, true
+	}
+	resource := Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}
+	if identity == nil {
+		writeForbidden(w, "Reincarnation requires an authenticated requester")
+		return nil, false
+	}
+	if s.authzService == nil {
+		s.agentLifecycleLog.Error("handleReincarnateAgent: no authorization service to re-record authority", "agent_id", agent.ID)
+		InternalError(w)
+		return nil, false
+	}
+
+	decision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(role),
+		ProjectID: agent.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   agent.ProjectID,
+	})
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionLifecycle, "CanDelegate denied: "+decision.Reason)
+		writeForbidden(w, "Cannot delegate agent authority you do not hold: "+decision.Reason)
+		return nil, false
+	}
+
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	if err != nil {
+		cause, structural := ceilingDenyCauseForError(err)
+		if !structural {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: effect ceiling lookup failed",
+				"agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
+			return nil, false
+		}
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+err.Error())
+		writeForbiddenDenial(w, ceilingSourceDenialMessage(cause), DeniedByDelegationCeiling)
+		return nil, false
+	}
+	if _, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, true); !allowed {
+		msg := fmt.Sprintf("the credential's scopes do not cover the agent's role %q", role)
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+msg)
+		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
+		return nil, false
+	}
+	if self {
+		// Decision D1: a self request does not re-record the edge.
+		return nil, true
+	}
+	ownerReclaim := false
+	if !roleChanged {
+		// ptone/scion#3762: another requester's reincarnate that keeps the
+		// role keeps the existing edge, so the agent keeps its delegator.
+		// ptone/scion#3948: the one exception is a user's reincarnate of an
+		// agent whose own edge is missing or unrecorded, or whose chain has
+		// an unrecorded hop further up that the chain walk reaches before
+		// any hop it does not accept, which re-records the edge below so
+		// the reincarnate repairs the chain.
+		if agentIdent != nil {
+			return nil, true
+		}
+		unrecorded, err := s.reincarnateChainUnrecorded(ctx, agent)
+		if err != nil {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+				"agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the agent's delegation chain; retry later", nil)
+			return nil, false
+		}
+		if !unrecorded {
+			// Owner reclaim: the agent's owner keeping the role of an agent
+			// whose recorded chain ends at another user re-records the edge
+			// with the owner as delegator, so the owner's unshared material
+			// follows the chain again (start_owner_material_chain.go).
+			reclaim, err := s.reincarnateOwnerReclaims(ctx, identity, agent)
+			if err != nil {
+				s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+					"agent_id", agent.ID, "error", err)
+				writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+					"Unable to evaluate the agent's delegation chain; retry later", nil)
+				return nil, false
+			}
+			if !reclaim {
+				return nil, true
+			}
+			ownerReclaim = true
+		}
+	}
+	if agentIdent != nil {
+		descends, err := s.requesterDescendsFrom(ctx, agentIdent.ID(), agent)
+		if err != nil {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+				"agent_id", agent.ID, "requester_id", agentIdent.ID(), "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the requester's delegation chain; retry later", nil)
+			return nil, false
+		}
+		if descends {
+			msg := "Cannot change the role of an agent you descend from: you would become its delegator, which closes a loop in the delegation chain"
+			logAuthzDenial(r, identity, resource, ActionLifecycle, "delegation cycle: requester descends from the agent")
+			writeForbidden(w, msg)
+			return nil, false
+		}
+	}
+
+	delegatorType := store.DelegationPrincipalUser
+	if agentIdent != nil {
+		delegatorType = store.DelegationPrincipalAgent
+	}
+	return &reincarnateAuthority{
+		DelegatorType:       delegatorType,
+		DelegatorID:         identity.ID(),
+		Role:                string(role),
+		Ceiling:             ceiling,
+		Provenance:          prov,
+		OwnerMaterialNotice: s.ownerMaterialReRecordNotice(ctx, agent, delegatorType, identity.ID()),
+		OwnerReclaim:        ownerReclaim,
+		RuntimeReadNotice:   s.runtimeReadReRecordNotice(ctx, agent, delegatorType, identity.ID()),
+	}, true
+}
+
+// reincarnateOwnerReclaims reports whether a user's same-role reincarnate of
+// agent re-records its edge as an owner reclaim: the requester is the
+// agent's owner, and the agent's recorded chain ends at another user. The
+// re-record is bounded as every other one is, by checks that run before
+// this: CanDelegate, and the requester's credential ceiling read as the hop
+// it records would apply it (uatHopEffectCeiling). Only a chain lookup
+// fault is an error.
+func (s *Server) reincarnateOwnerReclaims(ctx context.Context, identity Identity, agent *store.Agent) (bool, error) {
+	if identity == nil || agent.OwnerID == "" || identity.ID() != agent.OwnerID {
+		return false, nil
+	}
+	v := s.authzService.ownerChainVerdict(ctx, agent)
+	switch {
+	case v.outcome == ownerChainWithhold && v.reason == ownerChainReasonLookupError:
+		return false, fmt.Errorf("owner material chain lookup for agent %s failed", agent.ID)
+	case v.outcome == ownerChainEndsAtUser && v.terminalUserID != agent.OwnerID:
+		return true, nil
+	}
+	return false, nil
+}
+
+// ownerMaterialReRecordNoticeText is the plan warning of a re-record after
+// which the owner's unshared material is not delivered to the agent;
+// ownerMaterialReclaimClause is appended when the owner can restore it by
+// reincarnating the agent (its ancestry, if any, starts at the owner).
+const (
+	ownerMaterialReRecordNoticeText = "the agent's recorded delegation chain will not end at its owner, so the owner's user secrets and env vars that are not shared with progeny will not be delivered to it"
+	ownerMaterialReclaimClause      = "; the owner can restore them by reincarnating the agent"
+)
+
+// ownerMaterialReRecordNotice returns the notice for a re-record of agent's
+// edge with the given delegator, or "" when the owner's unshared rows are
+// still delivered after it: the new chain ends at the owner (a user
+// delegator equal to the owner, or an agent delegator whose own chain ends
+// there) and the agent's ancestry, if any, starts at the owner. A lookup
+// fault on an agent delegator's chain gives the notice. The remedy clause is added only when
+// the new chain is what withholds the rows (terminal_user_not_owner).
+func (s *Server) ownerMaterialReRecordNotice(ctx context.Context, agent *store.Agent, delegatorType, delegatorID string) string {
+	if agent == nil || agent.OwnerID == "" || s.authzService == nil {
+		return ""
+	}
+	var v ownerChainVerdict
+	switch delegatorType {
+	case store.DelegationPrincipalUser:
+		v = ownerChainVerdict{outcome: ownerChainEndsAtUser, terminalUserID: delegatorID}
+	case store.DelegationPrincipalAgent:
+		v = s.authzService.ownerChainVerdict(ctx, &store.Agent{ID: delegatorID, ProjectID: agent.ProjectID})
+		if v.outcome == ownerChainLegacy {
+			// The delegator's own hop is unrecorded: above the agent.
+			v = ownerChainVerdict{outcome: ownerChainWithhold, reason: ownerChainReasonUnrecordedAbove}
+		}
+	default:
+		return ownerMaterialReRecordNoticeText
+	}
+	deliver, _, reason := ownerRowDecision(v, agent.Ancestry, agent.OwnerID)
+	switch {
+	case deliver:
+		return ""
+	case reason == ownerChainReasonTerminalNotOwner:
+		return ownerMaterialReRecordNoticeText + ownerMaterialReclaimClause
+	default:
+		return ownerMaterialReRecordNoticeText
+	}
+}
+
+// runtimeReadReRecordNoticeText is the notice of a re-record after which
+// the agent's delegation chain is still unrecorded above its own edge, so
+// the runtime read and the agent secret list refuse the owner's shared
+// user secrets (chain_unrecorded), and start withholds them.
+const runtimeReadReRecordNoticeText = "runtime reads of the owner's shared secrets are refused until the agent's chain is recorded (reincarnate it as its owner)"
+
+// runtimeReadReRecordNotice returns the notice for a re-record of agent's
+// edge with the given delegator when the agent's chain stays unrecorded
+// above it: the delegator is an agent whose own edge, or a hop above it,
+// has no recorded provenance. It is "" for a user delegator (the chain then
+// ends at the agent's own edge), for an agent without ancestry (the runtime
+// read refuses it before the chain), and when the delegator's chain lookup
+// faults.
+func (s *Server) runtimeReadReRecordNotice(ctx context.Context, agent *store.Agent, delegatorType, delegatorID string) string {
+	if agent == nil || len(agent.Ancestry) == 0 || s.authzService == nil || delegatorType != store.DelegationPrincipalAgent {
+		return ""
+	}
+	v := s.authzService.ownerChainVerdict(ctx, &store.Agent{ID: delegatorID, ProjectID: agent.ProjectID})
+	switch {
+	case v.outcome == ownerChainLegacy:
+		// The delegator's own hop is unrecorded: above the agent.
+		return runtimeReadReRecordNoticeText
+	case v.outcome == ownerChainWithhold && v.reason == ownerChainReasonUnrecordedAbove:
+		return runtimeReadReRecordNoticeText
+	}
+	return ""
+}
+
+// reincarnateChainUnrecorded reports whether a user's same-role reincarnate
+// of agent re-records its edge. It does when the agent's own edge is missing
+// or is an unrecorded hop (hopUnrecorded: provenance version 0, an
+// uninterpretable version, the unrecorded ceiling kind, or the migration
+// sentinel), whatever lies above it: the user-rooted edge replaces the whole
+// chain, and CanDelegate and the user's ceiling, checked before this, still
+// bound it. Otherwise it does when the chain walk (chainEffectCeilingWalk)
+// counts an unrecorded hop further up: on a chain that folds, any unrecorded
+// hop; on a chain that stops with a structural error (for example a hop with
+// local development provenance on a server without dev auth), an unrecorded
+// hop below the hop where it stopped, or that hop itself when its ceiling
+// kind is unknown and its provenance version is not understood
+// (unrecordedBelow). Those are the chains whose agent a
+// permission requiring recorded provenance denies with ceiling_unrecorded,
+// as the check walks up from the agent and stops at the first unrecorded
+// hop. A fully recorded chain, and a chain whose only problem above a
+// recorded own edge is structural with no unrecorded hop below it, report
+// false, so the edge is kept; only a recreate replaces such a chain. More
+// than one active edge of its own also reports false, but that branch is
+// defensive: the agent standing gate (startGate, resolveChainRoot) runs
+// first and already refuses (409) such an agent, and one whose chain has a
+// missing ancestor edge or a loop. Only a lookup fault is an error.
+func (s *Server) reincarnateChainUnrecorded(ctx context.Context, agent *store.Agent) (bool, error) {
+	own, err := s.authzService.activeProjectEdges(ctx, agent.ID, agent.ProjectID)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case len(own) == 0:
+		return true, nil
+	case len(own) > 1:
+		// Defensive: unreachable behind the standing gate.
+		return false, nil
+	case hopUnrecorded(own[0]):
+		return true, nil
+	}
+	chain, unrecordedBelow, err := s.authzService.chainEffectCeilingWalk(ctx, agent)
+	if err != nil {
+		if isStructuralProvenanceError(err) {
+			return unrecordedBelow > 0, nil
+		}
+		return false, err
+	}
+	return chain.UnrecordedHops > 0, nil
+}
+
+// requesterDescendsFrom reports whether the requesting agent descends from
+// agent: agent is in the requester's stored ancestry (a lineage descendant,
+// refused conservatively even if its edge has since been re-pointed), or on
+// the requester's active delegation chain in agent's project, where
+// recording agent -> requester would close a loop that chainEffectCeiling
+// rejects (ErrProvenanceChain). The chain is walked as well because a
+// role-changing reincarnation re-points an edge without touching the
+// (immutable) ancestry. The walk stops at a user delegator, a migration
+// sentinel, a missing or ambiguous edge, a repeat, or maxDelegationDepth:
+// those are not loops through agent, and the requester's own ceiling check
+// has already judged its chain. Only a lookup fault is an error.
+func (s *Server) requesterDescendsFrom(ctx context.Context, requesterID string, agent *store.Agent) (bool, error) {
+	requester, err := s.store.GetAgent(ctx, requesterID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("requester agent lookup: %w", err)
+	}
+	if requester != nil && slices.Contains(requester.Ancestry, agent.ID) {
+		return true, nil
+	}
+	visited := make(map[string]bool, maxDelegationDepth+1)
+	delegateID := requesterID
+	for depth := 0; depth <= maxDelegationDepth; depth++ {
+		if delegateID == agent.ID {
+			return true, nil
+		}
+		if visited[delegateID] {
+			return false, nil
+		}
+		visited[delegateID] = true
+		active, err := s.authzService.activeProjectEdges(ctx, delegateID, agent.ProjectID)
+		if err != nil {
+			return false, err
+		}
+		if len(active) != 1 || isMigrationSentinel(active[0]) ||
+			active[0].DelegatorType != store.DelegationPrincipalAgent {
+			return false, nil
+		}
+		delegateID = active[0].DelegatorID
+	}
+	return false, nil
+}
+
+// reincarnateWorkspaceGateResult is the outcome of reincarnateWorkspaceGate.
+type reincarnateWorkspaceGateResult struct {
+	// workspaceModeErr is the refusal message of the reincarnate workspace
+	// gate, or "" when the agent's workspace mode is eligible.
+	workspaceModeErr string
+	// cloneMode, for a move, is true when the workspace is the agent's own
+	// directory (clone-per-agent, or an empty-per-agent workspace the move
+	// may carry or, forced, recreate).
+	cloneMode bool
+	// sameBrokerEmptyPerAgent is an empty-per-agent reincarnation that
+	// stays on the agent's broker.
+	sameBrokerEmptyPerAgent bool
+}
+
+// reincarnateWorkspaceGate decides whether agent's workspace mode allows a
+// reincarnation, a move to moveTarget when it is non-nil (forced when
+// forceMove). The request handler and the move worker's re-check both call
+// it, so a workspace change between the two is judged the same way.
+func (s *Server) reincarnateWorkspaceGate(ctx context.Context, agent *store.Agent, project *store.Project, moveTarget *store.RuntimeBroker, forceMove bool) reincarnateWorkspaceGateResult {
+	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
+	// clone-per-agent (a real GitClone, on a project that is neither
+	// worktree-per-agent nor shared — A23.1 R3: a project can be switched to
+	// shared after an agent was created as clone-per-agent, via a project
+	// label update, so this must be re-checked here rather than assumed from
+	// how populateAgentConfig behaves today) or an explicit mount (no
+	// GitClone, but a non-empty EFFECTIVE Workspace — shared-workspace and
+	// hub-managed projects), via the shared api.ReincarnateEligible
+	// predicate. GitClone alone does NOT identify clone-per-agent mode:
+	// populateAgentConfig (handlers_agent_create_helpers.go) sets GitClone
+	// for every git-remote project that is not shared-workspace, and that
+	// includes worktree-per-agent — so a worktree-per-agent agent has a
+	// non-nil GitClone and would otherwise pass the predicate. It is
+	// excluded here, separately, because only the Hub has the project
+	// record the predicate itself cannot see (api.ReincarnateEligible's doc
+	// comment).
+	//
+	// "Effective" Workspace (A23.1 R1): linkedProjectPath resolves a
+	// registered ProjectProvider.LocalPath for the agent's broker, exactly
+	// as the dispatcher's resolveDispatchProjectInfo does, and
+	// effectiveDispatchWorkspace applies buildCreateRequest's own "a linked
+	// local provider clears an absolute Workspace" rule. Gating on the raw
+	// AppliedConfig.Workspace let a linked shared project look eligible
+	// here, then get stopped and refused by the broker with a 409 — a
+	// regression from Phase 1's clean up-front 400. Evaluating the same
+	// effective value the dispatcher will actually send keeps the two from
+	// disagreeing.
+	//
+	// A23.2 FYI-b: the mirror of R3, for the reverse switch. A project can
+	// also switch TO clone-per-agent after an agent was created as
+	// shared-workspace or hub-managed: the agent's stored GitClone is still
+	// nil, but a fresh reincarnation would derive a GitClone from the
+	// project's CURRENT mode — and this agent has no existing real clone on
+	// disk for the broker's GitClone branch to find, so (without this
+	// check) it would be stopped and then refused by the broker's own "no
+	// existing git clone" 409, the same stop-then-refuse shape R1 fixed for
+	// the other direction. The linked-provider case is excluded here
+	// (linkedProjectPath == "") because when a provider IS linked,
+	// effectiveDispatchWorkspace already clears the workspace to "" and the
+	// generic ReincarnateEligible check below catches it as "neither".
+	//
+	// Checked before any plan is computed or anything persisted, as defense
+	// in depth alongside the broker's own refusal (Reprovision refuses to
+	// touch a workspace it did not find already on disk): this is what
+	// makes --dry-run report the restriction too, instead of a dry run
+	// showing a plan that a real request could not safely execute.
+	// Empty-per-agent workspaces are broker-local, unsynced state.
+	// A4 (ptone/scion#2727): an empty-per-agent workspace can move when it
+	// is on the shared export (placement export) and both brokers see the
+	// same export (equal identity markers): the target finds it in place.
+	// miller79/scion#167: on the same broker (no move target, including
+	// `--broker <current>`) the broker reuses the private workspace in
+	// place, gated below on a local-disk runtime and the broker's
+	// ReprovisionEmptyPerAgent capability. Any other empty-per-agent
+	// request (a move whose workspace is not movable) is still refused,
+	// unless it is a forced move (ptone/scion#5441): then the move checks
+	// decide, and a workspace the export cannot carry is recreated empty on
+	// the target.
+	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() &&
+		(forceMove || s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget))
+	sameBrokerEmptyPerAgent := project.IsEmptyPerAgent() && moveTarget == nil
+	workspaceModeErr := ""
+	if project.IsEmptyPerAgent() && !emptyPerAgentMove && !sameBrokerEmptyPerAgent {
+		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
+	}
+
+	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
+	var effectiveWorkspace string
+	var linkedProjectPath string
+	if agent.AppliedConfig != nil {
+		linkedProjectPath = s.linkedProjectPath(ctx, agent)
+		effectiveWorkspace = effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, linkedProjectPath)
+	}
+	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
+		linkedProjectPath == "" && effectiveWorkspace != ""
+	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
+		(hasGitClone && project.IsSharedWorkspace()) ||
+		switchedToCloneOnly ||
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace, project.IsEmptyPerAgent())))) {
+		// FYI-6 (review p1b-r1): the generic message now covers every
+		// eligible mode, not just clone-per-agent.
+		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
+		if project.IsWorktreePerAgent() {
+			workspaceModeErr = "reincarnate does not yet support worktree-per-agent workspaces"
+		}
+	}
+	// A linked project's workspace is a broker-local path, never on a
+	// shared export, so it cannot move.
+	if moveTarget != nil && workspaceModeErr == "" && linkedProjectPath != "" {
+		workspaceModeErr = "reincarnate --broker does not support linked projects; the workspace is local to the current broker"
+	}
+	return reincarnateWorkspaceGateResult{
+		workspaceModeErr:        workspaceModeErr,
+		cloneMode:               hasGitClone || emptyPerAgentMove,
+		sameBrokerEmptyPerAgent: sameBrokerEmptyPerAgent,
+	}
+}

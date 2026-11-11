@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,70 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	_ "github.com/mattn/go-sqlite3"
 )
-
-// setupMutePinTest builds a server with a web chat store, one project and one
-// topic in it, owned by nobody in particular — the dev-auth user is an admin so
-// it can read the project.
-func setupMutePinTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project, string) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	proj := &store.Project{
-		ID: tid("mutepin-proj"), Name: "mutepin", Slug: "mutepin",
-		Created: time.Now(), Updated: time.Now(),
-	}
-	if err := s.CreateProject(ctx, proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	topicID := tid("mutepin-topic")
-	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        topicID,
-		ProjectID: proj.ID,
-		Name:      "mutable",
-		CreatedBy: DevUserID,
-		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-
-	return srv, s, wcs, proj, topicID
-}
-
-// setupChatAuthzTest builds a server whose project has a real members group and
-// policy, so a user outside the project is genuinely refused rather than
-// waved through by the dev-auth admin.
-func setupChatAuthzTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project) {
-	t.Helper()
-	srv, s, _, _, project := setupDemoPolicyTest(t)
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	return srv, s, wcs, project
-}
 
 // ---------------------------------------------------------------------------
 // #1029 — PUT /api/v1/chat/conversations/{key}/mute
@@ -126,9 +62,9 @@ func TestChatV2_Mute_SetAndClear(t *testing.T) {
 				t.Errorf("response muted = %v, want %v", resp.Muted, tt.muted)
 			}
 
-			stored, err := wcs.IsConversationMuted(ctx, DevUserID, topicID)
+			stored, err := conversationMuted(ctx, wcs, DevUserID, topicID)
 			if err != nil {
-				t.Fatalf("IsConversationMuted: %v", err)
+				t.Fatalf("read mute state: %v", err)
 			}
 			if stored != tt.muted {
 				t.Errorf("stored muted = %v, want %v", stored, tt.muted)
@@ -149,9 +85,9 @@ func TestChatV2_Mute_DMParticipant(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	muted, err := wcs.IsConversationMuted(ctx, DevUserID, dmKey)
+	muted, err := conversationMuted(ctx, wcs, DevUserID, dmKey)
 	if err != nil {
-		t.Fatalf("IsConversationMuted: %v", err)
+		t.Fatalf("read mute state: %v", err)
 	}
 	if !muted {
 		t.Error("DM should be muted after PUT")
@@ -179,7 +115,7 @@ func TestChatV2_Mute_RejectsBadRequests(t *testing.T) {
 		{
 			"DM the caller is not part of", http.MethodPut,
 			"dm:user:" + tid("stranger-a") + ":user:" + tid("stranger-b"),
-			map[string]bool{"muted": true}, nil, http.StatusForbidden,
+			map[string]bool{"muted": true}, nil, http.StatusNotFound,
 		},
 	}
 
@@ -210,9 +146,8 @@ func TestChatV2_Mute_Unauthenticated(t *testing.T) {
 }
 
 // A user with no read access to the topic's project must not be able to mute
-// it — muting a conversation you cannot read would leak its existence and let
-// a stranger write to another user's read-state row.
-func TestChatV2_MutePin_ForbiddenForNonMember(t *testing.T) {
+// it, and gets the same answer as for a topic that does not exist.
+func TestChatV2_MutePin_NonMemberMatchesMissing(t *testing.T) {
 	srv, s, wcs, project := setupChatAuthzTest(t)
 	ctx := context.Background()
 
@@ -227,9 +162,7 @@ func TestChatV2_MutePin_ForbiddenForNonMember(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	// Deliberately not a hub member: the seeded hub-member-read-all policy
-	// grants project read to every hub member, so an outsider is the user the
-	// project's read authorization actually turns away.
+	// A user with no role in the project.
 	outsider := &store.User{
 		ID:          tid("chat-outsider"),
 		Email:       "outsider@test.com",
@@ -252,16 +185,19 @@ func TestChatV2_MutePin_ForbiddenForNonMember(t *testing.T) {
 		t.Run(action.route, func(t *testing.T) {
 			rec := doRequestAsUser(t, srv, outsider, http.MethodPut,
 				"/api/v1/chat/conversations/"+topicID+"/"+action.route, action.body)
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("expected 403 for non-member, got %d: %s", rec.Code, rec.Body.String())
+			missing := doRequestAsUser(t, srv, outsider, http.MethodPut,
+				"/api/v1/chat/conversations/"+tid("authz-topic-missing")+"/"+action.route, action.body)
+			if rec.Code != http.StatusNotFound || rec.Code != missing.Code || rec.Body.String() != missing.Body.String() {
+				t.Fatalf("non-member must get the missing-topic answer: got %d %s, missing %d %s",
+					rec.Code, rec.Body.String(), missing.Code, missing.Body.String())
 			}
 		})
 	}
 
 	// Nothing was written for the outsider.
-	muted, err := wcs.IsConversationMuted(ctx, outsider.ID, topicID)
+	muted, err := conversationMuted(ctx, wcs, outsider.ID, topicID)
 	if err != nil {
-		t.Fatalf("IsConversationMuted: %v", err)
+		t.Fatalf("read mute state: %v", err)
 	}
 	if muted {
 		t.Error("refused request must not have muted the conversation")
@@ -336,7 +272,7 @@ func TestChatV2_Pin_RejectsBadRequests(t *testing.T) {
 		{
 			"DM the caller is not part of", http.MethodPut,
 			"dm:user:" + tid("stranger-c") + ":user:" + tid("stranger-d"),
-			map[string]bool{"pinned": true}, nil, http.StatusForbidden,
+			map[string]bool{"pinned": true}, nil, http.StatusNotFound,
 		},
 	}
 
@@ -511,4 +447,14 @@ func TestChatV2_DMList_ReportsMuted(t *testing.T) {
 	if !resp.DMs[0].Muted {
 		t.Error("DM list should report muted=true")
 	}
+}
+
+// conversationMuted reads userID's stored mute flag for key; no read-state
+// row means unmuted.
+func conversationMuted(ctx context.Context, wcs WebChatStore, userID, key string) (bool, error) {
+	rs, err := wcs.GetReadState(ctx, userID, key)
+	if err != nil {
+		return false, err
+	}
+	return rs != nil && rs.Muted, nil
 }

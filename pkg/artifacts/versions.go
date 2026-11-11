@@ -1,0 +1,1066 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package artifacts
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"mime"
+	"net/http"
+	"path"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
+)
+
+// Two-step publish (design D9): a publisher creates a pending version from
+// a manifest, uploads each file the response lists, then finalizes. The
+// version becomes ready, and the artifact's current version, only at
+// finalize, after every file of the manifest has arrived.
+
+const (
+	// PendingVersionTTL is how long a pending version may wait for its
+	// files and its finalize before it is reaped.
+	PendingVersionTTL = 24 * time.Hour
+
+	// MaxPendingVersions is how many pending versions one artifact may
+	// have at a time.
+	MaxPendingVersions = 4
+
+	// maxManifestBytes caps the JSON body of a create request.
+	maxManifestBytes = 1 << 20
+
+	maxKeyBytes   = 256
+	maxNoteRunes  = 2000
+	maxListedPath = 20
+)
+
+// CodeIncomplete is the error code of a finalize refused because files of
+// the manifest have not been uploaded. The error's details list them under
+// "missing".
+const CodeIncomplete = "incomplete"
+
+// handleCreate implements POST /api/v1/artifacts with a JSON manifest. It
+// creates an artifact with a pending first version or, when the caller
+// already owns an artifact with the requested key in the scope, appends a
+// pending version to it.
+func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	req, ok := decodeManifest(w, r)
+	if !ok {
+		return
+	}
+	kind, ref, home, ok := s.host.Principal(ctx)
+	if !ok {
+		if s.writeMissingScope(w, r) {
+			return
+		}
+		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+		return
+	}
+	scope := strings.TrimSpace(req.Scope)
+	if scope == "" {
+		scope = home
+	}
+	if scope == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
+		return
+	}
+	if !canCreateIn(ctx, s.host, scope) {
+		// A credential that does not permit artifact.create may be
+		// explained; the decision itself is canCreateIn's.
+		s.logCreateRefusal(r, scope)
+		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+			return
+		}
+		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
+		return
+	}
+	// canCreateIn passed, so the credential permits artifact.create in
+	// scope: appending to an existing artifact there reuses that answer.
+	permitted := true
+	key := req.Key
+	if err := validKey(key); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	b, ok := s.backend()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact storage is not configured")
+		return
+	}
+	if !validateManifest(w, req, b.currentLimits(ctx)) {
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = path.Base(req.Entry)
+	}
+	if !utf8.ValidString(title) || utf8.RuneCountInString(title) > maxTitleRunes {
+		writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("title must be valid UTF-8 of at most %d characters", maxTitleRunes))
+		return
+	}
+
+	if key != "" {
+		existing, err := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
+		if err == nil {
+			s.appendVersion(w, r, b, existing, req, &permitted)
+			return
+		}
+		if !errors.Is(err, ErrNotFound) {
+			slog.ErrorContext(ctx, "artifacts: key lookup failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact")
+			return
+		}
+	}
+
+	if req.Kind == VersionKindReview {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
+		return
+	}
+	now := time.Now().UTC()
+	a := &Artifact{
+		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
+		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
+		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
+	}
+	// The delegating user of an agent creating the artifact, resolved by
+	// the host from the agent's delegation chain (ptone/scion#6028); never
+	// from the request.
+	a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)
+	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
+	v.Seq = 1
+	g := Grant{
+		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: scope,
+		Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
+	}
+	grants := []Grant{g}
+	// The automatic review grant for the delegating user commits with the
+	// artifact, or not at all (ptone/scion#7134).
+	if sg, ok := s.sponsorReviewGrant(r, a, now); ok {
+		grants = append(grants, sg)
+	}
+	err := b.store.CreatePending(ctx, a, v, files, grants)
+	if errors.Is(err, ErrConflict) {
+		// Another publish took the key first: append to its artifact.
+		existing, lookErr := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
+		if lookErr == nil {
+			s.appendVersion(w, r, b, existing, req, &permitted)
+			return
+		}
+		err = lookErr
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: create pending version failed", "error", err)
+		s.logVersionError(r, a, v.Seq, logReasonStoreError)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
+		return
+	}
+	s.logAllowed(r, logEntry{action: logActionCreated, artifact: a, seq: v.Seq, authority: logAuthorityOwner})
+	s.logSponsorReviewGrants(r, a, grants)
+	writePending(w, a, v, files)
+}
+
+// handleCreateVersion implements POST /api/v1/artifacts/{id}/versions.
+func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id string) {
+	req, ok := decodeManifest(w, r)
+	if !ok {
+		return
+	}
+	if req.Title != "" || req.Key != "" || req.Scope != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "title, key and scope apply only when creating an artifact")
+		return
+	}
+	b, a, _, ok := s.writableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	if !validateManifest(w, req, b.currentLimits(r.Context())) {
+		return
+	}
+	s.appendVersion(w, r, b, a, req, nil)
+}
+
+// appendVersion adds a pending version to a, which the caller may write.
+// Files identical (same path and digest) to the current version's need no
+// upload.
+//
+// permitted, when not nil, is the caller's Host.Permits answer for
+// artifact.create in a's home scope, already asked.
+func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest, permitted *bool) {
+	ctx := r.Context()
+	kind, ref, _, _ := s.host.Principal(ctx)
+	var access writeAccess
+	var err error
+	if permitted != nil {
+		access, err = s.canWritePermittedErr(ctx, b, a, *permitted)
+	} else {
+		access, err = s.canWriteErr(ctx, b, a)
+	}
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return
+	}
+	if access == accessNone {
+		s.logWriteRefusal(r, a)
+		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
+		return
+	}
+	// Refusal 1 of 3 for a review grantee: starting a publish version.
+	if refuseKind(w, access, versionKind(req.Kind)) {
+		s.logRefusal(r, logActionWrite, logReasonReviewOnly, a)
+		return
+	}
+	if req.Kind == VersionKindReview && a.CurrentSeq == 0 {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
+		return
+	}
+	// The open-review check runs after authorization and before the
+	// version number is taken (ptone/scion#6849); reviews are not checked.
+	var warnings []string
+	if versionKind(req.Kind) == VersionKindPublish {
+		var ok bool
+		if warnings, ok = s.checkOpenReviews(w, r, b, a, req.Force); !ok {
+			return
+		}
+	}
+	var current map[string]File
+	if a.CurrentSeq > 0 {
+		if cv, err := b.store.GetVersion(ctx, a.ID, a.CurrentSeq); err == nil {
+			if files, err := b.store.ListFiles(ctx, cv.ID); err == nil {
+				current = make(map[string]File, len(files))
+				for _, f := range files {
+					if f.Origin == FileOriginUpload && f.SHA256 != "" {
+						current[f.Path] = f
+					}
+				}
+			}
+		}
+	}
+	v, files := pendingVersion(a.ID, req, kind, ref, time.Now().UTC(), current)
+	err = b.store.CreateVersion(ctx, v, files, MaxPendingVersions)
+	switch {
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
+		return
+	case errors.Is(err, ErrTooManyPending):
+		writeError(w, http.StatusConflict, "too_many_pending",
+			fmt.Sprintf("the artifact already has %d versions waiting to be finalized", MaxPendingVersions))
+		return
+	case errors.Is(err, ErrNotFound):
+		writeNotFound(w)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "artifacts: create version failed", "error", err)
+		s.logVersionError(r, a, v.Seq, logReasonStoreError)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the version")
+		return
+	}
+	s.logVersion(r, logActionVersionCreated, a, v.Seq, access)
+	writePending(w, a, v, files, warnings...)
+}
+
+// pendingVersion builds a pending version and its manifest rows. A file
+// that matches one in current (same path and digest) is recorded as
+// already received.
+func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref string, now time.Time, current map[string]File) (*Version, []File) {
+	v := &Version{
+		ID: uuid.NewString(), ArtifactID: artifactID, Kind: versionKind(req.Kind), EntryPath: req.Entry,
+		Note: strings.TrimSpace(req.Note), FileCount: len(req.Files), CreatedByKind: kind, CreatedByRef: ref,
+		CreatedAt: now, State: VersionStatePending,
+	}
+	files := make([]File, 0, len(req.Files))
+	for _, m := range req.Files {
+		v.TotalBytes += m.Size
+		f := File{
+			VersionID: v.ID, Path: m.Path, Size: m.Size, SHA256: m.SHA256,
+			MediaType: manifestMediaType(m.Path, m.MediaType), Pending: true,
+		}
+		if prev, ok := current[m.Path]; ok && prev.SHA256 == m.SHA256 && prev.Size == m.Size {
+			f.MediaType, f.Pending = prev.MediaType, false
+		}
+		files = append(files, f)
+	}
+	return v, files
+}
+
+// versionKind maps a request's kind to a stored kind; "" means publish.
+func versionKind(k string) string {
+	if k == VersionKindReview {
+		return VersionKindReview
+	}
+	return VersionKindPublish
+}
+
+func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File, warnings ...string) {
+	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}, Warnings: warnings}
+	// One upload per digest: files with the same bytes share the stored
+	// object, and uploading one marks the others received.
+	seen := map[string]bool{}
+	for _, f := range files {
+		if f.Pending && !seen[f.SHA256] {
+			seen[f.SHA256] = true
+			resp.Upload.Required = append(resp.Upload.Required, f.Path)
+		}
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// decodeManifest reads and decodes the JSON body of a create request.
+func decodeManifest(w http.ResponseWriter, r *http.Request) (*CreateVersionRequest, bool) {
+	if r.ContentLength > maxManifestBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "the manifest is too large")
+		return nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxManifestBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "could not read the request body")
+		return nil, false
+	}
+	if len(body) > maxManifestBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "the manifest is too large")
+		return nil, false
+	}
+	var req CreateVersionRequest
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || dec.More() {
+		writeError(w, http.StatusBadRequest, "bad_request", "the body must be a JSON version manifest")
+		return nil, false
+	}
+	return &req, true
+}
+
+// validKey checks a publisher-chosen key: optional, valid UTF-8 without
+// control characters, at most maxKeyBytes.
+func validKey(key string) error {
+	if key == "" {
+		return nil
+	}
+	if len(key) > maxKeyBytes || !utf8.ValidString(key) || strings.TrimSpace(key) != key {
+		return fmt.Errorf("key must be valid UTF-8 of at most %d bytes without surrounding spaces", maxKeyBytes)
+	}
+	for _, c := range key {
+		if c < 0x20 || c == 0x7f {
+			return errors.New("key must not contain control characters")
+		}
+	}
+	return nil
+}
+
+// validateManifest checks a manifest against the path rules and limits and
+// writes a 400 or 413 when it fails.
+func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits) bool {
+	bad := func(msg string) bool {
+		writeError(w, http.StatusBadRequest, "bad_request", msg)
+		return false
+	}
+	switch req.Kind {
+	case "", VersionKindPublish:
+	case VersionKindReview:
+	default:
+		return bad("kind must be publish or review")
+	}
+	if !utf8.ValidString(req.Note) || utf8.RuneCountInString(req.Note) > maxNoteRunes {
+		return bad(fmt.Sprintf("note must be valid UTF-8 of at most %d characters", maxNoteRunes))
+	}
+	if len(req.Files) == 0 {
+		return bad("the manifest lists no files")
+	}
+	if len(req.Files) > l.MaxFiles {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+			fmt.Sprintf("a version may hold at most %d files", l.MaxFiles))
+		return false
+	}
+	paths := make(map[string]bool, len(req.Files))
+	folded := make(map[string]string, len(req.Files))
+	var total int64
+	for i := range req.Files {
+		m := &req.Files[i]
+		if _, err := cleanFilePath(m.Path); err != nil {
+			return bad(fmt.Sprintf("invalid file path %q", truncate(m.Path, 80)))
+		}
+		if isReservedPath(m.Path) {
+			return bad("paths under " + RemotePrefix + " are reserved")
+		}
+		if paths[m.Path] {
+			return bad(fmt.Sprintf("file %q is listed twice", m.Path))
+		}
+		paths[m.Path] = true
+		key := pathFoldKey(m.Path)
+		if other, ok := folded[key]; ok {
+			return bad(fmt.Sprintf("files %q and %q differ only in case or Unicode form", other, m.Path))
+		}
+		folded[key] = m.Path
+		m.SHA256 = strings.ToLower(m.SHA256)
+		if !isHexDigest(m.SHA256) {
+			return bad(fmt.Sprintf("file %q needs a hex SHA-256 digest", m.Path))
+		}
+		if m.Size < 0 {
+			return bad(fmt.Sprintf("file %q has a negative size", m.Path))
+		}
+		if m.Size > l.MaxFileBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("file %q exceeds the %d byte limit", m.Path, l.MaxFileBytes))
+			return false
+		}
+		total += m.Size
+		if total > l.MaxBundleBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("the files exceed the %d byte version limit", l.MaxBundleBytes))
+			return false
+		}
+		if len(m.MediaType) > 255 {
+			return bad(fmt.Sprintf("file %q has an invalid media type", m.Path))
+		}
+	}
+	// A path may not also be a directory of another path, so a bundle
+	// always writes out to a file tree.
+	for p := range paths {
+		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+			if paths[dir] {
+				return bad(fmt.Sprintf("%q is both a file and a directory", dir))
+			}
+			if other, ok := folded[pathFoldKey(dir)]; ok {
+				return bad(fmt.Sprintf("%q and the directory %q differ only in case or Unicode form", other, dir))
+			}
+		}
+	}
+	if req.Entry == "" {
+		if len(req.Files) != 1 {
+			return bad("entry is required for a manifest of several files")
+		}
+		req.Entry = req.Files[0].Path
+	}
+	if !paths[req.Entry] {
+		return bad("entry must name a file of the manifest")
+	}
+	return true
+}
+
+// manifestMediaType is the media type recorded for a file before its
+// bytes arrive: from its extension, else the declared type, else
+// application/octet-stream, which the upload then refines by sniffing.
+func manifestMediaType(name, declared string) string {
+	if mt, ok := extMediaTypes[strings.ToLower(path.Ext(name))]; ok {
+		return mt
+	}
+	if declared != "" {
+		if mt, _, err := mime.ParseMediaType(declared); err == nil {
+			mt = strings.ToLower(mt)
+			if mt != "application/octet-stream" && !strings.HasPrefix(mt, "multipart/") {
+				return mt
+			}
+		}
+	}
+	return "application/octet-stream"
+}
+
+func isHexDigest(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// writeAccess is how the caller may append versions to an artifact: the
+// answer of the one write decision, canWritePermittedErr.
+type writeAccess int
+
+const (
+	// accessNone: the caller may not append versions.
+	accessNone writeAccess = iota
+	// accessReviewGrant: only a review grant matches, and the caller can
+	// read the artifact without it, so it may append versions of kind
+	// review and nothing else (ptone/scion#4538).
+	accessReviewGrant
+	// accessWriteGrant: an unexpired write or admin grant matches.
+	accessWriteGrant
+	// accessOwner: the caller owns the artifact.
+	accessOwner
+)
+
+// canPublish reports whether the access lets the caller publish any kind
+// of version, not only reviews.
+func (w writeAccess) canPublish() bool { return w == accessOwner || w == accessWriteGrant }
+
+// allowsKind reports whether the access lets the caller append (start,
+// upload to or finalize) a version of the stored kind: every kind for a
+// full writer, review only for a review grantee.
+func (w writeAccess) allowsKind(kind string) bool {
+	return w.canPublish() || (w == accessReviewGrant && kind == VersionKindReview)
+}
+
+// CodeReviewOnly is the error code of a request refused because the
+// caller's access allows review versions only.
+const CodeReviewOnly = "review_only"
+
+// refuseKind writes the 403 for a caller whose access does not allow a
+// version of kind and reports whether it did. A review grantee is refused
+// a publish version when it starts one, uploads to one and finalizes one,
+// so a publish never follows a review that was allowed to start.
+func refuseKind(w http.ResponseWriter, access writeAccess, kind string) bool {
+	if access.allowsKind(kind) {
+		return false
+	}
+	writeError(w, http.StatusForbidden, CodeReviewOnly, "your access to this artifact allows review versions only")
+	return true
+}
+
+// canWriteErr reports how the caller may append versions to artifact a:
+// its credential must permit publishing (artifact.create) in the home
+// scope, and it must own the artifact (accessOwner), hold an unexpired
+// write or admin grant (accessWriteGrant), or hold an unexpired review
+// grant while it reads the artifact through the home project or a grant
+// to one of its projects (accessReviewGrant, review versions only). A grant is a principal
+// grant for the caller or a scope grant for a scope the host authorizes it
+// to publish in. The home scope's own read grant never confers write.
+// Publishing a version is publishing; ownership and grants decide which
+// artifacts, and a review grant which kinds.
+//
+// A failed grant read is an error, never a refusal, so a write route
+// answers 500 rather than a 403 a working read would not give, and
+// ArtifactResponse.CanPublish and CanReview state the same decision.
+func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (writeAccess, error) {
+	return s.canWritePermittedErr(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
+}
+
+// canWritePermittedErr is canWriteErr with the answer of Host.Permits for
+// artifact.create in a's home scope already known, for a caller that has
+// just asked it for that scope. It is the one write decision. A write or
+// admin grant wins over a review grant held at the same time.
+//
+// A review grant reads (it is in grantsForRead, ptone/scion#5145), so for a
+// plain review grant the canReadWith re-check below decides nothing about
+// the grant itself. It is kept: at route level it is defence in depth
+// (every route runs readableArtifact first), it still applies the
+// credential's Permits(artifact.read) and the "no finalized version yet"
+// rule, and ptone/scion#5548's bounded review grant, which must not read
+// on its own, depends on it.
+func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (writeAccess, error) {
+	kind, ref, _, ok := s.host.Principal(ctx)
+	if !ok {
+		return accessNone, nil
+	}
+	now := time.Now()
+	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
+		return accessNone, nil
+	}
+	if !permitted {
+		return accessNone, nil
+	}
+	if kind == a.OwnerKind && ref == a.OwnerRef {
+		return accessOwner, nil
+	}
+	grants, err := b.store.ListGrants(ctx, a.ID)
+	if err != nil {
+		return accessNone, err
+	}
+	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false) {
+		return accessWriteGrant, nil
+	}
+	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForReview, PermissionCreate, false) &&
+		canReadWith(ctx, s.host, a, func() ([]Grant, error) { return grants, nil }) {
+		return accessReviewGrant, nil
+	}
+	return accessNone, nil
+}
+
+// writableArtifact loads an artifact the caller may write, with how it may
+// (canWriteErr). An artifact the caller cannot read answers 404, like a
+// missing one; one it can read but not write answers 403; a failed grant
+// read answers 500. A review grantee passes: each route then refuses the
+// version kinds its access does not allow (refuseKind).
+func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, writeAccess, bool) {
+	b, a, ok := s.readableArtifact(w, r, id)
+	if !ok {
+		return b, nil, accessNone, false
+	}
+	access, err := s.canWriteErr(r.Context(), b, a)
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return b, nil, accessNone, false
+	}
+	if access == accessNone {
+		s.logWriteRefusal(r, a)
+		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
+		return b, nil, accessNone, false
+	}
+	return b, a, access, true
+}
+
+// pendingVersionOf loads pending version seq of a for its creator. Another
+// caller gets 403; a version that is not pending, 409. With finalizing
+// set, a version another finalize request claimed is accepted too, and
+// ClaimFinalize decides whether that claim may be taken over.
+func (s *Service) pendingVersionOf(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, seq int, finalizing bool) (*Version, bool) {
+	v, err := b.store.GetVersion(r.Context(), a.ID, seq)
+	if errors.Is(err, ErrNotFound) {
+		writeNotFound(w)
+		return nil, false
+	}
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: get version failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
+		return nil, false
+	}
+	kind, ref, _, _ := s.host.Principal(r.Context())
+	if v.CreatedByKind != kind || v.CreatedByRef != ref {
+		s.logRefusal(r, logActionWrite, logReasonNotVersionPublisher, a)
+		writeError(w, http.StatusForbidden, "forbidden", "only the publisher of a pending version may upload to it")
+		return nil, false
+	}
+	accepted := v.State == VersionStatePending || (finalizing && v.State == VersionStateFinalizing)
+	if !accepted {
+		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
+		return nil, false
+	}
+	return v, true
+}
+
+// handlePutFile implements PUT /{id}/versions/{seq}/files/{path}: the raw
+// body is the file's bytes. It must match the manifest's size and digest
+// (X-Content-SHA256, when sent, must equal the manifest digest too).
+// Uploading the same file again is allowed while the version is pending.
+func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id string, seq int, filePath string) {
+	ctx := r.Context()
+	if _, err := cleanFilePath(filePath); err != nil {
+		writeNotFound(w)
+		return
+	}
+	b, a, access, ok := s.writableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	v, ok := s.pendingVersionOf(w, r, b, a, seq, false)
+	if !ok {
+		return
+	}
+	// Refusal 2 of 3 for a review grantee: uploading to a publish version
+	// (one it started while it still held write access).
+	if refuseKind(w, access, v.Kind) {
+		s.logRefusal(r, logActionWrite, logReasonReviewOnly, a)
+		return
+	}
+	f, err := b.store.GetFile(ctx, v.ID, filePath)
+	if errors.Is(err, ErrNotFound) || (err == nil && f.Origin != FileOriginUpload) {
+		writeError(w, http.StatusNotFound, "not_found", "the file is not in the version's manifest")
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: get file failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
+		return
+	}
+	if h := r.Header.Get(HeaderContentSHA256); h != "" && strings.ToLower(strings.TrimSpace(h)) != f.SHA256 {
+		writeError(w, http.StatusBadRequest, "digest_mismatch", HeaderContentSHA256+" does not match the manifest")
+		return
+	}
+	if r.ContentLength >= 0 && r.ContentLength != f.Size {
+		writeError(w, http.StatusBadRequest, "size_mismatch", "Content-Length does not match the manifest")
+		return
+	}
+	spool, err := spoolBody(r.Body, f.Size)
+	if errors.Is(err, errTooLarge) {
+		writeError(w, http.StatusBadRequest, "size_mismatch", "the body is larger than the manifest says")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "could not read the request body")
+		return
+	}
+	defer spool.Close()
+	if spool.size != f.Size {
+		writeError(w, http.StatusBadRequest, "size_mismatch", "the body is smaller than the manifest says")
+		return
+	}
+	if spool.digest != f.SHA256 {
+		writeError(w, http.StatusBadRequest, "digest_mismatch", "the body does not match the manifest digest")
+		return
+	}
+	mediaType := detectMediaType(filePath, f.MediaType, spool.head)
+	if err := s.putBlob(ctx, b, spool, mediaType); err != nil {
+		slog.ErrorContext(ctx, "artifacts: blob write failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not store the file")
+		return
+	}
+	// The other pending files of the version with the same bytes share the
+	// stored object: they arrive with this upload, each with the media type
+	// detected for its own path.
+	files, err := b.store.ListFiles(ctx, v.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list files failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the file")
+		return
+	}
+	siblings := map[string]string{}
+	for _, o := range files {
+		if o.Path != filePath && o.Pending && o.SHA256 == f.SHA256 && fileOrigin(o.Origin) == FileOriginUpload {
+			siblings[o.Path] = detectMediaType(o.Path, o.MediaType, spool.head)
+		}
+	}
+	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType, siblings); {
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
+		// ErrNotFound: the version was reaped since it was loaded.
+		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "artifacts: mark received failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the file")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleFinalize implements POST /{id}/versions/{seq}/finalize: it checks
+// every manifest file has arrived, flips the version to ready and makes it
+// the artifact's current version (unless a later version already is).
+//
+// A review names the version it was started from in the body
+// ({"base": <seq>}); see finalizeReviewCheck. The body is decoded before
+// the artifact is looked up, so its errors are the same for every id.
+func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id string, seq int) {
+	ctx := r.Context()
+	freq, ok := decodeFinalize(w, r)
+	if !ok {
+		return
+	}
+	b, a, access, ok := s.writableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	v, ok := s.pendingVersionOf(w, r, b, a, seq, true)
+	if !ok {
+		return
+	}
+	// Refusal 3 of 3 for a review grantee: finalizing a publish version.
+	// It comes before the claim, so a refused request changes nothing.
+	if refuseKind(w, access, v.Kind) {
+		s.logRefusal(r, logActionWrite, logReasonReviewOnly, a)
+		return
+	}
+	if v.Kind == VersionKindReview && freq.Base <= 0 {
+		writeError(w, http.StatusBadRequest, CodeBaseRequired,
+			`finalizing a review needs the version it was started from: send {"base": <seq>}`)
+		return
+	}
+	files, err := b.store.ListFiles(ctx, v.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list files failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
+		return
+	}
+	var missing []string
+	for _, f := range files {
+		if f.Pending {
+			missing = append(missing, f.Path)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		count := len(missing)
+		if len(missing) > maxListedPath {
+			missing = missing[:maxListedPath]
+		}
+		writeJSON(w, http.StatusConflict, errorResponse{Error: errorBody{
+			Code:    CodeIncomplete,
+			Message: fmt.Sprintf("%d file(s) of the manifest have not been uploaded", count),
+			Details: map[string]any{"missing": missing, "missingCount": count},
+		}})
+		return
+	}
+	// The limits in force now apply, even if they were lowered while the
+	// version was pending.
+	lim := b.currentLimits(ctx)
+	if v.FileCount > lim.MaxFiles || v.TotalBytes > lim.MaxBundleBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "the version exceeds the current file count or size limit")
+		return
+	}
+	for _, f := range files {
+		if f.Size > lim.MaxFileBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("file %q exceeds the current %d byte limit", f.Path, lim.MaxFileBytes))
+			return
+		}
+	}
+	// Claim the version before any remote fetch, so that one finalize
+	// request completes it and concurrent ones answer 409 at once.
+	claim, err := b.store.ClaimFinalize(ctx, a.ID, seq, time.Now().Add(-staleFinalizeClaim))
+	switch {
+	case errors.Is(err, ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")
+		return
+	case errors.Is(err, ErrNotFound):
+		writeNotFound(w)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "artifacts: claim finalize failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
+		return
+	}
+	// Everything after the claim runs within finalizeWorkLimit, which is
+	// shorter than staleFinalizeClaim, so this request has finished, or
+	// given up, before another one may take its claim over.
+	work, cancel := context.WithTimeout(ctx, finalizeWorkLimit)
+	defer cancel()
+	base := 0
+	if v.Kind == VersionKindReview {
+		var done bool
+		if base, done = s.finalizeReviewCheck(w, r.WithContext(work), b, a, v, files, claim, freq.Base); done {
+			return
+		}
+	}
+	extra, warnings := s.finalizeExtras(w, r.WithContext(work), b, v, files)
+	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
+	if errors.Is(err, ErrStaleBase) {
+		// A version was published between the review check and now.
+		s.discardStaleReview(w, r, b, a, seq, claim)
+		return
+	}
+	if errors.Is(err, ErrPendingNewer) {
+		s.discardReview(w, r, b, a, seq, claim, FailReasonNewerPublishPending,
+			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
+		return
+	}
+	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
+		// Let the publisher try again, unless another request has claimed
+		// the version since.
+		if rerr := b.store.ReleaseFinalize(context.WithoutCancel(ctx), a.ID, seq, claim); rerr != nil {
+			slog.ErrorContext(ctx, "artifacts: release finalize failed", "error", rerr)
+		}
+	}
+	switch {
+	case errors.Is(err, ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")
+		return
+	case errors.Is(err, ErrNotFound):
+		writeNotFound(w)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "artifacts: finalize failed", "error", err)
+		s.logVersionError(r, a, seq, logReasonStoreError)
+		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
+		return
+	}
+	// The version is committed: log it before the read-back, which may fail.
+	s.logVersion(r, logActionVersionFinalized, updated, seq, access)
+	ready, err := b.store.GetVersion(ctx, a.ID, seq)
+	if err == nil {
+		files, err = b.store.ListFiles(ctx, ready.ID)
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read finalized version failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
+		return
+	}
+	if ready.Kind == VersionKindReview {
+		s.notifyReview(ctx, updated, ready, access)
+	}
+	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
+}
+
+// maxFinalizeBodyBytes caps the JSON body of a finalize request.
+const maxFinalizeBodyBytes = 4 << 10
+
+// decodeFinalize reads the optional finalize body. An empty body is an
+// empty request. ok=false means the response was written.
+func decodeFinalize(w http.ResponseWriter, r *http.Request) (FinalizeRequest, bool) {
+	var req FinalizeRequest
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxFinalizeBodyBytes+1))
+	if err != nil || len(raw) > maxFinalizeBodyBytes {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return req, true
+	}
+	if err := json.Unmarshal(raw, &req); err != nil || req.Base < 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	return req, true
+}
+
+// finalizeExtras returns the manifest rows the hub adds to a version at
+// finalize, with warnings for the publisher: the remote images of a
+// markdown entry, fetched now so that reading the version never fetches
+// anything.
+func (s *Service) finalizeExtras(w http.ResponseWriter, r *http.Request, b backend, v *Version, files []File) ([]File, []string) {
+	ctx := r.Context()
+	var entry *File
+	for i := range files {
+		if files[i].Path == v.EntryPath {
+			entry = &files[i]
+		}
+	}
+	if entry == nil || entry.SHA256 == "" {
+		return nil, nil
+	}
+	if entry.MediaType == mediaTypeHTML {
+		if window, _, err := s.entryWindow(r, b, entry); err == nil && htmlHasRemoteImages(window) {
+			return nil, []string{WarnHTMLRemoteImages}
+		}
+		return nil, nil
+	}
+	if entry.MediaType != mediaTypeMarkdown {
+		return nil, nil
+	}
+	rc, _, err := b.blobs.Download(ctx, BlobPath(b.hubID, entry.SHA256))
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read markdown entry failed", "error", err)
+		return nil, nil
+	}
+	window, err := readWindow(rc, entry.Size)
+	_ = rc.Close()
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read markdown entry failed", "error", err)
+		return nil, nil
+	}
+	return s.remoteImages(ctx, w, b, v.ID, window, entry.Size > imageScanWindow, versionUsage{files: v.FileCount, bytes: v.TotalBytes})
+}
+
+// finalizeWorkLimit bounds the work a finalize request does after it
+// claims a version: reading the entry, fetching remote images (within
+// their own budget) and recording the version.
+const finalizeWorkLimit = MaxRemoteFetchBudget + publishDeadlineMargin
+
+// staleFinalizeClaim is how old a finalize claim must be before another
+// finalize request may take it over. It is longer than finalizeWorkLimit,
+// so the request that made the claim has stopped by then.
+const staleFinalizeClaim = finalizeWorkLimit + time.Minute
+
+// Version list pages.
+const (
+	defaultVersionPage = 100
+	maxVersionPage     = 500
+)
+
+// handleListVersions implements GET /{id}/versions[?limit=][&before=]: the ready versions,
+// newest first, without their files, and in Discarded the failed versions
+// of the same page (ptone/scion#4577). A page walks ready and failed
+// versions together by seq.
+func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id string) {
+	b, a, ok := s.readableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	limit := defaultVersionPage
+	if v := q.Get("limit"); v != "" {
+		n, ok := parseSeq(v)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be a positive integer")
+			return
+		}
+		limit = min(n, maxVersionPage)
+	}
+	before := 0
+	if v := q.Get("before"); v != "" {
+		n, ok := parseSeq(v)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "before must be a version number")
+			return
+		}
+		before = n
+	}
+	versions, err := b.store.ListVersionHistory(r.Context(), a.ID, before, limit)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: list versions failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the versions")
+		return
+	}
+	resp := VersionListResponse{Versions: make([]VersionInfo, 0, len(versions)), Discarded: []DiscardedVersionInfo{}}
+	for i := range versions {
+		if versions[i].State == VersionStateFailed {
+			resp.Discarded = append(resp.Discarded, discardedVersionInfo(&versions[i]))
+			continue
+		}
+		vi := versionInfo(&versions[i], nil)
+		vi.Files = nil
+		resp.Versions = append(resp.Versions, *vi)
+	}
+	if len(versions) == limit {
+		resp.NextBefore = versions[len(versions)-1].Seq
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// discardedVersionInfo is the list entry of a failed version: its number,
+// state, reason and creation time, and nothing else.
+func discardedVersionInfo(v *Version) DiscardedVersionInfo {
+	reason := v.FailReason
+	if reason == "" {
+		reason = FailReasonDiscarded
+	}
+	return DiscardedVersionInfo{Seq: v.Seq, State: v.State, Reason: reason, CreatedAt: v.CreatedAt}
+}
+
+// handleGetVersion implements GET /{id}/versions/{seq}: one ready version
+// with its files.
+func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id string, seq int) {
+	b, a, ok := s.readableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	v, ok := readyVersion(w, r, b, a, seq)
+	if !ok {
+		return
+	}
+	files, err := b.store.ListFiles(r.Context(), v.ID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: list files failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
+		return
+	}
+	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), ScopeDeleted: s.scopeDeleted(r.Context(), a)}
+	if !s.capabilities(w, r, b, a, &resp) {
+		return
+	}
+	resp.Archive = s.archiveInfo(r.Context(), b, files)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ReapPending reaps versions left pending longer than PendingVersionTTL
+// (see Store.ReapPending), at most limit per call. The host calls it
+// periodically.
+func (s *Service) ReapPending(ctx context.Context, limit int) (int, error) {
+	b, ok := s.backend()
+	if !ok {
+		return 0, nil
+	}
+	return b.store.ReapPending(ctx, time.Now().Add(-PendingVersionTTL), limit)
+}

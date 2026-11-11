@@ -177,11 +177,11 @@ harness_configs:
 			if cfg == nil {
 				t.Fatal("ProvisionAgent returned nil config")
 			}
-			if cfg.MaxTurns != tc.wantTurns {
-				t.Errorf("MaxTurns: want %d, got %d (%s)", tc.wantTurns, cfg.MaxTurns, tc.wantExplanation)
+			if !api.IntPtrEqual(cfg.MaxTurns, wantCount(tc.wantTurns)) {
+				t.Errorf("MaxTurns: want %d, got %s (%s)", tc.wantTurns, api.FormatCountLimit(cfg.MaxTurns), tc.wantExplanation)
 			}
-			if cfg.MaxModelCalls != tc.wantCalls {
-				t.Errorf("MaxModelCalls: want %d, got %d (%s)", tc.wantCalls, cfg.MaxModelCalls, tc.wantExplanation)
+			if !api.IntPtrEqual(cfg.MaxModelCalls, wantCount(tc.wantCalls)) {
+				t.Errorf("MaxModelCalls: want %d, got %s (%s)", tc.wantCalls, api.FormatCountLimit(cfg.MaxModelCalls), tc.wantExplanation)
 			}
 			if cfg.MaxDuration != tc.wantDuration {
 				t.Errorf("MaxDuration: want %q, got %q (%s)", tc.wantDuration, cfg.MaxDuration, tc.wantExplanation)
@@ -224,13 +224,14 @@ harness_configs:
   test-harness:
     harness: test-harness
 `
-	// Template sets memory only.
+	// The template tier sets memory only. A template's own resources key is
+	// an environment key that agents ignore (ptone/scion#4524), so the value
+	// comes from the inline (request) config, merged directly above the
+	// template chain in the same tier.
 	const templateJSON = `{
-		"default_harness_config": "test-harness",
-		"resources": {
-			"limits": {"memory": "8Gi"}
-		}
+		"default_harness_config": "test-harness"
 	}`
+	inline := &api.ScionConfig{Resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "8Gi"}}}
 
 	projectScionDir := hubDefaultsFixture(t, settingsYAML, templateJSON)
 
@@ -248,7 +249,7 @@ harness_configs:
 	})
 
 	_, _, cfg, err := ProvisionAgent(ctx, "res-agent", "limits-tpl", "", "test-harness",
-		projectScionDir, "", "", "", "")
+		projectScionDir, "", "", "", "", inline)
 	if err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
@@ -270,7 +271,7 @@ harness_configs:
 	}
 	// Memory is the (template, hub) rank in the other direction.
 	if cfg.Resources.Limits.Memory != "8Gi" {
-		t.Errorf("Limits.Memory: want 8Gi from the template, got %q", cfg.Resources.Limits.Memory)
+		t.Errorf("Limits.Memory: want 8Gi from the template tier (inline), got %q", cfg.Resources.Limits.Memory)
 	}
 }
 
@@ -296,8 +297,8 @@ harness_configs:
 	if err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
-	if cfg.MaxTurns != 10 {
-		t.Errorf("MaxTurns: want 10 from settings.yaml, got %d", cfg.MaxTurns)
+	if !api.IntPtrEqual(cfg.MaxTurns, api.IntPtr(10)) {
+		t.Errorf("MaxTurns: want 10 from settings.yaml, got %s", api.FormatCountLimit(cfg.MaxTurns))
 	}
 	if cfg.Resources == nil || cfg.Resources.Limits.CPU != "1" {
 		t.Errorf("Resources: want cpu=1 from settings.yaml, got %+v", cfg.Resources)
@@ -307,13 +308,14 @@ harness_configs:
 // TestProvision_HubAgentDefaults_ContextValueSurvivesProvisioning is a SMOKE
 // TEST, NOT A PIN. Read this before trusting it.
 //
-// It does not — and structurally cannot — pin the defensive copy at
-// provision.go (the `base := *hd.Resources` copy in the hub agent_defaults
-// block). Review proved that by deleting the copy and watching this stay
-// green. The reason is the `finalScionCfg = updatedCfg` reload near the end of
-// ProvisionAgent: it reloads
-// finalScionCfg from disk before returning, so the pointer this test inspects
-// can never be the aliased one no matter what the merge did. Asserting on the
+// It does not — and structurally cannot — pin the defensive copy in
+// resolveEnvironmentResources (agent_environment.go, the `base := *hd.Resources`
+// copy of the hub agent_defaults tier). Review proved that by deleting the
+// copy and watching this stay green. The reason is the reload near the end of
+// ProvisionAgent: it reloads finalScionCfg from disk and re-attaches copies
+// of the effective environment values (environmentOf) before returning, so
+// the pointer this test inspects can never be the aliased one no matter what
+// the merge did. Asserting on the
 // written scion-agent.json does not help either — that file is marshalled from
 // the config and re-read, which launders the aliasing the same way. Anything
 // downstream of the reload is incapable of failing on this property.

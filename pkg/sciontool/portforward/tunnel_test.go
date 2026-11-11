@@ -14,7 +14,20 @@
 
 package portforward
 
-import "testing"
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	wire "github.com/GoogleCloudPlatform/scion/pkg/portforward"
+	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/gorilla/websocket"
+)
 
 func TestIsLoopbackHost(t *testing.T) {
 	tests := []struct {
@@ -40,5 +53,108 @@ func TestIsLoopbackHost(t *testing.T) {
 				t.Errorf("isLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
 			}
 		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestDoLocalRequest_HostPort: the local request address is built with
+// net.JoinHostPort, so an IPv6 loopback host is bracketed.
+func TestDoLocalRequest_HostPort(t *testing.T) {
+	tests := []struct {
+		host string
+		want string
+	}{
+		{"127.0.0.1", "127.0.0.1:8080"},
+		{"::1", "[::1]:8080"},
+		{"localhost", "localhost:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			var got string
+			m := NewManager(nil)
+			m.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				got = r.URL.Host
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Header: http.Header{}}, nil
+			})}
+			resp := m.doLocalRequest(&wire.Request{StreamID: "s1", Host: tt.host, Port: 8080, Method: http.MethodGet, Path: "/"})
+			if resp.Error != "" || resp.Status != http.StatusOK {
+				t.Fatalf("doLocalRequest = %+v", resp)
+			}
+			if got != tt.want {
+				t.Fatalf("dialed host %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunOnce_DialCarriesTransportHeader(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   transportauth.HeaderMode
+		header string
+	}{
+		{"authorization", transportauth.HeaderAuthorization, "Authorization"},
+		{"iap", transportauth.HeaderProxyAuthorization, "Proxy-Authorization"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := make(chan http.Header, 1)
+			upgrader := websocket.Upgrader{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got <- r.Header.Clone()
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				_ = conn.Close()
+			}))
+			defer srv.Close()
+
+			client := scionhub.NewClientWithConfig(srv.URL, "agent-credential", "agent-1")
+			src := transportauth.NewInjectedSource()
+			src.SetToken("transport-credential", time.Now().Add(time.Hour))
+			client.SetTransportAuth(src, tt.mode)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = NewManager(client).runOnce(ctx)
+
+			select {
+			case h := <-got:
+				if v := h.Get(tt.header); v != "Bearer transport-credential" {
+					t.Errorf("%s = %q, want transport credential", tt.header, v)
+				}
+				if v := h.Get("X-Scion-Agent-Token"); v != "agent-credential" {
+					t.Errorf("X-Scion-Agent-Token = %q", v)
+				}
+			case <-ctx.Done():
+				t.Fatal("tunnel dial never reached the server")
+			}
+		})
+	}
+}
+
+func TestRunOnce_NoTransportSourceStillDials(t *testing.T) {
+	got := make(chan http.Header, 1)
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+		if conn, err := upgrader.Upgrade(w, r, nil); err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	client := scionhub.NewClientWithConfig(srv.URL, "agent-credential", "agent-1")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = NewManager(client).runOnce(ctx)
+
+	h := <-got
+	if v := h.Get("Authorization"); v != "" {
+		t.Errorf("unexpected Authorization header without a transport source")
 	}
 }

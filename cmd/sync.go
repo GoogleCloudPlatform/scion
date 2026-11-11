@@ -23,9 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/dustin/go-humanize"
@@ -35,49 +33,36 @@ import (
 var (
 	syncDryRun  bool
 	syncExclude []string
-	syncForce   bool
 )
 
+// projectSyncRemovedMessage is the error for the project-level forms of
+// scion sync (bare, push and pull). They synced a project workspace with the
+// hub's WebDAV endpoint, which has been removed.
+const projectSyncRemovedMessage = "project-level sync ('scion sync', 'scion sync push', 'scion sync pull') has been removed along with the hub's WebDAV endpoint. " +
+	"To sync with an agent, use 'scion sync to <agent>' or 'scion sync from <agent>'. " +
+	"To move project files, use git, or the project's Files tab in the web UI (upload, download or workspace archive)."
+
 // syncCmd represents the sync command.
-// When invoked bare (no subcommand, no agent), it performs bidirectional project-level sync.
 var syncCmd = &cobra.Command{
-	Use:   "sync [push|pull|to|from] [agent-name]",
-	Short: "Sync project or agent workspace",
-	Long: `Synchronizes the workspace for a project or a specific agent.
+	Use:   "sync to|from <agent-name>",
+	Short: "Sync an agent workspace",
+	Long: `Synchronizes the local workspace with a running agent's workspace.
 
-Project-level sync (requires Hub):
-  scion sync                   Bidirectional sync (newer file wins)
-  scion sync push              Push local workspace to hub
-  scion sync pull              Pull hub workspace to local
-
-Agent-level sync (existing behavior):
+The direction is required:
   scion sync to <agent-name>   Push to a running agent's workspace
   scion sync from <agent-name> Pull from a running agent's workspace
 
 Options:
   --dry-run                    Preview what would be synced
   --exclude "pattern"          Additional glob patterns to exclude
-  --force                      Bypass safety checks (bisync max-delete)
+
+Project-level sync (bare 'scion sync', 'scion sync push' and
+'scion sync pull') has been removed and exits with an error.
 
 Examples:
-  # Bidirectional project sync against hub
-  scion sync
-
-  # Push local project workspace to hub
-  scion sync push
-
-  # Pull hub workspace to local
-  scion sync pull
-
-  # Preview project sync
-  scion sync --dry-run
-
-  # Sync with specific project
-  scion sync -g /path/to/project push
-
-  # Agent-level sync (unchanged)
   scion sync from my-agent
-  scion sync to my-agent --exclude "*.log"`,
+  scion sync to my-agent --exclude "*.log"
+  scion sync to my-agent --dry-run`,
 	Args: cobra.MaximumNArgs(2),
 	RunE: runSync,
 }
@@ -86,179 +71,37 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVar(&syncDryRun, "dry-run", false, "Show what would be synced without making changes")
 	syncCmd.Flags().StringArrayVar(&syncExclude, "exclude", nil, "Glob patterns to exclude from sync (can be specified multiple times)")
-	syncCmd.Flags().BoolVar(&syncForce, "force", false, "Bypass safety checks (e.g., bisync max-delete limit)")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	// Parse arguments to determine scope and direction
-	if len(args) == 0 {
-		// Bare `scion sync` → project-level bidirectional
-		return runProjectSync(projectsync.DirBisync)
+	// The project-level forms were removed with the hub's WebDAV endpoint.
+	if len(args) == 0 || args[0] == "push" || args[0] == "pull" {
+		return newUsageError("%s", projectSyncRemovedMessage)
 	}
 
 	direction := args[0]
 
-	// Project-level subcommands: push, pull
-	switch direction {
-	case "push":
-		if len(args) > 1 {
-			return fmt.Errorf("'push' does not take an agent name; use 'scion sync to <agent>' for agent-level sync")
-		}
-		return runProjectSync(projectsync.DirPush)
-	case "pull":
-		if len(args) > 1 {
-			return fmt.Errorf("'pull' does not take an agent name; use 'scion sync from <agent>' for agent-level sync")
-		}
-		return runProjectSync(projectsync.DirPull)
-	}
-
-	// Agent-level subcommands: to, from
 	if direction == "to" || direction == "from" {
 		if len(args) < 2 {
-			return fmt.Errorf("agent-level sync requires an agent name: scion sync %s <agent-name>", direction)
+			return newUsageError("agent-level sync requires an agent name: scion sync %s <agent-name>", direction)
 		}
-		return runAgentSync(args)
+		return runAgentSync(runtime.SyncDirection(direction), api.Slugify(args[1]))
 	}
 
-	// Single arg that isn't a direction → treat as agent name (legacy compat)
-	return runAgentSync(args)
-}
-
-// runProjectSync performs project-level workspace sync against the Hub's WebDAV endpoint.
-func runProjectSync(direction projectsync.Direction) error {
-	// Check Hub availability (project-level sync requires a hub)
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
-	if err != nil {
-		return err
+	if len(args) == 2 {
+		return newUsageError("invalid direction '%s', must be 'to' or 'from'", direction)
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("project-level sync requires a Hub connection.\nUse 'scion sync to/from <agent>' for agent-level sync in solo mode")
-	}
-
-	PrintUsingHub(hubCtx.Endpoint)
-
-	// Get the project ID
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	// Resolve local workspace path
-	workspacePath, err := resolveProjectWorkspacePath()
-	if err != nil {
-		return err
-	}
-
-	// Get auth token for WebDAV
-	authToken := getHubAccessToken(hubCtx.Endpoint)
-	if authToken == "" {
-		return fmt.Errorf("no authentication token available for hub; run 'scion hub auth login'")
-	}
-
-	dirLabel := string(direction)
-	if direction == projectsync.DirBisync {
-		dirLabel = "bidirectional sync"
-	}
-	statusf("Starting project %s: %s ↔ hub\n", dirLabel, workspacePath)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	result, err := projectsync.Sync(ctx, projectsync.Options{
-		LocalPath:       workspacePath,
-		HubEndpoint:     hubCtx.Endpoint,
-		ProjectID:       projectID,
-		AuthToken:       authToken,
-		Direction:       direction,
-		DryRun:          syncDryRun,
-		ExcludePatterns: syncExclude,
-		Force:           syncForce,
-	})
-	if err != nil {
-		return fmt.Errorf("project sync failed: %w", err)
-	}
-
-	if isJSONOutput() {
-		return outputJSON(map[string]interface{}{
-			"status":    "success",
-			"command":   "sync",
-			"scope":     "project",
-			"direction": string(result.Direction),
-			"projectId": projectID,
-			"dryRun":    result.DryRun,
-		})
-	}
-
-	if result.DryRun {
-		statusln("Dry run complete.")
-	} else {
-		statusln("Project sync complete.")
-	}
-
-	return nil
-}
-
-// resolveProjectWorkspacePath resolves the local workspace path for project-level sync.
-// It finds the project root directory containing .scion/.
-func resolveProjectWorkspacePath() (string, error) {
-	if projectPath != "" {
-		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to resolve project path: %w", err)
-		}
-		// The workspace is the parent of the .scion directory (for project projects)
-		// or a recorded path (for external projects)
-		return resolveProjectWorkspace(resolvedPath)
-	}
-
-	// Use current directory — find the project root
-	cwd, err := filepath.Abs(".")
-	if err != nil {
-		return "", err
-	}
-
-	projectRoot, found := config.FindProjectRoot()
-	if !found {
-		return cwd, nil
-	}
-
-	return projectRoot, nil
+	// A bare agent name: agent-level sync needs a direction.
+	return newUsageError("agent-level sync requires a direction: scion sync to|from %s", api.Slugify(direction))
 }
 
 // runAgentSync handles agent-level sync (to/from a specific agent).
-func runAgentSync(args []string) error {
-	var agentName string
-	var direction = runtime.SyncUnspecified
-
-	if len(args) == 2 {
-		dirStr := args[0]
-		if dirStr != "to" && dirStr != "from" {
-			return fmt.Errorf("invalid direction '%s', must be 'to' or 'from'", dirStr)
-		}
-		direction = runtime.SyncDirection(dirStr)
-		agentName = api.Slugify(args[1])
-	} else {
-		agentName = api.Slugify(args[0])
-	}
-
-	// Check if Hub should be used
-	hubCtx, err := CheckHubAvailability(projectPath)
+func runAgentSync(direction runtime.SyncDirection, agentName string) error {
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-
-	if hubCtx != nil {
-		// Hosted mode requires direction
-		if direction == runtime.SyncUnspecified {
-			return fmt.Errorf("hosted mode requires sync direction: scion sync [to|from] %s", agentName)
-		}
-		return syncViaHub(hubCtx, agentName, direction)
-	}
-
-	// Solo mode: use existing local sync
-	rt := runtime.GetRuntime(projectPath, profile)
-
-	return rt.Sync(context.Background(), agentName, direction)
+	return syncViaHub(hubCtx, agentName, direction)
 }
 
 // syncViaHub performs workspace sync using Hub API.
@@ -323,7 +166,7 @@ func syncFromViaHub(hubCtx *HubContext, agentID, agentName, localPath string) er
 	}
 
 	// Build local file hash map for incremental sync
-	localFiles, err := transfer.CollectFiles(localPath, transfer.DefaultExcludePatterns)
+	localFiles, err := collectWorkspaceFiles(localPath, nil)
 	if err != nil && syncDryRun {
 		// In dry-run mode, local path may not exist
 		localFiles = nil
@@ -415,10 +258,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 	statusf("Scanning local workspace...\n")
 
 	// Collect local files
-	excludePatterns := append([]string{}, transfer.DefaultExcludePatterns...)
-	excludePatterns = append(excludePatterns, syncExclude...)
-
-	localFiles, err := transfer.CollectFiles(localPath, excludePatterns)
+	localFiles, err := collectWorkspaceFiles(localPath, syncExclude)
 	if err != nil {
 		return fmt.Errorf("failed to scan local workspace: %w", err)
 	}
@@ -427,6 +267,12 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		statusln("No files to sync.")
 		return nil
 	}
+	// Uploads read through this root; see transfer.Client.UploadFiles.
+	localRoot, err := os.OpenRoot(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local workspace %s: %w", localPath, err)
+	}
+	defer func() { _ = localRoot.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -469,10 +315,13 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		statusln("All files are up to date on remote, nothing to upload.")
 		// Still need to finalize to apply the manifest to the agent
 		manifest := transfer.BuildManifest(localFiles)
-		if _, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest); err != nil {
+		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest)
+		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to finalize sync: %w", err))
 		}
-		statusln("Workspace sync applied to agent.")
+		for _, line := range syncToResultLines(0, 0, 0, true, finalizeResp) {
+			statusln(line)
+		}
 		return nil
 	}
 
@@ -491,7 +340,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		return nil
 	}
 
-	if err := transferClient.UploadFiles(ctx, toUpload, resp.UploadURLs, progress); err != nil {
+	if err := transferClient.UploadFiles(ctx, localRoot, toUpload, resp.UploadURLs, progress); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 
@@ -504,7 +353,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 	}
 
 	if isJSONOutput() {
-		return outputJSON(map[string]interface{}{
+		result := map[string]interface{}{
 			"status":           "success",
 			"command":          "sync",
 			"direction":        "to",
@@ -513,15 +362,14 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 			"bytesTransferred": uploadedBytes,
 			"filesSkipped":     len(resp.ExistingFiles),
 			"filesApplied":     finalizeResp.FilesApplied,
-		})
+		}
+		if len(finalizeResp.Warnings) > 0 {
+			result["warnings"] = finalizeResp.Warnings
+		}
+		return outputJSON(result)
 	}
-
-	statusf("Sync complete: %d files uploaded, %s transferred\n", uploadedCount, humanize.Bytes(uint64(uploadedBytes)))
-	if len(resp.ExistingFiles) > 0 {
-		statusf("Skipped %d unchanged files\n", len(resp.ExistingFiles))
-	}
-	if finalizeResp.Applied {
-		statusf("Applied %d files to agent workspace\n", finalizeResp.FilesApplied)
+	for _, line := range syncToResultLines(uploadedCount, uploadedBytes, len(resp.ExistingFiles), false, finalizeResp) {
+		statusln(line)
 	}
 
 	return nil
@@ -579,4 +427,38 @@ func resolveLocalWorkspacePath(agentName string) (string, error) {
 
 	// Fall back to current directory
 	return ".", nil
+}
+
+// syncToResultLines returns the status lines to show after a sync-to
+// finalize. When the hub reports that it ignored the workspace files
+// (empty-per-agent), its warning replaces the "applied" / "Sync complete"
+// lines, which would be misleading. Other hub warnings are always shown.
+func syncToResultLines(uploadedCount int, uploadedBytes int64, skipped int, nothingToUpload bool, resp *hubclient.SyncToFinalizeResponse) []string {
+	if resp == nil {
+		// No finalize body: nothing ignored or applied, but the upload
+		// summary still applies.
+		resp = &hubclient.SyncToFinalizeResponse{}
+	}
+	ignored, rest := splitFilesIgnoredWarning(resp.Warnings)
+	var lines []string
+	if ignored {
+		lines = append(lines, "Warning: "+api.WarningEmptyPerAgentWorkspaceFilesIgnored)
+	}
+	for _, w := range rest {
+		lines = append(lines, "Warning: "+w)
+	}
+	if ignored {
+		return lines
+	}
+	if nothingToUpload {
+		return append(lines, "Workspace sync applied to agent.")
+	}
+	lines = append(lines, fmt.Sprintf("Sync complete: %d files uploaded, %s transferred", uploadedCount, humanize.Bytes(uint64(uploadedBytes))))
+	if skipped > 0 {
+		lines = append(lines, fmt.Sprintf("Skipped %d unchanged files", skipped))
+	}
+	if resp.Applied {
+		lines = append(lines, fmt.Sprintf("Applied %d files to agent workspace", resp.FilesApplied))
+	}
+	return lines
 }

@@ -34,6 +34,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
@@ -294,12 +295,12 @@ export class ScionSecurityReviewDialog extends LitElement {
           max-width: 100vw;
           margin: 0;
           border-radius: 0;
-          max-height: 100vh;
+          max-height: var(--scion-app-height, 100dvh);
         }
 
         sl-dialog::part(body) {
           overflow-y: auto;
-          max-height: calc(100vh - 8rem);
+          max-height: calc(var(--scion-app-height, 100dvh) - 8rem);
         }
 
         sl-dialog::part(footer) {
@@ -520,14 +521,14 @@ export class ScionSecurityReviewDialog extends LitElement {
     if (!d) return;
 
     if (d.impactPreviewUrl) {
-      window.location.href = d.impactPreviewUrl;
+      navigateTo(d.impactPreviewUrl);
     } else {
       // Default: navigate to the first affected boundary's detail page
       const firstBoundary = d.boundaries[0];
       if (firstBoundary) {
-        window.location.href = `/admin/access-boundaries/${firstBoundary.boundaryId}`;
+        navigateTo(`/admin/access-boundaries/${firstBoundary.boundaryId}`);
       } else {
-        window.location.href = '/admin/access-boundaries';
+        navigateTo('/admin/access-boundaries');
       }
     }
   }

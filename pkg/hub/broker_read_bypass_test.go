@@ -37,14 +37,13 @@ func TestBrokerCanGetTemplateByID(t *testing.T) {
 	ctx := context.Background()
 
 	tmpl := &store.Template{
-		ID:         tid("tmpl_broker1"),
-		Slug:       "broker-test-tmpl",
-		Name:       "Broker Test Template",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.TemplateStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_broker1"),
+		Slug:    "broker-test-tmpl",
+		Name:    "Broker Test Template",
+		Scope:   "global",
+		Status:  store.TemplateStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -83,15 +82,14 @@ func TestBrokerCanGetHarnessConfigByID(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_broker1"),
-		Slug:       "broker-test-hc",
-		Name:       "Broker Test HC",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_broker1"),
+		Slug:    "broker-test-hc",
+		Name:    "Broker Test HC",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)
@@ -123,20 +121,24 @@ func TestBrokerCanGetHarnessConfigByID(t *testing.T) {
 // TestNonBrokerWithoutPermissionDeniedTemplate verifies that a non-broker
 // identity without read permission is still denied access to templates.
 // This ensures the SECURITY-GATE is preserved for non-broker callers.
+//
+// Expects 404, not 403 (ptone/scion#1916): a read denial on this surface
+// must be indistinguishable from a nonexistent template, matching
+// getTemplateV2's authorizeRead gate (authorize.go) and the skill fix's
+// getSkill/writeSkillLookupError precedent (ptone/scion#1901).
 func TestNonBrokerWithoutPermissionDeniedTemplate(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	tmpl := &store.Template{
-		ID:         tid("tmpl_deny1"),
-		Slug:       "deny-test-tmpl",
-		Name:       "Deny Test Template",
-		Scope:      "project",
-		ScopeID:    tid("project_deny"),
-		Visibility: store.VisibilityPrivate,
-		Status:     store.TemplateStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_deny1"),
+		Slug:    "deny-test-tmpl",
+		Name:    "Deny Test Template",
+		Scope:   "project",
+		ScopeID: tid("project_deny"),
+		Status:  store.TemplateStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -152,28 +154,30 @@ func TestNonBrokerWithoutPermissionDeniedTemplate(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected status 404 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 // TestNonBrokerWithoutPermissionDeniedHarnessConfig verifies the same deny
 // behavior for harness config endpoints.
+//
+// Expects 404, not 403 (ptone/scion#1916) — see the identical comment on
+// TestNonBrokerWithoutPermissionDeniedTemplate.
 func TestNonBrokerWithoutPermissionDeniedHarnessConfig(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_deny1"),
-		Slug:       "deny-test-hc",
-		Name:       "Deny Test HC",
-		Harness:    "claude",
-		Scope:      "project",
-		ScopeID:    tid("project_deny"),
-		Visibility: store.VisibilityPrivate,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_deny1"),
+		Slug:    "deny-test-hc",
+		Name:    "Deny Test HC",
+		Harness: "claude",
+		Scope:   "project",
+		ScopeID: tid("project_deny"),
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)
@@ -187,7 +191,7 @@ func TestNonBrokerWithoutPermissionDeniedHarnessConfig(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected status 404 for non-admin user without read permission, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

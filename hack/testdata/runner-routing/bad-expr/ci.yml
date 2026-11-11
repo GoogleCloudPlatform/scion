@@ -1,0 +1,12 @@
+# Fixture for hack/check-runner-routing.sh --selftest; not a workflow GitHub runs.
+name: fixture
+
+on:
+  pull_request:
+
+jobs:
+  routed:
+    runs-on: ${{ vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - run: echo ok

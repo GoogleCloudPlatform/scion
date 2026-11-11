@@ -15,6 +15,10 @@
 package runtimebroker
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,68 +62,17 @@ func TestHubEndpointFromResolvedEnv(t *testing.T) {
 	}
 }
 
-func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
+func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 	projectDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	tests := []struct {
-		name                 string
-		broker               string
-		resolved             map[string]string
-		projectPath          string
-		containerHubEndpoint string
-		want                 string
-	}{
-		{
-			name:        "resolved env wins over broker",
-			broker:      "https://broker.example.com",
-			resolved:    map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
-			projectPath: projectDir,
-			want:        "https://resolved.example.com",
-		},
-		{
-			name:        "broker fallback when resolved env absent",
-			broker:      "https://broker.example.com",
-			resolved:    map[string]string{"UNRELATED": "x"},
-			projectPath: projectDir,
-			want:        "https://broker.example.com",
-		},
-		{
-			name:        "resolved env wins over settings",
-			resolved:    map[string]string{"SCION_HUB_URL": "https://resolved-legacy.example.com"},
-			projectPath: projectDir,
-			want:        "https://resolved-legacy.example.com",
-		},
-		{
-			name:        "settings fallback when others absent",
-			resolved:    map[string]string{"UNRELATED": "x"},
-			projectPath: projectDir,
-			want:        "https://settings.example.com",
-		},
-		{
-			name:                 "production combo: resolved public URL prevents bridge override over localhost broker",
-			broker:               "http://localhost:8080",
-			resolved:             map[string]string{"SCION_HUB_ENDPOINT": "https://hub.production.example.com"},
-			containerHubEndpoint: "http://host.docker.internal:8080",
-			want:                 "https://hub.production.example.com",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := resolveHubEndpointForStart(tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, "docker")
-			if got != tt.want {
-				t.Fatalf("resolveHubEndpointForStart() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
-	projectDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
+	// A project that set hub.enabled=false on this host (for example
+	// through an old 'scion hub unlink'): the broker still resolves its
+	// endpoint, because the broker is authoritative about connectivity.
+	disabledProjectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(disabledProjectDir, "settings.yaml"), []byte("hub:\n  enabled: false\n  endpoint: https://disabled-settings.example.com\n"), 0644); err != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
@@ -131,37 +84,62 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		resolved             map[string]string
 		projectPath          string
 		containerHubEndpoint string
+		colocated            colocatedRewrite
 		runtimeName          string
 		want                 string
+		// wantTrusted is the trust bit resolveHubEndpointForCreate reports
+		// for the returned endpoint: true only for the request/connection/
+		// broker tiers, false for both the resolved-env and the project-
+		// settings tiers — see the "resolved env fallback" and "settings
+		// fallback" cases below.
+		wantTrusted bool
 	}{
 		{
-			name:       "req endpoint takes priority",
-			req:        "https://req.example.com",
-			connection: "https://conn.example.com",
-			broker:     "https://broker.example.com",
-			want:       "https://req.example.com",
+			name:        "req endpoint takes priority",
+			req:         "https://req.example.com",
+			connection:  "https://conn.example.com",
+			broker:      "https://broker.example.com",
+			want:        "https://req.example.com",
+			wantTrusted: true,
 		},
 		{
-			name:       "connection fallback when req absent",
-			connection: "https://conn.example.com",
-			broker:     "https://broker.example.com",
-			want:       "https://conn.example.com",
+			name:        "connection fallback when req absent",
+			connection:  "https://conn.example.com",
+			broker:      "https://broker.example.com",
+			want:        "https://conn.example.com",
+			wantTrusted: true,
 		},
 		{
-			name:   "broker fallback when req and connection absent",
-			broker: "https://broker.example.com",
-			want:   "https://broker.example.com",
+			name:        "broker fallback when req and connection absent",
+			broker:      "https://broker.example.com",
+			want:        "https://broker.example.com",
+			wantTrusted: true,
 		},
 		{
 			name:        "resolved env fallback",
 			resolved:    map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
 			projectPath: projectDir,
 			want:        "https://resolved.example.com",
+			wantTrusted: false,
 		},
 		{
 			name:        "settings fallback when others absent",
 			projectPath: projectDir,
 			want:        "https://settings.example.com",
+			wantTrusted: false,
+		},
+		{
+			name:        "broker endpoint used for a project with hub.enabled=false",
+			broker:      "https://broker.example.com",
+			projectPath: disabledProjectDir,
+			want:        "https://broker.example.com",
+			wantTrusted: true,
+		},
+		{
+			name:        "settings fallback ignores hub.enabled=false",
+			projectPath: disabledProjectDir,
+			want:        "https://disabled-settings.example.com",
+			wantTrusted: false,
 		},
 		{
 			name:                 "localhost req overridden by non-localhost connection",
@@ -171,6 +149,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:8080",
 			runtimeName:          "podman",
 			want:                 "https://hub.remote.example.com",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "localhost req kept when connection is also localhost",
@@ -179,6 +158,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:9810",
 			runtimeName:          "podman",
 			want:                 "http://host.containers.internal:8080",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "localhost req kept when connection is empty",
@@ -186,6 +166,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:9810",
 			runtimeName:          "podman",
 			want:                 "http://host.containers.internal:8080",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "127.0.0.1 req overridden by non-localhost connection",
@@ -194,6 +175,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.docker.internal:8080",
 			runtimeName:          "docker",
 			want:                 "https://hub.remote.example.com",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "non-localhost req preserved even with different connection",
@@ -202,6 +184,31 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:8080",
 			runtimeName:          "podman",
 			want:                 "https://hub1.example.com",
+			wantTrusted:          true,
+		},
+		{
+			name:                 "colocated IAP public endpoint from request is rewritten for docker",
+			req:                  "https://scion-hub-123.us-central1.run.app",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated: colocatedRewrite{
+				PublicHubEndpoint:   "https://scion-hub-123.us-central1.run.app",
+				RuntimeHubEndpoints: map[string]string{"docker": "http://scion-hub.internal:8080"},
+			},
+			runtimeName: "docker",
+			want:        "http://scion-hub.internal:8080",
+			wantTrusted: true,
+		},
+		{
+			name:                 "colocated IAP public endpoint kept for kubernetes",
+			req:                  "https://scion-hub-123.us-central1.run.app",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated: colocatedRewrite{
+				PublicHubEndpoint:   "https://scion-hub-123.us-central1.run.app",
+				RuntimeHubEndpoints: map[string]string{"docker": "http://scion-hub.internal:8080"},
+			},
+			runtimeName: "kubernetes",
+			want:        "https://scion-hub-123.us-central1.run.app",
+			wantTrusted: true,
 		},
 	}
 
@@ -211,19 +218,32 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			if rn == "" {
 				rn = "docker"
 			}
-			got := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, rn)
+			got, gotTrusted := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, tt.colocated, rn)
 			if got != tt.want {
 				t.Fatalf("resolveHubEndpointForCreate() = %q, want %q", got, tt.want)
+			}
+			if gotTrusted != tt.wantTrusted {
+				t.Errorf("resolveHubEndpointForCreate() trusted = %v, want %v", gotTrusted, tt.wantTrusted)
 			}
 		})
 	}
 }
 
 func TestApplyContainerBridgeOverride(t *testing.T) {
+	const iapURL = "https://scion-hub-123.us-central1.run.app"
+	// iap is the colocated rewrite cmd computes for an IAP-derived public URL.
+	iap := colocatedRewrite{
+		PublicHubEndpoint: iapURL,
+		RuntimeHubEndpoints: map[string]string{
+			"docker": "http://scion-hub.internal:8080",
+			"podman": "http://host.containers.internal:8080",
+		},
+	}
 	tests := []struct {
 		name                 string
 		endpoint             string
 		containerHubEndpoint string
+		colocated            colocatedRewrite
 		runtimeName          string
 		want                 string
 	}{
@@ -239,6 +259,20 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			endpoint:             "http://localhost:9810",
 			containerHubEndpoint: "http://host.containers.internal:9810",
 			runtimeName:          "kubernetes",
+			want:                 "http://localhost:9810",
+		},
+		{
+			name:                 "k8s alias keeps localhost endpoint",
+			endpoint:             "http://localhost:9810",
+			containerHubEndpoint: "http://host.containers.internal:9810",
+			runtimeName:          "k8s",
+			want:                 "http://localhost:9810",
+		},
+		{
+			name:                 "remote alias keeps localhost endpoint",
+			endpoint:             "http://localhost:9810",
+			containerHubEndpoint: "http://host.containers.internal:9810",
+			runtimeName:          "remote",
 			want:                 "http://localhost:9810",
 		},
 		{
@@ -290,11 +324,141 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			runtimeName:          "docker",
 			want:                 "https://hub.example.com:8443",
 		},
+		{
+			name:                 "colocated public endpoint is rewritten for docker",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+		},
+		{
+			name:                 "colocated public endpoint match ignores trailing slash and case",
+			endpoint:             "https://SCION-HUB-123.us-central1.run.app/",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+		},
+		{
+			name:                 "colocated public endpoint kept for kubernetes",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "kubernetes",
+			want:                 iapURL,
+		},
+		{
+			name:                 "colocated public endpoint with host-network docker target uses it wholesale",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://host.docker.internal:8080",
+			colocated: colocatedRewrite{
+				PublicHubEndpoint:   iapURL,
+				RuntimeHubEndpoints: map[string]string{"docker": "http://host.docker.internal:8080"},
+			},
+			runtimeName: "docker",
+			want:        "http://host.docker.internal:8080",
+		},
+		{
+			name:                 "colocated public endpoint is rewritten for podman to its native host alias",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "podman",
+			want:                 "http://host.containers.internal:8080",
+		},
+		{
+			// #3635 case 1: podman default runtime.
+			name:                 "podman default: colocated public endpoint is rewritten for podman",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://host.containers.internal:8080",
+			colocated:            iap,
+			runtimeName:          "podman",
+			want:                 "http://host.containers.internal:8080",
+		},
+		{
+			// #3635 case 2: kubernetes default runtime, docker profile. The
+			// default runtime yields no container endpoint.
+			name:        "kubernetes default: docker profile rewrites the colocated public endpoint",
+			endpoint:    iapURL,
+			colocated:   iap,
+			runtimeName: "docker",
+			want:        "http://scion-hub.internal:8080",
+		},
+		{
+			name:        "kubernetes default: podman profile rewrites the colocated public endpoint",
+			endpoint:    iapURL,
+			colocated:   iap,
+			runtimeName: "podman",
+			want:        "http://host.containers.internal:8080",
+		},
+		{
+			name:                 "podman default: docker profile gets the docker target, not the podman endpoint",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://host.containers.internal:8080",
+			colocated:            iap,
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+		},
+		{
+			name:                 "runtime without a colocated target keeps the public endpoint",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://host.docker.internal:8080",
+			colocated: colocatedRewrite{
+				PublicHubEndpoint:   iapURL,
+				RuntimeHubEndpoints: map[string]string{"docker": "http://scion-hub.internal:8080"},
+			},
+			runtimeName: "podman",
+			want:        iapURL,
+		},
+		{
+			name:                 "colocated target is used wholesale when the public endpoint has an explicit port",
+			endpoint:             iapURL + ":443",
+			containerHubEndpoint: "http://host.docker.internal:8080",
+			colocated: colocatedRewrite{
+				PublicHubEndpoint:   iapURL + ":443",
+				RuntimeHubEndpoints: map[string]string{"docker": "http://host.docker.internal:8080"},
+			},
+			runtimeName: "docker",
+			want:        "http://host.docker.internal:8080",
+		},
+		{
+			name:                 "colocated public endpoint kept for cloudrun",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "cloudrun",
+			want:                 iapURL,
+		},
+		{
+			name:                 "colocated public endpoint kept for Apple container",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "container",
+			want:                 iapURL,
+		},
+		{
+			name:                 "other remote endpoint unchanged when colocated public is set",
+			endpoint:             "https://other.example.com",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "docker",
+			want:                 "https://other.example.com",
+		},
+		{
+			name:                 "localhost still rewritten when colocated public is set",
+			endpoint:             "http://localhost:8080",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocated:            iap,
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := applyContainerBridgeOverride(tt.endpoint, tt.containerHubEndpoint, tt.runtimeName)
+			got := applyContainerBridgeOverride(tt.endpoint, tt.containerHubEndpoint, tt.colocated, tt.runtimeName)
 			if got != tt.want {
 				t.Fatalf("applyContainerBridgeOverride() = %q, want %q", got, tt.want)
 			}
@@ -320,6 +484,37 @@ func TestColocatedExtraHosts(t *testing.T) {
 			wantFirst: "hub.example.com:host-gateway",
 		},
 		{
+			name:      "colocated docker with local hub alias",
+			endpoint:  "http://scion-hub.internal:8080",
+			colocated: true,
+			runtime:   "docker",
+			wantLen:   1,
+			wantFirst: "scion-hub.internal:host-gateway",
+		},
+		{
+			name:      "colocated podman with its native host alias",
+			endpoint:  "http://host.containers.internal:8080",
+			colocated: true,
+			runtime:   "podman",
+			wantLen:   0,
+		},
+		{
+			name:      "colocated docker with podman host alias still maps it",
+			endpoint:  "http://host.containers.internal:8080",
+			colocated: true,
+			runtime:   "docker",
+			wantLen:   1,
+			wantFirst: "host.containers.internal:host-gateway",
+		},
+		{
+			name:      "colocated podman with public domain",
+			endpoint:  "https://hub.example.com",
+			colocated: true,
+			runtime:   "podman",
+			wantLen:   1,
+			wantFirst: "hub.example.com:host-gateway",
+		},
+		{
 			name:      "colocated docker with localhost",
 			endpoint:  "http://localhost:8080",
 			colocated: true,
@@ -331,6 +526,20 @@ func TestColocatedExtraHosts(t *testing.T) {
 			endpoint:  "https://hub.example.com",
 			colocated: true,
 			runtime:   "kubernetes",
+			wantLen:   0,
+		},
+		{
+			name:      "colocated k8s alias",
+			endpoint:  "https://hub.example.com",
+			colocated: true,
+			runtime:   "k8s",
+			wantLen:   0,
+		},
+		{
+			name:      "colocated remote alias",
+			endpoint:  "https://hub.example.com",
+			colocated: true,
+			runtime:   "remote",
 			wantLen:   0,
 		},
 		{
@@ -429,17 +638,560 @@ func TestCloudrunSandboxHubEndpoint_LinkLocalFallback(t *testing.T) {
 	}
 }
 
+func TestResolveCloudRunServiceURL(t *testing.T) {
+	okProjectID := func() (string, error) { return "721899303052", nil }
+	okZone := func() (string, error) { return "us-central1-1", nil }
+
+	tests := []struct {
+		name       string
+		kService   string
+		projectFn  func() (string, error)
+		zoneFn     func() (string, error)
+		want       string
+		wantErrSub string
+	}{
+		{
+			name:      "constructs correct URL",
+			kService:  "scion-hub",
+			projectFn: okProjectID,
+			zoneFn:    okZone,
+			want:      "https://scion-hub-721899303052.us-central1.run.app",
+		},
+		{
+			name:      "different region",
+			kService:  "scion-hub",
+			projectFn: okProjectID,
+			zoneFn:    func() (string, error) { return "europe-west1-b", nil },
+			want:      "https://scion-hub-721899303052.europe-west1.run.app",
+		},
+		{
+			name:       "empty K_SERVICE",
+			kService:   "",
+			projectFn:  okProjectID,
+			zoneFn:     okZone,
+			wantErrSub: "K_SERVICE not set",
+		},
+		{
+			name:       "numeric project ID error",
+			kService:   "scion-hub",
+			projectFn:  func() (string, error) { return "", fmt.Errorf("metadata unavailable") },
+			zoneFn:     okZone,
+			wantErrSub: "numeric project ID",
+		},
+		{
+			name:       "zone error",
+			kService:   "scion-hub",
+			projectFn:  okProjectID,
+			zoneFn:     func() (string, error) { return "", fmt.Errorf("metadata unavailable") },
+			wantErrSub: "zone",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveCloudRunServiceURL(tt.kService, tt.projectFn, tt.zoneFn)
+			if tt.wantErrSub != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErrSub)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("error %q does not contain %q", err, tt.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveCloudRunServiceURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCloudrunInstancesHubEndpoint_NoKService(t *testing.T) {
+	// When K_SERVICE is not set, cloudrunInstancesHubEndpoint must fail.
+	t.Setenv("K_SERVICE", "")
+	_, err := cloudrunInstancesHubEndpoint(context.Background())
+	if err == nil {
+		t.Fatal("expected error when K_SERVICE is empty")
+	}
+	if !strings.Contains(err.Error(), "K_SERVICE not set") {
+		t.Fatalf("expected 'K_SERVICE not set' error, got: %v", err)
+	}
+}
+
 func TestRedactEnvValueForLog(t *testing.T) {
-	if got := redactEnvValueForLog("SCION_AUTH_TOKEN", "secret-token"); got != redactedEnvValue {
-		t.Fatalf("SCION_AUTH_TOKEN should be redacted, got %q", got)
+	for _, tt := range []struct {
+		key, value string
+		visible    bool
+	}{
+		{key: "SCION_AUTH_TOKEN", value: "secret-token"},
+		{key: "SCION_BROKER_ID", value: "broker-1", visible: true},
+		{key: "SCION_HUB_ENDPOINT", value: "https://hub.example.com", visible: true},
+		{key: "SCION_HUB_URL", value: "https://hub.example.com", visible: true},
+		{key: "SCION_HUB_EXPERIMENTS", value: "hub.conduit", visible: true},
+		{key: "SCION_HUB_CONDUIT", value: "true"}, // retired; no longer listed
+	} {
+		t.Run(tt.key, func(t *testing.T) {
+			want := redactedEnvValue
+			if tt.visible {
+				want = tt.value
+			}
+			if got := redactEnvValueForLog(tt.key, tt.value); got != want {
+				t.Fatalf("redactEnvValueForLog(%s) = %q, want %q", tt.key, got, want)
+			}
+		})
 	}
-	if got := redactEnvValueForLog("SCION_BROKER_ID", "broker-1"); got != "broker-1" {
-		t.Fatalf("SCION_BROKER_ID should remain visible, got %q", got)
+}
+
+// TestResolveEffectiveHubEndpoint_AnchorRows pins a small set of
+// human-readable, named scenarios for GoogleCloudPlatform/scion#1931: on the
+// HTTP start and restart operations, the request-level HubEndpoint field
+// ranks the same way it does on create — above the broker's own HubEndpoint
+// and above a differing value in ResolvedEnv — while every other create-path
+// behaviour (the connection-endpoint localhost rescue, the container bridge
+// override, and the cloudrun-family runtime overrides) still applies. The
+// full cross product lives in TestResolveEffectiveHubEndpoint_CrossProduct.
+func TestResolveEffectiveHubEndpoint_AnchorRows(t *testing.T) {
+	const (
+		brokerLocalhost = "http://localhost:8080"
+		dispatchPublic  = "https://hub.dispatched.example.com"
+		dispatchLocal   = "http://localhost:9090"
+		staleResolved   = "https://stale-in-resolved-env.example.com"
+		connPublic      = "https://hub.connection.example.com"
+		iapPublic       = "https://scion-hub-123.us-central1.run.app"
+	)
+
+	tests := []struct {
+		name string
+		in   hubEndpointInputs
+		want string
+	}{
+		{
+			name: "http-start: the request-level endpoint ranks above the broker's own",
+			in: hubEndpointInputs{
+				Op: opHTTPStart, ReqHubEndpoint: dispatchPublic, BrokerHubEndpoint: brokerLocalhost, RuntimeName: "kubernetes",
+			},
+			want: dispatchPublic,
+		},
+		{
+			name: "http-restart: the request-level endpoint ranks above the broker's own",
+			in: hubEndpointInputs{
+				Op: opHTTPRestart, ReqHubEndpoint: dispatchPublic, BrokerHubEndpoint: brokerLocalhost, RuntimeName: "kubernetes",
+			},
+			want: dispatchPublic,
+		},
+		{
+			name: "create: the request-level endpoint ranks above the broker's own",
+			in: hubEndpointInputs{
+				Op: opCreate, ReqHubEndpoint: dispatchPublic, BrokerHubEndpoint: brokerLocalhost, RuntimeName: "kubernetes",
+			},
+			want: dispatchPublic,
+		},
+		{
+			name: "http-start: the request-level endpoint ranks above a differing resolvedEnv value",
+			in: hubEndpointInputs{
+				Op: opHTTPStart, ReqHubEndpoint: dispatchPublic, BrokerHubEndpoint: brokerLocalhost,
+				ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": staleResolved}, RuntimeName: "kubernetes",
+			},
+			want: dispatchPublic,
+		},
+		{
+			name: "http-restart: the request-level endpoint ranks above a differing resolvedEnv value",
+			in: hubEndpointInputs{
+				Op: opHTTPRestart, ReqHubEndpoint: dispatchPublic, BrokerHubEndpoint: brokerLocalhost,
+				ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": staleResolved}, RuntimeName: "kubernetes",
+			},
+			want: dispatchPublic,
+		},
+		{
+			name: "http-start: resolvedEnv supplies the endpoint when the request field is absent",
+			in: hubEndpointInputs{
+				Op: opHTTPStart, ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": dispatchPublic}, RuntimeName: "kubernetes",
+			},
+			want: dispatchPublic,
+		},
+		{
+			name: "http-restart: resolvedEnv supplies the endpoint when the request field is absent",
+			in: hubEndpointInputs{
+				Op: opHTTPRestart, ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": dispatchPublic}, RuntimeName: "kubernetes",
+			},
+			want: dispatchPublic,
+		},
+		{
+			name: "http-start: the connection endpoint rescues a localhost result",
+			in: hubEndpointInputs{
+				Op: opHTTPStart, ReqHubEndpoint: dispatchLocal, ConnectionHubEndpoint: connPublic, RuntimeName: "kubernetes",
+			},
+			want: connPublic,
+		},
+		{
+			name: "http-start on docker: a localhost result gets the container bridge override",
+			in: hubEndpointInputs{
+				Op: opHTTPStart, ReqHubEndpoint: dispatchLocal,
+				ContainerHubEndpoint: "http://host.docker.internal:9090", RuntimeName: "docker",
+			},
+			want: "http://host.docker.internal:9090",
+		},
+		{
+			name: "http-start on kubernetes: the container bridge override never applies",
+			in: hubEndpointInputs{
+				Op: opHTTPStart, ReqHubEndpoint: dispatchLocal,
+				ContainerHubEndpoint: "http://host.docker.internal:9090", RuntimeName: "kubernetes",
+			},
+			want: dispatchLocal,
+		},
+		{
+			name: "create on docker: a colocated IAP public endpoint gets the local hub alias",
+			in: hubEndpointInputs{
+				Op: opCreate, ReqHubEndpoint: iapPublic,
+				ContainerHubEndpoint: "http://scion-hub.internal:8080", ColocatedPublicHubEndpoint: iapPublic,
+				ColocatedRuntimeHubEndpoints: map[string]string{"docker": "http://scion-hub.internal:8080"}, RuntimeName: "docker",
+			},
+			want: "http://scion-hub.internal:8080",
+		},
+		{
+			name: "create on cloudrun: a colocated IAP public endpoint is kept",
+			in: hubEndpointInputs{
+				Op: opCreate, ReqHubEndpoint: iapPublic,
+				ContainerHubEndpoint: "http://scion-hub.internal:8080", ColocatedPublicHubEndpoint: iapPublic,
+				ColocatedRuntimeHubEndpoints: map[string]string{"docker": "http://scion-hub.internal:8080"}, RuntimeName: "cloudrun",
+			},
+			want: iapPublic,
+		},
+		{
+			name: "create on kubernetes: a colocated IAP public endpoint is kept",
+			in: hubEndpointInputs{
+				Op: opCreate, ReqHubEndpoint: iapPublic,
+				ContainerHubEndpoint: "http://scion-hub.internal:8080", ColocatedPublicHubEndpoint: iapPublic,
+				ColocatedRuntimeHubEndpoints: map[string]string{"docker": "http://scion-hub.internal:8080"}, RuntimeName: "kubernetes",
+			},
+			want: iapPublic,
+		},
+		{
+			name: "http-start on cloudrun-sandbox: the sandbox override replaces the resolved value",
+			in: hubEndpointInputs{
+				Op: opHTTPStart, ReqHubEndpoint: dispatchPublic, RuntimeName: "cloudrun-sandbox", HubListenPort: 8080,
+			},
+			want: "http://203.0.113.5:8080",
+		},
 	}
-	if got := redactEnvValueForLog("SCION_HUB_ENDPOINT", "https://hub.example.com"); got != "https://hub.example.com" {
-		t.Fatalf("SCION_HUB_ENDPOINT should remain visible, got %q", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("K_SERVICE", "") // deterministic: no real Cloud Run environment in tests
+			t.Setenv("SCION_METADATA_BIND_ADDRESS", "203.0.113.5")
+
+			got, _, err := resolveEffectiveHubEndpoint(context.Background(), tt.in)
+			if err != nil {
+				t.Fatalf("resolveEffectiveHubEndpoint() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveEffectiveHubEndpoint() = %q, want %q", got, tt.want)
+			}
+		})
 	}
-	if got := redactEnvValueForLog("SCION_HUB_URL", "https://hub.example.com"); got != "https://hub.example.com" {
-		t.Fatalf("SCION_HUB_URL should remain visible, got %q", got)
+}
+
+// TestResolveEffectiveHubEndpoint_CrossProduct asserts, for every combination
+// of broker endpoint, request-level endpoint, connection endpoint, and
+// runtime, that http-start and http-restart resolve identically to create
+// given the identical hubEndpointInputs (the same request field, the same
+// ResolvedEnv, ...). This is a property (equality between two computations
+// for every cell), not a table of expected strings, so it catches drift the
+// anchor rows above cannot.
+func TestResolveEffectiveHubEndpoint_CrossProduct(t *testing.T) {
+	t.Setenv("K_SERVICE", "") // deterministic: no real Cloud Run environment in tests
+	t.Setenv("SCION_METADATA_BIND_ADDRESS", "203.0.113.5")
+
+	brokers := []string{"", "http://localhost:8080", "https://broker.example.com"}
+	reqValues := []string{"", "http://localhost:9090", "https://hub.dispatched.example.com"}
+	connections := []string{"", "http://localhost:7070", "https://hub.connection.example.com"}
+	runtimes := []struct {
+		name                 string
+		containerHubEndpoint string
+	}{
+		{name: "docker", containerHubEndpoint: "http://host.docker.internal:9090"},
+		{name: "kubernetes"},
+		{name: "cloudrun"},
+		{name: "cloudrun-sandbox"},
+	}
+
+	for _, broker := range brokers {
+		for _, req := range reqValues {
+			for _, connection := range connections {
+				for _, rt := range runtimes {
+					name := fmt.Sprintf("broker=%s/req=%s/connection=%s/runtime=%s", labelOrEmpty(broker), labelOrEmpty(req), labelOrEmpty(connection), rt.name)
+					t.Run(name, func(t *testing.T) {
+						// The same value fills both the request-level field and
+						// ResolvedEnv, since a real Hub dispatch carries the
+						// endpoint in both places.
+						resolvedEnv := map[string]string{}
+						if req != "" {
+							resolvedEnv["SCION_HUB_ENDPOINT"] = req
+						}
+						base := hubEndpointInputs{
+							ReqHubEndpoint:        req,
+							BrokerHubEndpoint:     broker,
+							ConnectionHubEndpoint: connection,
+							ResolvedEnv:           resolvedEnv,
+							ContainerHubEndpoint:  rt.containerHubEndpoint,
+							RuntimeName:           rt.name,
+							HubListenPort:         8080,
+						}
+
+						createIn := base
+						createIn.Op = opCreate
+						wantVal, _, wantErr := resolveEffectiveHubEndpoint(context.Background(), createIn)
+
+						startIn := base
+						startIn.Op = opHTTPStart
+						gotStart, _, errStart := resolveEffectiveHubEndpoint(context.Background(), startIn)
+						assertSameHubEndpointResult(t, "http-start vs create", gotStart, errStart, wantVal, wantErr)
+
+						restartIn := base
+						restartIn.Op = opHTTPRestart
+						gotRestart, _, errRestart := resolveEffectiveHubEndpoint(context.Background(), restartIn)
+						assertSameHubEndpointResult(t, "http-restart vs create", gotRestart, errRestart, wantVal, wantErr)
+					})
+				}
+			}
+		}
+	}
+
+	// The settings fallback (the loop above never sets ProjectPath) applies
+	// to http-start and http-restart the same way it applies to create.
+	t.Run("settings fallback supplies the endpoint for http-start and http-restart", func(t *testing.T) {
+		projectDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
+			t.Fatalf("failed to write settings: %v", err)
+		}
+		for _, op := range []startOperation{opHTTPStart, opHTTPRestart, opCreate} {
+			t.Run(string(op), func(t *testing.T) {
+				got, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+					Op:          op,
+					ProjectPath: projectDir,
+					RuntimeName: "docker",
+				})
+				if err != nil {
+					t.Fatalf("resolveEffectiveHubEndpoint() unexpected error: %v", err)
+				}
+				if got != "https://settings.example.com" {
+					t.Errorf("resolveEffectiveHubEndpoint() = %q, want the settings-supplied endpoint", got)
+				}
+			})
+		}
+	})
+}
+
+// labelOrEmpty makes cross-product subtest names readable when an axis value
+// is the empty string.
+func labelOrEmpty(s string) string {
+	if s == "" {
+		return "<empty>"
+	}
+	return s
+}
+
+// assertSameHubEndpointResult asserts two resolveEffectiveHubEndpoint
+// results (value and error) are identical, used to compare parity between
+// operations that must resolve the same way for the same inputs.
+func assertSameHubEndpointResult(t *testing.T, label string, got string, gotErr error, want string, wantErr error) {
+	t.Helper()
+	if (gotErr == nil) != (wantErr == nil) {
+		t.Errorf("%s: error presence mismatch: got %v, want %v", label, gotErr, wantErr)
+		return
+	}
+	if gotErr != nil {
+		if gotErr.Error() != wantErr.Error() {
+			t.Errorf("%s: error = %q, want %q", label, gotErr.Error(), wantErr.Error())
+		}
+		return
+	}
+	if got != want {
+		t.Errorf("%s: got %q, want %q", label, got, want)
+	}
+}
+
+// TestResolveEffectiveHubEndpoint_HTTPOpsResolvedEnvRanksBelowBroker verifies
+// that on http-start and http-restart a ResolvedEnv SCION_HUB_URL ranks below
+// the broker's own endpoint and is used only when broker, connection, and
+// settings are all empty, as on create.
+func TestResolveEffectiveHubEndpoint_HTTPOpsResolvedEnvRanksBelowBroker(t *testing.T) {
+	const brokerPublic = "https://broker.example.com"
+	const urlOnly = "https://from-scion-hub-url.example.com"
+
+	for _, op := range []startOperation{opHTTPStart, opHTTPRestart} {
+		t.Run(string(op)+": SCION_HUB_URL alone leaves the broker endpoint in place", func(t *testing.T) {
+			got, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+				Op:                op,
+				BrokerHubEndpoint: brokerPublic,
+				ResolvedEnv:       map[string]string{"SCION_HUB_URL": urlOnly},
+				RuntimeName:       "docker",
+			})
+			if err != nil {
+				t.Fatalf("resolveEffectiveHubEndpoint() unexpected error: %v", err)
+			}
+			if got != brokerPublic {
+				t.Errorf("resolveEffectiveHubEndpoint() = %q, want the broker endpoint %q", got, brokerPublic)
+			}
+		})
+
+		// The shared resolvedEnv fallback consults SCION_HUB_URL when
+		// broker, connection and settings are all empty; pinned here so a
+		// change to it is deliberate. This is also the exact untrusted case:
+		// the value is delivered to the agent (documented last-resort
+		// fallback), but must never be reported as trusted.
+		t.Run(string(op)+": SCION_HUB_URL is the last resort when broker, connection and settings are all empty, and is untrusted", func(t *testing.T) {
+			got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+				Op:          op,
+				ResolvedEnv: map[string]string{"SCION_HUB_URL": urlOnly},
+				RuntimeName: "docker",
+			})
+			if err != nil {
+				t.Fatalf("resolveEffectiveHubEndpoint() unexpected error: %v", err)
+			}
+			if got != urlOnly {
+				t.Errorf("resolveEffectiveHubEndpoint() = %q, want %q (documented last-resort fallback)", got, urlOnly)
+			}
+			if trusted {
+				t.Errorf("resolveEffectiveHubEndpoint() trusted = true, want false — a resolved-env-only value must never be trusted for egress")
+			}
+		})
+	}
+}
+
+// TestResolveEffectiveHubEndpoint_RequiresKnownOperation proves
+// resolveEffectiveHubEndpoint has no usable default: the zero-value
+// Operation and any operation it does not recognize both return an error
+// rather than resolving as create.
+func TestResolveEffectiveHubEndpoint_RequiresKnownOperation(t *testing.T) {
+	tests := []struct {
+		name string
+		op   startOperation
+	}{
+		{name: "empty operation", op: ""},
+		{name: "unknown operation", op: startOperation("bogus-operation")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+				Op:                tt.op,
+				BrokerHubEndpoint: "https://broker.example.com",
+				RuntimeName:       "docker",
+			})
+			if err == nil {
+				t.Fatalf("resolveEffectiveHubEndpoint() with operation %q: expected an error, got nil", tt.op)
+			}
+			if !strings.Contains(err.Error(), "unknown start operation") {
+				t.Errorf("resolveEffectiveHubEndpoint() error = %q, want it to contain %q", err.Error(), "unknown start operation")
+			}
+		})
+	}
+}
+
+// TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride pins the
+// cloudrun (CRI) runtime override at the attempted level: a localhost result
+// is replaced only on the cloudrun runtime, and only when the result
+// actually is localhost. K_SERVICE is set to empty, so the override itself
+// always fails here (no real Cloud Run Instance metadata in tests) — an
+// error return proves the override was attempted, and its absence proves it
+// was skipped.
+func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
+	t.Setenv("K_SERVICE", "")
+
+	t.Run("cloudrun runtime with a localhost result: override is attempted", func(t *testing.T) {
+		_, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+			Op: opCreate, BrokerHubEndpoint: "http://localhost:8080", RuntimeName: "cloudrun",
+		})
+		if err == nil {
+			t.Fatal("expected an error: K_SERVICE is set to empty, so the cloudrun override cannot succeed")
+		}
+		if !strings.Contains(err.Error(), "Cloud Run instance") {
+			t.Errorf("expected the cloudrun-instance override error, got: %v", err)
+		}
+	})
+
+	t.Run("cloudrun runtime with a non-localhost result: override is skipped", func(t *testing.T) {
+		got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+			Op: opCreate, BrokerHubEndpoint: "https://broker.example.com", RuntimeName: "cloudrun",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "https://broker.example.com" {
+			t.Errorf("got %q, want the broker endpoint as-is (no override applies to a non-localhost result)", got)
+		}
+		if !trusted {
+			t.Error("trusted = false, want true (BrokerHubEndpoint is an operator-derived tier)")
+		}
+	})
+
+	t.Run("non-cloudrun runtime with a localhost result: override is skipped", func(t *testing.T) {
+		got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+			Op: opCreate, BrokerHubEndpoint: "http://localhost:8080", RuntimeName: "kubernetes",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "http://localhost:8080" {
+			t.Errorf("got %q, want the localhost endpoint left alone on a non-cloudrun runtime", got)
+		}
+		if !trusted {
+			t.Error("trusted = false, want true (BrokerHubEndpoint is an operator-derived tier)")
+		}
+	})
+}
+
+// TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverrideValue pins the
+// cloudrun (CRI) override at the value level: a fake GCE metadata server lets
+// the override actually succeed, so the replaced endpoint value itself is
+// asserted, not just that the override was attempted.
+func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverrideValue(t *testing.T) {
+	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Metadata-Flavor") != "Google" {
+			http.Error(w, "missing Metadata-Flavor", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Metadata-Flavor", "Google")
+		switch r.URL.Path {
+		case "/computeMetadata/v1/project/numeric-project-id":
+			_, _ = w.Write([]byte("123456789"))
+		case "/computeMetadata/v1/instance/zone":
+			_, _ = w.Write([]byte("projects/123456789/zones/us-central1-1"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(md.Close)
+	t.Setenv("GCE_METADATA_HOST", strings.TrimPrefix(md.URL, "http://"))
+	t.Setenv("K_SERVICE", "scion-hub")
+
+	const want = "https://scion-hub-123456789.us-central1.run.app"
+	for _, tt := range []struct {
+		name, runtime, broker, want string
+	}{
+		{"cloudrun, localhost: replaced", "cloudrun", "http://localhost:8080", want},
+		{"cloudrun, non-localhost: kept", "cloudrun", "https://broker.example.com", "https://broker.example.com"},
+		{"kubernetes, localhost: kept", "kubernetes", "http://localhost:8080", "http://localhost:8080"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+				Op: opCreate, BrokerHubEndpoint: tt.broker, RuntimeName: tt.runtime,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+			// Both the cloudrun-instance override (infra-derived) and the
+			// underlying BrokerHubEndpoint tier it may replace (an
+			// operator-derived tier) are always trusted.
+			if !trusted {
+				t.Error("trusted = false, want true")
+			}
+		})
 	}
 }

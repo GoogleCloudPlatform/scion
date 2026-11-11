@@ -115,6 +115,11 @@ func StoragePath(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldStoragePath, v))
 }
 
+// Layout applies equality check predicate on the "layout" field. It's identical to LayoutEQ.
+func Layout(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldLayout, v))
+}
+
 // Files applies equality check predicate on the "files" field. It's identical to FilesEQ.
 func Files(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldFiles, v))
@@ -123,6 +128,11 @@ func Files(v string) predicate.HarnessConfig {
 // ImageStatusCheckedAt applies equality check predicate on the "image_status_checked_at" field. It's identical to ImageStatusCheckedAtEQ.
 func ImageStatusCheckedAt(v time.Time) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldImageStatusCheckedAt, v))
+}
+
+// BuiltImage applies equality check predicate on the "built_image" field. It's identical to BuiltImageEQ.
+func BuiltImage(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldBuiltImage, v))
 }
 
 // OwnerID applies equality check predicate on the "owner_id" field. It's identical to OwnerIDEQ.
@@ -143,11 +153,6 @@ func UpdatedBy(v string) predicate.HarnessConfig {
 // SourceURL applies equality check predicate on the "source_url" field. It's identical to SourceURLEQ.
 func SourceURL(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldSourceURL, v))
-}
-
-// Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
-func Visibility(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldEQ(FieldVisibility, v))
 }
 
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
@@ -1020,6 +1025,81 @@ func StoragePathContainsFold(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldContainsFold(FieldStoragePath, v))
 }
 
+// LayoutEQ applies the EQ predicate on the "layout" field.
+func LayoutEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldLayout, v))
+}
+
+// LayoutNEQ applies the NEQ predicate on the "layout" field.
+func LayoutNEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNEQ(FieldLayout, v))
+}
+
+// LayoutIn applies the In predicate on the "layout" field.
+func LayoutIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIn(FieldLayout, vs...))
+}
+
+// LayoutNotIn applies the NotIn predicate on the "layout" field.
+func LayoutNotIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotIn(FieldLayout, vs...))
+}
+
+// LayoutGT applies the GT predicate on the "layout" field.
+func LayoutGT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGT(FieldLayout, v))
+}
+
+// LayoutGTE applies the GTE predicate on the "layout" field.
+func LayoutGTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGTE(FieldLayout, v))
+}
+
+// LayoutLT applies the LT predicate on the "layout" field.
+func LayoutLT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLT(FieldLayout, v))
+}
+
+// LayoutLTE applies the LTE predicate on the "layout" field.
+func LayoutLTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLTE(FieldLayout, v))
+}
+
+// LayoutContains applies the Contains predicate on the "layout" field.
+func LayoutContains(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContains(FieldLayout, v))
+}
+
+// LayoutHasPrefix applies the HasPrefix predicate on the "layout" field.
+func LayoutHasPrefix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasPrefix(FieldLayout, v))
+}
+
+// LayoutHasSuffix applies the HasSuffix predicate on the "layout" field.
+func LayoutHasSuffix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasSuffix(FieldLayout, v))
+}
+
+// LayoutIsNil applies the IsNil predicate on the "layout" field.
+func LayoutIsNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIsNull(FieldLayout))
+}
+
+// LayoutNotNil applies the NotNil predicate on the "layout" field.
+func LayoutNotNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotNull(FieldLayout))
+}
+
+// LayoutEqualFold applies the EqualFold predicate on the "layout" field.
+func LayoutEqualFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEqualFold(FieldLayout, v))
+}
+
+// LayoutContainsFold applies the ContainsFold predicate on the "layout" field.
+func LayoutContainsFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContainsFold(FieldLayout, v))
+}
+
 // FilesEQ applies the EQ predicate on the "files" field.
 func FilesEQ(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldFiles, v))
@@ -1183,6 +1263,81 @@ func ImageStatusCheckedAtIsNil() predicate.HarnessConfig {
 // ImageStatusCheckedAtNotNil applies the NotNil predicate on the "image_status_checked_at" field.
 func ImageStatusCheckedAtNotNil() predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldNotNull(FieldImageStatusCheckedAt))
+}
+
+// BuiltImageEQ applies the EQ predicate on the "built_image" field.
+func BuiltImageEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldBuiltImage, v))
+}
+
+// BuiltImageNEQ applies the NEQ predicate on the "built_image" field.
+func BuiltImageNEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNEQ(FieldBuiltImage, v))
+}
+
+// BuiltImageIn applies the In predicate on the "built_image" field.
+func BuiltImageIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIn(FieldBuiltImage, vs...))
+}
+
+// BuiltImageNotIn applies the NotIn predicate on the "built_image" field.
+func BuiltImageNotIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotIn(FieldBuiltImage, vs...))
+}
+
+// BuiltImageGT applies the GT predicate on the "built_image" field.
+func BuiltImageGT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGT(FieldBuiltImage, v))
+}
+
+// BuiltImageGTE applies the GTE predicate on the "built_image" field.
+func BuiltImageGTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGTE(FieldBuiltImage, v))
+}
+
+// BuiltImageLT applies the LT predicate on the "built_image" field.
+func BuiltImageLT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLT(FieldBuiltImage, v))
+}
+
+// BuiltImageLTE applies the LTE predicate on the "built_image" field.
+func BuiltImageLTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLTE(FieldBuiltImage, v))
+}
+
+// BuiltImageContains applies the Contains predicate on the "built_image" field.
+func BuiltImageContains(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContains(FieldBuiltImage, v))
+}
+
+// BuiltImageHasPrefix applies the HasPrefix predicate on the "built_image" field.
+func BuiltImageHasPrefix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasPrefix(FieldBuiltImage, v))
+}
+
+// BuiltImageHasSuffix applies the HasSuffix predicate on the "built_image" field.
+func BuiltImageHasSuffix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasSuffix(FieldBuiltImage, v))
+}
+
+// BuiltImageIsNil applies the IsNil predicate on the "built_image" field.
+func BuiltImageIsNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIsNull(FieldBuiltImage))
+}
+
+// BuiltImageNotNil applies the NotNil predicate on the "built_image" field.
+func BuiltImageNotNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotNull(FieldBuiltImage))
+}
+
+// BuiltImageEqualFold applies the EqualFold predicate on the "built_image" field.
+func BuiltImageEqualFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEqualFold(FieldBuiltImage, v))
+}
+
+// BuiltImageContainsFold applies the ContainsFold predicate on the "built_image" field.
+func BuiltImageContainsFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContainsFold(FieldBuiltImage, v))
 }
 
 // OwnerIDEQ applies the EQ predicate on the "owner_id" field.
@@ -1483,71 +1638,6 @@ func SourceURLEqualFold(v string) predicate.HarnessConfig {
 // SourceURLContainsFold applies the ContainsFold predicate on the "source_url" field.
 func SourceURLContainsFold(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldContainsFold(FieldSourceURL, v))
-}
-
-// VisibilityEQ applies the EQ predicate on the "visibility" field.
-func VisibilityEQ(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldEQ(FieldVisibility, v))
-}
-
-// VisibilityNEQ applies the NEQ predicate on the "visibility" field.
-func VisibilityNEQ(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldNEQ(FieldVisibility, v))
-}
-
-// VisibilityIn applies the In predicate on the "visibility" field.
-func VisibilityIn(vs ...string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldIn(FieldVisibility, vs...))
-}
-
-// VisibilityNotIn applies the NotIn predicate on the "visibility" field.
-func VisibilityNotIn(vs ...string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldNotIn(FieldVisibility, vs...))
-}
-
-// VisibilityGT applies the GT predicate on the "visibility" field.
-func VisibilityGT(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldGT(FieldVisibility, v))
-}
-
-// VisibilityGTE applies the GTE predicate on the "visibility" field.
-func VisibilityGTE(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldGTE(FieldVisibility, v))
-}
-
-// VisibilityLT applies the LT predicate on the "visibility" field.
-func VisibilityLT(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldLT(FieldVisibility, v))
-}
-
-// VisibilityLTE applies the LTE predicate on the "visibility" field.
-func VisibilityLTE(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldLTE(FieldVisibility, v))
-}
-
-// VisibilityContains applies the Contains predicate on the "visibility" field.
-func VisibilityContains(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldContains(FieldVisibility, v))
-}
-
-// VisibilityHasPrefix applies the HasPrefix predicate on the "visibility" field.
-func VisibilityHasPrefix(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldHasPrefix(FieldVisibility, v))
-}
-
-// VisibilityHasSuffix applies the HasSuffix predicate on the "visibility" field.
-func VisibilityHasSuffix(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldHasSuffix(FieldVisibility, v))
-}
-
-// VisibilityEqualFold applies the EqualFold predicate on the "visibility" field.
-func VisibilityEqualFold(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldEqualFold(FieldVisibility, v))
-}
-
-// VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
-func VisibilityContainsFold(v string) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldContainsFold(FieldVisibility, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

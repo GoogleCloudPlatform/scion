@@ -28,6 +28,157 @@ func (_u *DelegationEdgeUpdate) Where(ps ...predicate.DelegationEdge) *Delegatio
 	return _u
 }
 
+// SetCeilingKind sets the "ceiling_kind" field.
+func (_u *DelegationEdgeUpdate) SetCeilingKind(v string) *DelegationEdgeUpdate {
+	_u.mutation.SetCeilingKind(v)
+	return _u
+}
+
+// SetNillableCeilingKind sets the "ceiling_kind" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableCeilingKind(v *string) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetCeilingKind(*v)
+	}
+	return _u
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_u *DelegationEdgeUpdate) SetCeilingVersion(v int32) *DelegationEdgeUpdate {
+	_u.mutation.ResetCeilingVersion()
+	_u.mutation.SetCeilingVersion(v)
+	return _u
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableCeilingVersion(v *int32) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddCeilingVersion adds value to the "ceiling_version" field.
+func (_u *DelegationEdgeUpdate) AddCeilingVersion(v int32) *DelegationEdgeUpdate {
+	_u.mutation.AddCeilingVersion(v)
+	return _u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_u *DelegationEdgeUpdate) SetCeilingPermissionIds(v string) *DelegationEdgeUpdate {
+	_u.mutation.SetCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableCeilingPermissionIds(v *string) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (_u *DelegationEdgeUpdate) ClearCeilingPermissionIds() *DelegationEdgeUpdate {
+	_u.mutation.ClearCeilingPermissionIds()
+	return _u
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (_u *DelegationEdgeUpdate) SetCeilingBoundaryKind(v string) *DelegationEdgeUpdate {
+	_u.mutation.SetCeilingBoundaryKind(v)
+	return _u
+}
+
+// SetNillableCeilingBoundaryKind sets the "ceiling_boundary_kind" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableCeilingBoundaryKind(v *string) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetCeilingBoundaryKind(*v)
+	}
+	return _u
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (_u *DelegationEdgeUpdate) SetCeilingBoundaryProjectID(v string) *DelegationEdgeUpdate {
+	_u.mutation.SetCeilingBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableCeilingBoundaryProjectID(v *string) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetCeilingBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (_u *DelegationEdgeUpdate) SetCeilingSourceExpiresAt(v time.Time) *DelegationEdgeUpdate {
+	_u.mutation.SetCeilingSourceExpiresAt(v)
+	return _u
+}
+
+// SetNillableCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableCeilingSourceExpiresAt(v *time.Time) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetCeilingSourceExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearCeilingSourceExpiresAt clears the value of the "ceiling_source_expires_at" field.
+func (_u *DelegationEdgeUpdate) ClearCeilingSourceExpiresAt() *DelegationEdgeUpdate {
+	_u.mutation.ClearCeilingSourceExpiresAt()
+	return _u
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (_u *DelegationEdgeUpdate) SetDeactivationCause(v string) *DelegationEdgeUpdate {
+	_u.mutation.SetDeactivationCause(v)
+	return _u
+}
+
+// SetNillableDeactivationCause sets the "deactivation_cause" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableDeactivationCause(v *string) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetDeactivationCause(*v)
+	}
+	return _u
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (_u *DelegationEdgeUpdate) SetDeactivatedAt(v time.Time) *DelegationEdgeUpdate {
+	_u.mutation.SetDeactivatedAt(v)
+	return _u
+}
+
+// SetNillableDeactivatedAt sets the "deactivated_at" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableDeactivatedAt(v *time.Time) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetDeactivatedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeactivatedAt clears the value of the "deactivated_at" field.
+func (_u *DelegationEdgeUpdate) ClearDeactivatedAt() *DelegationEdgeUpdate {
+	_u.mutation.ClearDeactivatedAt()
+	return _u
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (_u *DelegationEdgeUpdate) SetDeactivationOpID(v string) *DelegationEdgeUpdate {
+	_u.mutation.SetDeactivationOpID(v)
+	return _u
+}
+
+// SetNillableDeactivationOpID sets the "deactivation_op_id" field if the given value is not nil.
+func (_u *DelegationEdgeUpdate) SetNillableDeactivationOpID(v *string) *DelegationEdgeUpdate {
+	if v != nil {
+		_u.SetDeactivationOpID(*v)
+	}
+	return _u
+}
+
 // SetDelegatorType sets the "delegator_type" field.
 func (_u *DelegationEdgeUpdate) SetDelegatorType(v delegationedge.DelegatorType) *DelegationEdgeUpdate {
 	_u.mutation.SetDelegatorType(v)
@@ -248,6 +399,48 @@ func (_u *DelegationEdgeUpdate) sqlSave(ctx context.Context) (_node int, err err
 			}
 		}
 	}
+	if _u.mutation.SourceScheduleIDCleared() {
+		_spec.ClearField(delegationedge.FieldSourceScheduleID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CeilingKind(); ok {
+		_spec.SetField(delegationedge.FieldCeilingKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingVersion(); ok {
+		_spec.SetField(delegationedge.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedCeilingVersion(); ok {
+		_spec.AddField(delegationedge.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(delegationedge.FieldCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.CeilingPermissionIdsCleared() {
+		_spec.ClearField(delegationedge.FieldCeilingPermissionIds, field.TypeString)
+	}
+	if value, ok := _u.mutation.CeilingBoundaryKind(); ok {
+		_spec.SetField(delegationedge.FieldCeilingBoundaryKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingBoundaryProjectID(); ok {
+		_spec.SetField(delegationedge.FieldCeilingBoundaryProjectID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingSourceExpiresAt(); ok {
+		_spec.SetField(delegationedge.FieldCeilingSourceExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.CeilingSourceExpiresAtCleared() {
+		_spec.ClearField(delegationedge.FieldCeilingSourceExpiresAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeactivationCause(); ok {
+		_spec.SetField(delegationedge.FieldDeactivationCause, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DeactivatedAt(); ok {
+		_spec.SetField(delegationedge.FieldDeactivatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeactivatedAtCleared() {
+		_spec.ClearField(delegationedge.FieldDeactivatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeactivationOpID(); ok {
+		_spec.SetField(delegationedge.FieldDeactivationOpID, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.DelegatorType(); ok {
 		_spec.SetField(delegationedge.FieldDelegatorType, field.TypeEnum, value)
 	}
@@ -296,6 +489,157 @@ type DelegationEdgeUpdateOne struct {
 	fields   []string
 	hooks    []Hook
 	mutation *DelegationEdgeMutation
+}
+
+// SetCeilingKind sets the "ceiling_kind" field.
+func (_u *DelegationEdgeUpdateOne) SetCeilingKind(v string) *DelegationEdgeUpdateOne {
+	_u.mutation.SetCeilingKind(v)
+	return _u
+}
+
+// SetNillableCeilingKind sets the "ceiling_kind" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableCeilingKind(v *string) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetCeilingKind(*v)
+	}
+	return _u
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_u *DelegationEdgeUpdateOne) SetCeilingVersion(v int32) *DelegationEdgeUpdateOne {
+	_u.mutation.ResetCeilingVersion()
+	_u.mutation.SetCeilingVersion(v)
+	return _u
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableCeilingVersion(v *int32) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddCeilingVersion adds value to the "ceiling_version" field.
+func (_u *DelegationEdgeUpdateOne) AddCeilingVersion(v int32) *DelegationEdgeUpdateOne {
+	_u.mutation.AddCeilingVersion(v)
+	return _u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_u *DelegationEdgeUpdateOne) SetCeilingPermissionIds(v string) *DelegationEdgeUpdateOne {
+	_u.mutation.SetCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableCeilingPermissionIds(v *string) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (_u *DelegationEdgeUpdateOne) ClearCeilingPermissionIds() *DelegationEdgeUpdateOne {
+	_u.mutation.ClearCeilingPermissionIds()
+	return _u
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (_u *DelegationEdgeUpdateOne) SetCeilingBoundaryKind(v string) *DelegationEdgeUpdateOne {
+	_u.mutation.SetCeilingBoundaryKind(v)
+	return _u
+}
+
+// SetNillableCeilingBoundaryKind sets the "ceiling_boundary_kind" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableCeilingBoundaryKind(v *string) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetCeilingBoundaryKind(*v)
+	}
+	return _u
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (_u *DelegationEdgeUpdateOne) SetCeilingBoundaryProjectID(v string) *DelegationEdgeUpdateOne {
+	_u.mutation.SetCeilingBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableCeilingBoundaryProjectID(v *string) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetCeilingBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (_u *DelegationEdgeUpdateOne) SetCeilingSourceExpiresAt(v time.Time) *DelegationEdgeUpdateOne {
+	_u.mutation.SetCeilingSourceExpiresAt(v)
+	return _u
+}
+
+// SetNillableCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableCeilingSourceExpiresAt(v *time.Time) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetCeilingSourceExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearCeilingSourceExpiresAt clears the value of the "ceiling_source_expires_at" field.
+func (_u *DelegationEdgeUpdateOne) ClearCeilingSourceExpiresAt() *DelegationEdgeUpdateOne {
+	_u.mutation.ClearCeilingSourceExpiresAt()
+	return _u
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (_u *DelegationEdgeUpdateOne) SetDeactivationCause(v string) *DelegationEdgeUpdateOne {
+	_u.mutation.SetDeactivationCause(v)
+	return _u
+}
+
+// SetNillableDeactivationCause sets the "deactivation_cause" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableDeactivationCause(v *string) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetDeactivationCause(*v)
+	}
+	return _u
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (_u *DelegationEdgeUpdateOne) SetDeactivatedAt(v time.Time) *DelegationEdgeUpdateOne {
+	_u.mutation.SetDeactivatedAt(v)
+	return _u
+}
+
+// SetNillableDeactivatedAt sets the "deactivated_at" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableDeactivatedAt(v *time.Time) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetDeactivatedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeactivatedAt clears the value of the "deactivated_at" field.
+func (_u *DelegationEdgeUpdateOne) ClearDeactivatedAt() *DelegationEdgeUpdateOne {
+	_u.mutation.ClearDeactivatedAt()
+	return _u
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (_u *DelegationEdgeUpdateOne) SetDeactivationOpID(v string) *DelegationEdgeUpdateOne {
+	_u.mutation.SetDeactivationOpID(v)
+	return _u
+}
+
+// SetNillableDeactivationOpID sets the "deactivation_op_id" field if the given value is not nil.
+func (_u *DelegationEdgeUpdateOne) SetNillableDeactivationOpID(v *string) *DelegationEdgeUpdateOne {
+	if v != nil {
+		_u.SetDeactivationOpID(*v)
+	}
+	return _u
 }
 
 // SetDelegatorType sets the "delegator_type" field.
@@ -547,6 +891,48 @@ func (_u *DelegationEdgeUpdateOne) sqlSave(ctx context.Context) (_node *Delegati
 				ps[i](selector)
 			}
 		}
+	}
+	if _u.mutation.SourceScheduleIDCleared() {
+		_spec.ClearField(delegationedge.FieldSourceScheduleID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CeilingKind(); ok {
+		_spec.SetField(delegationedge.FieldCeilingKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingVersion(); ok {
+		_spec.SetField(delegationedge.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedCeilingVersion(); ok {
+		_spec.AddField(delegationedge.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(delegationedge.FieldCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.CeilingPermissionIdsCleared() {
+		_spec.ClearField(delegationedge.FieldCeilingPermissionIds, field.TypeString)
+	}
+	if value, ok := _u.mutation.CeilingBoundaryKind(); ok {
+		_spec.SetField(delegationedge.FieldCeilingBoundaryKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingBoundaryProjectID(); ok {
+		_spec.SetField(delegationedge.FieldCeilingBoundaryProjectID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingSourceExpiresAt(); ok {
+		_spec.SetField(delegationedge.FieldCeilingSourceExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.CeilingSourceExpiresAtCleared() {
+		_spec.ClearField(delegationedge.FieldCeilingSourceExpiresAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeactivationCause(); ok {
+		_spec.SetField(delegationedge.FieldDeactivationCause, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DeactivatedAt(); ok {
+		_spec.SetField(delegationedge.FieldDeactivatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeactivatedAtCleared() {
+		_spec.ClearField(delegationedge.FieldDeactivatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeactivationOpID(); ok {
+		_spec.SetField(delegationedge.FieldDeactivationOpID, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.DelegatorType(); ok {
 		_spec.SetField(delegationedge.FieldDelegatorType, field.TypeEnum, value)

@@ -19,6 +19,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/spf13/cobra"
 )
@@ -50,6 +51,10 @@ The migration is:
     so the running SQLite hub can stay up until you cut over.
   - Verified: source and destination row counts are compared after every
     entity, aborting on any mismatch.
+  - Guarded: like server start, it refuses to create the destination tables
+    when the first schema on the destination's search_path has no Hub tables
+    but a later schema does. Set server.database.allow_shadowed_schema: true
+    (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true) to proceed anyway.
 
 By default the source SQLite file is left untouched (--keep-source). Pass
 --drop-source for an explicit cutover that deletes the SQLite file after a
@@ -83,11 +88,13 @@ func init() {
 }
 
 func runServerMigrate(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
 	if migrateBatchSize < 0 {
-		return fmt.Errorf("batch size must be non-negative, got %d", migrateBatchSize)
+		return newUsageError("batch size must be non-negative, got %d", migrateBatchSize)
 	}
 
 	srcDSN, srcPath, err := parseSQLiteSourceDSN(migrateFrom)
@@ -95,6 +102,11 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	dstDSN, err := parsePostgresDestDSN(migrateTo)
+	if err != nil {
+		return err
+	}
+
+	allowShadowed, err := serverMigrateAllowShadowedSchema()
 	if err != nil {
 		return err
 	}
@@ -118,8 +130,8 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = dst.Close() }()
 
 	_, _ = fmt.Fprintln(out, "Ensuring destination schema (auto-migrate)")
-	if err := entc.AutoMigrate(ctx, dst); err != nil {
-		return fmt.Errorf("destination auto-migrate: %w", err)
+	if err := migrateHubSchema(ctx, dst, allowShadowed, true); err != nil {
+		return fmt.Errorf("destination: %w", err)
 	}
 
 	_, _ = fmt.Fprintln(out, "Migrating entities...")
@@ -164,7 +176,7 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 //	/abs/path/hub.db            -> bare path
 func parseSQLiteSourceDSN(raw string) (dsn, path string, err error) {
 	if raw == "" {
-		return "", "", fmt.Errorf("--from is required")
+		return "", "", newUsageError("--from is required")
 	}
 	switch {
 	case strings.HasPrefix(raw, "sqlite://"):
@@ -187,7 +199,7 @@ func parseSQLiteSourceDSN(raw string) (dsn, path string, err error) {
 		path = raw
 	}
 	if path == "" {
-		return "", "", fmt.Errorf("could not determine sqlite file path from %q", raw)
+		return "", "", newUsageError("could not determine sqlite file path from %q", raw)
 	}
 	// cache=shared matches how the hub opens its SQLite database elsewhere.
 	dsn = "file:" + path + "?cache=shared"
@@ -199,14 +211,30 @@ func parseSQLiteSourceDSN(raw string) (dsn, path string, err error) {
 // ("host=... port=...") DSNs are passed through unchanged.
 func parsePostgresDestDSN(raw string) (string, error) {
 	if raw == "" {
-		return "", fmt.Errorf("--to is required")
+		return "", newUsageError("--to is required")
 	}
 	if strings.HasPrefix(raw, "postgres://") ||
 		strings.HasPrefix(raw, "postgresql://") ||
 		strings.Contains(raw, "host=") {
 		return raw, nil
 	}
-	return "", fmt.Errorf("--to must be a PostgreSQL DSN (postgres://... or host=...), got %q", raw)
+	return "", newUsageError("--to must be a PostgreSQL DSN (postgres://... or host=...), got %q", raw)
+}
+
+// serverMigrateAllowShadowedSchema reads server.database.allow_shadowed_schema
+// for server migrate's destination guard, which is the same PostgreSQL
+// search_path shadow guard and override as server start (ptone/scion#4432).
+// The setting comes from the server settings and the environment
+// (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA) the way server start reads it.
+// With no settings file this is the default, false, unless the environment
+// sets it. A settings file or SCION_SERVER_* environment that does not load
+// fails the command, as it fails server start.
+func serverMigrateAllowShadowedSchema() (bool, error) {
+	cfg, err := config.LoadGlobalConfig(serverConfigPath)
+	if err != nil {
+		return false, fmt.Errorf("loading server config for server.database.allow_shadowed_schema: %w", err)
+	}
+	return cfg.Database.AllowShadowedSchema, nil
 }
 
 // dropSQLiteFile removes the SQLite database file and any WAL/SHM/journal

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // outboundEmailRe matches scion user emails in outbound messages, with optional "user:" prefix.
@@ -59,23 +60,15 @@ func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
 //
 // Expected topics:
 //
-//	scion.grove.<projectID>.user.<userID>.messages  — user-targeted message
-//	scion.grove.<projectID>.agent.<agentID>.messages — agent-targeted message
+//	scion.project.<projectID>.user.<userID>.messages  — user-targeted message
+//	scion.project.<projectID>.agent.<agentID>.messages — agent-targeted message
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	// Strip the "scion." prefix used by the broker topic hierarchy.
-	normalized := strings.TrimPrefix(topic, "scion.")
-
-	parts := strings.Split(normalized, ".")
-	if len(parts) < 2 {
-		n.log.Debug("ignoring message with short topic", "topic", topic)
+	parsed, err := projectkeys.ParseTopic(topic)
+	if err != nil {
+		n.log.Debug("ignoring unrecognized topic", "topic", topic, "error", err)
 		return nil
 	}
-
-	if parts[0] != "grove" {
-		n.log.Debug("ignoring non-grove topic", "topic", topic)
-		return nil
-	}
-	projectID := parts[1]
+	projectID := parsed.ProjectID
 
 	// Classify the message for filtering.
 	isAgentToAgent := msg != nil &&
@@ -85,7 +78,7 @@ func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic strin
 
 	// User-targeted messages are always relayed (they were explicitly
 	// sent to a specific user and bypass observe/filter settings).
-	if len(parts) >= 5 && parts[2] == "user" {
+	if parsed.Kind == projectkeys.TopicKindUser {
 		return n.handleUserMessage(ctx, projectID, msg)
 	}
 
@@ -252,11 +245,16 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		return nil
 	}
 
+	// The retired end-of-turn assistant-reply mirror is one user's turn
+	// text. An older hub may still forward it; discard it rather than let
+	// it fall through to the notification path, which posts to every
+	// space linked to the project.
 	if msg.Type == messages.TypeAssistantReply {
-		if len(msg.Msg) > 500 {
-			msg.Msg = msg.Msg[:500] + fmt.Sprintf("\n[%d chars truncated]", len(msg.Msg)-500)
-		}
-	} else if msg.Type != messages.TypeInstruction {
+		n.log.Debug("discarding retired assistant-reply message", "sender", msg.Sender)
+		return nil
+	}
+
+	if msg.Type != messages.TypeInstruction {
 		n.log.Debug("routing non-instruction user message to notification path",
 			"type", msg.Type,
 			"sender", msg.Sender,
@@ -439,7 +437,7 @@ func notificationStyle(activity string) (string, notificationStyleInfo) {
 	case "COMPLETED":
 		return "Completed", notificationStyleInfo{icon: "\u2705"}
 	case "WAITING_FOR_INPUT":
-		return "Needs Input", notificationStyleInfo{icon: "\u231b"}
+		return "Waiting on Parent", notificationStyleInfo{icon: "\u231b"}
 	case "ERROR":
 		return "Error", notificationStyleInfo{icon: "\u274c"}
 	case "STALLED":
@@ -598,7 +596,12 @@ func (n *NotificationRelay) sendOversizeErrorCards(ctx context.Context, attachPa
 		if agentPath == "" {
 			continue
 		}
-		hostPath := resolveAgentPath(agentPath, projectSlug, projectID)
+		hostPath, err := resolveAgentPath(agentPath, projectSlug, projectID)
+		if err != nil {
+			n.log.Warn("cannot resolve attachment path for size check",
+				"agent_path", agentPath, "error", err)
+			continue
+		}
 		if hostPath == "" {
 			continue
 		}

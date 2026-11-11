@@ -1,0 +1,33 @@
+# Release Notes (2026-10-18)
+
+User access tokens can now administer invitations, project membership, schedules, skill catalogs and identity governance, and bearer-authorized streams end when their token stops validating. Cloud Run Instances join async launch, and Hub delete now removes the instance. A stateless co-located Runtime Broker no longer drops offline after a restart.
+
+## ⚠️ BREAKING CHANGES
+* **Test mode requires a pinned Hub ID** (#3785): Any `--test-mode` level other than `off` refuses to start with `hub_id_not_pinned` unless `server.hub.hub_id` (or `SCION_SERVER_HUB_HUBID`) is set. Pin the Hub's current ID, from `GET /healthz` or `~/.scion/hub-id`; a new value would re-scope secrets and keys. Test identities with admin roles are single-replica only.
+* **One server environment mapping** (#3782): A single table derived from the settings registry maps `SCION_SERVER_*` and `SCION_SEED_*` variables for every consumer, with one canonical spelling per key; earlier spellings remain aliases. Some spellings that were previously ignored now take effect, so remove leftover variables before upgrading. An unparseable value for a setting outside the main configuration tree now fails config loading.
+* **`--project <slug>` binds to the Hub project** (#3778): `--project <slug>` uses the existing Hub project instead of creating a directory named after the current directory, and a missing explicit project path is refused. `--global` harness-config and template uploads skip the project link and Runtime Broker registration. A leftover `<cwd>/<slug>` directory still wins, so delete it.
+* **Runtime Broker material uses `broker` permissions** (#3727): Runtime Broker env vars, secrets and the user heartbeat are checked on the `broker` permissions, and the separate `runtime_broker` pair is removed. Reading env vars or secret metadata needs `broker.read` plus ownership or `broker.update`. Material writes, update and deregistration need a sign-in. Image pull and removal check `broker.dispatch` first, even on an auto-provide Runtime Broker.
+
+## 🚀 Features
+* **User access tokens for administration** (#3818, #3815, #3811, #3696, #3577): Within their boundary and the holder's live authority, tokens can now do the following. Manage invitations and the allow list with `user:invite` and new Hub-only selectors. Create, update and resume schedules with `scheduled_event:create`/`update`; schedules carry the creating credential's limits. Change project membership, roles and ownership with `project:manage`. Create global skills (`skill:create_global`), manage skill registries and import global catalogs. Read roles, role bindings, access constraints and the Hub audit log. Identity binding stays session-only.
+* **Cloud Run Instances join async launch** (#3805): The Cloud Run Instances runtime no longer opts out of async launch, so creates return a pending launch.
+* **Launch wait labels** (#3800): The CLI launch wait labels each step. On failure it shows the code, its label and the step, for example `image_pull_failed`. A launch that ended with an error ends the wait in any phase. `scion start` and `resume` follow the Hub's reported resume phase.
+* **Hub maintenance** (#3769, #3766, #3781): An upgraded SQLite Hub runs `utc-timestamp-normalize` once at start, in the background, instead of logging an error that asks for a manual run. Start-up repair snapshots are removed 7 days after their last use. The TTL sweep log names the expired messages, their recipients and how long each was pending.
+* **Test identity cleanup** (#3796): On test-designated Hubs, `POST /api/v1/test-identities/cleanup` removes what the caller's expired or deleted test identities created, by provenance stamp only, and `GET /api/v1/test-identities/provenance` reports provenance within the caller's scope.
+* **Conduit, experimental** (#3752, #3753): Behind `hub.conduit`, the Hub's short Runtime Broker requests (logs, `exec`, image operations, project cleanup) go through the conduit from any Hub instance, falling back to the control channel. The grant-key lifecycle and the renewal re-check and mint landed with enforcement off.
+* **Groundwork** (#3755): Hubs can accept user access credentials from peer Hubs by credential kind, through a new trusted-issuer `accept_user_tokens` flag (default off) and only with the `federation.project_visitors` experiment enabled.
+
+## 🔒 Security
+* **Streams end with their token** (#3806): Streams opened with a user access token re-check the token every 15 seconds. They end when it is revoked or expired, its user is suspended, or it no longer has the permission that admitted the stream. This covers agent log and message streams, the project message-log stream, and terminals, which close with 4401 `authz_expired`.
+* **Token ceilings on lists** (#3804): A user access token lists rows only when its ceiling carries the list's permission for its boundary kind, and a project token lists only its own project. New selector: `project:list`.
+* **Uniform credential-issuing refusal** (#3809): Callers without an interactive session or dev credential get one fixed refusal from the credential-issuing endpoint. It is decided before the body is read or any target is resolved.
+
+## 🐛 Fixes
+* **Stateless co-located Runtime Broker stays online** (#3802): A stateless co-located Runtime Broker, for example with Cloud Run as the default runtime, is no longer marked offline about 5 minutes after a server restart. Creates no longer fail with no Runtime Broker available.
+* **Shared-workspace Hub projects accept starts** (#3794): A Hub-seeded shared-workspace clone ignores `.scion/agents/`, so agent provisioning no longer refuses every start for the project.
+* **Other agents' worktrees are preserved** (#3770): Provisioning and agent cleanup remove only the agent's own worktree entry instead of pruning repo-wide. A branch held by another worktree gives a clear error.
+* **Cloud Run Instances** (#3798, #3799, #3792): Hub delete now removes the Cloud Run instance instead of leaving it running. Runtime labels are read under Cloud Run's sanitized keys, so an owned flat Runtime Broker host sees its own instances. A start on a workspace backend other than NFS is refused instead of launching an instance that can never run.
+* **Tunnel to a stopped agent** (#3728): `scion tunnel` to a stopped agent reports `agent_not_running` (409, exit 9) instead of forbidden (403, exit 5).
+
+## 🔧 CI & Infrastructure
+* **CI caches** (#3593): The `pkg/hub` shard cache no longer restores the shard-plan cache due to a name-prefix collision, and the cache setup now fails on any such collision. The extras CI no longer saves a Go cache, about 5.4 GB per extras PR.

@@ -1,0 +1,20 @@
+{
+  "profile_map": {
+    "narrow": "k8s-team"
+  },
+  "findings": [
+    {
+      "code": "flat_target_scope_violation",
+      "severity": "blocking",
+      "path": "runtimes.cluster.list_all_namespaces",
+      "profiles": [
+        "wide"
+      ],
+      "message_contains": [
+        "lists agents in every namespace",
+        "one cluster and namespace",
+        "declare one instance per namespace"
+      ]
+    }
+  ]
+}

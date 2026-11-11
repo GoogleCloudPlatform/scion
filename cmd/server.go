@@ -22,19 +22,20 @@ import (
 const GlobalProjectName = "global"
 
 var (
-	serverConfigPath    string
-	hubPort             int
-	hubHost             string
-	enableHub           bool
-	enableRuntimeBroker bool
-	runtimeBrokerPort   int
-	dbURL               string
-	noAutoMigrate       bool
-	enableDevAuth       bool
-	enableTestLogin     bool
-	enableDebug         bool
-	storageBucket       string
-	storageDir          string
+	serverConfigPath     string
+	hubPort              int
+	hubHost              string
+	enableHub            bool
+	enableRuntimeBroker  bool
+	runtimeBrokerPort    int
+	dbURL                string
+	noAutoMigrate        bool
+	enableDevAuth        bool
+	enableTestLogin      bool
+	enableDebugEndpoints bool
+	enableDebug          bool
+	storageBucket        string
+	storageDir           string
 
 	// Template cache settings for Runtime Broker
 	templateCacheDir string
@@ -56,6 +57,12 @@ var (
 	webAssetsDir     string
 	webSessionSecret string
 	webBaseURL       string
+
+	// serverKeyringFile is --keyring-file (server.keyring_file).
+	serverKeyringFile string
+	// serverKeyringAllowWorldReadable is --keyring-file-allow-world-readable
+	// (server.keyring_file_allow_world_readable).
+	serverKeyringAllowWorldReadable bool
 
 	// Server daemon flags
 	serverStartForeground bool
@@ -240,7 +247,7 @@ func init() {
 	// Hub API flags
 	serverStartCmd.Flags().BoolVar(&enableHub, "enable-hub", false, "Enable the Hub API")
 	serverStartCmd.Flags().IntVar(&hubPort, "port", 9810, "Hub API port (standalone mode only; ignored when --enable-web is set, use --web-port instead)")
-	serverStartCmd.Flags().StringVar(&hubHost, "host", "0.0.0.0", "Hub API host to bind")
+	serverStartCmd.Flags().StringVar(&hubHost, "host", "0.0.0.0", "Listen address for the Hub API and web server; the runtime broker listener is set by server.broker.host (workstation default 127.0.0.1; 0.0.0.0 counts as unset)")
 	serverStartCmd.Flags().StringVar(&dbURL, "db", "", "Database URL/path")
 	serverStartCmd.Flags().BoolVar(&noAutoMigrate, "no-auto-migrate", false, "Skip automatic in-process upgrade of a legacy raw-SQL hub.db to the Ent schema (operator opt-out)")
 
@@ -251,9 +258,11 @@ func init() {
 	// Auth flags
 	serverStartCmd.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "Enable development authentication (auto-generates token)")
 	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
+	registerTestModeFlags(serverStartCmd)
 
 	// Debug flags
-	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable debug logging (verbose output)")
+	serverStartCmd.Flags().BoolVar(&enableDebugEndpoints, "enable-debug-endpoints", false, "Serve diagnostic endpoints for local development; refused in hosted mode and independent of --debug")
+	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable server debug mode; sets the default log level to debug, overriding the SCION_LOG_LEVEL default (per-component levels are kept)")
 
 	// Storage flags
 	serverStartCmd.Flags().StringVar(&storageBucket, "storage-bucket", "", "GCS bucket name for template storage")
@@ -274,9 +283,12 @@ func init() {
 	serverStartCmd.Flags().IntVar(&webPort, "web-port", 8080, "Web frontend port")
 	serverStartCmd.Flags().StringVar(&webAssetsDir, "web-assets-dir", "", "Path to client assets directory (overrides embedded)")
 	serverStartCmd.Flags().StringVar(&webSessionSecret, "session-secret", "", "Session cookie signing secret (auto-generated if empty)")
-	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects (e.g., https://scion.example.com)")
+	serverStartCmd.Flags().StringVar(&serverKeyringFile, "keyring-file", "", "Experimental: path of the server keyring file (server.keyring_file); requires the server.secret_rotation experiment and no --session-secret")
+	serverStartCmd.Flags().BoolVar(&serverKeyringAllowWorldReadable, "keyring-file-allow-world-readable", false, "Experimental: load a server keyring file whose world-read permission bit is set, with a warning (server.keyring_file_allow_world_readable); prefer mode 0400 or 0440")
+	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects and the hub endpoint; outranks server.hub.public_url (e.g., https://scion.example.com)")
 
 	// Admin bootstrap flags
+	registerConduitServerFlags(serverStartCmd.Flags())
 	serverStartCmd.Flags().StringArrayVar(&adminEmails, "admin-emails", nil, "Email address to auto-promote to admin role (repeatable; also accepts a comma-separated list)")
 
 	// Stop flags

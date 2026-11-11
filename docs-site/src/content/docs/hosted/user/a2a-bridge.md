@@ -77,9 +77,13 @@ Google Cloud Run enforces a strict single-port limitation for incoming traffic. 
 
 ### Interaction Modes
 The bridge supports three distinct A2A communication mechanics:
-* **Synchronous Blocking (SendMessage)**: The client POSTs a message and holds the HTTP connection open (up to `timeouts.send_message`, default 120s) until the agent produces its final response.
+* **Synchronous Blocking (SendMessage)**: The client POSTs a message and holds the HTTP connection open (up to `timeouts.send_message`, default 120s) until the task completes; the response is the agent's explicit reply (see the note below).
 * **Server-Sent Events (SSE) Streaming (SendStreamingMessage)**: The client initiates streaming to receive real-time, token-by-token streaming updates as the agent executes.
 * **Asynchronous Webhooks (Push Notifications)**: Clients register a callback URL (via the `CreateTaskPushNotificationConfig` method). The bridge stores this subscription in its state database (SQLite in default mode, PostgreSQL in standalone/HA mode) and POSTs state-change alerts (running, completed, input-required, error) to the webhook as they occur.
+
+:::note[Where the response comes from]
+The task's response (its artifacts) is whatever the agent explicitly sends back to the caller with `scion message`. The agent's final turn text is not forwarded automatically. If the agent never messages the caller, the task can still complete but carries no artifact, so instruct agents that serve A2A callers to reply with `scion message`. By default (`reply_poll.enabled: true`), when the caller is a Scion user (`hubUAT`, `hubJWT`, `hubBearer`, `geGoogle`) or a federated user (project visitor under `oidcFederation`), the bridge reads the agent's reply from the caller's own direct conversation on the Hub (`GET /api/v1/chat/conversations/:id/messages` with the caller's own credential, after the `POST .../message` call returns `conversation_id` and `message_id`), rather than from the shared `scion.user.messages` broker plugin topic. Set `reply_poll.enabled: false` only as an emergency rollback to the legacy broker plugin topic path.
+:::
 
 ---
 
@@ -134,7 +138,7 @@ export A2A_API_KEY="your-secure-static-api-key"
 ```
 
 ### Step 4: Verify Connection
-Return to the Hub **Admin > Integrations** page. Click **Reconnect** on the A2A Bridge integration card. Once the Hub successfully dials the bridge's RPC server on port `9090`, the status badge will update to **Connected**.
+Return to the Hub **Admin > Integrations** page. Click **Reconnect** on the A2A Bridge integration card. Once the Hub successfully dials the bridge's RPC server on port `9090`, the status badge will update to **Connected**. If the bridge restarts or loses its RPC connection later, the Hub's plugin supervisor automatically re-dials it with exponential backoff and replays topic subscriptions; see [Message-Bus Plugin Supervision](/scion/hosted/user/external-channels/#message-bus-plugin-supervision).
 
 ### Dev-Mode Rebuild
 When running the Scion Hub in development mode (`MaintenanceConfig.RepoPath` is configured in `settings.yaml`), clicking **Update** inside the A2A integration detail page triggers an automatic compilation of the bridge binary directly from your local repository. The Hub will output instructions for you to restart the process manually to apply the new binary.
@@ -214,6 +218,11 @@ timeouts:
   sse_keepalive: 30s     # Interval between SSE ping packets
   push_retry_max: 3      # Max delivery retries for webhook push notifications
 
+# Reply Polling (User & Visitor Conversations)
+reply_poll:
+  enabled: true          # Poll the caller's own conversation for the agent's reply (false = legacy broker topic rollback)
+  concurrency: 64        # Max concurrent Hub conversation poll requests across tasks
+
 # Client Request Rate Limiting
 rate_limit:
   enabled: true
@@ -274,6 +283,14 @@ This is managed using the **A2A Projects Editor** on the Integration Detail page
   * If **Enabled**: When a client sends a request with an unrecognized `contextId` (representing a new conversation), the bridge calls the Hub to automatically provision and start a new agent for that user on demand.
 * **Default Template**: Select which template is used when auto-provisioning new agents.
 
+### Asynchronous agent create (`bridge.async_create`)
+
+When the bridge auto-provisions an agent, it asks the Hub for an asynchronous create (YAML `bridge.async_create`, default `true`). A Hub with asynchronous launch enabled answers as soon as a Runtime Broker accepts the create, while the agent is still starting. A Hub without it answers once the agent is running, as before.
+
+While the agent starts, the bridge holds the first message and reports the task as `working`. Streaming and A2A SDK clients also see the status message `provisioning agent (<step>)` for each launch step (the step is shown as its code, for example `pod_create`); other clients see the `working` state only. Once the agent is running, the bridge sends the message, and the usual response wait starts. If the launch fails, the task ends `failed` and the message is not sent; streaming and SDK clients see `Agent failed to start (<code>): <message>`. A task can therefore stay `working` until the launch times out on the Hub, plus about 30 seconds. A user caller from another hub sees only the code, or `(phase: <phase>)` when the outcome has no code; see **Users from another hub (project visitors)** in section 8 below.
+
+The bridge also waits when it adopts an agent that another client is still starting, and before a follow-up message on an existing task whose agent is still starting; a follow-up sent while the task's first message is still waiting is delivered after that message when both reach the same bridge instance (a follow-up handled by another replica does not wait for it). It waits in those cases even with `async_create: false`, because that setting controls only the bridge's own request. Set `async_create: false` to always use the synchronous create.
+
 ---
 
 ## 7. Desktop App Federation
@@ -295,12 +312,14 @@ To secure and isolate desktop client sessions, Scion uses **User Access Token (U
 To authorize your desktop application, generate a Scion Personal Access Token scoped to the project you wish to target:
 
 ```bash
-scion token create \
+scion hub token create \
   --name "claude-desktop-integration" \
   --project "my-coding-project" \
-  --scope agent:message,agent:read \
+  --scopes agent:message,agent:read,inbox:read \
   --expires 365d
 ```
+
+`inbox:read` is required with `reply_poll.enabled: true` (the default) so the bridge can read the agent's reply from your conversation (`GET /api/v1/chat/conversations/:id/messages`) using your token. If the token lacks `inbox:read`, the Hub answers `403` on the conversation read and the task fails with `"This access token can't read your conversation with this agent (it needs the inbox:read scope and access to the agent's project); agent replies can't be returned."`
 
 This command returns a secure token starting with `scion_pat_...`. Copy it immediately; it will not be shown again.
 
@@ -346,7 +365,7 @@ When the A2A bridge is configured with per-user authentication, callers present 
 
 ### Per-User & Federation Schemes
 
-The A2A bridge supports four authentication schemes for granular access control, specified via `auth.scheme` in the bridge configuration:
+The A2A bridge supports five authentication schemes for granular access control, specified via `auth.scheme` in the bridge configuration. Four are described below; the fifth, `hubBearer` (Google credential pass-through — recommended over `geGoogle`, see below), is documented in the Hub's [External Bearer Tokens](/scion/hosted/single-node/auth/#external-bearer-tokens-google-credential-pass-through) section and `scion-a2a-bridge.yaml.sample`, since its verification logic lives on the Hub side.
 
 #### 1. `hubUAT` (Recommended for Desktop App Federation)
 * **How it works**: Callers present a Scion User Access Token (`Authorization: Bearer scion_pat_...`) created via the CLI.
@@ -358,7 +377,10 @@ The A2A bridge supports four authentication schemes for granular access control,
 * **How it works**: Callers present a Scion-signed User JWT.
 * **Local Validation**: The bridge validates the JWT signature locally using the HS256 `hub.signing_key` secret shared with the Hub. Since this happens entirely locally, it requires no active API calls to the Hub, making it extremely fast.
 
-#### 3. `geGoogle` (For Google Cloud Environments)
+#### 3. `geGoogle` (For Google Cloud Environments) — **Deprecated, superseded by `hubBearer`**
+:::caution[Deprecated]
+Deprecated and scheduled for removal in a future release; it continues to work until then. `hubBearer` forwards the caller's Google credential to the Hub verbatim: no Hub-issued token to cache or refresh, and the Hub re-checks the user (including suspension) on every request. See the Hub's [External Bearer Tokens](/scion/hosted/single-node/auth/#external-bearer-tokens-google-credential-pass-through) section and `scion-a2a-bridge.yaml.sample` for how to configure `hubBearer`.
+:::
 * **How it works**: Callers present a Google credential (ID token or access token) in the `Authorization: Bearer` header. The bridge exchanges it with the Hub for a short-lived Hub user token via the `/api/v1/auth/integrations/google/exchange` endpoint.
 * **Credential Types**: Supports both `id_token` and `access_token` via `auth.ge_exchange.credential_type`.
 * **LRU Cache**: Validated tokens are cached per-replica with a configurable TTL (`auth.ge_exchange.cache_ttl`, default `60s`, max `300s`). The effective TTL is capped at the minimum of the configured value, the Hub token expiry, and the upstream Google credential expiry. Expired tokens fail closed (never cached).
@@ -382,6 +404,13 @@ auth:
   - It rewrites the returned `jwks_uri` inside the OIDC config to point back to the bridge's own `/.well-known/jwks.json` endpoint.
   - It serves these endpoints publicly and caches them for **5 minutes** to ensure high performance and reduce Hub load.
   - For air-gapped or manual distribution, administrators can also use the **Download JWKS** button on the federation admin page in the Web Dashboard to download public keys out-of-band.
+* **Users from another hub (project visitors)**: The bridge reads the `scion_token_kind` claim (`user` or `agent`). A credential without the claim counts as an agent when it carries an agent claim (`project_id`, `agent_name`, `ancestry`, `root_user`), and as a user when it carries only an email. A credential that claims both kinds, or another kind, is refused. Agent credentials work as before.
+  - The Hub decides everything for a user caller, asked with the caller's own user access credential. `GET /api/v1/auth/me` names the caller's project visitor account on this Hub, and the bridge sends as `user:<account ID>`. Tasks are kept separate per account.
+  - A user with no project visitor account on this Hub (for example, the user of an identity issuer who is not linked to an account) is refused: the Hub answers 403, and the bridge answers 403 with "You don't have access to this resource" before any task starts. A user access credential from another hub is refused by the Hub with 401 while the Hub's project visitor experiment is off, or while the issuer does not accept user access credentials; the bridge passes the 401 on. When the Hub cannot be reached, the caller gets 502 and can retry.
+  - Messages from a user caller are text only. With `reply_poll.enabled: true` (the default), the bridge takes `conversation_key` (`dm:agent:<agentId>:user:<visitor id>`) and `message_id` from the Hub's send response and polls the visitor's own direct conversation (`GET /api/v1/chat/conversations/:dmKey/messages?limit=50`) with the caller's credential (paired with a bridge-signed token for `/chat/` admission) until a reply from `agent:<slug>` newer than `message_id` arrives; no broker plugin topic subscription is used for the reply. If `reply_poll.enabled` is set to `false` (rollback mode), the agent's reply comes back on the user's own broker topic (`scion.visitors.<accountID>.messages`), which the bridge listens on for that visitor alone, and the bridge re-verifies `GET /api/v1/chat/conversations/:dmKey/messages?limit=1` before forwarding the reply. In either mode, if the Hub refuses the conversation read with `401` or `403` (for example, the visitor grant was revoked), the task ends with `"You don't have access to this resource"`; any other failure on that conversation read ends the task with `"Unable to verify access to agent"`. The caller gets `"You don't have access to this resource"` when the project or agent is unknown, not exposed by the bridge, or not open to them. For an agent that is still starting, the bridge first asks the Hub, with the same conversation read, whether the caller may message it: a user caller sees launch progress only after the Hub allows the message, and if the launch fails it sees only the launch outcome code (`Agent failed to start (<code>)`), or the phase when the outcome has no code (`Agent failed to start (phase: <phase>)`). Any other Hub answer while the bridge routes or sends the message ends the task with `"Failed to route message to agent"` instead. That includes a `400`, which the Hub gives for a request it does not accept from a user caller (such as a message with an attachment); sending the same message again gets the same answer.
+  - `GET /projects/{project}/agents` (authenticated) returns the cards of the project's exposed agents that the caller may message. This comes from the Hub's `?messageable=true` agent list.
+  - The bridge never creates an agent for a user caller, and never sends for it as the bridge admin.
+  - Requirements: the bridge needs a signing key (`hub.signing_key` or `hub.signing_key_secret`), because it sends its own minted credential next to the caller's; without one a user caller gets 502. The Hub needs native chat enabled, because the access check before each reply reads the conversation through the chat API; with chat off, every reply to a user caller is refused, and so is every message from a user caller to an agent that is still starting.
 
 ### Per-User Isolation Benefits
 
@@ -411,10 +440,6 @@ The bridge exposes the following HTTP endpoints:
 | `/readyz` | GET | None | Readiness check (checks DB and active broker plugin connection). |
 | `/metrics` | GET | Configured Scheme | Prometheus metrics. |
 
-:::note[Backward Compatibility]
-To support legacy configurations, the bridge also routes endpoints prefixed with `/groves/` (e.g., `/groves/{projectSlug}/agents/{agentSlug}/jsonrpc`) to the exact same handlers.
-:::
-
 ---
 
 ### Supported JSON-RPC Methods
@@ -432,6 +457,8 @@ Standard A2A JSON-RPC methods supported at the `/jsonrpc` endpoint:
 | `CreateTaskPushNotificationConfig` | Register a webhook callback URL to receive real-time POST alerts on task state changes. |
 | `GetTaskPushNotificationConfig` | Retrieve registered webhooks for a specific task. |
 | `DeleteTaskPushNotificationConfig` | Remove a webhook callback subscription. |
+
+**Input-required replies.** When the agent asks for input (an `input-needed` reply, for example after `sciontool status ask_user`), the bridge returns the reply as a task artifact with the task in the `input-required` state, on every path: blocking `SendMessage`, SSE streams, push notifications, and `SubscribeToTask` replays. Plain replies keep the `working` and `completed` states. The bridge derives task state from the agent's structured status, and falls back to the message text only when no status is set.
 
 ---
 

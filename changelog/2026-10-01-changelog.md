@@ -1,0 +1,44 @@
+# Release Notes (2026-10-01)
+
+The dedicated agent keys operation went live end to end, and legacy raw messages now route through it. The project agent list gained a server-sorted, paged mode for large projects. The Kubernetes runtime got a batch of reliability fixes. Security work continued: host-path validation, root-context filesystem hardening and resource-aware delegation ceilings.
+
+## ⚠️ BREAKING CHANGES
+* **Raw messages now go through the agent keys path** (#2231, #2233): Legacy raw message requests are handed to the keys authorization, budget, dispatch and audit path, and responses carry migration headers. Raw content is capped at 4096 bytes, raw requests need attach authority on the target, and every message request body is read under a 2 MiB cap. `scion keys` and `scion message --raw` call the keys operation directly, with no fallback to messaging. Results are reported as dispatched, rejected or unknown.
+* **Kubernetes rejects an explicit GCP identity `block`** (#2248): A dispatch that resolves to the Kubernetes runtime with an explicit block mode now fails with an actionable 400. An unconfigured Kubernetes dispatch defaults to passthrough. When a hub-default passthrough grant is denied, the agent's GCP identity is left unset instead of being stored as block. Existing agents with a stored block aren't migrated (see `permissions.md`).
+* **terraform-ha: legacy hub-scope grant and OIDC key pre-create removed** (#2226): The hub-identity Secret Manager grant and the Terraform-managed OIDC signing key are gone. Hubs keep their migrated key from the backend, and fresh hubs generate one on first boot. Follow the run order and expected plan delta in `migrate-names-cloudrun.md` §7. The nfs-init Job now uses `generate_name`.
+* **User access tokens store an explicit boundary** (#2210): `user_access_tokens` gains `boundary_kind` (default `project`), and `project_id` becomes nullable, enforced by a CHECK constraint. Rows that fail the rule are logged at boot and rejected at validation. An existing row with a non-UUID `project_id` stops the migration, so correct or delete it before upgrading.
+
+## 🚀 Features
+* **Agent keys operation** (#2224, #2233, #2234, #2243): `POST /api/v1/agents/{id}/keys` (and the project-scoped route) is the authoritative keystroke endpoint. It has bounded bodies, operation IDs, per-principal and per-target rate limits, running-phase checks and content-free audit records for every outcome. hubclient `SendKeys` sends once with no retry. The docs and platform skills now use `scion keys`, and the raw flag is documented as deprecated and migration-only.
+* **Sorted, paged project agent list** (#2223, #2225, #2232, #2228, #2189): `GET /api/v1/projects/:id/agents?sort=updated` returns a stable server-sorted order with tamper-proof v2 cursors. Every cursor is now bound to the project, filter and caller. Requests return 422 `sorted_view_unavailable` above 2,000 agents. The project page loads projects of 50 agents or fewer in one request, and larger ones page with Prev/Next, which cut first load from about 21 s to 3.3 s on a 500-agent hub. SSE agent updates are coalesced into one flush per frame.
+* **Experiments admin UI** (#2191, #2214): The server-config settings page has an Experiments tab for toggling or resetting each experiment hub-wide. The web client takes flag values from the server, so a devtools localStorage override no longer wins. A new reference page, Experiments, documents the contributor convention.
+* **Open terminals restored per user** (#2229): The hub saves each user's open terminal list and frontmost terminal, then restores them when the terminal viewer opens. Only the frontmost terminal connects automatically. This is gated by `web.terminal_workspace`.
+* **gs:// links in native chat** (#2250): `gs://` URIs in agent messages become links. The hub fetches the object with the sending agent's own service account and renders text and markdown inline, with a 10 MiB cap and rate limits. This is phase 1, behind the `web.gcs_links` experiment.
+* **Chat and mobile web** (#2207, #2239, #2245, #2217): A header button opens the quick switcher, with a touch-friendly layout on phones. The app frame is pinned to the viewport, so headers no longer scroll away and mobile panels no longer drift sideways. The rail's Alphabetical/Recent sort now also orders threads within spaces, and custom thread order is saved per space. The `web.native_chat_v2` flag is removed, so v2 chat is unconditional.
+* **Display-timezone preference** (#2241): Users have a `preferences.timezone` setting (an IANA zone, or empty for Auto). `PATCH /api/v1/users/{id}` merges it per key, and `/auth/me` returns it.
+* **Agent start timing breakdown** (#2240): Structured `*_ms` and byte-count log fields across the Kubernetes runtime, agent manager, hub dispatcher and sciontool init attribute GKE start time phase by phase.
+* **`scion config get` dotted profile and runtime keys** (#2219): For example `profiles.local.runtime` or `runtimes.kubernetes.namespace`.
+* **Async agent-create hub wiring** (#2194): The broker launch-report endpoint, launch fields on the agent API and events, reaper scheduling and opt-in settings. All of it is inactive until the feature is enabled.
+
+## 🔒 Security
+* **Host-path validation before mounts and chown** (#2244): Workspace source paths are resolved through symlinks and checked against the project before any bind mount, GCS sync, container mount or recursive chown. The filesystem root, the user's home directory or its ancestors, critical system directories and most of the scion home are refused.
+* **Root-context filesystem and exec hardening** (#2236): Root-context file operations use no-follow, fd-anchored primitives. Root commands resolve from a fixed PATH. Attach is gated per runtime profile capability.
+* **Resource-aware delegation ceilings** (#2206): An agent's delegated authority on lifecycle actions and agent creation requires a live delegator at every link. Cycles, excess depth and lookup errors deny.
+* **Separate `project:agent:sa_assign` scope** (#2209): `gcp_service_account.assign` is no longer implied by `project:agent:create`, so the two are granted and restricted independently.
+* **Cloud tokens require a current service account record** (#2200): The GCP access-token and identity-token mint endpoints recheck the agent's service account assignment on every request.
+* **Per-agent Kubernetes Secrets cleaned up** (#2256): An agent's Secrets and its GKE SecretProviderClass are deleted on agent delete or stop, on pod-create failure, and before a re-create.
+* **Authorization hardening** (#2205, #2188): A typed-nil identity is treated as missing and denied. Trusted local-dev schedules record a `dev_local` initiator instead of `legacy_unknown`.
+
+## 🐛 Fixes
+* **Kubernetes runtime reliability** (#2235, #2222, #2212, #2242): On GKE Autopilot, the first exec into a pod on a new node is retried while its exec tunnel comes up. An agent's Runtime is resolved from its own applied broker profile, so agents on Kubernetes profiles no longer show as docker. Duplicate container env entries are removed. Concurrent same-project NFS workspace provisioning is now guarded by a lock, and init logs show the project ID.
+* **Project runtime settings no longer silently ignored** (#2192): A `SCION_AUTO_EXPOSE_PORTS` env collision made the broker fall back to the default runtime. Settings decode errors are now logged.
+* **Env-gather preflight honors settings env** (#2213): Required auth keys declared in settings or the harness-config env block (such as the Vertex AI keys) are no longer reported missing.
+* **Harness model defaults** (#2216, #2190): Codex defaults to `medium` reasoning effort when no thinking level is set, instead of low. Antigravity honors `SCION_MODEL`, resolves tier aliases and refreshes the model in an existing settings.json.
+* **Quick switcher Agents group** (#2227, #2251): Fixed a refresh livelock that left it on "Loading…". Agents now render page by page, and a stalled fetch hits an idle timeout with a retryable error.
+* **Agent graph stays stable on delete** (#2220): Surviving nodes keep their positions, and auto-fit no longer resets.
+* **Unread filter applies within spaces** (#2197): Read threads are hidden inside shown spaces, while the open conversation stays visible.
+* **Settings unused-key warning** (#2202): The warning no longer fires on valid v1 settings fields, still catches typos, and names the source file.
+* **Hub shutdown** (#2196): Background teardown runs even if the server was never started, and the preview service is closed.
+
+## 📖 Docs
+* **Observability and secrets** (#2215): Agent telemetry log queries. The default server log name is corrected to `scion-server`. Also covers the `POST /api/v1/agent/secrets` batch fetch and an always-mode callout for `GITHUB_TOKEN`.

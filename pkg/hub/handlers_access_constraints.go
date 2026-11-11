@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -28,8 +29,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -43,18 +47,19 @@ const (
 )
 
 // ---------------------------------------------------------------------------
-// WP0-conformant capabilities serialization (R1)
+// WP0-conformant capabilities serialization
 // ---------------------------------------------------------------------------
 
-// wpCapabilities is the WP0 wire shape for capabilities. The B6
-// BoundaryCapabilities struct uses boolean fields; the WP0 contract
-// (type-shapes.ts §8) specifies an actions array. This wrapper lives
-// in B7 (serialization layer), not B6.
+// wpCapabilities is the WP0 wire shape for capabilities. The
+// BoundaryCapabilities struct of the capabilities service uses boolean
+// fields; the WP0 contract (type-shapes.ts §8) specifies an actions
+// array. This wrapper lives in the handler serialization layer, not in
+// the capabilities service.
 type wpCapabilities struct {
 	Actions []string `json:"actions"`
 }
 
-// toWPCapabilities maps B6 boolean BoundaryCapabilities to the WP0
+// toWPCapabilities maps the boolean BoundaryCapabilities to the WP0
 // actions array format. Action names match type-shapes.ts §8
 // AccessBoundaryCapabilityAction.
 func toWPCapabilities(bc *BoundaryCapabilities) *wpCapabilities {
@@ -85,7 +90,7 @@ func toWPCapabilities(bc *BoundaryCapabilities) *wpCapabilities {
 }
 
 // ---------------------------------------------------------------------------
-// Strict JSON decoding (R2)
+// Strict JSON decoding
 // ---------------------------------------------------------------------------
 
 // readJSONStrict decodes JSON from the request body into v, rejecting unknown
@@ -104,7 +109,7 @@ func readJSONStrict(r *http.Request, v interface{}) error {
 }
 
 // ---------------------------------------------------------------------------
-// Permission display name cache (N3)
+// Permission display name cache
 // ---------------------------------------------------------------------------
 
 var (
@@ -127,7 +132,7 @@ func getPermissionDisplayNameLookup() map[string]string {
 }
 
 // ---------------------------------------------------------------------------
-// Request types — preview-bound mutations (B7)
+// Request types — preview-bound mutations
 // ---------------------------------------------------------------------------
 
 // accessConstraintCreateRequest is the payload for POST
@@ -177,6 +182,23 @@ type constraintConditionReq struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
+// utcWindow returns the request's time window converted to UTC. Clients may
+// send any RFC 3339 offset; the window is stored and returned in UTC so every
+// consumer sees the same canonical "Z" form. Nil bounds stay nil.
+func (c *constraintConditionReq) utcWindow() (notBefore, expiresAt *time.Time) {
+	return utcTimePtr(c.NotBefore), utcTimePtr(c.ExpiresAt)
+}
+
+// utcTimePtr returns a pointer to a UTC copy of *t, or nil when t is nil.
+// It never modifies *t.
+func utcTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
+}
+
 // ---------------------------------------------------------------------------
 // Preview request types
 // ---------------------------------------------------------------------------
@@ -191,7 +213,7 @@ type previewCreateRequest struct {
 
 	// For update and delete:
 	ConstraintID string `json:"constraintId,omitempty"`
-	// BaseRevision is an opaque string on the wire (N4, WP0 contract).
+	// BaseRevision is an opaque string on the wire (WP0 contract).
 	// Parsed to int64 internally.
 	BaseRevision string `json:"baseRevision,omitempty"`
 }
@@ -206,17 +228,17 @@ type previewDraftRequest struct {
 }
 
 // ---------------------------------------------------------------------------
-// API response types (B7 response shape)
+// API response types
 // ---------------------------------------------------------------------------
 
-// principalRef is the WP0 wire shape for createdBy/updatedBy (R4.3).
+// principalRef is the WP0 wire shape for createdBy/updatedBy.
 type principalRef struct {
 	Type        string `json:"type"`
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName"`
 }
 
-// appliesWhenResponse is the WP0 wire shape for time conditions (R4.6).
+// appliesWhenResponse is the WP0 wire shape for time conditions.
 type appliesWhenResponse struct {
 	NotBefore *time.Time `json:"notBefore"`
 	ExpiresAt *time.Time `json:"expiresAt"`
@@ -294,7 +316,7 @@ type resolvedPermission struct {
 	DisplayName string `json:"displayName,omitempty"`
 }
 
-// wpResolutionHealth is the WP0 ResolutionHealth wire shape (R4.2).
+// wpResolutionHealth is the WP0 ResolutionHealth wire shape.
 // Maps from the old {healthy, degraded, reason} to {state, unresolvedReferences}.
 type wpResolutionHealth struct {
 	State                string                `json:"state"`
@@ -314,7 +336,7 @@ type provenanceLinks struct {
 }
 
 // accessBoundaryListResponse is the list envelope.
-// Includes collection-level _capabilities (R4.7).
+// Includes collection-level _capabilities.
 type accessBoundaryListResponse struct {
 	Items         []accessBoundarySummary `json:"items"`
 	NextPageToken string                  `json:"nextPageToken,omitempty"`
@@ -324,24 +346,41 @@ type accessBoundaryListResponse struct {
 
 // auditEventResponse wraps a single audit entry for the API.
 type auditEventResponse struct {
-	ID             string       `json:"id"`
-	ConstraintID   string       `json:"constraintId"`
-	Operation      string       `json:"operation"`
-	ActorID        string       `json:"actorId"`
-	BeforeRevision string       `json:"beforeRevision"`
-	AfterRevision  string       `json:"afterRevision"`
-	Classification string       `json:"classification"`
-	PreviewID      string       `json:"previewId,omitempty"`
-	DraftHash      string       `json:"draftHash,omitempty"`
-	ImpactCounts   ImpactCounts `json:"impactCounts"`
-	Timestamp      time.Time    `json:"timestamp"`
+	ID               string                     `json:"id"`
+	ConstraintID     string                     `json:"constraintId"`
+	Operation        string                     `json:"operation"`
+	ActorKind        string                     `json:"actorKind,omitempty"`
+	ActorID          string                     `json:"actorId,omitempty"`
+	CorrelationID    string                     `json:"correlationId,omitempty"`
+	BatchOperationID string                     `json:"batchOperationId,omitempty"`
+	BeforeRevision   *string                    `json:"beforeRevision"`
+	AfterRevision    *string                    `json:"afterRevision"`
+	Classification   string                     `json:"classification,omitempty"`
+	PreviewID        string                     `json:"previewId,omitempty"`
+	DraftHash        string                     `json:"draftHash,omitempty"`
+	ImpactCounts     *auditImpactCountsResponse `json:"impactCounts,omitempty"`
+	ChangedFields    []string                   `json:"changedFields,omitempty"`
+	Timestamp        time.Time                  `json:"timestamp"`
+}
+
+type auditImpactCountsResponse struct {
+	Agents   uint32 `json:"agents"`
+	Users    uint32 `json:"users"`
+	Projects uint32 `json:"projects"`
+}
+
+type auditRetentionResponse struct {
+	MaxRows int    `json:"maxRows"`
+	Note    string `json:"note"`
 }
 
 // auditListResponse is the audit subresource envelope.
 type auditListResponse struct {
-	Items         []auditEventResponse `json:"items"`
-	NextPageToken string               `json:"nextPageToken,omitempty"`
-	TotalCount    int                  `json:"totalCount"`
+	Items           []auditEventResponse   `json:"items"`
+	NextPageToken   string                 `json:"nextPageToken,omitempty"`
+	TotalCount      int                    `json:"totalCount"`
+	TotalCountExact bool                   `json:"totalCountExact"`
+	Retention       auditRetentionResponse `json:"retention"`
 }
 
 // affectedPrincipalsResponse wraps the affected-principals subresource.
@@ -354,11 +393,23 @@ type affectedPrincipalsResponse struct {
 // mutationResponse is the response for create/update mutations.
 type mutationResponse struct {
 	accessBoundaryDetail
+	// AuditID is the event ID (a UUID) of the access_constraint_history row
+	// written in the same transaction as the create or update. It is listed
+	// by the constraint's audit endpoint while the constraint exists and its
+	// row is within the per-constraint retention cap.
 	AuditID string `json:"auditId"`
 }
 
 // deleteResponse is the response for delete mutations.
 type deleteResponse struct {
+	// AuditID is the event ID (a UUID) assigned to the access_boundary/delete
+	// structured-log event for this delete. It identifies a best-effort log
+	// event only: it is not retrievable through any API and is not backed by
+	// history (the constraint's history is deleted with it). A non-empty value
+	// does not guarantee the event was written: a dispatch failure is logged
+	// with this event_id, and the event is silently dropped when the process
+	// log level is above info. Empty if the event could not be built or no
+	// sink is configured.
 	AuditID string `json:"auditId"`
 }
 
@@ -516,7 +567,7 @@ func (s *Server) listAccessConstraints(w http.ResponseWriter, r *http.Request) {
 		items = append(items, summary)
 	}
 
-	// Collection-level _capabilities (R4.7): gates "New boundary" control.
+	// Collection-level _capabilities: gates "New boundary" control.
 	// Default to empty actions array so _capabilities is always present (WP0 contract).
 	collectionCaps := &wpCapabilities{Actions: []string{}}
 	if actor != nil && s.capabilitiesService != nil {
@@ -588,7 +639,7 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Keyset pagination based on principal ID (R5).
+	// Keyset pagination based on principal ID.
 	pageSize := parseIntOr(r.URL.Query().Get("pageSize"), 50)
 	if pageSize > 200 {
 		pageSize = 200
@@ -607,7 +658,7 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 	if rawToken := r.URL.Query().Get("pageToken"); rawToken != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
 		if err != nil {
-			BadRequest(w, "invalid pageToken")
+			writeInvalidCursor(w)
 			return
 		}
 		cursorID = string(decoded)
@@ -657,14 +708,32 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 // Audit subresource
 // ---------------------------------------------------------------------------
 
+const (
+	constraintAuditCursorVersion = 1
+	constraintAuditMaxPageSize   = 200
+	constraintAuditRetentionRows = 1000
+)
+
+type constraintAuditCursor struct {
+	Version      int    `json:"version"`
+	ConstraintID string `json:"constraintId"`
+	OccurredAt   string `json:"occurredAt"`
+	EventID      string `json:"eventId"`
+}
+
+func (s *Server) handleAdminAccessConstraintAudit(w http.ResponseWriter, r *http.Request) {
+	s.getConstraintAudit(w, r, r.PathValue("id"))
+}
+
 func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, "GET")
 		return
 	}
 
-	// Verify the constraint exists.
-	_, err := s.store.GetAccessConstraint(r.Context(), id)
+	// Resolve the live constraint before authorization. Every absent/denied
+	// outcome below deliberately uses the same response to prevent enumeration.
+	constraint, err := s.store.GetAccessConstraint(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Access Constraint")
@@ -674,48 +743,36 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Get audit entries from the governance service's audit writer.
-	var entries []BoundaryAuditEntry
-	if s.governanceService != nil && s.governanceService.auditWriter != nil {
-		entries = s.governanceService.auditWriter.GetEntriesForConstraint(id)
+	if !s.canReadConstraintAudit(r, constraint) {
+		NotFound(w, "Access Constraint")
+		return
 	}
 
-	// Keyset pagination based on audit entry ID (R5).
-	// Audit entries are append-only, so ID-based keyset is stable.
+	cursor, err := decodeConstraintAuditCursor(r.URL.Query().Get("pageToken"), id)
+	if err != nil {
+		writeInvalidCursor(w)
+		return
+	}
+
 	pageSize := parseIntOr(r.URL.Query().Get("pageSize"), 50)
-	if pageSize > 200 {
-		pageSize = 200
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > constraintAuditMaxPageSize {
+		pageSize = constraintAuditMaxPageSize
 	}
 
-	// Sort entries by ID for deterministic ordering.
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].ID < entries[j].ID
-	})
-
+	entries, err := s.store.ListConstraintHistory(r.Context(), id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
 	total := len(entries)
 
-	// Decode cursor: base64-encoded last-seen audit entry ID.
-	var cursorID string
-	if rawToken := r.URL.Query().Get("pageToken"); rawToken != "" {
-		decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
-		if err != nil {
-			BadRequest(w, "invalid pageToken")
-			return
-		}
-		cursorID = string(decoded)
-	}
-
-	// Filter: skip all entries with ID <= cursorID.
 	startIdx := 0
-	if cursorID != "" {
-		for i, e := range entries {
-			if e.ID > cursorID {
-				startIdx = i
-				break
-			}
-			if i == len(entries)-1 {
-				startIdx = len(entries) // all items consumed
-			}
+	if cursor != nil {
+		for startIdx < len(entries) && !constraintHistoryOlderThan(entries[startIdx], cursor) {
+			startIdx++
 		}
 	}
 
@@ -727,19 +784,12 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 	var items []auditEventResponse
 	if startIdx < total {
 		for _, e := range entries[startIdx:end] {
-			items = append(items, auditEventResponse{
-				ID:             e.ID,
-				ConstraintID:   e.ConstraintID,
-				Operation:      e.Operation,
-				ActorID:        e.ActorID,
-				BeforeRevision: strconv.FormatInt(e.BeforeRevision, 10),
-				AfterRevision:  strconv.FormatInt(e.AfterRevision, 10),
-				Classification: e.Classification,
-				PreviewID:      e.PreviewID,
-				DraftHash:      e.DraftHash,
-				ImpactCounts:   e.ImpactCounts,
-				Timestamp:      e.Timestamp,
-			})
+			item, mapErr := constraintHistoryResponse(e)
+			if mapErr != nil {
+				writeErrorFromErr(w, mapErr, "")
+				return
+			}
+			items = append(items, item)
 		}
 	}
 	if items == nil {
@@ -747,16 +797,144 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	var nextToken string
-	if end < total && len(items) > 0 {
-		lastID := items[len(items)-1].ID
-		nextToken = base64.RawURLEncoding.EncodeToString([]byte(lastID))
+	if end < total && len(entries[startIdx:end]) > 0 {
+		last := entries[end-1]
+		nextToken, err = encodeConstraintAuditCursor(id, last)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, auditListResponse{
-		Items:         items,
-		NextPageToken: nextToken,
-		TotalCount:    total,
+		Items:           items,
+		NextPageToken:   nextToken,
+		TotalCount:      total,
+		TotalCountExact: true,
+		Retention: auditRetentionResponse{
+			MaxRows: constraintAuditRetentionRows,
+			Note:    "Current retained rows for this live access constraint; not a lifetime or pagination-snapshot total.",
+		},
 	})
+}
+
+func (s *Server) canReadConstraintAudit(r *http.Request, constraint *store.AccessConstraint) bool {
+	identity := GetIdentityFromContext(r.Context())
+	user, ok := identity.(UserIdentity)
+	if !ok || user == nil || s.authzService == nil {
+		return false
+	}
+
+	resource := Resource{Type: "access_constraint", ID: constraint.ID}
+	if constraint.ScopeType == store.RoleScopeProject && constraint.ScopeID != "" {
+		resource.ParentType = "project"
+		resource.ParentID = constraint.ScopeID
+	}
+	// hub.audit.read is a hub-level permission: a user access token reads
+	// any constraint's audit history only on a hub boundary, with the
+	// hub_audit:read selector, through the hub-level constraint record.
+	if IsScopedUserIdentity(user) {
+		resource = hubScopedResource("access_constraint", constraint.ID)
+	}
+	decision := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   resource,
+		Action:     ActionRead,
+		Permission: "hub.audit.read",
+	})
+	return decision.Allowed
+}
+
+func decodeConstraintAuditCursor(rawToken, constraintID string) (*constraintAuditCursor, error) {
+	if rawToken == "" {
+		return nil, nil
+	}
+	if len(rawToken) > 2048 {
+		return nil, errors.New("audit cursor is too large")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(strings.NewReader(string(decoded)))
+	dec.DisallowUnknownFields()
+	var cursor constraintAuditCursor
+	if err := dec.Decode(&cursor); err != nil {
+		return nil, err
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("audit cursor must contain one object")
+	}
+	if cursor.Version != constraintAuditCursorVersion || cursor.ConstraintID != constraintID ||
+		cursor.EventID == "" || cursor.OccurredAt == "" {
+		return nil, errors.New("invalid audit cursor")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, cursor.OccurredAt); err != nil {
+		return nil, err
+	}
+	return &cursor, nil
+}
+
+func encodeConstraintAuditCursor(constraintID string, entry *store.AccessConstraintHistory) (string, error) {
+	encoded, err := json.Marshal(constraintAuditCursor{
+		Version:      constraintAuditCursorVersion,
+		ConstraintID: constraintID,
+		OccurredAt:   entry.OccurredAt.UTC().Format(time.RFC3339Nano),
+		EventID:      entry.EventID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func constraintHistoryOlderThan(entry *store.AccessConstraintHistory, cursor *constraintAuditCursor) bool {
+	cursorTime, err := time.Parse(time.RFC3339Nano, cursor.OccurredAt)
+	if err != nil {
+		return false
+	}
+	return entry.OccurredAt.Before(cursorTime) ||
+		(entry.OccurredAt.Equal(cursorTime) && entry.EventID < cursor.EventID)
+}
+
+func constraintHistoryResponse(entry *store.AccessConstraintHistory) (auditEventResponse, error) {
+	response := auditEventResponse{
+		ID:               entry.EventID,
+		ConstraintID:     entry.ConstraintID,
+		Operation:        entry.Operation,
+		ActorKind:        entry.ActorKind,
+		ActorID:          entry.ActorID,
+		CorrelationID:    entry.CorrelationID,
+		BatchOperationID: entry.BatchOperationID,
+		BeforeRevision:   formatOptionalRevision(entry.BeforeRevision),
+		AfterRevision:    formatOptionalRevision(entry.AfterRevision),
+		Classification:   entry.Classification,
+		PreviewID:        entry.PreviewID,
+		DraftHash:        entry.DraftHash,
+		Timestamp:        entry.OccurredAt,
+	}
+	if entry.ImpactCountsJSON != "" {
+		var counts auditImpactCountsResponse
+		if err := json.Unmarshal([]byte(entry.ImpactCountsJSON), &counts); err != nil {
+			return auditEventResponse{}, fmt.Errorf("decode access constraint history impact counts: %w", err)
+		}
+		response.ImpactCounts = &counts
+	}
+	if entry.ChangedFieldsJSON != "" {
+		if err := json.Unmarshal([]byte(entry.ChangedFieldsJSON), &response.ChangedFields); err != nil {
+			return auditEventResponse{}, fmt.Errorf("decode access constraint history changed fields: %w", err)
+		}
+	}
+	return response, nil
+}
+
+func formatOptionalRevision(revision *int64) *string {
+	if revision == nil {
+		return nil
+	}
+	formatted := strconv.FormatInt(*revision, 10)
+	return &formatted
 }
 
 // ---------------------------------------------------------------------------
@@ -781,7 +959,7 @@ func (s *Server) createPreview(w http.ResponseWriter, r *http.Request, user User
 		ID:   user.ID(),
 	}
 
-	// Parse BaseRevision from opaque string to int64 (N4).
+	// Parse BaseRevision from opaque string to int64.
 	var baseRevision int64
 	if req.BaseRevision != "" {
 		var parseErr error
@@ -890,7 +1068,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// N1: purpose is required by the WP0 contract.
+	// Purpose is required by the WP0 contract.
 	req.Purpose = strings.TrimSpace(req.Purpose)
 	if req.Purpose == "" {
 		BadRequest(w, "purpose is required")
@@ -952,8 +1130,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 
 	// Set time window (appliesWhen).
 	if req.AppliesWhen != nil {
-		draft.NotBefore = req.AppliesWhen.NotBefore
-		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
+		draft.NotBefore, draft.ExpiresAt = req.AppliesWhen.utcWindow()
 	}
 
 	// Commit through governance service.
@@ -962,12 +1139,22 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		ID:   user.ID(),
 	}
 
-	result, err := s.governanceService.CommitBoundaryChange(r.Context(), CommitRequest{
+	commitRequest := CommitRequest{
 		Operation:    "create",
 		Draft:        draft,
 		PreviewToken: req.PreviewToken,
 		Actor:        actor,
-	})
+		Credential:   user,
+	}
+	if requestID := logging.RequestIDFromContext(r.Context()); requestID != "" {
+		commitRequest.AuditRequest = &auditevent.RequestRef{
+			ID:      requestID,
+			Method:  r.Method,
+			Route:   "/api/v1/admin/access-constraints",
+			Surface: "api",
+		}
+	}
+	result, err := s.governanceService.CommitBoundaryChange(r.Context(), commitRequest)
 	if err != nil {
 		s.handleGovernanceError(w, err)
 		return
@@ -1047,7 +1234,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// N1: purpose is required by the WP0 contract.
+	// Purpose is required by the WP0 contract.
 	req.Purpose = strings.TrimSpace(req.Purpose)
 	if req.Purpose == "" {
 		BadRequest(w, "purpose is required")
@@ -1105,8 +1292,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if req.AppliesWhen != nil {
-		draft.NotBefore = req.AppliesWhen.NotBefore
-		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
+		draft.NotBefore, draft.ExpiresAt = req.AppliesWhen.utcWindow()
 	}
 
 	actor := PrincipalContext{
@@ -1121,6 +1307,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		BaseRevision: expectedRevision,
 		PreviewToken: req.PreviewToken,
 		Actor:        actor,
+		Credential:   user,
 	})
 	if err != nil {
 		s.handleGovernanceError(w, err)
@@ -1153,7 +1340,17 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// R3: Accept preview token ONLY from request body (JSON) or
+	// Deleting a boundary relaxes it, which needs an interactive session:
+	// a user access token is refused before the preview token is used.
+	if !sessionCredentialAllowed(r.Context()) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("access constraint deletion requires an interactive session; credential kind %q is not allowed",
+				GetCredentialContextFromContext(r.Context()).Kind),
+			authzop.ReasonGovernancePending)
+		return
+	}
+
+	// Accept preview token ONLY from request body (JSON) or
 	// X-Preview-Token header. Never from query parameters — tokens are
 	// HMAC credentials and must not appear in URLs.
 	var previewToken string
@@ -1177,7 +1374,7 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// N2: This pre-fetch checks the Disabled flag before calling
+	// This pre-fetch checks the Disabled flag before calling
 	// CommitBoundaryChange. The governance service will re-fetch internally,
 	// but we need the early check to return the correct error code for
 	// recovery-disabled constraints without consuming the preview token.
@@ -1201,13 +1398,23 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		ID:   user.ID(),
 	}
 
-	result, err := s.governanceService.CommitBoundaryChange(r.Context(), CommitRequest{
+	commitRequest := CommitRequest{
 		Operation:    "delete",
 		ConstraintID: id,
 		BaseRevision: existing.Revision,
 		PreviewToken: previewToken,
 		Actor:        actor,
-	})
+		Credential:   user,
+	}
+	if requestID := logging.RequestIDFromContext(r.Context()); requestID != "" {
+		commitRequest.AuditRequest = &auditevent.RequestRef{
+			ID:      requestID,
+			Method:  r.Method,
+			Route:   "/api/v1/admin/access-constraints/{id}",
+			Surface: "api",
+		}
+	}
+	result, err := s.governanceService.CommitBoundaryChange(r.Context(), commitRequest)
 	if err != nil {
 		s.handleGovernanceError(w, err)
 		return
@@ -1249,7 +1456,7 @@ func (s *Server) requireConstraintAdminPermission(w http.ResponseWriter, r *http
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "access_constraint", ID: "hub"},
+		Resource:   hubScopedResource("access_constraint", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})
@@ -1421,7 +1628,7 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 	// Build scope display (WP0 ConstraintScopeDisplay shape).
 	scopeDisp := buildScopeDisplay(sc, scopeDisplayName)
 
-	// R4.3: createdBy/updatedBy as PrincipalRef objects.
+	// createdBy/updatedBy as PrincipalRef objects.
 	createdByRef := s.resolvePrincipalRef(ctx, sc.CreatedBy)
 	updatedByRef := s.resolvePrincipalRef(ctx, sc.UpdatedBy)
 
@@ -1434,10 +1641,10 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 		Scope:                  resolvedScopeFromStore(sc),
 		ScopeDisplay:           scopeDisp,
 		MaxPermissionCount:     len(sc.MaximumPermissions),
-		AffectedPrincipalCnt:   0, // R4.5: populated from cached count; TODO: compute from preview cache.
+		AffectedPrincipalCnt:   0, // Populated from cached count; TODO: compute from preview cache.
 		AffectedPrincipalExact: false,
 		Status:                 status,
-		Risk:                   []string{}, // R4.4: empty array; risk assessment not yet implemented.
+		Risk:                   []string{}, // Empty array; risk assessment not yet implemented.
 		Health:                 health,
 		AppliesWhen: appliesWhenResponse{
 			NotBefore: sc.NotBefore,
@@ -1450,7 +1657,7 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 		UpdatedAt: sc.UpdatedAt,
 	}
 
-	// Compute capabilities if actor is available (R1: WP0 actions array).
+	// Compute capabilities if actor is available (WP0 actions array).
 	// Default to empty actions array so _capabilities is always present (WP0 contract).
 	summary.Capabilities = &wpCapabilities{Actions: []string{}}
 	if actor != nil && s.capabilitiesService != nil {
@@ -1573,7 +1780,7 @@ func buildScopeDisplay(sc *store.AccessConstraint, displayName string) scopeDisp
 	return d
 }
 
-// resolvePrincipalRef resolves a bare user ID to a PrincipalRef (R4.3).
+// resolvePrincipalRef resolves a bare user ID to a PrincipalRef.
 // Falls back to showing the ID as display name if unresolvable.
 func (s *Server) resolvePrincipalRef(_ context.Context, userID string) *principalRef {
 	if userID == "" {
@@ -1589,7 +1796,7 @@ func (s *Server) resolvePrincipalRef(_ context.Context, userID string) *principa
 	}
 }
 
-// N3: Uses cached lookup map instead of rebuilding per call.
+// Uses cached lookup map instead of rebuilding per call.
 func resolvePermissionDisplayNames(ids []string) []resolvedPermission {
 	lookup := getPermissionDisplayNameLookup()
 	result := make([]resolvedPermission, len(ids))
@@ -1616,7 +1823,7 @@ func computeConstraintStatus(sc *store.AccessConstraint, hc *AccessConstraint) s
 	return "active"
 }
 
-// computeWPHealth converts the internal health to the WP0 ResolutionHealth shape (R4.2).
+// computeWPHealth converts the internal health to the WP0 ResolutionHealth shape.
 func computeWPHealth(hc *AccessConstraint) wpResolutionHealth {
 	if hc == nil || hc.Degraded {
 		return wpResolutionHealth{
@@ -1643,6 +1850,10 @@ func computeWPHealth(hc *AccessConstraint) wpResolutionHealth {
 
 // handleGovernanceError maps governance errors to HTTP responses.
 func (s *Server) handleGovernanceError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errTokenRelaxationSessionOnly) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden, err.Error(), authzop.ReasonGovernancePending)
+		return
+	}
 	var govErr *GovernanceError
 	if errors.As(err, &govErr) {
 		statusCode := governanceErrorStatus(govErr.Code)
@@ -1711,6 +1922,14 @@ func governanceErrorStatus(code string) int {
 		return http.StatusConflict
 	case ErrCodeInvalidRequest:
 		return http.StatusBadRequest
+	case ErrCodePreviewTokenExpired, ErrCodePreviewTokenReplay,
+		ErrCodePreviewActorMismatch, ErrCodePreviewOperationMismatch,
+		ErrCodePreviewConstraintMismatch, ErrCodePreviewDraftModified,
+		ErrCodePreviewRevisionMismatch, ErrCodePreviewStateMismatch,
+		ErrCodePreviewTokenInvalid:
+		// A preview-token refusal carried by a governance error answers
+		// the same status as on the token error path.
+		return tokenErrorStatus(code)
 	default:
 		return http.StatusInternalServerError
 	}
@@ -1726,6 +1945,8 @@ func tokenErrorStatus(code string) int {
 	case ErrCodePreviewActorMismatch:
 		return http.StatusForbidden
 	case ErrCodePreviewOperationMismatch:
+		return http.StatusBadRequest
+	case ErrCodePreviewConstraintMismatch:
 		return http.StatusBadRequest
 	case ErrCodePreviewDraftModified:
 		return http.StatusConflict
@@ -1815,8 +2036,7 @@ func (s *Server) draftToStoreConstraint(draft *previewDraftRequest, user UserIde
 	}
 
 	if draft.AppliesWhen != nil {
-		sc.NotBefore = draft.AppliesWhen.NotBefore
-		sc.ExpiresAt = draft.AppliesWhen.ExpiresAt
+		sc.NotBefore, sc.ExpiresAt = draft.AppliesWhen.utcWindow()
 	}
 
 	return sc, nil
@@ -1853,26 +2073,41 @@ func parseIntOr(s string, defaultVal int) int {
 	return v
 }
 
-// hasUnknownFields was removed (R2): replaced by readJSONStrict which uses
-// json.NewDecoder.DisallowUnknownFields() as the primary decode path for
-// all mutation and preview endpoints.
+// readJSONStrict, which uses json.NewDecoder.DisallowUnknownFields(), is
+// the primary decode path for all mutation and preview endpoints.
 
 // ---------------------------------------------------------------------------
-// Server field extensions (B7 service wiring)
+// Server field extensions (boundary service wiring)
 // ---------------------------------------------------------------------------
 
-// previewService provides access to the B3 preview engine.
+// previewService provides access to the preview engine.
 // Set via initBoundaryServices().
-// Field declared here to document B7's dependency; the actual field lives
+// Field declared here to document the handlers' dependency; the actual field lives
 // on Server.
 
-// governanceService provides access to the B5 governance service.
+// governanceService provides access to the governance service.
 // Set via initBoundaryServices().
 
-// capabilitiesService provides access to the B6 capabilities service.
+// capabilitiesService provides access to the capabilities service.
 // Set via initBoundaryServices().
 
-// initBoundaryServices initializes the B3-B6 services on the Server.
+// sharedAuditLogSink returns the structured-log audit sink over the server's
+// shared asynchronous audit writer (s.auditWriter, built by
+// initDecisionAuditLog). Records through it are async and best-effort, not
+// persisted records: queue-full, oversize and closed-writer rejections are
+// counted, but a record is silently not emitted (and not counted) when the
+// process log level is above info. It is not gated by the decision-audit
+// experiment, which applies only to decision records. Nil when the writer
+// was not initialized.
+func (s *Server) sharedAuditLogSink() auditevent.Sink {
+	if s.auditWriter == nil || s.decisionAuditLogger == nil || s.decisionAuditLogger.sink == nil {
+		return nil
+	}
+	return s.decisionAuditLogger.sink
+}
+
+// initBoundaryServices initializes the preview, governance and
+// capabilities services on the Server.
 // Called during server startup after authzService is available.
 func (s *Server) initBoundaryServices() {
 	if s.authzService == nil {
@@ -1883,12 +2118,16 @@ func (s *Server) initBoundaryServices() {
 	s.previewService = NewPreviewService(s.store, s.authzService, logger)
 	s.capabilitiesService = NewCapabilitiesService(s.store, s.authzService, logger)
 
-	// Create audit writer and event bus.
-	auditWriter := NewBoundaryAuditWriter(logger)
 	eventBus := NewInvalidationEventBus(logger)
 
 	gs := NewGovernanceService(s.store, s.previewService, s.authzService, logger)
-	gs.auditWriter = auditWriter
+	gs.deleteAuditSink = s.sharedAuditLogSink()
 	gs.eventBus = eventBus
 	s.governanceService = gs
+
+	// A committed boundary or binding change can narrow what a principal
+	// may do: re-check open conduit user streams on every node.
+	eventBus.Subscribe("conduit-stream-authz", nil, func(InvalidationEvent) {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{})
+	}, true)
 }

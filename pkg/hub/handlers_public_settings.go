@@ -36,6 +36,13 @@ type PublicSettingsResponse struct {
 	DefaultTemplate string `json:"defaultTemplate,omitempty"`
 	// DefaultModel is the hub-level default model identifier.
 	DefaultModel string `json:"defaultModel,omitempty"`
+	// AgentSecretsUserScopeOnly mirrors agent_secrets.user_scope_only so the
+	// web terminal's capture dialog can disable Project and preselect
+	// Profile without needing admin rights to read the config (design
+	// ptone/scion#2291 §7). Exposing this policy boolean on an
+	// unauthenticated endpoint reveals nothing beyond what a 403 would
+	// reveal anyway.
+	AgentSecretsUserScopeOnly bool `json:"agentSecretsUserScopeOnly"`
 }
 
 // nativeChatEnabled reports whether the built-in chat feature is active.
@@ -50,7 +57,7 @@ func (s *Server) nativeChatEnabled() bool {
 
 func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -67,12 +74,13 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 	defaults := s.hubAgentDefaults()
 
 	writeJSON(w, http.StatusOK, PublicSettingsResponse{
-		TelemetryEnabled:       telemetryEnabled,
-		AutoExposePortsEnabled: autoExposePortsEnabled,
-		NativeChatEnabled:      s.nativeChatEnabled(),
-		DefaultRuntimeBroker:   defaults.DefaultRuntimeBroker,
-		DefaultHarnessConfig:   defaults.DefaultHarnessConfig,
-		DefaultTemplate:        defaults.DefaultTemplate,
-		DefaultModel:           defaults.DefaultModel,
+		TelemetryEnabled:          telemetryEnabled,
+		AutoExposePortsEnabled:    autoExposePortsEnabled,
+		NativeChatEnabled:         s.nativeChatEnabled(),
+		DefaultRuntimeBroker:      defaults.DefaultRuntimeBroker,
+		DefaultHarnessConfig:      defaults.DefaultHarnessConfig,
+		DefaultTemplate:           defaults.DefaultTemplate,
+		DefaultModel:              defaults.DefaultModel,
+		AgentSecretsUserScopeOnly: s.agentSecretsUserScopeOnly(),
 	})
 }

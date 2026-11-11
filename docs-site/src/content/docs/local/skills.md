@@ -13,7 +13,7 @@ Scion supports two ways to deliver skills to agents:
 This page covers the Skill Bank: how to author, publish, version, and consume skills with the `scion skills` command group. For Hub-side registry administration and federation, see [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
 
 :::note
-The `scion skills` commands (except `create`) talk to a Hub. Make sure a Hub endpoint is configured — see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
+The `scion skills` commands (except `create`) talk to a Hub. Make sure a Hub is selected (from your hub list, or with `--hub`) — see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
 :::
 
 ## Anatomy of a skill
@@ -77,16 +77,39 @@ skills:
   - uri: gh://my-org/skills/linting        # federated GitHub source
     as: lint-rules                          # mount under a different name
   - uri: skill://scion/user/alice/scratch
-    optional: true                          # do not fail provisioning if unresolved
+    optional: true                          # skip (with a warning) if it can't be resolved or installed
 ```
 
 | Field | Required | Description |
 | :--- | :--- | :--- |
 | `uri` | Yes | A [skill reference URI](#skill-reference-uris) or bare skill name. |
 | `as` | No | Mount the skill under a different directory name. |
-| `optional` | No | If `true`, provisioning continues even when the skill cannot be resolved. |
+| `optional` | No | If `true`, provisioning continues even when the skill cannot be resolved or installed. The skipped skill is logged as a warning that names it and gives the reason. |
 
-At provisioning time Scion resolves every required skill, downloads its files (using the [content-hash cache](#content-hash-caching)), and mounts them into the harness's skills directory (for example `.claude/skills/` or `.gemini/skills/`).
+At provisioning time Scion resolves every required skill, downloads its files (using the [content-hash cache](#content-hash-caching)), and installs them into the harness's skills directory inside the Agent home (for example `.claude/skills/` or `.gemini/skills/`). The harness's `skills_dir` must be a relative path inside the Agent home (`harness skills_dir must be a relative path inside the agent home`), and Scion installs each skill without following symbolic links in the source or the Agent home, within `4096` entries, `64 MiB`, and `32` directory levels per skill (skipping symlinks, special files, and files with multiple hard links in the source, and refusing if a directory on the skill's path in the Agent home or source is a symlink or not a directory).
+
+When a Hub dispatches the agent, the Hub resolves Hub-registry skill references with the permissions of the principal creating the agent. That principal is the user, or the parent agent when an agent creates a child. The Runtime Broker's own identity is not used. A required skill provisions whenever the agent's creator can read it. A skill the creator cannot read is reported the same way as one that does not exist, so the failure does not reveal that the skill is there. The broker installs Hub-resolved skills as-is. It resolves only what the Hub did not cover itself, such as `gh://`, `gcp-skill://`, federated registries, and references found only in broker-local templates.
+
+### When a required skill cannot be resolved or installed
+
+If a required skill cannot be resolved, or resolves but cannot be downloaded, verified or installed, the request fails with an error instead of reporting success. This applies to `scion create`, `scion start`, restart, and resuming a stopped or suspended agent. A new agent whose provisioning failed is removed. An existing agent keeps its record and is not started. Starting can re-provision the agent, which resolves its skills again. Skills marked `optional: true` are skipped instead, with a warning in the provisioning log.
+
+The error uses code `skill_resolution_failed`. Its message names the skill reference, and `details` has the reference (`skill`) and the cause (`cause`). The HTTP status depends on the cause:
+
+| Cause | Status | Meaning |
+| :--- | :--- | :--- |
+| `not_found` | 404 | The skill does not exist at that reference, or the agent's creator cannot read it. |
+| `forbidden` | 403 | The creator may not resolve `gh://` skills for this project. |
+| `rate_limited` | 429 | GitHub rate-limited the request. The response has a `Retry-After` header when GitHub sent one. |
+| `timeout` | 504 | GitHub did not respond before the deadline. |
+| `upstream_unavailable`, `unreachable` | 502 | GitHub returned repeated server errors, or could not be reached. |
+| `install_failed` | 500 | The skill resolved, but its files could not be downloaded, verified or installed. The message gives a short reason, such as `download failed with status 404`; a failure on the broker's own filesystem is reported as `install failed on the broker`. |
+| `unsupported_skill_content` | 500 | A `gh://` skill cannot be installed as it is in the repository: its directory contains a git submodule, has more than 1000 files or a path that would leave the skill directory, or GitHub truncated its listing. Retrying does not help; change the skill. |
+| any other cause | 500 | An internal failure while resolving the skill. |
+
+For `scion create` (which only provisions), a provisioning failure for any other reason is reported as a warning on the created agent.
+
+On a Hub that runs several nodes, a create, start, restart or resume handed to another Hub node returns the same error, status and `Retry-After` as on a single node. For a create, this covers a failure the broker reports when it answers the request. A failure the broker reports after it has accepted an asynchronous launch is reported through that launch, as on a single node.
 
 ## Skill reference URIs
 
@@ -115,14 +138,18 @@ Most segments are optional. Common forms:
 
 The `@version` suffix accepts:
 
-- `latest` (the default when omitted) — the highest published, non-deprecated stable version.
+- `latest` (the default when omitted) — the highest published stable version, or the highest deprecated stable version when no published stable version exists.
 - An exact version, e.g. `1.4.0` (a leading `v` is stripped).
-- A semver range, e.g. `^1.0`, `~1.2`, `>=1.0.0` — resolves to the highest matching version.
-- A content hash, e.g. `sha256:abc123…` — resolves to the exact bytes with that hash.
+- A semver range, e.g. `^1.0`, `~1.2`, `>=1.0.0` — resolves to the highest matching published stable version, or the highest matching deprecated stable version when no published stable version matches.
+- A content hash, e.g. `sha256:abc123…` — resolves to the exact version with that hash (matching `contentHash`, or `contentHashV2` while the `hub.skill_content_hash_v2` [experiment](/scion/reference/experiments/) is enabled; see [Content hash forms](/scion/hosted/single-node/skill-registry/#content-hash-forms)). `published` and `deprecated` versions match; `draft` and `archived` versions never do.
 
 ### GitHub skill URIs (`gh://`)
 
 The `gh://` scheme retrieves skill files directly from a GitHub repository. It works out-of-the-box for public repositories, and supports secure private repository resolution.
+
+A `gh://` skill contains every regular file under the skill directory, including files in subdirectories such as `scripts/` or `references/`. Scion reads the directory with one GitHub git trees API call per resolution. A file that is executable in the repository is installed executable (`0755`); every other file is installed `0644`. Setuid, setgid and sticky bits are never applied. Symlinks in the skill directory are skipped. Resolution fails with an error, before any file is downloaded, when the skill directory contains a git submodule, has more than 1000 files, or has a path that would leave the skill directory, or when GitHub truncates the listing because the directory has too many entries. These failures carry the error code `unsupported_skill_content`.
+
+If GitHub rejects the credential sent with a skill file download at install time (`401`, `403` or `404`, for example because the token expired or was revoked), as can happen when the skill's resolution was cached or done by the Hub, Scion retries that file once without credentials. Hash checks apply to the result as usual. A fresh resolution with a rejected token still fails.
 
 #### Private repository resolution
 
@@ -134,7 +161,7 @@ For private repositories, Scion resolves skills using the project's configured g
    - uri: gh://acme-corp/partner-skills/my-skill@v1.2.3?token=PARTNER_GITHUB_TOKEN
    ```
    Scion retrieves the secret from the `ProvisionCredentials` channel during provisioning. The secret value is processed completely in memory and is **never** forwarded to the agent's container environment or harness scripts.
-3. **Local CLI fallback**: In local CLI mode, the resolver automatically falls back to your local `GITHUB_TOKEN` environment variable.
+3. **Runtime Broker fallback**: when the project's environment supplies no `GITHUB_TOKEN`, a plain `gh://` URI uses `GITHUB_TOKEN` from the environment of the Runtime Broker process (on a workstation, the `scion server` process). It takes precedence over a `GITHUB_TOKEN` project secret that is not an environment secret.
 
 #### Input validation & auto-normalization
 
@@ -189,6 +216,8 @@ When a destination-name collision is detected and resolved:
 1. Scion logs the collision and the resolution outcome in the Hub and agent dispatch logs.
 2. The collision details and final resolved mapping are recorded in a `resolved-skills.json` file inside the agent's run/state directory.
 
+If a required skill loses a collision to an optional one, the winner is treated as required: if it then fails to install, provisioning fails and names the winning URI. The collision warning names the dropped required URI.
+
 Each `SkillReference` includes a `Scope` field, annotated at all injection sites, allowing full traceability of where each skill was sourced and how collisions were handled.
 
 ## Publishing a skill
@@ -211,8 +240,12 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `--version` | *(required)* | SemVer version to publish (e.g. `1.0.0`). |
-| `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. |
+| `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
 | `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name and creates the skill when no match exists. |
+
+:::note[Global scope permissions]
+Publishing a skill to the `global` scope requires either the `hub-admin` role or the `global-catalog-author` role. The `global-catalog-author` role grants only the `skill.create_global` permission, allowing non-admin users to author global catalog skills without full Hub administrator authority. See [Permissions & Policy](/scion/hosted/ha/permissions/#roles) for role details.
+:::
 
 **Per-version limits:** at most **50 files**, **10 MB** per file, and **50 MB** total. `.git/`, `.DS_Store`, `__pycache__`, and files matching `.gitignore` patterns are excluded automatically.
 
@@ -224,9 +257,9 @@ Published deploy-checklist v1.0.0 (hash: sha256:9f2b…)
 
 ## Versioning and immutability
 
-Each publish creates a new `SkillVersion`. Versions are content-addressed by a `sha256:` hash computed over their files, so a given `name@version` always resolves to the same bytes. This makes resolution reproducible and enables the [content-hash cache](#content-hash-caching).
+Each publish creates a new `SkillVersion`. Versions are content-addressed by a `sha256:` hash computed over their files (`contentHash`, plus `contentHashV2` covering file paths and normalized modes when the `hub.skill_content_hash_v2` [experiment](/scion/reference/experiments/) is enabled; see [Content hash forms](/scion/hosted/single-node/skill-registry/#content-hash-forms)), so a given `name@version` always resolves to the same bytes. This makes resolution reproducible and enables the [content-hash cache](#content-hash-caching).
 
-To retire a version without deleting it, deprecate it. Deprecated versions remain resolvable by exact reference but are skipped by `latest` and range resolution.
+To retire a version without deleting it, deprecate it. Deprecated versions remain resolvable by exact semver reference and by `@sha256:` content hash. `latest` and semver ranges prefer published versions and return a deprecated version only when no published version matches.
 
 ```bash
 scion skills deprecate deploy-checklist \
@@ -258,6 +291,7 @@ Because the cache is content-addressed, identical content is stored once regardl
 scion skills list
 scion skills list --scope global --search deploy
 scion skills list --tags ci,production          # comma-separated, AND semantics
+scion skills list --tags ci --tags production   # repeatable; same filter
 
 # Show a skill's details and its versions
 scion skills show deploy-checklist
@@ -277,6 +311,16 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 :::tip
 `scion skill` (singular) is an alias for `scion skills`.
 :::
+
+### From inside an agent
+
+Agents can browse skills too. In agent mode, the CLI allows `scion skills list` and `scion skills show`, but not `versions`, `resolve`, or `delete`. Access is read-only. An agent can see:
+
+- The Hub's global skill catalog
+- Skills scoped to the agent's own project
+- The personal (user-scoped) skills of the user at the root of the agent's creation chain
+
+Other projects' skills and other users' personal skills are not visible. Agent project scope and the creator's delegated permissions still apply on top of these grants.
 
 ## Auto-Injected Skills (Multi-Scope)
 
@@ -352,12 +396,12 @@ In addition to managing injected skills via the CLI, the Scion Web Dashboard all
 6. Scion adds all checked skills as individual URI references in a single atomic update.
 
 :::note[Security & Privacy]
-Before performing discovery or logging requests, Scion's API automatically strips any embedded userinfo or credentials from the URL, preventing sensitive tokens or usernames from appearing in system logs.
+Before performing discovery or logging requests (`POST /api/v1/skills/discover-directory`), Scion's API strips embedded userinfo, fragments, and all query parameters except `?token=<SECRET_NAME>` (where `<SECRET_NAME>` matches `[A-Z][A-Z0-9_]*`, a `token` value that is not such a name is refused with `400`), preventing sensitive tokens, query strings, or usernames from appearing in candidate URIs or system logs.
 :::
 
 ## Platform skills
 
-Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent. They provide baseline capabilities without any Hub or template setup.
+Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent (including `scion-web-serving` and its `references/web-apps.md`, which the agent instructions preamble points to for serving web apps and files over port forwarding). They provide baseline capabilities without any Hub or template setup.
 
 Platform skills honor an optional `inject_when` frontmatter condition in `SKILL.md`, which gates injection on the agent's environment:
 

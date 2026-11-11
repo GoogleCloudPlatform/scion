@@ -15,7 +15,7 @@
  */
 
 /**
- * Tests for drag-and-drop file upload in the terminal page component.
+ * Tests for drag-and-drop file upload in the shared terminal pane.
  *
  * Covers four areas introduced by the drag-drop feature:
  *
@@ -28,13 +28,12 @@
  *     flicker prevention across child elements.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-let ScionPageTerminal: any;
+let ScionTerminalPane: any;
 
 /** One recorded fetch call. */
 interface Call {
@@ -55,6 +54,15 @@ interface SharedDir {
   name: string;
   read_only?: boolean;
   in_workspace?: boolean;
+  target?: string;
+}
+
+/** A shared dir as the hub lists it: with its container target. */
+function dir(name: string, extra: Partial<SharedDir> = {}): SharedDir {
+  const target = extra.in_workspace
+    ? `/workspace/.scion-volumes/${name}`
+    : `/scion-volumes/${name}`;
+  return { name, target, ...extra };
 }
 
 interface MockOptions {
@@ -69,8 +77,8 @@ interface MockOptions {
  * terminal component touches during tests.
  */
 function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
-  return async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const href = String(url);
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const href = requestUrl(url);
     const method = init?.method ?? 'GET';
     let parsed: any = undefined;
     if (init?.body && typeof init.body === 'string') {
@@ -84,47 +92,49 @@ function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
 
     // Shared dirs endpoint
     if (href.includes('/shared-dirs') && method === 'GET') {
-      return jsonResponse({ sharedDirs: opts.sharedDirs ?? [] }, 200);
+      return Promise.resolve(jsonResponse({ sharedDirs: opts.sharedDirs ?? [] }, 200));
     }
 
     // Upload endpoint
     if (href.includes('/shared-dirs/') && href.includes('/files') && method === 'POST') {
       const status = opts.uploadStatus ?? 200;
       if (status >= 400) {
-        return jsonResponse({ error: { message: 'upload failed' } }, status);
+        return Promise.resolve(jsonResponse({ error: { message: 'upload failed' } }, status));
       }
-      return jsonResponse({ ok: true }, status);
+      return Promise.resolve(jsonResponse({ ok: true }, status));
     }
 
     // Agent info (returns a minimal agent object)
     if (href.includes('/api/v1/agents/')) {
-      return jsonResponse(
-        {
-          id: 'test-agent',
-          name: 'test-agent',
-          phase: 'running',
-          projectId: 'proj-1',
-          activity: '',
-          exposedPorts: [],
-        },
-        200
+      return Promise.resolve(
+        jsonResponse(
+          {
+            id: 'test-agent',
+            name: 'test-agent',
+            phase: 'running',
+            projectId: 'proj-1',
+            activity: '',
+            exposedPorts: [],
+          },
+          200
+        )
       );
     }
 
-    return jsonResponse({}, 200);
+    return Promise.resolve(jsonResponse({}, 200));
   };
 }
 
 /** Create an element instance without appending to DOM (avoids connectedCallback side effects). */
 function createElement(): any {
   // Use document.createElement but don't append — this gives us an instance
-  // we can call private methods on without triggering loadAgentInfo().
-  const el = document.createElement('scion-page-terminal') as any;
+  // we can call private helpers without opening a session.
+  const el = document.createElement('scion-terminal-pane') as any;
   return el;
 }
 
 /** Create an element, set up basic state, and stub fetch for resolveUploadTarget tests. */
-async function createForUploadTest(calls: Call[], opts: MockOptions = {}): Promise<any> {
+function createForUploadTest(calls: Call[], opts: MockOptions = {}): any {
   vi.stubGlobal('fetch', vi.fn(makeFetchMock(calls, opts)));
   const el = createElement();
   el.projectId = 'proj-1';
@@ -141,9 +151,9 @@ function cleanup() {
 
 describe('terminal — _quoteForShell', () => {
   beforeAll(async () => {
-    const mod = await import('./terminal.js');
-    ScionPageTerminal = mod.ScionPageTerminal;
-    expect(ScionPageTerminal).toBeDefined();
+    const mod = await import('../terminal/terminal-pane.js');
+    ScionTerminalPane = mod.ScionTerminalPane;
+    expect(ScionTerminalPane).toBeDefined();
   });
 
   afterEach(cleanup);
@@ -189,7 +199,7 @@ describe('terminal — _quoteForShell', () => {
 
 describe('terminal — _handleFileDrop size validation', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);
@@ -252,7 +262,7 @@ describe('terminal — _handleFileDrop size validation', () => {
 
 describe('terminal — resolveUploadTarget', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);
@@ -260,24 +270,24 @@ describe('terminal — resolveUploadTarget', () => {
   it('prefers scratchpad when available', async () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
-      sharedDirs: [{ name: 'data' }, { name: 'scratchpad' }, { name: 'other' }],
+      sharedDirs: [
+        dir('data'),
+        dir('scratchpad', { target: '/mnt/hub-computed/scratchpad' }),
+        dir('other'),
+      ],
     });
 
     await (el as any).resolveUploadTarget();
 
     expect(el.uploadEnabled).toBe(true);
     expect(el.uploadTargetDir).toBe('scratchpad');
-    expect(el.uploadBasePath).toBe('/scion-volumes/scratchpad');
+    expect(el.uploadBasePath).toBe('/mnt/hub-computed/scratchpad');
   });
 
   it('falls back to first writable non-in_workspace dir', async () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
-      sharedDirs: [
-        { name: 'workspace-dir', in_workspace: true },
-        { name: 'data' },
-        { name: 'other' },
-      ],
+      sharedDirs: [dir('workspace-dir', { in_workspace: true }), dir('data'), dir('other')],
     });
 
     await (el as any).resolveUploadTarget();
@@ -290,8 +300,8 @@ describe('terminal — resolveUploadTarget', () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
       sharedDirs: [
-        { name: 'readonly-dir', read_only: true },
-        { name: 'workspace-dir', in_workspace: true },
+        dir('readonly-dir', { read_only: true }),
+        dir('workspace-dir', { in_workspace: true }),
       ],
     });
 
@@ -305,11 +315,33 @@ describe('terminal — resolveUploadTarget', () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
       sharedDirs: [
-        { name: 'ro', read_only: true },
-        { name: 'iw', in_workspace: true },
-        { name: 'ro-iw', read_only: true, in_workspace: true },
+        dir('ro', { read_only: true }),
+        dir('iw', { in_workspace: true }),
+        dir('ro-iw', { read_only: true, in_workspace: true }),
       ],
     });
+
+    await (el as any).resolveUploadTarget();
+
+    expect(el.uploadEnabled).toBe(false);
+  });
+
+  it('skips dirs without a hub-computed target', async () => {
+    const calls: Call[] = [];
+    const el = await createForUploadTest(calls, {
+      sharedDirs: [{ name: 'scratchpad' }, dir('data')],
+    });
+
+    await (el as any).resolveUploadTarget();
+
+    expect(el.uploadEnabled).toBe(true);
+    expect(el.uploadTargetDir).toBe('data');
+    expect(el.uploadBasePath).toBe('/scion-volumes/data');
+  });
+
+  it('disables upload when no dir has a target', async () => {
+    const calls: Call[] = [];
+    const el = await createForUploadTest(calls, { sharedDirs: [{ name: 'scratchpad' }] });
 
     await (el as any).resolveUploadTarget();
 
@@ -330,7 +362,7 @@ describe('terminal — resolveUploadTarget', () => {
 
 describe('terminal — _handleFileDrop upload paths', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);
@@ -357,12 +389,23 @@ describe('terminal — _handleFileDrop upload paths', () => {
     el.uploadTargetDir = 'scratchpad';
     el.uploadBasePath = '/scion-volumes/scratchpad';
     el.projectId = 'test-project';
+    // Upload completion guard (P1.8) requires:
+    // 1. _focused = true (derived from DOM focusin events)
+    // 2. session.state.generation stable across async boundary
+    // Simulate a focused, connected terminal with a stable session.
+    document.body.appendChild(el);
+    el._onFocusIn();
+    el.ownedSession = {
+      state: { generation: 0 },
+      setFrontmost: () => {},
+      noteAgentAvailable: () => {},
+    };
     return el;
   }
 
   it('shows error and disables upload on 409 response', async () => {
     const el = setupElement(
-      vi.fn(async () => jsonResponse({ error: { message: 'upload failed' } }, 409))
+      vi.fn(() => Promise.resolve(jsonResponse({ error: { message: 'upload failed' } }, 409)))
     );
 
     const file = new File(['hello'], 'test.txt');
@@ -378,7 +421,9 @@ describe('terminal — _handleFileDrop upload paths', () => {
 
   it('shows error on non-ok HTTP response', async () => {
     const el = setupElement(
-      vi.fn(async () => jsonResponse({ error: { message: 'server error details' } }, 500))
+      vi.fn(() =>
+        Promise.resolve(jsonResponse({ error: { message: 'server error details' } }, 500))
+      )
     );
 
     const file = new File(['hello'], 'test.txt');
@@ -392,8 +437,8 @@ describe('terminal — _handleFileDrop upload paths', () => {
 
   it('shows error on network failure', async () => {
     const el = setupElement(
-      vi.fn(async () => {
-        throw new Error('Network failure');
+      vi.fn(() => {
+        return Promise.reject(new Error('Network failure'));
       })
     );
 
@@ -406,7 +451,7 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('calls sendData with shell-quoted paths on success', async () => {
-    const el = setupElement(vi.fn(async () => jsonResponse({ ok: true }, 200)));
+    const el = setupElement(vi.fn(() => Promise.resolve(jsonResponse({ ok: true }, 200))));
     // Mock sendData to capture what gets sent to the terminal
     const sendDataCalls: string[] = [];
     el.sendData = (data: string) => {
@@ -426,7 +471,7 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('sends multiple shell-quoted paths on multi-file success', async () => {
-    const el = setupElement(vi.fn(async () => jsonResponse({ ok: true }, 200)));
+    const el = setupElement(vi.fn(() => Promise.resolve(jsonResponse({ ok: true }, 200))));
     const sendDataCalls: string[] = [];
     el.sendData = (data: string) => {
       sendDataCalls.push(data);
@@ -448,7 +493,7 @@ describe('terminal — _handleFileDrop upload paths', () => {
 
 describe('terminal — drag enter/leave counter', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);
@@ -456,7 +501,7 @@ describe('terminal — drag enter/leave counter', () => {
   function makeDragEvent(type: string): DragEvent {
     const event = new Event(type, { bubbles: true }) as any;
     event.preventDefault = vi.fn();
-    event.dataTransfer = { dropEffect: '', files: [] };
+    event.dataTransfer = { dropEffect: '', files: [], types: ['Files'] };
     return event as DragEvent;
   }
 
@@ -512,7 +557,7 @@ describe('terminal — drag enter/leave counter', () => {
 
     // Drop event
     const dropEvent = makeDragEvent('drop') as any;
-    dropEvent.dataTransfer = { files: { length: 0 } };
+    dropEvent.dataTransfer = { files: { length: 0 }, types: ['Files'] };
     await (el as any)._onDrop(dropEvent);
 
     expect((el as any)._dragCounter).toBe(0);

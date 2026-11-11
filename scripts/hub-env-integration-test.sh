@@ -18,9 +18,9 @@
 # ===================================================
 # This script tests the full hub env storage feature by exercising the
 # scion CLI commands for setting, getting, listing, and clearing
-# environment variables at user and grove scopes.
+# environment variables at user and project scopes.
 #
-# It starts a Hub server with dev auth, links a test grove, and runs
+# It starts a Hub server with dev auth, links a test project, and runs
 # the complete set of env CRUD operations.
 #
 # Usage:
@@ -302,35 +302,31 @@ start_hub_server() {
     log_success "Authentication configured (dev token)"
 }
 
-setup_test_grove() {
-    log_section "Setting Up Test Grove"
+setup_test_project() {
+    log_section "Setting Up Test Project"
 
-    local grove_dir="$TEST_DIR/test-grove"
-    mkdir -p "$grove_dir"
+    local project_dir="$TEST_DIR/test-project"
+    mkdir -p "$project_dir"
 
-    # Initialize a grove
-    cd "$grove_dir"
+    # Initialize a project
+    cd "$project_dir"
     git init -q .
     git commit --allow-empty -m "init" -q
 
     $SCION init -y 2>&1 || true
-    log_success "Grove initialized at $grove_dir"
+    log_success "Project initialized at $project_dir"
 
-    # Link grove to the Hub
+    # Link project to the Hub
     if $SCION hub link -y 2>&1; then
-        log_success "Grove linked to Hub"
+        log_success "Project linked to Hub"
     else
-        log_error "Failed to link grove to Hub"
+        log_error "Failed to link project to Hub"
         exit 1
     fi
 
-    # Extract the grove ID for later use
-    GROVE_ID=$($SCION config get grove_id 2>/dev/null || echo "")
-    if [[ -z "$GROVE_ID" ]]; then
-        # Fall back to reading settings.yaml directly
-        GROVE_ID=$(grep 'grove_id:' "$grove_dir/.scion/settings.yaml" 2>/dev/null | awk '{print $2}' || echo "")
-    fi
-    log_info "Grove ID: ${GROVE_ID:-<not found>}"
+    # Extract the project ID for later use
+    PROJECT_ID=$($SCION config get project_id 2>/dev/null || echo "")
+    log_info "Project ID: ${PROJECT_ID:-<not found>}"
 }
 
 # ============================================================================
@@ -443,101 +439,101 @@ test_phase1_user_scope() {
 }
 
 # ============================================================================
-# Phase 2: Grove-Scoped Env Variables (via CLI)
+# Phase 2: Project-Scoped Env Variables (via CLI)
 # ============================================================================
 
-test_phase2_grove_scope() {
-    log_section "Phase 2: Grove-Scoped Environment Variables"
+test_phase2_project_scope() {
+    log_section "Phase 2: Project-Scoped Environment Variables"
 
-    # 2.1 List grove vars (should be empty)
+    # 2.1 List project vars (should be empty)
     assert_output_contains \
-        "2.1  List grove env vars (empty)" \
+        "2.1  List project env vars (empty)" \
         "No environment variables found" \
-        $SCION hub env get --grove="$GROVE_ID"
+        $SCION hub env get --project="$PROJECT_ID"
 
-    # 2.2 Set a grove-scoped variable (infer grove from current dir)
+    # 2.2 Set a project-scoped variable (infer project from current dir)
     assert_output_contains \
-        "2.2  Set grove-scoped env var" \
+        "2.2  Set project-scoped env var" \
         "Created" \
-        $SCION hub env set --grove="$GROVE_ID" "GROVE_VAR_A=grove_value_1"
+        $SCION hub env set --project="$PROJECT_ID" "PROJECT_VAR_A=project_value_1"
 
-    # 2.3 Set another grove-scoped variable
+    # 2.3 Set another project-scoped variable
     assert_output_contains \
-        "2.3  Set another grove-scoped env var" \
+        "2.3  Set another project-scoped env var" \
         "Created" \
-        $SCION hub env set --grove="$GROVE_ID" GROVE_VAR_B grove_value_2
+        $SCION hub env set --project="$PROJECT_ID" PROJECT_VAR_B project_value_2
 
-    # 2.4 Get a specific grove variable
+    # 2.4 Get a specific project variable
     assert_output_contains \
-        "2.4  Get specific grove env var" \
-        "GROVE_VAR_A=grove_value_1" \
-        $SCION hub env get --grove="$GROVE_ID" GROVE_VAR_A
+        "2.4  Get specific project env var" \
+        "PROJECT_VAR_A=project_value_1" \
+        $SCION hub env get --project="$PROJECT_ID" PROJECT_VAR_A
 
-    # 2.5 List all grove variables
+    # 2.5 List all project variables
     assert_output_contains \
-        "2.5  List grove env vars" \
-        "GROVE_VAR_A" \
-        $SCION hub env get --grove="$GROVE_ID"
+        "2.5  List project env vars" \
+        "PROJECT_VAR_A" \
+        $SCION hub env get --project="$PROJECT_ID"
 
     assert_output_contains \
-        "2.5b List grove env vars (contains B)" \
-        "GROVE_VAR_B" \
-        $SCION hub env get --grove="$GROVE_ID"
+        "2.5b List project env vars (contains B)" \
+        "PROJECT_VAR_B" \
+        $SCION hub env get --project="$PROJECT_ID"
 
-    # 2.6 Update a grove variable
+    # 2.6 Update a project variable
     assert_output_contains \
-        "2.6  Update grove-scoped env var" \
+        "2.6  Update project-scoped env var" \
         "Updated" \
-        $SCION hub env set --grove="$GROVE_ID" "GROVE_VAR_A=updated_grove_value"
+        $SCION hub env set --project="$PROJECT_ID" "PROJECT_VAR_A=updated_project_value"
 
-    # 2.7 Verify the grove update
+    # 2.7 Verify the project update
     assert_output_contains \
-        "2.7  Verify grove update" \
-        "GROVE_VAR_A=updated_grove_value" \
-        $SCION hub env get --grove="$GROVE_ID" GROVE_VAR_A
+        "2.7  Verify project update" \
+        "PROJECT_VAR_A=updated_project_value" \
+        $SCION hub env get --project="$PROJECT_ID" PROJECT_VAR_A
 
-    # 2.8 Grove and user scopes are independent
+    # 2.8 Project and user scopes are independent
     assert_output_not_contains \
-        "2.8  User scope does not contain grove vars" \
-        "GROVE_VAR_A" \
+        "2.8  User scope does not contain project vars" \
+        "PROJECT_VAR_A" \
         $SCION hub env get
 
     assert_output_not_contains \
-        "2.8b Grove scope does not contain user vars" \
+        "2.8b Project scope does not contain user vars" \
         "TEST_VAR_A" \
-        $SCION hub env get --grove="$GROVE_ID"
+        $SCION hub env get --project="$PROJECT_ID"
 
-    # 2.9 Get grove variable in JSON format
+    # 2.9 Get project variable in JSON format
     TESTS_RUN=$((TESTS_RUN + 1))
     local json_output=""
-    json_output=$($SCION hub env get --grove="$GROVE_ID" --json GROVE_VAR_A 2>/dev/null) || true
+    json_output=$($SCION hub env get --project="$PROJECT_ID" --json PROJECT_VAR_A 2>/dev/null) || true
     local json_scope=""
     json_scope=$(echo "$json_output" | jq -r '.scope // empty' 2>/dev/null) || true
     if [[ "$json_scope" == "project" ]]; then
-        log_success "2.9  Get grove env var --json shows scope=project"
+        log_success "2.9  Get project env var --json shows scope=project"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        log_error "2.9  Get grove env var --json shows scope=project"
+        log_error "2.9  Get project env var --json shows scope=project"
         log_error "  expected scope 'project', got: $json_output"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
-    # 2.10 Clear a grove variable
+    # 2.10 Clear a project variable
     assert_output_contains \
-        "2.10 Clear grove env var" \
+        "2.10 Clear project env var" \
         "Deleted" \
-        $SCION hub env clear --grove="$GROVE_ID" GROVE_VAR_B
+        $SCION hub env clear --project="$PROJECT_ID" PROJECT_VAR_B
 
-    # 2.11 Verify the cleared grove variable is gone
+    # 2.11 Verify the cleared project variable is gone
     assert_failure \
-        "2.11 Verify cleared grove var is gone" \
-        $SCION hub env get --grove="$GROVE_ID" GROVE_VAR_B
+        "2.11 Verify cleared project var is gone" \
+        $SCION hub env get --project="$PROJECT_ID" PROJECT_VAR_B
 
-    # 2.12 Verify remaining grove variable still exists
+    # 2.12 Verify remaining project variable still exists
     assert_output_contains \
-        "2.12 Remaining grove var survives clear" \
-        "GROVE_VAR_A" \
-        $SCION hub env get --grove="$GROVE_ID"
+        "2.12 Remaining project var survives clear" \
+        "PROJECT_VAR_A" \
+        $SCION hub env get --project="$PROJECT_ID"
 
     log_info "Phase 2 complete"
 }
@@ -603,10 +599,10 @@ test_phase3_edge_cases() {
         "3.9  Clear non-existent var fails" \
         $SCION hub env clear NON_EXISTENT_VAR_ZZZZZ
 
-    # 3.10 Cannot use --grove and --broker at the same time
+    # 3.10 Cannot use --project and --broker at the same time
     assert_failure \
-        "3.10 Reject --grove and --broker together" \
-        $SCION hub env get --grove="$GROVE_ID" --broker=fake-broker-id
+        "3.10 Reject --project and --broker together" \
+        $SCION hub env get --project="$PROJECT_ID" --broker=fake-broker-id
 
     log_info "Phase 3 complete"
 }
@@ -737,8 +733,8 @@ test_phase5_cleanup() {
         $SCION hub env clear "$key" 2>/dev/null || true
     done
 
-    # Clear remaining grove-scoped variables
-    $SCION hub env clear --grove="$GROVE_ID" GROVE_VAR_A 2>/dev/null || true
+    # Clear remaining project-scoped variables
+    $SCION hub env clear --project="$PROJECT_ID" PROJECT_VAR_A 2>/dev/null || true
 
     # 5.1 Verify user scope is empty
     assert_output_contains \
@@ -746,11 +742,11 @@ test_phase5_cleanup() {
         "No environment variables found" \
         $SCION hub env get
 
-    # 5.2 Verify grove scope is empty
+    # 5.2 Verify project scope is empty
     assert_output_contains \
-        "5.2  Grove scope empty after cleanup" \
+        "5.2  Project scope empty after cleanup" \
         "No environment variables found" \
-        $SCION hub env get --grove="$GROVE_ID"
+        $SCION hub env get --project="$PROJECT_ID"
 
     log_info "Phase 5 complete"
 }
@@ -769,10 +765,10 @@ run_all_tests() {
     check_prerequisites
     build_scion
     start_hub_server
-    setup_test_grove
+    setup_test_project
 
     test_phase1_user_scope
-    test_phase2_grove_scope
+    test_phase2_project_scope
     test_phase3_edge_cases
     test_phase4_injection_and_secret
     test_phase5_cleanup

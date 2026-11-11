@@ -38,7 +38,7 @@ export class ScionPage404 extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      min-height: calc(100vh - 200px);
+      min-height: calc(var(--scion-app-height, 100dvh) - 200px);
     }
 
     .container {

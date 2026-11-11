@@ -77,8 +77,8 @@ model defined in the design doc.
 | **Actions** | `assign` |
 | **Effect** | `allow` |
 | **Bound to** | Project members group (`project:<slug>:members`) |
-| **Disposition** | **RoleBinding** — Becomes `gcp_service_account.assign` in the `project-member` RoleDefinition, granted via a project-scoped RoleBinding to the members group. |
-| **Post-cutover equivalent** | `gcp_service_account.assign` permission added to `project-member` role. Project-scoped RoleBinding of `project-member` to the project members group. |
+| **Disposition** | **RoleBinding — landed.** `gcp_service_account.assign` was added to the `project-member` RoleDefinition's curated permission list in ptone/scion#2147, granted via the existing project-scoped RoleBinding to the members group. The same ticket also curated it into `project-owner` and `project-admin` (not planned here, but in scope for the ruling that landed it) — not into any hub/system role. When `gcpIamCheckMode` is `enforce`, `evaluateSAAssignment` also checks the immediate creator's IAM actAs grant (`iam.serviceAccounts.actAs`); in the default `off` mode this permission alone authorizes assignment of project-scoped service accounts. |
+| **Post-cutover equivalent** | `gcp_service_account.assign` permission in the `project-owner`, `project-admin` and `project-member` RoleDefinitions (seed.go). Project-scoped RoleBinding of the member's role to the project members group. |
 
 ### 5. Project member read policies (project + agent)
 
@@ -317,7 +317,7 @@ be inventoried because they bypass the policy engine.
 | 1 | `hub-member-read-{type}` (×13) | `seedDefaultPoliciesAndGroups` | seed.go:63-74 | RoleBinding | `hub-member` role permissions |
 | 2 | `hub-member-create-projects` | `seedDefaultPoliciesAndGroups` | seed.go:77-86 | RoleBinding | `project.create` in `hub-member` role |
 | 3 | `hub-member-read-all` (legacy) | Historical seed | seed.go:471-494 (deleted) | Intentional removal | Already removed |
-| 4 | `project:<slug>:member-assign-service-accounts` | `ensureProjectAssignPolicy` | seed.go:225-272 | RoleBinding | `project-member` role + project RoleBinding |
+| 4 | `project:<slug>:member-assign-service-accounts` | `ensureProjectAssignPolicy` | seed.go:225-272 | RoleBinding — landed (ptone/scion#2147) | `project-owner`/`project-admin`/`project-member` roles + project RoleBinding |
 | 5 | `project:<slug>:member-read-{project,agent}` | `ensureProjectMemberReadPolicies` | seed.go:413-459 | RoleBinding | `project-member` role permissions |
 | 6 | `project:<slug>:member-create-agents` | `createProjectMembersGroupAndPolicy` | handlers_projects_core.go:819-890 | RoleBinding | `project-member` role permissions |
 | 7 | `progeny-secret-access:<id>` | `ensureProgenyPolicy` | handlers_env_secrets.go:608-658 | Relationship grant | Lineage resolver |

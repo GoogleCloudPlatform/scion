@@ -17,17 +17,13 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,7 +65,7 @@ func TestSanitizeFilename_DangerousExtension(t *testing.T) {
 	for _, f := range dangerous {
 		_, err := SanitizeFilename(f)
 		require.Error(t, err, "should reject %s", f)
-		assert.Contains(t, err.Error(), "dangerous file extension")
+		assert.Equal(t, "files with a "+filepath.Ext(f)+" extension are not accepted", err.Error())
 	}
 }
 
@@ -137,7 +133,7 @@ func TestSanitizeFilename_TrailingCharactersDoNotDefeatTheBlocklist(t *testing.T
 	for _, v := range variants {
 		_, err := SanitizeFilename(v)
 		require.Error(t, err, "SanitizeFilename(%q) was accepted", v)
-		assert.Contains(t, err.Error(), "dangerous file extension", "for %q", v)
+		assert.Equal(t, "files with a .sh extension are not accepted", err.Error(), "for %q", v)
 	}
 }
 
@@ -254,6 +250,116 @@ func TestLocalDiskAttachmentStore_Delete(t *testing.T) {
 	require.Error(t, err)
 }
 
+// newDeleteFixture returns a store under <tmp>/store, a saved witness
+// attachment in project proj-1, and a directory OUTSIDE the store
+// (<tmp>/outside) holding keep.txt, for the Delete confinement tests.
+func newDeleteFixture(t *testing.T) (store *LocalDiskAttachmentStore, base, outside string, witness AttachmentMeta) {
+	t.Helper()
+	tmp := t.TempDir()
+	base = filepath.Join(tmp, "store")
+	store, err := NewLocalDiskAttachmentStore(base)
+	require.NoError(t, err)
+	content := []byte("witness")
+	witness, err = store.Save(context.Background(), "proj-1", "w.txt", bytes.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+	outside = filepath.Join(tmp, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "keep.txt"), []byte("keep"), 0o644))
+	return store, base, outside, witness
+}
+
+// requireSurvives asserts that the outside file and the witness attachment
+// are still there.
+func requireSurvives(t *testing.T, store *LocalDiskAttachmentStore, outside string, witness AttachmentMeta) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(outside, "keep.txt"))
+	require.NoError(t, err, "the file outside the store must survive")
+	assert.Equal(t, "keep", string(got))
+	r, _, err := store.Get(context.Background(), "proj-1", witness.ID)
+	require.NoError(t, err, "the witness attachment must survive")
+	_ = r.Close()
+}
+
+// Delete validates projectID and id exactly as Get does, so nothing outside
+// one attachment's directory can be removed: an empty, ".", ".." or
+// separator-bearing component is refused with an error that names only the
+// ID, and neither the store, the project directory nor anything outside the
+// store is touched.
+func TestLocalDiskAttachmentStore_DeleteRefusesInvalidIDs(t *testing.T) {
+	store, _, outside, witness := newDeleteFixture(t)
+	ctx := context.Background()
+	cases := []struct{ name, projectID, id string }{
+		{"empty id", "proj-1", ""},
+		{"dot id", "proj-1", "."},
+		{"dotdot id", "proj-1", ".."},
+		{"separator id", "proj-1", "a/b"},
+		{"relative escape id", "proj-1", "../x"},
+		{"escape to outside", "proj-1", "../../outside"},
+		{"absolute id", "proj-1", outside},
+		{"dotdot project", "..", "outside"},
+		{"separator project", "proj-1/..", "x"},
+		{"dm dotdot id", "", ".."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := store.Delete(ctx, tc.projectID, tc.id)
+			require.Error(t, err)
+			assert.Equal(t, "attachment delete refused: "+tc.id, err.Error(), "the error names only the ID")
+			requireSurvives(t, store, outside, witness)
+		})
+	}
+}
+
+// A valid ID is removed.
+func TestLocalDiskAttachmentStore_DeleteValidRemoves(t *testing.T) {
+	store, base, outside, witness := newDeleteFixture(t)
+	ctx := context.Background()
+	content := []byte("gone")
+	meta, err := store.Save(ctx, "proj-1", "g.txt", bytes.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, store.Delete(ctx, "proj-1", meta.ID))
+	_, err = os.Lstat(filepath.Join(base, "proj-1", meta.ID))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, _, err = store.Get(ctx, "proj-1", meta.ID)
+	require.Error(t, err)
+	requireSurvives(t, store, outside, witness)
+}
+
+// A missing attachment, or a store whose base does not exist, is a no-op.
+func TestLocalDiskAttachmentStore_DeleteMissingIsNoOp(t *testing.T) {
+	store, base, _, _ := newDeleteFixture(t)
+	ctx := context.Background()
+	require.NoError(t, store.Delete(ctx, "proj-1", "no-such-id"))
+	require.NoError(t, store.Delete(ctx, "", "no-such-id"))
+
+	require.NoError(t, os.RemoveAll(base))
+	require.NoError(t, store.Delete(ctx, "proj-1", "no-such-id"), "a missing store is not an error")
+}
+
+// A symlink in the attachment path is not followed out of the store: a
+// symlinked attachment directory is removed as a link (its target survives),
+// and a symlinked project directory pointing outside cannot be traversed.
+func TestLocalDiskAttachmentStore_DeleteSymlinkNotFollowed(t *testing.T) {
+	t.Run("leaf", func(t *testing.T) {
+		store, base, outside, witness := newDeleteFixture(t)
+		require.NoError(t, os.Symlink(outside, filepath.Join(base, "proj-1", "leaf-link")))
+		_ = store.Delete(context.Background(), "proj-1", "leaf-link")
+		requireSurvives(t, store, outside, witness)
+	})
+	t.Run("project dir", func(t *testing.T) {
+		store, base, outside, witness := newDeleteFixture(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(outside, "victim"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "victim", "v.txt"), []byte("v"), 0o644))
+		require.NoError(t, os.Symlink(outside, filepath.Join(base, "proj-link")))
+		err := store.Delete(context.Background(), "proj-link", "victim")
+		require.Error(t, err, "a project directory that escapes the store is refused")
+		_, err = os.Stat(filepath.Join(outside, "victim", "v.txt"))
+		require.NoError(t, err, "the target outside the store must survive")
+		requireSurvives(t, store, outside, witness)
+	})
+}
+
 func TestLocalDiskAttachmentStore_OversizedFile(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewLocalDiskAttachmentStore(dir)
@@ -274,182 +380,6 @@ func TestLocalDiskAttachmentStore_FilePath(t *testing.T) {
 
 	path := store.FilePath("proj-1", "uuid-123", "file.txt")
 	assert.Equal(t, filepath.Join(dir, "proj-1", "uuid-123", "file.txt"), path)
-}
-
-// ---------------------------------------------------------------------------
-// Attachment metadata store (WebChatStore) tests — dual-dialect coverage
-// ---------------------------------------------------------------------------
-
-func TestAttachment_CreateAndGet(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
-
-	meta := AttachmentMeta{
-		ID:         "att-1",
-		ProjectID:  "proj-1",
-		Filename:   "photo.jpg",
-		MimeType:   "image/jpeg",
-		Size:       12345,
-		UploadedBy: "user-1",
-		CreatedAt:  now,
-	}
-
-	require.NoError(t, store.CreateAttachment(ctx, meta))
-
-	got, err := store.GetAttachment(ctx, "att-1")
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, "att-1", got.ID)
-	assert.Equal(t, "proj-1", got.ProjectID)
-	assert.Equal(t, "photo.jpg", got.Filename)
-	assert.Equal(t, "image/jpeg", got.MimeType)
-	assert.Equal(t, int64(12345), got.Size)
-	assert.Equal(t, "user-1", got.UploadedBy)
-}
-
-func TestAttachment_Delete(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	ctx := context.Background()
-	meta := AttachmentMeta{
-		ID:         "att-del",
-		ProjectID:  "proj-1",
-		Filename:   "temp.txt",
-		MimeType:   "text/plain",
-		Size:       100,
-		UploadedBy: "user-1",
-		CreatedAt:  time.Now().UTC(),
-	}
-	require.NoError(t, store.CreateAttachment(ctx, meta))
-
-	require.NoError(t, store.DeleteAttachment(ctx, "att-del"))
-
-	got, err := store.GetAttachment(ctx, "att-del")
-	require.Error(t, err) // should fail — row deleted
-	assert.Nil(t, got)
-}
-
-func TestAttachment_GetNotFound(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	_, err := store.GetAttachment(context.Background(), "nonexistent")
-	require.Error(t, err)
-}
-
-func TestAttachment_LinkToMessage(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
-
-	// Create two attachments.
-	for _, id := range []string{"att-a", "att-b"} {
-		meta := AttachmentMeta{
-			ID:         id,
-			ProjectID:  "proj-1",
-			Filename:   id + ".txt",
-			MimeType:   "text/plain",
-			Size:       100,
-			UploadedBy: "user-1",
-			CreatedAt:  now,
-		}
-		require.NoError(t, store.CreateAttachment(ctx, meta))
-	}
-
-	// Link both to a message.
-	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-1", "att-a"))
-	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-1", "att-b"))
-
-	// Verify linkage.
-	refs, err := store.GetAttachmentsByMessage(ctx, "msg-1")
-	require.NoError(t, err)
-	require.Len(t, refs, 2)
-
-	names := []string{refs[0].Filename, refs[1].Filename}
-	assert.Contains(t, names, "att-a.txt")
-	assert.Contains(t, names, "att-b.txt")
-}
-
-func TestAttachment_LinkIdempotent(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	ctx := context.Background()
-	meta := AttachmentMeta{
-		ID:         "att-idem",
-		ProjectID:  "proj-1",
-		Filename:   "file.txt",
-		MimeType:   "text/plain",
-		Size:       50,
-		UploadedBy: "user-1",
-		CreatedAt:  time.Now().UTC(),
-	}
-	require.NoError(t, store.CreateAttachment(ctx, meta))
-
-	// Link twice — should not error (idempotent).
-	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-1", "att-idem"))
-	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-1", "att-idem"))
-
-	refs, err := store.GetAttachmentsByMessage(ctx, "msg-1")
-	require.NoError(t, err)
-	assert.Len(t, refs, 1)
-}
-
-func TestAttachment_GetByMessageEmpty(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	refs, err := store.GetAttachmentsByMessage(context.Background(), "msg-no-attachments")
-	require.NoError(t, err)
-	assert.Empty(t, refs)
-}
-
-// ---------------------------------------------------------------------------
-// Batch query test (R3 fix)
-// ---------------------------------------------------------------------------
-
-func TestAttachment_GetByMessagesBatch(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
-
-	// Create 3 attachments.
-	for _, id := range []string{"b-att-1", "b-att-2", "b-att-3"} {
-		require.NoError(t, store.CreateAttachment(ctx, AttachmentMeta{
-			ID: id, ProjectID: "proj-1", Filename: id + ".txt",
-			MimeType: "text/plain", Size: 100, UploadedBy: "user-1", CreatedAt: now,
-		}))
-	}
-
-	// Link: msg-A -> att-1, att-2; msg-B -> att-3; msg-C -> nothing.
-	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-A", "b-att-1"))
-	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-A", "b-att-2"))
-	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-B", "b-att-3"))
-
-	result, err := store.GetAttachmentsByMessages(ctx, []string{"msg-A", "msg-B", "msg-C"})
-	require.NoError(t, err)
-
-	assert.Len(t, result["msg-A"], 2)
-	assert.Len(t, result["msg-B"], 1)
-	assert.Empty(t, result["msg-C"])
-	assert.Equal(t, "b-att-3", result["msg-B"][0].ID)
-}
-
-func TestAttachment_GetByMessagesBatch_Empty(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	result, err := store.GetAttachmentsByMessages(context.Background(), nil)
-	require.NoError(t, err)
-	assert.Nil(t, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -499,41 +429,6 @@ func TestLocalDiskAttachmentStore_GetRejectsSymlink(t *testing.T) {
 // Upload endpoint handler tests
 // ---------------------------------------------------------------------------
 
-// testAttachmentServer creates a minimal server with attachment support for testing.
-func testAttachmentServer(t *testing.T) (*Server, WebChatStore, AttachmentStore) {
-	t.Helper()
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-
-	wcs := NewWebChatStore(db, "sqlite3")
-	require.NoError(t, wcs.Init())
-
-	dir := t.TempDir()
-	as, err := NewLocalDiskAttachmentStore(dir)
-	require.NoError(t, err)
-
-	srv := &Server{
-		webChatStore:    wcs,
-		attachmentStore: as,
-	}
-
-	return srv, wcs, as
-}
-
-func TestUploadHandler_ValidFile(t *testing.T) {
-	_, wcs, _ := testAttachmentServer(t)
-	_ = wcs
-
-	// Safe MIME types are not on the deny-list.
-	assert.False(t, IsDangerousMimeType("image/jpeg"))
-	assert.False(t, IsDangerousMimeType("text/plain"))
-	assert.False(t, IsDangerousMimeType("application/x-executable"))
-	assert.False(t, IsDangerousMimeType("application/x-gzip"))
-	assert.False(t, IsDangerousMimeType("application/octet-stream"))
-}
-
 func TestUploadHandler_DisallowedMime(t *testing.T) {
 	// Verify the deny-list rejects dangerous browser-executable types.
 	assert.True(t, IsDangerousMimeType("application/javascript"))
@@ -582,19 +477,4 @@ func TestAttachmentRef_MetadataEmbedding(t *testing.T) {
 	var decoded []AttachmentRef
 	require.NoError(t, json.Unmarshal(data, &decoded))
 	assert.Len(t, decoded, 2)
-}
-
-// ---------------------------------------------------------------------------
-// Webchat table DDL verification
-// ---------------------------------------------------------------------------
-
-func TestWebchatAttachmentTableExists(t *testing.T) {
-	_, db := newTestWebChatStoreV2(t)
-	defer db.Close() //nolint:errcheck
-
-	for _, table := range []string{"webchat_attachment", "webchat_message_attachment"} {
-		var count int
-		err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
-		require.NoError(t, err, "table %s should exist", table)
-	}
 }

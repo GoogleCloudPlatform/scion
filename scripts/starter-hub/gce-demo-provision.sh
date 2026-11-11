@@ -153,31 +153,40 @@ fi
 echo "Adding/ensuring roles on service account..."
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/logging.viewer" > /dev/null
+    --role "roles/logging.viewer" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/logging.logWriter" > /dev/null
+    --role "roles/logging.logWriter" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/monitoring.metricWriter" > /dev/null
+    --role "roles/monitoring.metricWriter" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/monitoring.viewer" > /dev/null
+    --role "roles/monitoring.viewer" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/cloudtrace.agent" > /dev/null
+    --role "roles/cloudtrace.agent" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/cloudsql.client" > /dev/null
+    --role "roles/cloudsql.client" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/storage.objectAdmin" > /dev/null
+    --role "roles/storage.objectAdmin" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/iam.serviceAccountAdmin" > /dev/null
+    --role "roles/iam.serviceAccountAdmin" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/iam.serviceAccountTokenCreator" > /dev/null
+    --role "roles/iam.serviceAccountTokenCreator" \
+    --condition=None > /dev/null
 
 # Also grant the service account token creator role on ITSELF - required for signBlob via metadata server
 gcloud iam service-accounts add-iam-policy-binding "${SERVICE_ACCOUNT_EMAIL}" \
@@ -187,14 +196,17 @@ gcloud iam service-accounts add-iam-policy-binding "${SERVICE_ACCOUNT_EMAIL}" \
 
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/dns.admin" > /dev/null
+    --role "roles/dns.admin" \
+    --condition=None > /dev/null
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role "roles/secretmanager.admin" > /dev/null
+    --role "roles/secretmanager.admin" \
+    --condition=None > /dev/null
 if [[ "${ENABLE_GKE}" == "true" ]]; then
     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member "serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-        --role "roles/container.admin" > /dev/null
+        --role "roles/container.admin" \
+        --condition=None > /dev/null
 fi
 
 # Create Firewall Rule if it doesn't exist

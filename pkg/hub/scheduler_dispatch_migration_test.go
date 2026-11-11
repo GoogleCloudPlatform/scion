@@ -28,17 +28,18 @@ import (
 )
 
 func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *testing.T) {
+	t.Parallel()
 	srv, s, user, project := setupAgentRoleTest(t)
 	ctx := context.Background()
 
-	err := srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID:        tid("scheduled-dispatch-user-role"),
 		ProjectID: project.ID,
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"scheduled-user-child","task":"scheduled work"}`,
 		CreatedBy: user.ID,
 		FireAt:    time.Now(),
-	})
+	}, user.ID))
 	require.NoError(t, err)
 
 	child, err := s.GetAgentBySlug(ctx, project.ID, "scheduled-user-child")

@@ -43,10 +43,11 @@ func MaterializeBundledTemplates(globalDir string, opts MaterializeOptions) erro
 }
 
 // MaterializeBundledHarnessConfigs writes only the bundled Harness-configs to
-// the local filesystem. With Force=false, existing configs are preserved so
-// operator customizations are not overwritten. Use this in hosted mode to
-// ensure newly added harness configs from binary updates are materialized
-// without a full InitGlobal.
+// the local filesystem. With Force=false, bundle-owned files (config.yaml and
+// the provisioner scripts provision.py, scion_harness.py and capture_auth.py)
+// are refreshed from the bundle, and other existing files are preserved. Use
+// this in hosted mode to ensure newly added harness configs from binary
+// updates are materialized without a full InitGlobal.
 func MaterializeBundledHarnessConfigs(globalDir string, opts MaterializeOptions) error {
 	for _, res := range resources.BuiltinHarnessConfigs() {
 		targetDir := filepath.Join(globalDir, harnessConfigsDirName, res.Name)

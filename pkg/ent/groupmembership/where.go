@@ -81,6 +81,16 @@ func AgentID(v uuid.UUID) predicate.GroupMembership {
 	return predicate.GroupMembership(sql.FieldEQ(FieldAgentID, v))
 }
 
+// ExpiresAt applies equality check predicate on the "expires_at" field. It's identical to ExpiresAtEQ.
+func ExpiresAt(v time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldEQ(FieldExpiresAt, v))
+}
+
+// IssuanceID applies equality check predicate on the "issuance_id" field. It's identical to IssuanceIDEQ.
+func IssuanceID(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldEQ(FieldIssuanceID, v))
+}
+
 // RoleEQ applies the EQ predicate on the "role" field.
 func RoleEQ(v Role) predicate.GroupMembership {
 	return predicate.GroupMembership(sql.FieldEQ(FieldRole, v))
@@ -294,6 +304,131 @@ func AgentIDIsNil() predicate.GroupMembership {
 // AgentIDNotNil applies the NotNil predicate on the "agent_id" field.
 func AgentIDNotNil() predicate.GroupMembership {
 	return predicate.GroupMembership(sql.FieldNotNull(FieldAgentID))
+}
+
+// ExpiresAtEQ applies the EQ predicate on the "expires_at" field.
+func ExpiresAtEQ(v time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldEQ(FieldExpiresAt, v))
+}
+
+// ExpiresAtNEQ applies the NEQ predicate on the "expires_at" field.
+func ExpiresAtNEQ(v time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldNEQ(FieldExpiresAt, v))
+}
+
+// ExpiresAtIn applies the In predicate on the "expires_at" field.
+func ExpiresAtIn(vs ...time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldIn(FieldExpiresAt, vs...))
+}
+
+// ExpiresAtNotIn applies the NotIn predicate on the "expires_at" field.
+func ExpiresAtNotIn(vs ...time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldNotIn(FieldExpiresAt, vs...))
+}
+
+// ExpiresAtGT applies the GT predicate on the "expires_at" field.
+func ExpiresAtGT(v time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldGT(FieldExpiresAt, v))
+}
+
+// ExpiresAtGTE applies the GTE predicate on the "expires_at" field.
+func ExpiresAtGTE(v time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldGTE(FieldExpiresAt, v))
+}
+
+// ExpiresAtLT applies the LT predicate on the "expires_at" field.
+func ExpiresAtLT(v time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldLT(FieldExpiresAt, v))
+}
+
+// ExpiresAtLTE applies the LTE predicate on the "expires_at" field.
+func ExpiresAtLTE(v time.Time) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldLTE(FieldExpiresAt, v))
+}
+
+// ExpiresAtIsNil applies the IsNil predicate on the "expires_at" field.
+func ExpiresAtIsNil() predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldIsNull(FieldExpiresAt))
+}
+
+// ExpiresAtNotNil applies the NotNil predicate on the "expires_at" field.
+func ExpiresAtNotNil() predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldNotNull(FieldExpiresAt))
+}
+
+// IssuanceIDEQ applies the EQ predicate on the "issuance_id" field.
+func IssuanceIDEQ(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDNEQ applies the NEQ predicate on the "issuance_id" field.
+func IssuanceIDNEQ(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldNEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDIn applies the In predicate on the "issuance_id" field.
+func IssuanceIDIn(vs ...string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDNotIn applies the NotIn predicate on the "issuance_id" field.
+func IssuanceIDNotIn(vs ...string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldNotIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDGT applies the GT predicate on the "issuance_id" field.
+func IssuanceIDGT(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldGT(FieldIssuanceID, v))
+}
+
+// IssuanceIDGTE applies the GTE predicate on the "issuance_id" field.
+func IssuanceIDGTE(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldGTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDLT applies the LT predicate on the "issuance_id" field.
+func IssuanceIDLT(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldLT(FieldIssuanceID, v))
+}
+
+// IssuanceIDLTE applies the LTE predicate on the "issuance_id" field.
+func IssuanceIDLTE(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldLTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDContains applies the Contains predicate on the "issuance_id" field.
+func IssuanceIDContains(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldContains(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasPrefix applies the HasPrefix predicate on the "issuance_id" field.
+func IssuanceIDHasPrefix(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldHasPrefix(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasSuffix applies the HasSuffix predicate on the "issuance_id" field.
+func IssuanceIDHasSuffix(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldHasSuffix(FieldIssuanceID, v))
+}
+
+// IssuanceIDIsNil applies the IsNil predicate on the "issuance_id" field.
+func IssuanceIDIsNil() predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldIsNull(FieldIssuanceID))
+}
+
+// IssuanceIDNotNil applies the NotNil predicate on the "issuance_id" field.
+func IssuanceIDNotNil() predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldNotNull(FieldIssuanceID))
+}
+
+// IssuanceIDEqualFold applies the EqualFold predicate on the "issuance_id" field.
+func IssuanceIDEqualFold(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldEqualFold(FieldIssuanceID, v))
+}
+
+// IssuanceIDContainsFold applies the ContainsFold predicate on the "issuance_id" field.
+func IssuanceIDContainsFold(v string) predicate.GroupMembership {
+	return predicate.GroupMembership(sql.FieldContainsFold(FieldIssuanceID, v))
 }
 
 // HasGroup applies the HasEdge predicate on the "group" edge.

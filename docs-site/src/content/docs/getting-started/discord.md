@@ -8,7 +8,7 @@ description: An end-to-end walkthrough for Workstation-mode users — create a D
 This guide is for [Workstation mode](/scion/choosing-a-mode/): you installed Scion with Homebrew and run the combo server locally with `scion server start`. It assumes you have already finished [installation](/scion/getting-started/install/) and the [Onboarding Wizard](/scion/getting-started/onboarding/), and that you can open the web dashboard at `http://127.0.0.1:8080`.
 
 :::note[Already installed the plugin?]
-The Homebrew install includes `scion-plugin-discord` automatically — no separate build or download is needed. If you installed from source instead, see the [plugin README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord) for build instructions, then rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
+Plugins are not bundled with the Homebrew formula. On Linux, download `scion-plugin-discord-linux-amd64.tar.gz` or `-arm64.tar.gz` from the same [GitHub release](https://github.com/GoogleCloudPlatform/scion/releases) as your Scion version, verify it against that release's `SHA256SUMS`, and put the `scion-plugin-discord` binary on your `$PATH` or in `~/.scion/plugins/broker/`. No plugin build is published for macOS: build it from source with the [plugin README](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord). Then rejoin this guide at [Step 2](#step-2-configure-the-plugin-from-the-hub-admin-ui).
 :::
 
 At a glance, you will:
@@ -155,6 +155,12 @@ In Discord, messages are routed using `@mention` triggers. If a default agent is
 | `can you review this PR?` | Routes to the channel's **default agent** (if configured via `/scion default`). |
 | `@all run safety audit` | Broadcasts the message to **all agents** running within the linked project. |
 | *Reply to an agent's message* | Replying to a webhook message or bot response automatically continues the discussion thread with that specific agent. |
+
+### Answering Agent Questions
+When an agent asks for input, the bot posts the question with answer buttons: one per choice, or **Reply** (which opens a text box) and **Dismiss**. Clicking a button delivers your answer to the agent that asked. A question stays answerable for 24 hours; if delivery fails, you see a private error and can try again. Long choice labels are shortened to fit Discord's limits, but the agent receives the full text.
+
+### Direct Messages
+A Scion direct message to a user is sent to that user's stored Discord channel, or else to the DM channel of their linked Discord account. It is never broadcast to a server channel.
 
 ---
 

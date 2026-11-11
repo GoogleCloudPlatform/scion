@@ -1,0 +1,468 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type sseAgentStore struct {
+	*mockAuthzStore
+	agents    map[string]*store.Agent
+	lookupErr error
+	authzErr  error
+}
+
+// sseStatusWriter is an httptest.ResponseRecorder that reports, once, when
+// the handler has written its status: an explicit WriteHeader, a first body
+// write or a flush (each of which fixes the status).
+type sseStatusWriter struct {
+	*httptest.ResponseRecorder
+	once    sync.Once
+	written chan struct{}
+}
+
+func (w *sseStatusWriter) signal() { w.once.Do(func() { close(w.written) }) }
+
+func (w *sseStatusWriter) WriteHeader(code int) {
+	w.ResponseRecorder.WriteHeader(code)
+	w.signal()
+}
+
+func (w *sseStatusWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(b)
+	w.signal()
+	return n, err
+}
+
+func (w *sseStatusWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	w.signal()
+}
+
+// serveSSELive runs ws.handleSSE on a request built by mkReq with a LIVE
+// context, so the authorization decision runs on a context that has not
+// ended. Once the handler has written its status (or returned), the context
+// is cancelled to end the stream, and serveSSELive waits for the handler to
+// return before handing back the recorder. Only the end of the stream is
+// driven by the cancellation.
+func serveSSELive(t *testing.T, ws *WebServer, mkReq func(ctx context.Context) *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &sseStatusWriter{ResponseRecorder: httptest.NewRecorder(), written: make(chan struct{})}
+	req := mkReq(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ws.handleSSE(w, req)
+	}()
+	select {
+	case <-w.written:
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleSSE wrote no status within 30s")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleSSE did not return within 30s of the cancellation")
+	}
+	return w.ResponseRecorder
+}
+
+func sseAgentRequest(ctx context.Context, userID, role string, subjects ...string) *http.Request {
+	query := url.Values{"sub": subjects}
+	req := httptest.NewRequest(http.MethodGet, "/events?"+query.Encode(), nil)
+	user := &webSessionUser{UserID: userID, Role: role}
+	return req.WithContext(context.WithValue(ctx, webUserContextKey{}, user))
+}
+
+// mockSuperAdminStore returns a mockAuthzStore pre-configured with a
+// super-admin role binding for the given user ID. This allows the AK1
+// kernel to grant all permissions without a real database.
+func mockSuperAdminStore(userID string) *mockAuthzStore {
+	rdID := "mock-rd-super-admin"
+	return &mockAuthzStore{
+		roleBindings: []*store.RoleBinding{{
+			ID:               "mock-rb-super-admin",
+			RoleDefinitionID: rdID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      userID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        store.SystemReconcileCreatedBy,
+		}},
+		roleDefinitions: map[string]*store.RoleDefinition{
+			rdID: {
+				ID:          rdID,
+				Name:        store.SystemRoleSuperAdmin,
+				ScopeType:   store.RoleScopeSystem,
+				Permissions: allPermissionIDs(),
+			},
+		},
+	}
+}
+
+// mockAuthzStore satisfies store.Store for NewAuthzService. Only the methods
+// called by ComputeCapabilitiesBatch's dependency chain are implemented;
+// the embedded interface satisfies everything else at the signature level.
+//
+// Optional fields allow tests to inject role bindings and role definitions
+// so the CO1 kernel can resolve permissions without a real database.
+// projectMemberships is served the way the store serves it: as a view over
+// project-scoped bindings to the seeded project roles, which the mock also
+// returns from the role-binding and role-definition lookups.
+type mockAuthzStore struct {
+	store.Store // embed to satisfy interface
+
+	roleBindings          []*store.RoleBinding
+	roleDefinitions       map[string]*store.RoleDefinition
+	projects              []store.Project                     // injectable project list for wildcard expansion tests
+	projectMemberships    map[string]*store.ProjectMembership // key: "projectID:userID"
+	listProjectsReturnNil bool                                // when true, the project lists return (nil, nil)
+
+	// Project paging (ptone/scion#1741). projectPageSize > 0 serves
+	// projects in pages of that size with an index cursor; it is capped by
+	// the request's Limit when that is smaller.
+	projectPageSize       int
+	listProjectsErrAfter  int  // > 0: calls after this many fail
+	stuckProjectCursor    bool // every page is the first, with the same cursor
+	listProjectsCalls     int  // list calls of either kind
+	lastListProjectsLimit int
+	// listProjectsFullCalls counts ListProjects calls only (the computed
+	// fields; ListProjectSummaries skips them).
+	listProjectsFullCalls int
+}
+
+// sseMessageIDs returns the message ids of the events written to an SSE body.
+func sseMessageIDs(t *testing.T, body string) []string {
+	t.Helper()
+	ids := []string{}
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var frame struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(data), &frame))
+		ids = append(ids, frame.Data.ID)
+	}
+	return ids
+}
+
+// sseFlushWriter injects client activity at the first header flush, exactly
+// where EventSource can announce an open connection to a snapshot consumer.
+type sseFlushWriter struct {
+	*httptest.ResponseRecorder
+	onFirstFlush func()
+	onWrite      func() error
+	flushed      bool
+}
+
+func newSSEOrderingRequest(t *testing.T) (*WebServer, *ChannelEventPublisher, *http.Request) {
+	t.Helper()
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	ws := &WebServer{
+		events:       pub,
+		authzService: NewAuthzService(&mockAuthzStore{}, nil),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/events?sub=user.user-1.message", nil)
+	user := &webSessionUser{UserID: "user-1", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+	return ws, pub, req
+}
+
+func assertNoSSESubscribers(t *testing.T, pub *ChannelEventPublisher) {
+	t.Helper()
+	pub.mu.RLock()
+	defer pub.mu.RUnlock()
+	for pattern, subscribers := range pub.subscribers {
+		assert.Empty(t, subscribers, "subscription leaked for %s", pattern)
+	}
+}
+
+// GetUser returns an active user for any ID, for the live project-access
+// check on relationship grants.
+func (s *sseAgentStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	return &store.User{ID: id, Email: id + "@test.com", Role: "member", Status: store.UserStatusActive}, nil
+}
+
+func (s *sseAgentStore) GetAgent(_ context.Context, id string) (*store.Agent, error) {
+	if s.lookupErr != nil {
+		return nil, s.lookupErr
+	}
+	if a, ok := s.agents[id]; ok {
+		return a, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *sseAgentStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopes, ids []string) ([]*store.RoleBinding, error) {
+	if s.authzErr != nil {
+		return nil, s.authzErr
+	}
+	return s.mockAuthzStore.ListRoleBindingsForPrincipals(ctx, principals, scopes, ids)
+}
+
+func (m *mockAuthzStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockAuthzStore) GetEffectiveGroupsForAgent(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockAuthzStore) ListGroups(_ context.Context, _ store.GroupFilter, _ store.ListOptions) (*store.ListResult[store.Group], error) {
+	return &store.ListResult[store.Group]{}, nil
+}
+
+func (m *mockAuthzStore) GetProject(_ context.Context, _ string) (*store.Project, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) GetGroupMembership(_ context.Context, _, _ string, _ string) (*store.GroupMember, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) GetProjectMembership(_ context.Context, projectID, userID string) (*store.ProjectMembership, error) {
+	if m.projectMemberships != nil {
+		key := projectID + ":" + userID
+		if pm, ok := m.projectMemberships[key]; ok {
+			return pm, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+// membershipBindings returns the project-scoped role bindings the
+// projectMemberships view is derived from, in a stable order.
+func (m *mockAuthzStore) membershipBindings() []*store.RoleBinding {
+	keys := make([]string, 0, len(m.projectMemberships))
+	for key := range m.projectMemberships {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]*store.RoleBinding, 0, len(keys))
+	for _, key := range keys {
+		pm := m.projectMemberships[key]
+		id := pm.RoleBindingID
+		if id == "" {
+			id = "mock-rb-" + key
+		}
+		out = append(out, &store.RoleBinding{
+			ID:               id,
+			RoleDefinitionID: mockProjectRoleDefinitionID(pm.Role),
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      pm.UserID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          pm.ProjectID,
+		})
+	}
+	return out
+}
+
+func (m *mockAuthzStore) roleDefinition(id string) (*store.RoleDefinition, bool) {
+	if rd, ok := m.roleDefinitions[id]; ok {
+		return rd, true
+	}
+	if len(m.projectMemberships) > 0 {
+		if rd, ok := mockProjectRoleDefinitions()[id]; ok {
+			return rd, true
+		}
+	}
+	return nil, false
+}
+
+func (m *mockAuthzStore) ListRoleBindingsForPrincipal(_ context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	var out []*store.RoleBinding
+	for _, rb := range m.membershipBindings() {
+		if rb.PrincipalType == principalType && rb.PrincipalID == principalID {
+			out = append(out, rb)
+		}
+	}
+	return out, nil
+}
+
+func (m *mockAuthzStore) GetRoleDefinition(_ context.Context, id string) (*store.RoleDefinition, error) {
+	if rd, ok := m.roleDefinition(id); ok {
+		return rd, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) GetRoleDefinitionByName(_ context.Context, name, scopeType string) (*store.RoleDefinition, error) {
+	for _, defs := range []map[string]*store.RoleDefinition{m.roleDefinitions, mockProjectRoleDefinitions()} {
+		for _, rd := range defs {
+			if rd.Name == name && rd.ScopeType == scopeType {
+				return rd, nil
+			}
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+// GetUser reports every principal as an existing, active account; the
+// tests using this mock exercise role bindings, not account status. It also
+// serves the test-identity grant clamp's kind read
+// (authz_test_fixture_clamp.go): the empty Kind reads as an ordinary user.
+func (m *mockAuthzStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	return &store.User{ID: id, Status: store.UserStatusActive}, nil
+}
+
+func (m *mockAuthzStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
+	result := make(map[string]*store.RoleDefinition, len(ids))
+	for _, id := range ids {
+		if rd, ok := m.roleDefinition(id); ok {
+			result[id] = rd
+		}
+	}
+	return result, nil
+}
+
+// ListRoleBindingsForPrincipals returns the injected roleBindings plus the
+// membership bindings of the requested principals.
+func (m *mockAuthzStore) ListRoleBindingsForPrincipals(_ context.Context, principals []store.PrincipalRef, _ []string, _ []string) ([]*store.RoleBinding, error) {
+	out := append([]*store.RoleBinding(nil), m.roleBindings...)
+	for _, rb := range m.membershipBindings() {
+		for _, p := range principals {
+			if rb.PrincipalType == p.Type && rb.PrincipalID == p.ID {
+				out = append(out, rb)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*store.AccessConstraint, error) {
+	return nil, nil
+}
+
+// ListProjects serves m.projects like ListProjectSummaries and also counts
+// listProjectsFullCalls, so a test can check that a caller used summaries.
+func (m *mockAuthzStore) ListProjects(_ context.Context, _ store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	m.listProjectsFullCalls++
+	return m.pageProjects(opts)
+}
+
+// ListProjectSummaries serves m.projects, paged per projectPageSize.
+func (m *mockAuthzStore) ListProjectSummaries(_ context.Context, _ store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return m.pageProjects(opts)
+}
+
+// pageProjects is one list call of either kind (counted in
+// listProjectsCalls).
+func (m *mockAuthzStore) pageProjects(opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	m.listProjectsCalls++
+	m.lastListProjectsLimit = opts.Limit
+	if m.listProjectsReturnNil {
+		return nil, nil
+	}
+	if m.listProjectsErrAfter > 0 && m.listProjectsCalls > m.listProjectsErrAfter {
+		return nil, errors.New("list projects failed")
+	}
+	items := m.projects
+	if items == nil {
+		items = []store.Project{}
+	}
+	if m.projectPageSize <= 0 {
+		return &store.ListResult[store.Project]{Items: items, TotalCount: len(items)}, nil
+	}
+	size := m.projectPageSize
+	if opts.Limit > 0 && opts.Limit < size {
+		size = opts.Limit
+	}
+	start := 0
+	if opts.Cursor != "" && !m.stuckProjectCursor {
+		n, err := strconv.Atoi(opts.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		start = n
+	}
+	end := min(start+size, len(items))
+	res := &store.ListResult[store.Project]{Items: items[start:end]}
+	switch {
+	case m.stuckProjectCursor:
+		res.NextCursor = "stuck"
+	case end < len(items):
+		res.NextCursor = strconv.Itoa(end)
+	}
+	return res, nil
+}
+
+func (w *sseFlushWriter) Flush() {
+	w.ResponseRecorder.Flush()
+	if !w.flushed {
+		w.flushed = true
+		w.onFirstFlush()
+	}
+}
+
+func (w *sseFlushWriter) Write(p []byte) (int, error) {
+	if w.onWrite != nil {
+		if err := w.onWrite(); err != nil {
+			return 0, err
+		}
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+// mockProjectRoleDefinitions are the seeded project-scoped roles
+// (seed.go), keyed by ID. Project memberships are views over bindings to
+// these roles, so the mock serves them alongside roleDefinitions.
+func mockProjectRoleDefinitions() map[string]*store.RoleDefinition {
+	defs := map[string]*store.RoleDefinition{}
+	for name, perms := range map[string][]string{
+		store.ProjectRoleOwner:  projectOwnerPermissionIDs(),
+		store.ProjectRoleAdmin:  projectAdminPermissionIDs(),
+		store.ProjectRoleMember: projectMemberCuratedPermissionIDs(),
+	} {
+		id := mockProjectRoleDefinitionID(name)
+		defs[id] = &store.RoleDefinition{ID: id, Name: name, ScopeType: store.RoleScopeProject, Permissions: perms, System: true}
+	}
+	return defs
+}
+
+// mockProjectRoleDefinitionID is the role definition ID the mock uses for a
+// seeded project role name.
+func mockProjectRoleDefinitionID(roleName string) string {
+	return "mock-rd-" + roleName
+}

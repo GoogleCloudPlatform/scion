@@ -17,15 +17,21 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
+	"path"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -39,8 +45,12 @@ func NewAppleContainerRuntime() *AppleContainerRuntime {
 	}
 }
 
+// appleContainerRuntimeName is the Apple runtime's name, and its
+// RunConfig.RuntimeName.
+const appleContainerRuntimeName = "container"
+
 func (r *AppleContainerRuntime) Name() string {
-	return "container"
+	return appleContainerRuntimeName
 }
 
 func (r *AppleContainerRuntime) ExecUser() string {
@@ -52,6 +62,19 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 		return "", err
 	}
 
+	// buildCommonRunArgs emits the Apple-supported --tmpfs flag for the
+	// shared workspace agents mask when it sees this name, and only when
+	// <workspace>/.scion/agents already exists, so the runtime never
+	// creates that mount point in the host checkout. The Apple
+	// "container" CLI has accepted --tmpfs since its first release, 0.1.0
+	// (https://github.com/apple/container/blob/0.1.0/Sources/ContainerClient/Flags.swift,
+	// applied in Sources/ContainerClient/Utility.swift); the current
+	// docs/command-reference.md lists it under "container run". The CLI
+	// lists tmpfs mounts before -v volumes, so the mask takes effect only
+	// where mounts are applied by destination depth: apple/containerization
+	// 0.31.0 (apple/containerization#601), first used by apple/container
+	// 0.12.0.
+	config.RuntimeName = r.Name()
 	args, err := buildCommonRunArgs(config)
 	if err != nil {
 		return "", err
@@ -94,25 +117,309 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 
 	// Skip the original 'run', '-d', and '-i' from buildCommonRunArgs (indices 0, 1, 2)
 	// then strip flags that the Apple container CLI does not support.
+	// Apple's container CLI has no --group-add: warn and start unchanged.
+	newArgs = appendSharedDirGroupArgs(newArgs, config, "container", false)
 	newArgs = append(newArgs, stripUnsupportedAppleFlags(args[3:])...)
+	// When the agents mask applies, refuse a CLI known to be older than
+	// appleMaskMinVersion; an unknown version is left to the check after
+	// the start (verifyMasks).
+	maskTargets := appleTmpfsTargets(newArgs)
+	roTargets := appleNestedReadOnlyTargets(newArgs)
+	masked := len(maskTargets) > 0 || len(roTargets) > 0
+	cliVersion := "unknown"
+	if masked {
+		v, below, ok := appleCLIVersion(ctx, r.Command)
+		if ok && below {
+			floor := appleMaskMinVersionString()
+			return "", fmt.Errorf("container CLI %s is older than %s: the nested mounts at %s rely on nested mount ordering that needs apple/container %s or later", v, floor, strings.Join(append(roTargets, maskTargets...), ", "), floor)
+		}
+		if ok {
+			cliVersion = v
+		}
+	}
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller gave up while the daemon may still have been
+			// creating/starting the container. Clean up any partial result
+			// instead of leaking it. See ptone/scion#1886.
+			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
 	// The output of 'container run -d' is the container ID
-	return strings.TrimSpace(out), nil
+	id := strings.TrimSpace(out)
+	reportAppleContainerCreated(hooks, config.Name, id)
+	if masked {
+		err := r.verifyMasks(ctx, id, maskTargets)
+		if err == nil {
+			err = r.verifyReadOnly(ctx, id, roTargets)
+		}
+		if err != nil {
+			checkErr := fmt.Errorf("%w (container CLI version %s)", err, cliVersion)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if derr := r.Delete(cleanupCtx, RunRef{ID: id}); derr != nil {
+				return "", errors.Join(checkErr, fmt.Errorf("removing container %s: %w; the container may still exist", id, derr))
+			}
+			return "", checkErr
+		}
+	}
+	return id, nil
 }
 
-func (r *AppleContainerRuntime) Stop(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "stop", id)
+var (
+	// appleMaskCheckTimeout bounds the whole agents mask check, retries
+	// included.
+	appleMaskCheckTimeout = 10 * time.Second
+	// appleMaskCheckAttempts and appleMaskCheckRetryDelay: how often, and
+	// how far apart, the check runs when it could not run (see
+	// verifyMasks).
+	appleMaskCheckAttempts   = 3
+	appleMaskCheckRetryDelay = 500 * time.Millisecond
+)
+
+// appleTmpfsTargets returns the container paths of the --tmpfs masks in
+// args, in order.
+func appleTmpfsTargets(args []string) []string {
+	var targets []string
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--tmpfs" {
+			targets = append(targets, args[i+1])
+		}
+	}
+	return targets
+}
+
+// appleNestedReadOnlyTargets returns the container paths of every
+// read-only -v bind in args that is nested in the workspace or repo root
+// mount, in order: the project configuration directory, and any read-only
+// template volume placed there. Each is version-gated and checked after the
+// start.
+func appleNestedReadOnlyTargets(args []string) []string {
+	var targets []string
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] != "-v" || !strings.HasSuffix(args[i+1], ":ro") {
+			continue
+		}
+		parts := strings.Split(strings.TrimSuffix(args[i+1], ":ro"), ":")
+		dst := parts[len(parts)-1]
+		if strings.HasPrefix(dst, "/workspace/") || strings.HasPrefix(dst, "/repo-root/") {
+			targets = append(targets, dst)
+		}
+	}
+	return targets
+}
+
+// appleExecCheck runs argv in the started container with the retry rule of
+// verifyMask: retried, up to appleMaskCheckAttempts runs within
+// appleMaskCheckTimeout, only when it could not run.
+func (r *AppleContainerRuntime) appleExecCheck(ctx context.Context, id string, argv ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, appleMaskCheckTimeout)
+	defer cancel()
+	var out string
+	var err error
+	// A deadline that passes during the backoff ends the loop, keeping the
+	// last real attempt's error and output.
+retry:
+	for attempt := 1; ; attempt++ {
+		out, err = appleBoundedCommand(ctx, r.Command, append([]string{"exec", id}, argv...)...)
+		if err == nil || attempt >= appleMaskCheckAttempts || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break retry
+		case <-time.After(appleMaskCheckRetryDelay):
+		}
+	}
+	return out, err
+}
+
+// verifyReadOnly checks, in the started container, that each target is
+// mounted read-only: the last /proc/self/mountinfo entry for that mount
+// point (the one in effect) must carry the per-mount "ro" option. It reads
+// the mount table with cat by absolute path and an empty environment, as
+// verifyMask runs stat, and fails closed when the table cannot be read or
+// has no entry for a target.
+func (r *AppleContainerRuntime) verifyReadOnly(ctx context.Context, id string, targets []string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	out, err := r.appleExecCheck(ctx, id, "/usr/bin/env", "-i", "/bin/cat", "/proc/self/mountinfo")
+	if err != nil {
+		return fmt.Errorf("could not check that %s is mounted read-only in the container: %w (output: %q)", strings.Join(targets, ", "), err, truncateCheckOutput(out))
+	}
+	for _, target := range targets {
+		readOnly, found := mountinfoReadOnly(out, target)
+		if !found {
+			return fmt.Errorf("could not check that %s is mounted read-only in the container: no mount table entry for it", target)
+		}
+		if !readOnly {
+			return fmt.Errorf("%s is not mounted read-only in the container", target)
+		}
+	}
+	return nil
+}
+
+// mountinfoReadOnly reports whether target is mounted read-only in the
+// mount table mountinfo (/proc/self/mountinfo, listed in mount order), and
+// whether there is a mount entry for it at all. The entry that counts is
+// the last one whose mount point is target, and only while it is the
+// mount in effect: an entry mounted later at target or at any directory
+// above it covers it (a nested bind shadowed by its parent), and then the
+// result is not read-only. Fields: ID, parent ID, major:minor, root, mount
+// point (octal-escaped), per-mount options, ...
+func mountinfoReadOnly(mountinfo, target string) (readOnly, found bool) {
+	target = path.Clean(target)
+	for _, line := range strings.Split(mountinfo, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 6 {
+			continue
+		}
+		mp := path.Clean(unescapeMountinfo(f[4]))
+		switch {
+		case mp == target:
+			found = true
+			readOnly = slices.Contains(strings.Split(f[5], ","), "ro")
+		case found && (mp == "/" || strings.HasPrefix(target, mp+"/")):
+			// A later mount above target covers it.
+			readOnly = false
+		}
+	}
+	return readOnly, found
+}
+
+// unescapeMountinfo decodes the octal escapes (\040 for a space, \011,
+// \012, \134) the kernel writes in mountinfo path fields.
+func unescapeMountinfo(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// verifyMasks runs verifyMask for each tmpfs mask target, in order, and
+// returns the first error.
+func (r *AppleContainerRuntime) verifyMasks(ctx context.Context, id string, targets []string) error {
+	for _, target := range targets {
+		if err := r.verifyMask(ctx, id, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyMask checks, in the started container, that a tmpfs mask is
+// mounted at target (the agents mask at /workspace/.scion/agents, or the
+// /repo-root/.scion mask): target must be on a different device from its
+// parent directory. This tests that the mount exists, not that
+// the directory looks empty, since an existing directory that happens to
+// be empty would pass an emptiness check with no mask. stat compares the
+// exact path with no mount table parsing; it runs as the container's
+// default user (root), since it reads metadata only.
+//
+// stat runs by absolute path with an empty environment, so the check does
+// not depend on the container PATH or environment. Scope: the per-start
+// root filesystem does not persist while the home mount does; the absolute
+// paths and the empty environment (which also clears LD_* variables) make
+// the check independent of anything under home or in the environment.
+//
+// Boundary: the mask and this check assume the agent cannot change mounts
+// inside its own container (no CAP_SYS_ADMIN), and that the check runs
+// right after start. Granting mount capability to agent containers removes
+// both guarantees.
+//
+// Retry rule: the check is retried, up to appleMaskCheckAttempts runs in
+// all within appleMaskCheckTimeout, only when it could not run (the exec
+// failed or stat exited non-zero). A result is never retried: equal
+// devices, or output that does not parse, fail closed at once.
+func (r *AppleContainerRuntime) verifyMask(ctx context.Context, id, target string) error {
+	out, err := r.appleExecCheck(ctx, id, "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", target, path.Dir(target))
+	if err != nil {
+		return fmt.Errorf("could not check that the mask is mounted at %s in the container: %w (output: %q)", target, err, truncateCheckOutput(out))
+	}
+	devs := strings.Fields(out)
+	numeric := len(devs) == 2
+	for _, d := range devs {
+		if _, perr := strconv.ParseUint(d, 10, 64); perr != nil {
+			numeric = false
+		}
+	}
+	if !numeric {
+		return fmt.Errorf("could not check that the mask is mounted at %s in the container: unexpected stat output %q", target, truncateCheckOutput(out))
+	}
+	if devs[0] == devs[1] {
+		return fmt.Errorf("the mask is not mounted at %s in the container", target)
+	}
+	return nil
+}
+
+// truncateCheckOutput trims s and cuts it to at most 200 bytes, for an
+// error message.
+func truncateCheckOutput(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
+}
+
+// appleBoundedCommand runs the container CLI and returns its combined
+// output. WaitDelay bounds the wait after ctx ends, so a child that keeps
+// the output pipe open cannot outlive the timeout.
+func appleBoundedCommand(ctx context.Context, command string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// Stop stops the container ref.ID. Apple's CLI uses the container name as
+// its ID, so a container recreated under the same name by another run would
+// be hit by name; when ref.RunID is set the container is first checked
+// against it (appleCheckRun) and one of another run is left running with
+// ErrRunMismatch (ptone/scion#2550).
+func (r *AppleContainerRuntime) Stop(ctx context.Context, ref RunRef) error {
+	if err := r.appleCheckRun(ctx, ref); err != nil {
+		return err
+	}
+	_, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	return err
 }
 
-func (r *AppleContainerRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the container ref.ID. As for Stop, when ref.RunID is set
+// the container is checked against it first, and one of another run is
+// left untouched with ErrRunMismatch. The check is a listing, not a CLI
+// precondition: a container recreated between the listing and the kill is
+// still hit (a window of one CLI call).
+func (r *AppleContainerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	if err := r.appleCheckRun(ctx, ref); err != nil {
+		return err
+	}
+	id := ref.ID
 	// Apple's `container rm` doesn't support -f and fails on running containers,
 	// so kill first (ignoring errors if already stopped) then remove.
 	_, _ = runSimpleCommand(ctx, r.Command, "kill", id)
@@ -172,10 +479,9 @@ type containerListOutput struct {
 	} `json:"configuration"`
 }
 
-func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	args := []string{"list", "-a", "--format", "json"}
-
-	cmd := exec.CommandContext(ctx, r.Command, args...)
+// appleListContainers returns the parsed "container list -a" output.
+func appleListContainers(ctx context.Context, command string) ([]containerListOutput, error) {
+	cmd := exec.CommandContext(ctx, command, "list", "-a", "--format", "json")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("container list failed: %w (output: %s)", err, string(out))
@@ -185,43 +491,61 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse container list output: %w (output: %s)", err, string(out))
 	}
+	return raw, nil
+}
+
+// appleCheckRun enforces ref.RunID before Stop or Delete act on the
+// container named ref.ID. With no run ID it does nothing (name semantics,
+// as before run IDs existed). Otherwise the container is looked up in the
+// listing: one labelled with another run yields ErrRunMismatch; one of
+// ref.RunID, a legacy container with no run label (the rule k8s and the
+// broker apply), or a name the listing does not show passes, and the caller
+// proceeds as before. A listing failure is returned, and nothing is done.
+func (r *AppleContainerRuntime) appleCheckRun(ctx context.Context, ref RunRef) error {
+	if ref.RunID == "" {
+		return nil
+	}
+	raw, err := appleListContainers(ctx, r.Command)
+	if err != nil {
+		return fmt.Errorf("could not check the run of container %s: %w", ref.ID, err)
+	}
+	for _, c := range raw {
+		if c.Configuration.ID != ref.ID {
+			continue
+		}
+		if run := c.Configuration.Labels[api.LabelRunID]; run != "" && run != ref.RunID {
+			runtimeLog().Info("Left a container of another run untouched",
+				"container", ref.ID, "run_id", ref.RunID, "container_run_id", run)
+			return fmt.Errorf("container %s belongs to run %q, not %q: %w", ref.ID, run, ref.RunID, ErrRunMismatch)
+		}
+		return nil
+	}
+	return nil
+}
+
+func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+	raw, err := appleListContainers(ctx, r.Command)
+	if err != nil {
+		return nil, err
+	}
 
 	var agents []api.AgentInfo
 	for _, c := range raw {
 		// Filter by labels if requested
-		if len(labelFilter) > 0 {
-			match := true
-			for k, v := range labelFilter {
-				actual := c.Configuration.Labels[k]
-				if actual == "" {
-					switch k {
-					case projectcompat.LabelProject:
-						actual = projectcompat.ProjectNameFromLabels(c.Configuration.Labels)
-					case projectcompat.LabelProjectID:
-						actual = projectcompat.ProjectIDFromLabels(c.Configuration.Labels)
-					case projectcompat.LabelProjectPath:
-						actual = projectcompat.ProjectPathFromLabels(c.Configuration.Labels)
-					}
-				}
-				if actual != v {
-					match = false
-					break
-				}
-			}
-			if !match {
-				continue
-			}
+		if !LabelsMatchFilter(c.Configuration.Labels, labelFilter) {
+			continue
 		}
 
 		info := api.AgentInfo{
 			ContainerID:     c.Configuration.ID,
+			RunID:           c.Configuration.Labels[api.LabelRunID],
 			Name:            c.Configuration.Labels["scion.name"],
 			Template:        c.Configuration.Labels["scion.template"],
 			HarnessConfig:   c.Configuration.Labels["scion.harness_config"],
 			HarnessAuth:     c.Configuration.Labels["scion.harness_auth"],
-			Project:         projectcompat.ProjectNameFromLabels(c.Configuration.Labels),
-			ProjectID:       projectcompat.ProjectIDFromLabels(c.Configuration.Labels),
-			ProjectPath:     projectcompat.ProjectPathFromLabels(c.Configuration.Labels),
+			Project:         projectkeys.ProjectNameFromLabels(c.Configuration.Labels),
+			ProjectID:       projectkeys.ProjectIDFromLabels(c.Configuration.Labels),
+			ProjectPath:     projectkeys.ProjectPathFromLabels(c.Configuration.Labels),
 			Labels:          c.Configuration.Labels,
 			Annotations:     c.Configuration.Labels,
 			ContainerStatus: c.Status.State,
@@ -243,7 +567,7 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 }
 
 func (r *AppleContainerRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return runSimpleCommand(ctx, r.Command, "logs", id)
+	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
 func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
@@ -333,7 +657,56 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
-	return runSimpleCommand(ctx, r.Command, args...)
+	out, err := runCombinedCommand(ctx, r.Command, args...)
+	// A container removed after the lookup above must surface as
+	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
+	return out, appleExecNotFound.classifyExecErr(ctx, err, out, id, r.List)
+}
+
+// ExecWithStdin runs cmd inside the container with stdin piped from the
+// given reader. The -i flag is required for `container exec` to attach
+// stdin, mirroring Docker/Podman's exec semantics. See #1355.
+func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if agents, err := r.List(ctx, nil); err == nil {
+		id = resolveContainerID(agents, id)
+	}
+	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
+}
+
+// appleMaskMinVersion is the first apple/container release whose nested
+// mount ordering lets the --tmpfs agents mask take effect (see Run).
+var appleMaskMinVersion = [3]int{0, 12, 0}
+
+// appleMaskMinVersionString formats appleMaskMinVersion, e.g. "0.12.0".
+func appleMaskMinVersionString() string {
+	return fmt.Sprintf("%d.%d.%d", appleMaskMinVersion[0], appleMaskMinVersion[1], appleMaskMinVersion[2])
+}
+
+// appleVersionTimeout bounds "container --version", so a CLI that hangs
+// cannot hold up a start. Tests shorten it.
+var appleVersionTimeout = 5 * time.Second
+
+var appleVersionPattern = regexp.MustCompile(`version (\d+)\.(\d+)\.(\d+)`)
+
+// appleCLIVersion runs "container --version" and returns the version, and
+// whether it is older than appleMaskMinVersion. ok is false, with a debug
+// log, when the CLI fails or its output does not parse. Output such as
+// "container CLI version 0.12.0 (build: release, commit: ...)".
+func appleCLIVersion(ctx context.Context, command string) (version string, below, ok bool) {
+	ctx, cancel := context.WithTimeout(ctx, appleVersionTimeout)
+	defer cancel()
+	out, err := appleBoundedCommand(ctx, command, "--version")
+	m := appleVersionPattern.FindStringSubmatch(out)
+	if err != nil || m == nil {
+		runtimeLog().Debug("Could not read the container CLI version", "error", err)
+		return "", false, false
+	}
+	var v [3]int
+	for i := range v {
+		v[i], _ = strconv.Atoi(m[i+1])
+	}
+	return strings.Join(m[1:4], "."), slices.Compare(v[:], appleMaskMinVersion[:]) < 0, true
 }
 
 // stripUnsupportedAppleFlags removes flag-value pairs that the Apple

@@ -33,6 +33,8 @@ func TestValidateType(t *testing.T) {
 		{TypeSystem, false},
 		{TypeChat, false},
 		{TypeReply, false},
+		{TypeChoicePrompt, false},
+		{TypeChoiceResponse, false},
 		{"unknown", true},
 		{"", true},
 	}
@@ -340,9 +342,9 @@ func TestLogAttrs(t *testing.T) {
 
 	attrs := m.LogAttrs()
 
-	// Should contain 10 key-value pairs (20 elements) when IDs are set
-	if len(attrs) != 20 {
-		t.Fatalf("LogAttrs() returned %d elements, want 20", len(attrs))
+	// Should contain 9 key-value pairs (18 elements) when IDs are set
+	if len(attrs) != 18 {
+		t.Fatalf("LogAttrs() returned %d elements, want 18", len(attrs))
 	}
 
 	// Verify key-value pairs
@@ -356,7 +358,6 @@ func TestLogAttrs(t *testing.T) {
 		"urgent":          true,
 		"broadcasted":     false,
 		"plain":           true,
-		"raw":             false,
 	}
 	for i := 0; i < len(attrs); i += 2 {
 		key, ok := attrs[i].(string)
@@ -375,6 +376,24 @@ func TestLogAttrs(t *testing.T) {
 	}
 }
 
+// TestLogAttrs_NoRawAttribute pins that the retired raw flag is no longer
+// part of message log output now that raw delivery has been removed.
+func TestLogAttrs_NoRawAttribute(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "hello",
+		Type:      TypeInstruction,
+	}
+	attrs := m.LogAttrs()
+	for i := 0; i < len(attrs); i += 2 {
+		if key, ok := attrs[i].(string); ok && key == "raw" {
+			t.Fatalf("LogAttrs() must not include a raw attribute")
+		}
+	}
+}
+
 func TestLogAttrsWithoutIDs(t *testing.T) {
 	m := &StructuredMessage{
 		Version:   Version,
@@ -386,9 +405,9 @@ func TestLogAttrsWithoutIDs(t *testing.T) {
 
 	attrs := m.LogAttrs()
 
-	// Without IDs, should contain 8 key-value pairs (16 elements)
-	if len(attrs) != 16 {
-		t.Fatalf("LogAttrs() returned %d elements, want 16", len(attrs))
+	// Without IDs, should contain 7 key-value pairs (14 elements)
+	if len(attrs) != 14 {
+		t.Fatalf("LogAttrs() returned %d elements, want 14", len(attrs))
 	}
 
 	// Verify sender_id and recipient_id are not present
@@ -423,6 +442,56 @@ func TestLogAttrsWithRecipients(t *testing.T) {
 	}
 	if !found {
 		t.Error("LogAttrs() should include recipients when set")
+	}
+}
+
+// TestLogAttrsWithConversationID is a regression test for ptone/scion#1635:
+// the dedicated message audit log omitted conversation_id even though the
+// field is resolved and stamped onto the message before dispatch.
+func TestLogAttrsWithConversationID(t *testing.T) {
+	m := &StructuredMessage{
+		Version:        Version,
+		Sender:         "user:alice",
+		Recipient:      "agent:dev",
+		Msg:            "hello",
+		Type:           TypeInstruction,
+		ConversationID: "conv-uuid-789",
+	}
+
+	attrs := m.LogAttrs()
+
+	found := false
+	for i := 0; i < len(attrs)-1; i += 2 {
+		if attrs[i] == "conversation_id" {
+			found = true
+			if attrs[i+1] != "conv-uuid-789" {
+				t.Errorf("conversation_id = %v, want %q", attrs[i+1], "conv-uuid-789")
+			}
+		}
+	}
+	if !found {
+		t.Error("LogAttrs() should include conversation_id when set")
+	}
+}
+
+// TestLogAttrsWithoutConversationID ensures the field stays absent (rather
+// than emitted empty) when no conversation has been resolved, matching the
+// omitempty convention used by the other optional attrs.
+func TestLogAttrsWithoutConversationID(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "hello",
+		Type:      TypeInstruction,
+	}
+
+	attrs := m.LogAttrs()
+
+	for i := 0; i < len(attrs); i += 2 {
+		if attrs[i] == "conversation_id" {
+			t.Error("LogAttrs() should not include conversation_id when empty")
+		}
 	}
 }
 
@@ -511,6 +580,7 @@ func TestNewSystemMessage_Categories(t *testing.T) {
 		{SystemCategoryScheduler, "scheduler"},
 		{SystemCategoryPortForward, "port-forward"},
 		{SystemCategoryDeliveryFailed, "delivery-failed"},
+		{SystemCategoryArtifactReview, "artifact-review"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.category, func(t *testing.T) {

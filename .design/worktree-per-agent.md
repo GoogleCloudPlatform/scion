@@ -81,9 +81,9 @@ This is not a from-scratch effort. For **local** (non-hub) git projects, Scion a
   registerMount(config.Workspace, containerWorkspace, false, true)
   ```
 
-- Tears worktrees + branches down on delete with pruning of stale records
-  (`util.RemoveWorktree`, `PruneWorktreesIn`, `DeleteBranchIn` —
-  `pkg/agent/provision.go:35-146`).
+- Tears worktrees + branches down on delete, removing only the agent's own stale
+  worktree record (`util.RemoveWorktree`, `RemoveWorktreeEntryIn`, `DeleteBranchIn` —
+  `pkg/agent/provision.go`).
 
 So worktree-per-agent **already runs in production** for the local-repo case. The work
 is to bring this model to **hub-managed** projects (which today take the
@@ -145,7 +145,7 @@ never see each other's prompts through a shared mount.
 > the basename `workspace` causes git to auto-suffix entries (`workspace`, `workspace1`,
 > …). Using `worktrees/<agentID>` as the worktree path gives each a **unique basename**
 > (the agent UUID), eliminating that ambiguity. Scion associates worktrees by branch
-> (`FindWorktreeByBranch`) regardless, but unique basenames make `git worktree list`
+> (`FindWorktreeByBranchIn`) regardless, but unique basenames make `git worktree list`
 > legible.
 
 ---
@@ -156,10 +156,10 @@ never see each other's prompts through a shared mount.
 
 When the first agent for a project lands on a node in worktree-per-agent mode:
 
-1. **Acquire the per-project advisory lock** (`store.AdvisoryLocker` /
-   `LockWorkspaceProvision`, keyed by a stable project hash — same guard the NFS
-   backend uses, `workspace_backend_nfs.go:227-268`). On Postgres this is
-   `pg_try_advisory_lock`; on SQLite/single-node it serializes naturally.
+1. **Acquire the per-project provisioning lock** — the `.scion-provision.lock`
+   file lock that `pkg/provision` takes on the project's state directory (a lock
+   directory with heartbeats, stale reclaim and a bounded wait), the same guard
+   that NFS workspace provisioning uses.
 2. **Check the `.scion-provisioned` sentinel.** If present, skip to §4.2.
 3. **Clone the remote once** into `base/` using the dispatched `GitCloneConfig`
    (URL/branch/depth). This is the *only* network clone for the project on this node.
@@ -314,11 +314,13 @@ with a clear error (or falls back to clone-per-agent).
 ## 8. Lifecycle & cleanup
 
 Agent deletion already does the right thing for worktrees
-(`pkg/agent/provision.go:35-146`):
+(`pkg/agent/provision.go`):
 
 1. `util.RemoveWorktree(agentWorkspace, removeBranch)` — removes the worktree and
    optionally its branch.
-2. `util.PruneWorktreesIn(repoRoot)` — clears stale `.git/worktrees/<id>` records.
+2. `util.RemoveWorktreeEntryIn(repoRoot, path)` — removes the stale
+   `.git/worktrees/<id>` record of this agent's worktree only, never a
+   repository-wide `git worktree prune` (sibling agents' records are left alone).
 3. `util.DeleteBranchIn(repoRoot, branchName)` fallback by slugified name.
 4. External per-agent state dir removed (with podman-unshare fallback).
 
@@ -349,6 +351,81 @@ New work for the base repo:
    shared-ref rewrite is visible to siblings. Branch-per-agent contains *normal*
    workflows, not adversarial ones.
 6. **K8s node-local path unproven** — may be NFS-only in v1 (§7).
+7. **In-container `.git/config` is read-only for hub-managed bases.** The
+   shared base repo's `.git/config`, `.git/hooks/`, and `.git/info/` are
+   mounted read-only into each agent container; objects, refs, and the
+   per-agent worktree's own `HEAD`/`index`/logs stay writable, so ordinary
+   `git commit`, `git status`, `git fetch`, explicit `git pull --ff-only`,
+   and `git checkout -b`/`git switch -c` (without requesting a tracking
+   branch) are unaffected. The base sets `branch.autoSetupMerge=false`, so
+   the most common in-container workflow — checking out or switching onto a
+   remote-tracking branch (`git checkout -b <local> origin/<branch>`, or
+   `git switch <remote-branch>`) — degrades to a plain untracked local
+   branch instead of failing. A few less common workflows still fail or only
+   partially apply, because they need to *write* repo config: `git push -u`
+   (the push succeeds, but the upstream is silently not recorded), `git
+   branch --set-upstream-to` (fails), `git branch -m` (the rename succeeds,
+   but the config update fails, which git reports as an error), `git remote
+   add`, and `git config <key> <value>` (local). **Workaround:** run those
+   specific commands from the broker host against the shared base directly
+   (for example, `git -C <base> branch --set-upstream-to=origin/<branch>
+   <local-branch>` after an in-container `git push -u` if the upstream needs
+   to be recorded), or set the upstream when opening the PR/merge instead of
+   relying on a locally-recorded tracking branch. This is a deliberate
+   trade-off, not an oversight: making `.git/config`/`hooks`/`info`
+   read-only in the container is what keeps a container from being able to
+   change what the broker's own git operations do against the shared base;
+   see `pkg/provision/provision.go`'s `SafeGitCommand` and
+   `pkg/runtime/common.go`'s `narrowGitAdminMounts`.
+8. **Host-side git runs without repository hooks or repository-defined
+   commands.** Every git command the broker or Hub runs on the host in a
+   repository agents can write (the shared base, a linked checkout, a
+   shared-workspace clone) goes through `pkg/util`'s `HostGitArgs` /
+   `HostGitCommand`: `core.hooksPath=/dev/null`, `core.fsmonitor=false`,
+   `core.pager=cat`, `protocol.ext.allow=never`; filter driver variables set
+   in the repository's own config are re-set to their global/system value
+   (or emptied); `submodule.recurse`/`fetch.recurseSubmodules`/
+   `merge.verifySignatures` are off; the environment drops `GIT_*` variables
+   that choose a repository or add config. The primary control is a
+   deny-by-default check: before each such command the repository config
+   (`.git/config`, `config.worktree`) is read as data (a parser in
+   `pkg/util`, never through git, which keeps a `=` inside a subsection as part
+   of the subsection name) and the command is refused, naming the key, on any
+   `include`/`includeIf` directive or any key outside an allow-list. A
+   managed repository (hub-native base, shared-workspace clone) allows only
+   the keys git and Scion write; a linked checkout allows a wider set of keys
+   that run no command and redirect no network, with value checks on
+   `filter.lfs.*` (standard git-lfs only), `submodule.*.update` and
+   `core.worktree`. After each command the config is read again and a change
+   is reported (`ErrRepoConfigChanged`). The runtime mounts (item 7, extended
+   to every runtime and base type) are what keep agents from writing the
+   config in the first place; in-container git stays flexible through the
+   per-agent private `.git/config` of that change.
+   Host-side checkouts also take the git-lfs endpoint from the configured
+   remote, never a tracked `.lfsconfig`: managed repos skip the LFS smudge
+   (agents fetch LFS in-container), linked checkouts pin `lfs.url` from the
+   `origin` remote when it is http(s) and otherwise skip-smudge with a
+   warning. The shared-workspace pull scopes any credential to the clone
+   URL's host. `extensions.partialClone`/`index.sparse` are refused
+   (fail-closed; may be lifted later). An operator-set `GIT_ALLOW_PROTOCOL`
+   overrides the `protocol.*.allow` pins.
+   Host-side git never embeds a token in a URL or leaves one in a repo's
+   `.git/config`: a token is supplied only through a credential helper scoped
+   to the clone URL's host (util.ScopedCredentialHelperEnv), which also resets
+   any other configured helper so nothing persists it. git-lfs: managed repos
+   and provisioning clones skip the smudge; linked checkouts pin lfs.url from
+   origin only when the committed .lfsconfig names no endpoint, else skip and
+   warn. git-lfs's own repo-config writes (lfs.repositoryformatversion,
+   lfs.<url>.access in {basic,none}, lfs.<url>.locksverify) are allowed;
+   post-command the policy is re-checked and a change to a value-sensitive key
+   (remote url/fetch, branch tracking, submodule url/update, core.worktree,
+   user.signingkey, gpg.format, filter.lfs.*) still fails
+   (ErrRepoConfigChanged). Global and system config
+   stay in effect, so a globally installed git-lfs filter still runs; the
+   git-lfs post-checkout hook (lockable files read-only) does not. Running
+   `git lfs post-checkout` explicitly instead was rejected: git-lfs reads
+   further repository config (`lfs.*`, including custom transfer agents),
+   which would reintroduce repository-defined commands.
 
 ---
 
@@ -359,9 +436,9 @@ New work for the base repo:
 | Worktree add (host, relative) | `util.CreateWorktree` | `pkg/util/git.go`, `provision.go:470` |
 | Worktree add (NFS, with reuse) | `nfsBackend.ensureWorktree` | `workspace_backend_nfs.go:318-376` |
 | Branch name from agent | `api.Slugify` / `sanitizeBranchName` | `workspace_backend_nfs.go:378-393` |
-| First-access guard | sentinel + `store.AdvisoryLocker` | `workspace_backend_nfs.go:141-268` |
+| First-access guard | sentinel + `.scion-provision.lock` file lock (`acquireProvisionLock`) | `pkg/provision/provision.go` |
 | Dual mount (`.git` + worktree) | runtime mount registration | `common.go:181-189` |
-| Worktree teardown + prune | `RemoveWorktree`/`PruneWorktreesIn`/`DeleteBranchIn` | `provision.go:35-146` |
+| Worktree teardown (own entry only) | `RemoveWorktree`/`RemoveWorktreeEntryIn`/`DeleteBranchIn` | `pkg/agent/provision.go` |
 | In-container worktree guard | `SCION_HOST_UID` → `isGit=false` | `provision.go:303-309` |
 | Per-agent state isolation | external split storage | `.design/hub-shared-workspace-isolation.md` |
 | Backend abstraction | `WorkspaceBackend` Resolve/Provision/Realize | `workspace_backend.go:33-64` |

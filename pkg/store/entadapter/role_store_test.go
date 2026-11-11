@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -1245,7 +1245,7 @@ func TestCreateRoleBinding_BuiltInMembership_IdempotentRetry(t *testing.T) {
 
 	// Idempotent retry with the SAME role returns ErrAlreadyExists
 	// (not ErrBuiltInMembershipConflict), preserving the contract
-	// that callers like createProjectOwnerRoleBinding rely on.
+	// that callers like createProjectOwnerRoleBindingTx rely on.
 	_, err = env.roleStore.CreateRoleBinding(ctx, binding)
 	require.Error(t, err, "duplicate binding should be rejected")
 	assert.True(t, errors.Is(err, store.ErrAlreadyExists),
@@ -1259,7 +1259,7 @@ func TestCreateRoleBinding_BuiltInMembership_OwnerIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	// Regression test for production idempotent paths:
-	// createProjectOwnerRoleBinding and seed backfill catch ErrAlreadyExists
+	// createProjectOwnerRoleBindingTx and seed backfill catch ErrAlreadyExists
 	// and return nil. This verifies the owner role specifically.
 	binding := &store.RoleBinding{
 		RoleDefinitionID: env.projectOwnerDef.ID, // project-owner
@@ -1491,7 +1491,7 @@ func TestCreateRoleBinding_BuiltInMembership_ConcurrentRace(t *testing.T) {
 
 	// Install the D4 membership-only partial unique index to test concurrent
 	// enforcement. In production, server.go installs this at startup.
-	drv, ok := env.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(env.client.Driver())
 	require.True(t, ok, "expected ent SQL driver")
 	db := drv.DB()
 	_, err := db.ExecContext(ctx,

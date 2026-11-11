@@ -35,7 +35,7 @@ provision and operate:
 
 - An external managed database (Cloud SQL Postgres).
 - Object storage (GCS) for durable artifacts.
-- Load-balanced Hub replicas (e.g. Cloud Run with min-instances ≥ 2).
+- Load-balanced Hub replicas (e.g. Cloud Run with min-instances ≥ 2), with shared [project storage](/scion/reference/server-config/#project-storage-serverproject_storage).
 - Stateless proxy/hosted brokers, and typically identity providers, IAP, RBAC, and observability.
 
 ## When to use it

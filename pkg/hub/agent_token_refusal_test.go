@@ -1,0 +1,270 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// agentTokenRefusedCode is the error code in agentTokenRefusedBody.
+const agentTokenRefusedCode = "invalid_token"
+
+// agentTokenRefusalCase is one agent-token refusal: the token sent as
+// X-Scion-Agent-Token, the run header, the agent id for a path, and the
+// cause the refusal is logged with ("" for a run-scope refusal, which the
+// run-scope checker logs itself).
+type agentTokenRefusalCase struct {
+	name      string
+	cause     string
+	agentID   string
+	token     string
+	runHeader string
+}
+
+// enforceRunScopeForRefusals enforces run scope on srv, with legacy_until
+// passed. Call it before srv.Handler(): the handler copies the auth config.
+func enforceRunScopeForRefusals(srv *Server, s store.Store) {
+	srv.authConfig.AgentRunScope = testRunScopeChecker(agentRunScopeEnforce, time.Now().Add(-time.Hour), s)
+}
+
+// agentTokenRefusalCases stores an agent and a token for each refusal
+// cause UnifiedAuthMiddleware answers. The run-scope cases are refused
+// only when the caller's handler enforces run scope
+// (enforceRunScopeForRefusals).
+func agentTokenRefusalCases(t *testing.T, srv *Server, s store.Store, project *store.Project) []agentTokenRefusalCase {
+	t.Helper()
+	require.NotNil(t, srv.authConfig.AgentRunScope, "run scope is not enforced")
+	ctx := context.Background()
+	var cases []agentTokenRefusalCase
+
+	// bound stores an agent and a token bound to its current run.
+	bound := func(name string) (*store.Agent, string) {
+		agent := runScopeAgent(t, s, project.ID, name, "run-"+name)
+		return agent, signRunToken(t, srv, s, agent, agent.RunID, recordRun(agent.RunID))
+	}
+
+	revoked, revokedTok := bound("refusal-revoked")
+	claims, err := srv.agentTokenService.ValidateAgentToken(revokedTok)
+	require.NoError(t, err)
+	cred, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+	require.NoError(t, err)
+	require.NoError(t, s.RevokeAgentCredential(ctx, cred.ID, "test", "explicit"))
+	cases = append(cases, agentTokenRefusalCase{name: "revoked", cause: "revoked", agentID: revoked.ID, token: revokedTok})
+
+	held, heldTok := bound("refusal-held")
+	_, err = s.CreateAgentHolds(ctx, []*store.AgentHold{{
+		AgentID:           held.ID,
+		ProjectID:         held.ProjectID,
+		Cause:             store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser,
+		RootPrincipalID:   tid("user-cred-test"),
+		Trigger:           store.MembershipLossTriggerMemberRemove,
+		ActorKind:         "system",
+		ActorID:           "hub",
+		CorrelationID:     "test",
+	}})
+	require.NoError(t, err)
+	cases = append(cases, agentTokenRefusalCase{name: "held", cause: "held", agentID: held.ID, token: heldTok})
+
+	subjectTok, _, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID: "not-an-agent", ProjectID: project.ID, Scopes: ScopesForRole(AgentRoleFull),
+	}, "")
+	require.NoError(t, err)
+	cases = append(cases, agentTokenRefusalCase{name: "invalid subject", cause: "invalid_subject", agentID: revoked.ID, token: subjectTok})
+
+	cases = append(cases, agentTokenRefusalCase{name: "invalid token", cause: "invalid_token", agentID: revoked.ID, token: "not-a-token"})
+
+	superseded := runScopeAgent(t, s, project.ID, "refusal-superseded", "run-refusal-superseded")
+	cases = append(cases, agentTokenRefusalCase{
+		name: "run superseded", agentID: superseded.ID,
+		token: signRunToken(t, srv, s, superseded, "run-old", recordRun("run-old")),
+	})
+
+	mismatch, mismatchTok := bound("refusal-run-header")
+	cases = append(cases, agentTokenRefusalCase{name: "run header", agentID: mismatch.ID, token: mismatchTok, runHeader: "run-elsewhere"})
+
+	return cases
+}
+
+// testOuterHeader is set by withTestOuterHeader, outside every hub
+// middleware.
+const (
+	testOuterHeader      = "X-Test-Outer"
+	testOuterHeaderValue = "kept"
+)
+
+func withTestOuterHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(testOuterHeader, testOuterHeaderValue)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// serveAuditRoute sends a GET for the constraint audit route through h,
+// with an Origin the test server's CORS allows, and returns the response.
+func serveAuditRoute(h http.Handler, set func(*http.Request)) rawResponse {
+	req := httptest.NewRequest(http.MethodGet, constraintAuditAuthTestPath, nil)
+	req.Header.Set("Origin", "https://outer.example")
+	set(req)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rawOf(rec)
+}
+
+// TestUniformRefusalResponsesOnAuditRoute: on the constraint audit route
+// every agent-token refusal gets the response a missing constraint gets:
+// status, the full header map and body. Headers set before
+// authentication are kept and nothing authentication set is.
+func TestUniformRefusalResponsesOnAuditRoute(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+	enforceRunScopeForRefusals(srv, s)
+	cases := agentTokenRefusalCases(t, srv, s, project)
+	h := withTestOuterHeader(srv.Handler())
+
+	want := serveAuditRoute(h, func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+testDevToken) })
+	require.Equal(t, http.StatusNotFound, want.Status, want.Body)
+	require.Equal(t, testOuterHeaderValue, want.Header.Get(testOuterHeader))
+	require.NotEmpty(t, want.Header.Get("Access-Control-Allow-Origin"))
+	require.Empty(t, want.Header.Values("WWW-Authenticate"))
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := serveAuditRoute(h, func(r *http.Request) {
+				r.Header.Set("X-Scion-Agent-Token", c.token)
+				if c.runHeader != "" {
+					r.Header.Set(AgentRunIDHeader, c.runHeader)
+				}
+			})
+			assert.Equal(t, want, got)
+			assert.Empty(t, got.Header.Values("WWW-Authenticate"))
+		})
+	}
+
+	t.Run("development middleware", func(t *testing.T) {
+		notFound := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			NotFound(w, "Access Constraint")
+		})
+		dh := withTestOuterHeader(srv.corsMiddleware(DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(notFound)))
+		want := serveAuditRoute(dh, func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+testDevToken) })
+		require.Equal(t, http.StatusNotFound, want.Status, want.Body)
+		require.Equal(t, testOuterHeaderValue, want.Header.Get(testOuterHeader))
+		require.NotEmpty(t, want.Header.Get("Access-Control-Allow-Origin"))
+
+		got := serveAuditRoute(dh, func(r *http.Request) { r.Header.Set("X-Scion-Agent-Token", "not-a-token") })
+		assert.Equal(t, want, got)
+		assert.Empty(t, got.Header.Values("WWW-Authenticate"))
+	})
+}
+
+// revokedRefreshRequest stores an agent and a revoked token for it and
+// returns a token refresh request for the handler, with the credential
+// marker set when marker is true.
+func revokedRefreshRequest(t *testing.T, srv *Server, s store.Store, project *store.Project, name string, marker bool) (*http.Request, string) {
+	t.Helper()
+	ctx := context.Background()
+	agent := runScopeAgent(t, s, project.ID, name, "")
+	tok := signRunToken(t, srv, s, agent, "", recordRun(""))
+	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
+	require.NoError(t, err)
+	cred, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+	require.NoError(t, err)
+	require.NoError(t, s.RevokeAgentCredential(ctx, cred.ID, "test", "explicit"))
+	credID := ""
+	if marker {
+		credID = cred.ID
+	}
+	return buildAgentRefreshRequest(agent.ID, claims, credID, false), agent.ID
+}
+
+// TestAgentTokenRefusalCauseIsLogged: each refusal cause is logged once
+// with its cause, while the response stays the shared refusal.
+func TestAgentTokenRefusalCauseIsLogged(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+	logs := &captureHandler{}
+	srv.authConfig.Logger = slog.New(logs)
+	enforceRunScopeForRefusals(srv, s)
+	cases := agentTokenRefusalCases(t, srv, s, project)
+	h := srv.Handler()
+
+	for _, c := range cases {
+		if c.cause == "" {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			before := len(logs.records(agentTokenRefusedLogMessage))
+			rec := agentRequest(t, h, http.MethodGet, "/api/v1/agents/"+c.agentID, c.token, c.runHeader)
+			require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+			assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
+			recs := logs.records(agentTokenRefusedLogMessage)
+			require.Len(t, recs, before+1)
+			assert.Equal(t, c.cause, recs[before].attrs["cause"])
+		})
+	}
+
+	t.Run("development middleware", func(t *testing.T) {
+		buf := captureSlogDefault(t)
+		dh := DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(http.NotFoundHandler())
+		rec := agentRequest(t, dh, http.MethodGet, "/api/v1/agents/any", "not-a-token", "")
+		assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
+		assertOneRefusalLogLine(t, buf.String(), "header_not_validated")
+	})
+
+	for _, marker := range []bool{true, false} {
+		name := "refresh without credential marker"
+		if marker {
+			name = "refresh with credential marker"
+		}
+		t.Run(name, func(t *testing.T) {
+			req, agentID := revokedRefreshRequest(t, srv, s, project, "cause-log-"+name, marker)
+			buf := captureSlogDefault(t)
+			before := len(logs.records(agentTokenRefusedLogMessage))
+			rec := httptest.NewRecorder()
+			srv.handleAgentTokenRefresh(rec, req, agentID)
+			assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
+			// The refusal is logged on the auth logger, not the default one.
+			recs := logs.records(agentTokenRefusedLogMessage)
+			require.Len(t, recs, before+1)
+			assert.Equal(t, "refresh_revoked", recs[before].attrs["cause"])
+			assert.NotContains(t, buf.String(), agentTokenRefusedLogMessage)
+		})
+	}
+}
+
+// assertOneRefusalLogLine asserts that text-handler output holds exactly
+// one refused-token record, and that it carries cause.
+func assertOneRefusalLogLine(t *testing.T, out, cause string) {
+	t.Helper()
+	msg := "msg=\"" + agentTokenRefusedLogMessage + "\""
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, msg) {
+			lines = append(lines, line)
+		}
+	}
+	require.Len(t, lines, 1, out)
+	assert.Contains(t, lines[0], msg+" cause="+cause)
+}

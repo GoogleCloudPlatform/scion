@@ -18,41 +18,234 @@ credential.
 ## Overview
 
 A user access token is a scoped, revocable bearer token linked to your user account, used for
-non-interactive authentication. Unlike a full OAuth session, a UAT is **scoped to a single
-project** and carries a specific set of action permissions, so a token minted for CI can do only
-what CI needs.
+non-interactive authentication. Every token has a **boundary** and a list of **scopes**
+(action permissions), so a token minted for CI can do only what CI needs:
+
+- A **project token** works in one project.
+- A **hub token** ([hub-bound token](#hub-bound-tokens)) works in every project you can
+  currently access, and is the only kind that can carry hub-level scopes.
+
+A token never grants more than your account holds: each request is checked against your
+current access (see [Live access and reduced permissions](#live-access-and-reduced-permissions)).
+You can create and manage both kinds in the web UI and with the CLI.
 
 **Note on legacy keys:** the legacy `sk_live_*` API keys have been completely removed. All users
 must migrate to `scion_pat_*` tokens.
 
 ## Scoping and permissions
 
-Every token is scoped to a single project and to an explicit list of **scopes** (action
+Every token has a boundary (a single project, or the hub for a
+[hub-bound token](#hub-bound-tokens)) and an explicit list of **scopes** (action
 permissions). Available scopes:
 
 | Scope | Grants |
 |-------|--------|
 | `project:read` | Read project metadata |
+| `project:list` | List projects. A project token lists only its own project; on a hub token this scope can be selected only by holders of a hub-wide role that grants it |
 | `project:update` | Update project settings, configurations, and annotations |
+| `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role. It is not a read/write alias and does not include `project:read` or `project:list` |
+| `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
+| `project:chat_post` | Keep `project.chat_post` on the token so it can grant roles that include it, such as the built-in `project-member` role through `project:manage`. It does not post: a token posts in, or mutates, a project's chat threads and groups with `inbox:write`, and your own account must hold `project.chat_post` there (without `inbox:write`, chat `_capabilities` withholds write actions, including `delete_own`, with `reason` set to `token_scope`) |
+| `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
-| `agent:start` | Start/restart agents |
-| `agent:stop` | Stop agents |
+| `agent:lifecycle` | Start, stop, suspend, restart, restore, and reincarnate agents |
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
-| `agent:attach` | Attach to agent sessions |
-| `agent:dispatch` | Dispatch agents (create + start) |
-| `agent:manage` | All agent scopes (convenience alias) |
-| `project:manage` | All project scopes (convenience alias) |
+| `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) — your own agents and their descendants |
+| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins). Registering, deleting or clearing an agent's exposed ports also needs `agent.port_access` at hub level for the token's holder |
+| `agent:update` | Update an agent's metadata and configuration, report its status, and sync its workspace |
+| `agent:stop_all` | Stop all agents of a project (any boundary that contains it), or of the whole hub (hub-bound tokens only) |
+| `agent:set_message_mode` | Change an agent's message mode, under the same owner rules as a signed-in session. Granting `hub` mode (by setting it, by a cascade, or when creating an agent) needs a hub-bound token |
+| `agent:manage` | All agent scopes except `agent:attach`, `agent:port_access`, `agent:update`, `agent:stop_all` and `agent:set_message_mode` (convenience alias) |
 
-In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
+In addition to project and agent scopes, Scion supports UAT scopes for other resource types, among them `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
+
+To change your own injected skills (`scion user skills add` or `scion user skills remove`), a token needs the `user_skill_injection:update` scope on a Hub boundary. Reserved permissions (for example, `hub.federation.read`, `hub.federation.update`, `hub.teams_manifest.update`, and `agent.log_append`) are not offered as token scopes and are not part of any built-in role.
 
 You can dynamically discover all available scopes and their descriptions by querying the API:
 ```bash
 curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
      https://scion.example.com/api/v1/auth/scopes
 ```
+
+When a token is created, the Hub resolves its scopes into a fixed, versioned set of
+permissions (the token's permission ceiling), checks that you may currently select every one of
+them for the token's boundary (see [Checking what you can select](#checking-what-you-can-select)),
+and stores that ceiling with the token. Every later request that uses the token is
+limited to that ceiling. A token whose stored ceiling is missing or has an unrecognized version is
+denied. Existing tokens are converted to versioned ceilings automatically on upgrade.
+
+### Hub-boundary tokens for broker registration
+
+A project token is bound to one project. A hub token is bound to the **hub boundary**
+(`"boundary": {"kind": "hub"}` in `POST /api/v1/auth/tokens`), which is used for hub-level
+resources such as Runtime Brokers. The `broker:create` scope is available only with a hub
+boundary:
+
+| Scope | Boundary | Grants |
+|-------|----------|--------|
+| `broker:create` | Hub only | Register a Runtime Broker, or re-register (issue a new join token for) one your user created, including with `scion hub brokers join-token create`. A token does not let a super-admin re-register another user's broker. Requires that you currently hold `broker.create`, which hub members do. |
+| `broker:read` | Hub only | Read Runtime Broker records and the projects a broker serves. `scion runtime-broker register` uses it to check an existing registration. It also reads the environment variables (sensitive values masked) and secret metadata of a Runtime Broker your user created. |
+| `federation_token:mint` | Hub only | Obtain a short-lived user access credential for yourself to present to a peer hub (`scion hub auth federation-token`). Experimental: available only while the `federation.project_visitors` experiment is on and the audience is listed in `server.oidc.user_token_audiences`. |
+
+`broker:create` covers registration only. It never associates a broker with a project, never
+turns on auto-provide, and never rotates a broker's secret. Associating a broker with a project
+needs a sign-in by the broker's owner; see
+[Sharing a broker with a project](/scion/hosted/ha/runtime-broker/#sharing-a-broker-with-a-project).
+For the full steps, see
+[Headless registration with a hub token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-hub-token).
+
+### Hub-boundary tokens for groups
+
+The group scopes (`group:create`, `group:read`, `group:list`, `group:update`, `group:delete`,
+`group:addMember`, `group:removeMember`) are available only with a hub boundary. A group with no
+project is a hub-level resource; a project's own groups belong to that project.
+
+- Creating a group needs `group:create`. Creating it under a parent group is also a member add on
+  the parent (see below).
+- The group list shows only the groups your token may read (`group:read`).
+- Adding a member, or creating a group under a parent, never gives the new member more authority
+  than the token itself holds. If the group, or any group that contains it, has a hub-wide
+  (system-scoped) role binding, a token cannot add members to it. If it has project role
+  bindings, the token must hold every permission of those roles in each of those projects: you
+  hold them through your own roles, and the token's scopes cover them.
+- Changing a group's owner (`ownerId`) with a token needs `group:update` and your current update
+  access on the group. For the new owner, the token must also pass the delegation check of a
+  member add against the group's role bindings (the previous item); `group:addMember` and the
+  group's role hierarchy do not apply. A refused change always returns the same 403, including
+  for a group that does not exist.
+- A token is held to the group's own role hierarchy: only the group's owner, or an owner or admin
+  member of the group, adds members, even when you are a super-admin.
+- The members of a project's agents group are the project's agents; no one adds members to it.
+- Removing a member from, or deleting, a group that is the subject of an access constraint is
+  session only: a token is refused with `403` and `details.reason` `GOV_PENDING`.
+
+### Hub-boundary tokens for user administration
+
+A hub token can change another user's account through `PATCH /api/v1/users/{id}`, and
+delete a user through `DELETE /api/v1/users/{id}`. Each request is checked on the hub-level
+user record, and your user must also hold the matching permission:
+
+| Scope | Boundary | Grants |
+|-------|----------|--------|
+| `user:update` | Hub only | Change another user's display name and preferences. A token PATCH of another user that names neither `status` nor `role` is checked as a profile update, so it needs this scope. |
+| `user:suspend` | Hub only | Suspend or reactivate another user (the `status` field). |
+| `user:promote` | Hub only | Change another user between the `member` and `viewer` roles (the `role` field). |
+| `user:delete` | Hub only | Delete another user, including with `force=true`, and read `GET /api/v1/users/{id}/delete-blockers` and `GET /api/v1/users/{id}/deletion`. |
+
+- A request that names several fields is written only if every field passes its check;
+  otherwise nothing is written.
+- A token that cannot use any of `user:update`, `user:suspend` and `user:promote` on that user
+  gets the same `403` from `PATCH` for every user ID, including one that does not exist.
+- A token never makes a user `admin`, and never changes or deletes a user who holds the
+  super-admin role: every change that involves a super-admin role binding is refused with
+  `403`.
+- A token deletes a user only if the user holds no direct system-scope role binding other than
+  the one that represents the `viewer` role. Otherwise the delete is refused with `403` and
+  `details.reason` `system_role_binding_held`, with or without `force=true`. If such a binding
+  is added while the delete runs, it answers `409 conflict` with `details.reason`
+  `binding_state_drift` and deletes nothing. A forced deletion requested with a token does not
+  complete while the user holds such a binding; `GET /api/v1/users/{id}/deletion` shows it in
+  `lastError` until the binding is removed.
+- A forced delete with a token also needs `agent.delete` on each of the user's agents through
+  the token: the token's scopes must include `agent:delete`.
+- Changing your own profile or role still needs a sign-in. No credential can change your own
+  status, delete your own account, or activate an invited user. The last super-admin,
+  last-project-owner and blocker rules of a delete apply to tokens as to sign-in sessions.
+
+### Scopes are restrictions, not grants
+
+Selecting a scope only **limits** what a token may ever be used for — it never by itself grants
+access to anything. Whether a request actually succeeds is still checked against your current
+authority on the specific target, every time the token is used.
+
+This matters most for `agent:attach` and `agent:port_access`: you may select either scope for a
+project before you have created a single agent in it. The token gains no access from selection
+alone — each later attach or port request is independently checked against the specific agent.
+An attach request succeeds only for your own agents and their descendants. A port request also
+succeeds for any agent in a project where your role grants `agent.port_access`, which the
+built-in `project-owner` and `project-admin` roles do. Losing project access (for example,
+being removed from the project) makes every request against that project fail immediately, even
+though the token itself is still otherwise valid.
+
+Concretely, every request made with a token passes all of these checks, in order, and any error
+along the way denies the request:
+
+1. The token's boundary is valid.
+2. The request's target resolves to a scope (a project or the hub) that the boundary allows.
+3. The requested permission is inside the token's stored permission ceiling.
+4. For a project target, you still have active access to that project.
+5. Your live authority on the target (role bindings, groups, relationship grants, and access
+   boundaries) allows the action.
+
+### Live access and reduced permissions
+
+A token acts as you, with reduced permissions. A request that uses it is allowed only when the
+token carries the scope **and** your account has that access at the moment of the request. The
+boundary never adds access: a hub token reaches only the projects you can currently access, and
+lists only those projects and their resources.
+
+Access removal takes effect on the next request that uses the token. You do not need to revoke
+the token or create a new one:
+
+- **Removed from a project**, directly or by leaving the group that gave you access: the next
+  request in that project is refused. Requests in projects you can still access are allowed.
+- **Role changed**: when a project role or hub-wide role stops granting a permission, the next
+  request that needs it is refused.
+- **Account suspended**: every request is refused with `403` (`user_suspended`). When the account
+  is reactivated, the token works again within the same limits.
+- **Token revoked or expired**: every request is refused with `401`.
+
+The same rules apply to project tokens: a project token works only while you can access its
+project.
+
+### Checking what you can select
+
+Before minting a token, you can ask which scopes you are currently eligible to select for a given
+project, or for a hub boundary, and why a particular scope is not available to you. Eligibility is
+answered only for an interactive login (`scion hub auth login`). A request authenticated with a
+user access token gets the scope catalog only; naming a project or a boundary with a token is
+refused with `403` and `details.reason` `CREDENTIAL_MANAGEMENT`.
+
+```bash
+scion hub auth login
+scion hub token scopes --project my-project
+scion hub token scopes --boundary hub
+```
+
+`--project` alone means the project boundary. `--boundary hub` takes no `--project`; passing both
+is a usage error. The CLI shows the reason `authority_required` as "your account has no current
+access that includes this permission".
+
+Or via the API, with a session credential:
+```bash
+curl -H "Authorization: Bearer $SESSION_TOKEN" \
+     "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
+```
+
+For a hub boundary, send `?boundary=hub` with no `projectId`. Under a hub boundary, a project-level scope is eligible when your user holds a system-level grant for its permissions, holds an active role binding in at least one project that grants them, or satisfies a relationship source (such as `agent:attach` or `agent:port_access` with admission to a project). A scope that a hub boundary allows
+but you cannot select is reported with the reason `authority_required`; a scope that a hub boundary
+does not allow reports `boundary_not_allowed`. A hub-boundary request always answers per scope.
+
+Each scope in the response reports `eligibility.eligible` and, when it is not, a machine-readable
+`eligibility.reason` (for an alias such as `agent:manage`, `eligibility.ineligibleMembers` names the
+member scopes that are ineligible). The **Create Token** form in the web UI uses the same
+information: once you pick a project, or choose the hub boundary, scopes you cannot select are
+shown with the reason.
+
+If a Hub answers `?boundary=hub` with `400` and error code `unsupported_boundary`, the CLI prints
+`this hub cannot list hub eligibility; hub-only scopes are marked in the catalog` and shows the
+catalog with a `BOUNDARIES` column, without the scopes a hub token cannot select. The web UI shows
+the same filtered list with the note "Eligibility is not available on this hub; the server checks
+scopes when you create the token." Either way, the Hub checks every scope when the token is
+created.
+
+This answers only "may I select this restriction" — it never lists which agents or other targets
+the resulting token could reach. If you request eligibility for a project you cannot access, or
+one that does not exist, the request is denied identically in both cases, so the response cannot
+be used to discover whether a given project ID exists.
 
 ## Creating a token
 
@@ -62,17 +255,205 @@ Generate a new token with the Scion CLI:
 scion hub token create \
   --project my-project \
   --name "github-actions" \
-  --scopes agent:dispatch,agent:read,agent:stop \
+  --scopes project:read,agent:create,agent:read,agent:attach \
   --expires 90d
 ```
 
-- `--project` (required) — the project name or ID the token is scoped to.
+- `--project` (required unless `--boundary hub`) — the project name or ID the token is scoped to.
+- `--boundary` — `project` (the default) or `hub`. See [Hub-bound tokens](#hub-bound-tokens).
 - `--name` (required) — a human-readable label.
 - `--scopes` (required) — a comma-separated list of the scopes above.
-- `--expires` — a duration (`30d`, `90d`, `1y`) or an RFC 3339 date
-  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year.
+- `--expires` — a duration (`90m`, `2h`, `30d`, `1y`) or an RFC 3339 date
+  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year. `m` means minutes; there is
+  no month unit (use `30d` or `1y` for longer). `1y` is always 365 days.
+- `--purpose` — an optional description of what the token is for (up to 128 bytes).
+- `--label` — an optional `key=value` label; repeat the flag for more (up to 8). Keys are
+  lowercase, start with a letter and may contain digits, `_`, `.` and `-` (up to 32 bytes).
+  Values are up to 64 bytes. Keys that could be confused with identity or authorization
+  fields (for example `user`, `agent`, `owner`, `role` or `scope`) are rejected.
+
+The purpose and labels are descriptive only: they grant no permissions and cannot be changed
+after the token is created. Request logs record the token's ID, name, boundary, purpose and
+labels. Authorization decisions and audit records carry the token's ID, name, boundary and
+labels, but not its purpose. This tells you which automation sent a request. Labels describe
+the token; they never identify an agent.
 
 The command prints the token value **once**. Store it securely — it cannot be retrieved later.
+Each requested scope is checked against your current access for the token's boundary before the
+token is written. If a requested scope is denied, the Hub returns `403` with error code
+`scope_violation`, with `details.selector` and `details.reason` naming the scope and the reason;
+nothing is created. On a hub token, a scope the hub boundary allows but you cannot select is
+denied with the reason `authority_required`. A project token for a project you cannot access,
+or one that does not exist, gets the same `403` with no details. Run
+`scion hub token scopes --project <project>` (or `--boundary hub`) to see the full picture before
+retrying.
+
+### Hub-bound tokens
+
+A token can instead carry a **hub boundary**, which lets one token work across every project you
+can currently access, and is the only boundary that can select hub-level scopes such as
+`hub_health:read` and `broker:read`. Each request is still checked against your current access
+(see [Live access and reduced permissions](#live-access-and-reduced-permissions)).
+
+In the web UI, open **Access Tokens** in your profile, select **Create Token**, and choose
+**Hub: any project you can currently access** under **Boundary**. The form then hides the
+project choice, clears the scopes you had selected, and lists the scopes with their hub-boundary
+eligibility.
+
+With the CLI, pass `--boundary hub` and no `--project`:
+
+```bash
+scion hub token create --boundary hub \
+  --name health-check \
+  --scopes hub_health:read,broker:read,agent:list \
+  --expires 30d
+```
+
+The command prints the boundary as `Boundary: hub (any project you can currently access; each
+request is checked against your current access)`.
+
+Through the API, send
+`"boundary": {"kind": "hub"}` instead of `projectId` to `POST /api/v1/auth/tokens`. A missing
+boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
+with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
+`boundary` that disagrees with `projectId`, is rejected with `400` (`boundary_invalid`). Token
+management requires a signed-in session credential; a UAT cannot mint another token. Every
+authenticated caller that is not a user with a session or dev credential (a UAT, an agent, a
+Runtime Broker or any other credential) gets the same `403` from `POST /api/v1/auth/tokens`,
+decided before the request body is read. With a session credential:
+
+```bash
+curl -X POST -H "Authorization: Bearer $SESSION_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"name":"hub-automation","boundary":{"kind":"hub"},"scopes":["template:manage"]}' \
+     https://scion.example.com/api/v1/auth/tokens
+```
+
+Token responses include a `boundary` object (`{"kind":"project","projectId":"…"}` or
+`{"kind":"hub"}`); `projectId` is omitted for hub tokens, so read `boundary.kind` to tell them
+apart.
+
+The same per-request checks apply, with these limits:
+
+- **Lists.** Every list needs the exact list permission in the token, on a hub or a project
+  token: `project:list` to list projects, `agent:list` to list agents, `skill:list` to list
+  skills. Without it the list is empty. A hub token lists only projects (and their resources)
+  you currently have access to. A project token lists only its own project. A skill list also
+  needs `skill:read`, and its total counts only the skills the token may read. Template and
+  harness configuration lists filter each row by `template:read` or `harness_config:read`; with
+  `template:list` or `harness_config:list` on a hub token, a holder of hub-wide list access gets
+  the unfiltered list. Query filters such as `projectId` only narrow a token's results. A list
+  cursor issued to one token does not work for another token, or for a browser session.
+- **Delegation.** Grants a token creates must fall inside its boundary. A token can never create
+  a system-scoped grant. Under a hub boundary, you must also currently have the matching access in
+  the grant's project.
+- **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
+  live project-access checks before any other rule can allow it.
+- **Inbox and conversations.** Chat writes made with a token (sending, changing or removing your
+  own inbox items, notifications, conversations and direct messages) need `inbox:write`. Reading
+  your own inbox, notifications, direct messages, direct-message read state and chat preferences
+  needs `inbox:read`. Both scopes act only on your own records. Reading a project chat thread (the
+  thread, its messages and your read state on it) or the members of its chat space needs
+  `project:read` on its project (agent rows in the member list also need `agent:list`), and
+  posting to a thread needs `inbox:write` as well. A project token reaches only records of its
+  project, and only while you are a member; a record with no project, such as a direct message
+  between users, needs a hub token.
+- **Limits and quotas.** Reading hub-wide limit definitions, entitlements and usage needs
+  `quota:read`; creating, updating or deleting them needs `quota:read` together with `quota:create`,
+  `quota:update` or `quota:delete`.
+  These scopes can be selected only on a hub token, and your user must also hold the matching
+  hub permission.
+- **Project configuration.** Setting the project messaging policy, and template and project
+  configuration operations, each require their own permission; project owners hold
+  `project.set_messaging_policy`.
+- **Hub configuration.** Hub configuration operations admit only a hub token carrying the
+  matching selector, for example `hub_lifecycle_hooks:update` to change hub pre-start hooks.
+  Hub pre-start hook scripts are redacted in read responses for every credential other than an
+  interactive sign-in, so a token sees hub hook metadata but not the script.
+- **Integrations, GitHub App, and metrics.** Chat integration, GitHub App, metrics, and
+  diagnostics operations admit only a hub token carrying the matching selector (for example
+  `hub_integrations:update` or `hub_metrics:read`). Some of these operations need an interactive
+  sign-in, and every token is refused for them: writing integration secrets or integration
+  settings that configure credentials, authentication, endpoints or host paths; installing or
+  updating an integration; and changing the GitHub App configuration.
+- **Invitations and the allow list.** Inviting users (single or bulk), pre-registering a user
+  (`POST /api/v1/users`, `scion hub users provision`) and managing invitation codes admit only a
+  hub token carrying `user:invite`. On `POST /api/v1/users`, `user:read` on the token (together
+  with `user.read` on your user) controls whether an existing record's details are returned on a
+  repeat or conflict; without it, conflicts return `user_exists` and a repeat returns only
+  `{email, status}`. Creating a pre-registered user is audited as `user_provision` (recording the token as the credential; a repeat or conflict is not audited), and pre-registering is refused for every caller on a Hub running with dev authentication (`403`, `dev_auth_not_supported`). Reading the allow list and its domains
+  needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
+  `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
+  permission. An invited user gets no role binding or group membership from the invitation.
+  Removing an allow-list entry deletes the invited user together with that user's role bindings
+  and group memberships, and is refused with `409` while agents or active agent delegations depend
+  on the user (`user_delete_blocked`) or while the user is a project's last owner (`last_owner`).
+- **Creating, registering and cloning projects.** Creating or registering a project admits only
+  a hub token carrying `project:create`, and your user must hold `project.create`. You become the
+  owner of the new project, so the token must also carry a selector for every permission of the
+  project owner role; with the built-in owner role, which includes permissions that have no
+  selector (such as `project.delete`), a token is refused and you create projects with an
+  interactive sign-in. Naming an existing project by id also needs `project:update` on it.
+  Registering a project with an embedded broker needs an interactive sign-in; a token registers
+  brokers with `POST /api/v1/brokers`.
+  Cloning a project also needs `project:read` on the source project and `project:clone`;
+  selecting `project:clone` needs `project.clone`, which the built-in super-admin role carries.
+- **Roles, role bindings and access constraints.** These admit only a hub token. Creating,
+  importing or duplicating a custom role needs `role:create`, updating one `role:update`, and
+  deleting one `role:delete`, each together with `role:read`. Creating or updating a role needs
+  your user to hold every permission of the role at hub level, and the token must carry a scope
+  for each of them; a
+  project-scoped custom role can be bound in every project, so a project role does not count.
+  A token cannot create a system-scoped custom role. Binding a custom project role needs
+  `role_binding:create`, current project management access to that project, and every
+  permission of the role in that project within the token's scopes. Deleting a system-scoped
+  binding needs `role_binding:delete`. A token can never create a system-scoped binding or
+  delete a super-admin binding. Constraint previews need `access_constraint:admin`; creating a
+  constraint, or an update that tightens it (removes permissions from its maximum set, or
+  widens or removes its time window), also needs `access_constraint:read`. Deleting a
+  constraint, or an update that relaxes it (adds permissions, changes its subject or scope, or
+  narrows or adds its time window), needs an interactive sign-in.
+- **Your own user scope.** Templates, skills and harness configurations in your own user scope
+  admit only a hub token carrying the selector of the action. Your templates need
+  `template:read` to list, read or download, `template:create` to create or to clone into your
+  scope, `template:update` to update, upload, finalize or reimport, and `template:delete` to delete. A
+  user-scope skill needs `skill:create`. Your harness configurations need `harness_config:create`
+  to clone into your scope, `harness_config:update` to reimport, and `harness_config:delete` to
+  delete, together with `harness_config:read`. Importing or discovering templates or harness
+  configurations for your user scope needs `template:create` or `harness_config:create`. A
+  project token is refused for all of these, because these records belong to no project. Any
+  token can list your injected skills. User- and Hub-scope environment variables and secrets
+  (`scope=user` and `scope=hub` on `/api/v1/env` and `/api/v1/secrets`) never accept a token of
+  any boundary or scope: they require an interactive login (`403`, `details.reason: "CREDENTIAL_MANAGEMENT"`).
+- **Global catalog and skill registries.** Creating a global skill needs `skill:create_global`,
+  and managing skill registries needs `skill:register`; both can be selected only on a hub
+  token. Importing or discovering templates or harness configurations for the global catalog
+  needs `template:create` or `harness_config:create` on a hub token. Discovering skills for a
+  project needs `skill:create` on a token whose boundary contains the project; discovering
+  them with no project needs `skill:create_global` on a hub token. Resolving `gh://` skill
+  references with no project needs `skill:read` on a hub token.
+- **Schedules.** Creating a scheduled event or schedule needs `scheduled_event:create`; updating,
+  re-targeting, pausing or resuming a schedule needs `scheduled_event:update`; cancelling or
+  deleting needs `scheduled_event:delete`. The request also passes the event type's own target
+  checks, and each fire stays within the recording token's ceiling and boundary. A fire fails once
+  that token is revoked, deleted or has expired, so a recurring schedule authored with a token
+  stops firing at the token's expiry; pause and resume it with a sign-in or a newer token to record new
+  authority. See [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
+- **Identity governance.** Reading role definitions, role bindings and access constraints needs
+  `role:read`, `role_binding:read` or `access_constraint:read`; reading a principal's
+  effective access (the admin effective-access view), explaining another principal's
+  authorization, or reading an access constraint's audit history needs `hub_audit:read`; among the
+  built-in roles, only super-admin holds the `hub.audit.read` permission. These scopes can be
+  selected only on a hub token (for writes to roles, role bindings and access constraints, see
+  **Roles, role bindings and access constraints** above). Listing users
+  needs `user:list` together with `user:read`, and the list holds only users the token may read;
+  among the built-in roles, only super-admin holds the `user.list` permission. A token reads a user
+  through `GET /api/v1/users/{id}` with `user:read` on a hub boundary; without it, or on a project
+  boundary, it gets `403` for every id, and it reads its own record at `/api/v1/auth/me`. Redeeming an invitation code and linking a chat account
+  always need a sign-in.
+- **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
+  A project token cannot create or re-register a Runtime Broker (see
+  [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).
 
 ## Using a token
 
@@ -83,8 +464,131 @@ export SCION_HUB_TOKEN="scion_pat_..."
 scion list --project my-project
 ```
 
-When this variable is set, the CLI bypasses the browser-based OAuth flow and uses the token for
-all communication with the Hub.
+When no stored interactive login exists, the CLI uses the token for all communication with the
+Hub.
+
+:::caution[A stored login takes precedence]
+A stored interactive login (from `scion hub auth login`) takes precedence over
+`SCION_HUB_TOKEN`. To run the CLI under a scoped token, use an environment with no stored login:
+a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logout`).
+:::
+
+User- and hub-scope environment variables and secrets (`scion hub env` and `scion hub secret`
+without `--project` or `--broker`, or with `--hub-scope`) need an interactive login (`scion hub auth login`); the Hub
+refuses access tokens on them, whatever their boundary or scopes, with `403 Forbidden`,
+`details.reason: "CREDENTIAL_MANAGEMENT"` (`details.credential: "session_required"`), and the message
+`"user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted"`.
+Project (`--project`) and Runtime Broker (`--broker`) scopes continue to accept appropriately scoped tokens.
+
+### Scopes for CLI use
+
+Most CLI commands that run in a project look the project up on the Hub first, which needs
+`project:read`, and `project:list` when the CLI finds the project by its git remote, slug or
+name. Include `project:read` and `project:list` in every token you use with the CLI. Scopes
+common CLI flows need:
+
+| Flow | Scopes |
+|------|--------|
+| Any command run in a project | `project:read`, `project:list` |
+| `scion list` | `project:read`, `agent:list` |
+| `scion look`, `scion logs` | `project:read`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read`; for an agent role above `none`, also `skill:read`, `skill:list`, `template:read`, `template:list`, `harness_config:read`, `harness_config:list` (or pass `--role none`) |
+| `scion message` | `project:read`, `agent:message` |
+| `scion attach` | `project:read`, `agent:attach` |
+| `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
+| `scion delete` | `project:read`, `agent:delete` |
+| `scion project service-accounts list`, `scion service-accounts list` | `project:read` (a project's accounts) |
+| `scion project settings get` | `project:read` |
+| `scion project settings set, unset` | `project:read`, `project:update` |
+
+Hub-level configuration commands require a [hub-bound token](#hub-bound-tokens) with the matching hub configuration scopes:
+
+| Flow | Scopes |
+|------|--------|
+| `scion hub settings get, schema` | `hub_config:read` |
+| `scion hub settings set, unset` | `hub_config:read`, `hub_config:update` |
+| `scion hub settings unset --section NAME --reset` | `hub_config:update` |
+| `scion hub project-defaults get` | `hub_project_defaults:read` |
+| `scion hub project-defaults set, unset` | `hub_project_defaults:read`, `hub_project_defaults:update` |
+| `scion hub experiments list, enable, disable, reset` | `hub_experiments:update` |
+
+A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
+as a likely missing `project:read` scope and stops. A user access token cannot register a new
+project, so the CLI does not try to link or register the project under one. Link the project
+once with an interactive login (`scion hub link`), then use the token.
+
+:::note[Hub tokens and project names]
+On a hub token, `project:list` can be selected only by holders of a hub-wide role that grants
+it. Without it, the CLI cannot find a project by name, slug or git remote under a hub token, and
+reports that the token most likely lacks `project:read` and `project:list`. Pass the project ID
+(`--project <id>`), or run the command inside a linked checkout.
+:::
+
+Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and
+`scion delete --cleanup-only --force`, act on the local machine with the user's file permissions,
+and token scopes don't limit them.
+
+To use the CLI from a coding agent running on your machine, see
+[Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
+
+### What scoped tokens cannot do
+
+The operations below need an interactive sign-in (`scion hub auth login` or the web UI), or admit
+only the tokens an item names. Every other user access token is refused, whatever its boundary
+or scopes, with `403`.
+
+- **User- and Hub-level environment variables and secrets**: reading, listing, setting, updating, or deleting `scope=user` (the default) or `scope=hub` environment variables and secrets requires an interactive login (`403`, `details.reason: "CREDENTIAL_MANAGEMENT"`).
+- **Chat scheduled messages**: creating, listing, sending now, dismissing or cancelling a message
+  scheduled in a chat conversation.
+- **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
+  embedded Runtime Broker path of project registration) admits a UAT only when it is a
+  hub-boundary token carrying `broker:create` and your user holds `broker.create`; any other UAT
+  is denied with `403`. Re-registering an existing Runtime Broker (issuing a new join token) with
+  such a token works only for a Runtime Broker your user created: a UAT does not satisfy the
+  super-admin shortcut. See
+  [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
+- **Runtime Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
+  secret or carry the Runtime Broker owner's consent to associate a Runtime Broker with a project. See
+  [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
+- **Runtime Broker heartbeats**: sending a heartbeat on a Runtime Broker's behalf needs a
+  sign-in; a user access token is denied with `403` and `details.reason` `HOST_OPERATIONS`.
+  Updating or deregistering a Runtime Broker, and writing its environment variables or secrets,
+  are governance operations (below).
+- **Image operations on a Runtime Broker**: pulling or removing a harness-config image on a
+  named Runtime Broker (`broker_id`) needs dispatch authority on that Runtime Broker, which no UAT
+  scope carries, so a UAT is denied even on an auto-provide Runtime Broker.
+- **Governance operations (current release)**: these create or change durable authority, and in
+  the current release they need a sign-in. A token is refused with `details.reason`
+  `GOV_PENDING`. Operations leave this list as token rules for them are added:
+  - updating or deregistering a Runtime Broker, and writing its environment variables or
+    secrets;
+  - deleting an access constraint, or an update that relaxes it (adds permissions, changes its
+    subject or scope, or narrows or adds its time window);
+  - lifting an agent's hold;
+  - re-issuing agent scopes (`scion reset-auth --reissue-scopes`, for one agent or for all);
+  - listing, granting, changing and revoking a project's visitor grants, and listing, adding,
+    changing and removing its visitor rules;
+  - removing a member from, or deleting, a group that is the subject of an access constraint;
+  - deleting a super-admin role binding;
+  - writing hub settings or project defaults that are not configuration keys, and a hub
+    lifecycle hook's execution identity (`details.keys` lists the refused keys).
+
+### Agents created with a token
+
+An agent you create with a token records the token's scopes as the upper bound of its own
+authority. What that bound does and does not narrow:
+
+- **It narrows the agent's API actions and role.** The agent's role is capped to what the
+  token's scopes cover, an explicit role the scopes do not cover is refused, and the agent's
+  own Hub token carries only the scopes the token allows.
+- **It does not narrow material delivered to the agent.** At start, resume and restart the agent
+  receives Project, Hub and Broker variables and secrets, and your user-scoped secrets shared
+  with progeny, as an agent created from a sign-in does. Each item is still checked on its own
+  (see [Agents created from a user access token](/scion/hosted/user/secrets/#agents-created-from-a-user-access-token)).
+  The delivery permissions and `secret.use` have no token scope, and need none.
+- **Reading secrets at runtime is not included.** No token scope grants `project.secret_read`,
+  so the agent's Hub token does not carry `project:secret:read` and the full agent role is not
+  available from a token.
 
 ## Trust level separation
 
@@ -104,6 +608,7 @@ privilege boundaries:
   auto-injected by the Runtime Broker, and grants only the specific permissions that agent needs
   to function (e.g., reporting status, reading its own secrets).
 - **Usage**: Automatically used by the `sciontool` binary running inside the agent.
+- **Enforcement**: In Runtime Broker mode, the Runtime Broker populates `~/.scion/scion-token`, `SCION_AUTH_TOKEN`, and `SCION_HUB_TOKEN` solely from the Hub-issued token for that run. Any `SCION_AUTH_TOKEN` configured in an agent's or harness-config's `env` is stripped and ignored with a start warning (`SCION_AUTH_TOKEN is set in the agent's environment configuration and is ignored: the agent's hub credential is only the token the hub issues for it`), and a Hub-dispatched start or restart that lacks a Hub-issued token is refused with `500 runtime_error` before a container starts.
 
 :::danger[Privilege escalation risk]
 **Never inject a `SCION_HUB_TOKEN` (or a user-level UAT) into an agent container as the
@@ -117,23 +622,58 @@ automatically handles agent authentication; you do not need to manually configur
 
 ## Managing tokens
 
-Tokens can be managed either via the CLI or the Web UI.
+You manage tokens in the web UI or with the CLI. Both need a sign-in: the Hub refuses every
+token-management request (create, list, read, revoke and delete) authenticated with a user
+access token. To use the CLI, sign in with `scion hub auth login`; a stored login takes
+precedence over `SCION_HUB_TOKEN`.
 
-### Using the Web UI
-The easiest way to administer your tokens is through the **Web UI management interface**
-available in your user profile. It lets you create, view, and revoke tokens visually, and
-configure action permissions and project-level scopes.
+### Using the web UI
+
+Open **Access Tokens** in your profile. The table shows each token's name, status, boundary,
+scopes, creation time, last use and expiry. The **Boundary** column shows the project name for a
+project token, or a **Hub** badge for a hub token. A token's purpose appears under its name, and
+its labels appear as `key=value` chips.
+
+**Create Token** opens a form with:
+
+- **Name**.
+- **Boundary**: **Project** (the default) or **Hub: any project you can currently access**. For a
+  project token, choose the project. Changing the boundary or the project clears the selected
+  scopes.
+- **Scopes**, with the scopes you cannot currently select shown with the reason.
+- **Expires in**: 7, 30, 90, 180 or 365 days.
+- **Purpose** and up to 8 **labels**; you may leave both empty. They are descriptive only and
+  cannot be changed after creation.
+
+Each active token has a **Revoke** action, and every token has a **Delete** action.
 
 ### Using the CLI
 
-List your tokens (name, ID, visible prefix, status, expiry, and scopes):
+List your tokens:
 
 ```bash
 scion hub token list
+scion hub token list --wide
+scion hub token list --boundary hub
+scion hub token list --project my-project
+scion hub token list --json
 ```
 
+The table shows `NAME`, `ID`, `PREFIX`, `STATUS`, `BOUNDARY`, `EXPIRES` and `SCOPES`. `BOUNDARY`
+is `hub` for a hub token and `project:<id>` (the project ID) for a project token. `--wide` adds a
+`PURPOSE` column, truncated to 30 characters.
+
+- `--boundary project|hub` shows only tokens of that boundary.
+- `--project <project>` shows only project tokens of that project. It never matches a hub
+  token, even though a hub token can reach the project, so it cannot be combined with
+  `--boundary hub`.
+- `--json` prints the token records: each has a `boundary` object, and a hub token has no
+  `projectId`.
+
 Revoke a token — it stops working for authentication but remains visible in listings as
-revoked:
+revoked. Log and message streams and terminal sessions opened with the token end within
+about 15 seconds of the token being revoked or expiring, of its user being suspended, or of
+the user losing the permission the stream needs:
 
 ```bash
 scion hub token revoke <token-id>
@@ -144,3 +684,42 @@ Delete a token entirely (rather than leaving it in listings as revoked):
 ```bash
 scion hub token delete <token-id>
 ```
+
+### Token limit
+
+Your account can hold up to 50 tokens that are not revoked, project and hub tokens together.
+A revoked token does not count. An expired token counts until you revoke or delete it. Creating
+a token beyond the limit is refused with `409` and error code `limit_exceeded`; revoke or delete
+tokens you do not use to free a slot.
+
+### Rotating a token
+
+The Hub has no rotate operation. To rotate a token, replace it:
+
+1. Read the token's boundary, scopes, purpose and labels, for example with
+   `scion hub token list --json`.
+2. Create a new token with the same boundary and scopes, and, if you want, the same purpose and
+   labels (`--purpose`, `--label`), in the web UI or with `scion hub token create`.
+3. Switch your automation to the new token.
+4. Revoke the previous token (`scion hub token revoke <token-id>`). Requests that use it are
+   refused from then on.
+5. Delete the previous token once you do not need it in listings.
+
+Revoking the previous token also frees its slot under the [token limit](#token-limit).
+
+### Revoking a token someone else may hold
+
+If a token value may be known to someone else, revoke it at once from a sign-in, in the web UI
+or with `scion hub token revoke <token-id>`. A token cannot revoke itself or any other token,
+because token management needs a sign-in.
+
+You do not need to revoke a token to take access away from it: when your own access changes,
+every token follows on its next request (see
+[Live access and reduced permissions](#live-access-and-reduced-permissions)).
+
+### Migration notes
+
+- A project token works only in its project, and `POST /api/v1/auth/tokens` accepts the
+  `projectId` shorthand for a project token.
+- Token responses carry a `boundary` object. A hub token's response has no `projectId`, so
+  integrations read `boundary.kind` to tell the kinds apart.

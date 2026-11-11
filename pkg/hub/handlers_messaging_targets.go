@@ -15,9 +15,12 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // targetResolveResponse is the response for GET /api/v1/messaging/targets/resolve.
@@ -52,16 +55,8 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	}
 
 	identity := GetIdentityFromContext(r.Context())
-	if identity == nil {
+	if isNilIdentity(identity) {
 		Unauthorized(w)
-		return
-	}
-
-	// Check Hub feature enabled first, before target lookup.
-	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
-		writeError(w, http.StatusNotFound, "cross_project_disabled",
-			"Cross-project messaging is not enabled", nil)
 		return
 	}
 
@@ -72,6 +67,14 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 
 	if projectRef == "" || agentRef == "" {
 		BadRequest(w, "Both 'project' and 'agent' query parameters are required")
+		return
+	}
+
+	// Check Hub feature enabled before target lookup.
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+		writeError(w, http.StatusNotFound, "cross_project_disabled",
+			"Cross-project messaging is not enabled", nil)
 		return
 	}
 
@@ -92,20 +95,13 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	}
 
 	// Resolve the agent within the target project by ID or slug.
-	var targetAgent *store.Agent
-	agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{
-		ProjectID: targetProject.ID,
-	}, store.ListOptions{})
+	targetAgent, err := s.findLiveProjectAgent(ctx, targetProject.ID, agentRef)
 	if err != nil {
-		NotFound(w, "Target")
+		// A lookup failure is not evidence that the target does not exist.
+		s.messageLog.Error("Failed to look up messaging target agent",
+			"project_id", targetProject.ID, "agent_ref", agentRef, "error", err)
+		InternalError(w)
 		return
-	}
-
-	for i := range agentResult.Items {
-		if agentResult.Items[i].ID == agentRef || agentResult.Items[i].Slug == agentRef {
-			targetAgent = &agentResult.Items[i]
-			break
-		}
 	}
 	if targetAgent == nil {
 		// Privacy-preserving: indistinguishable from nonexistent.
@@ -118,9 +114,17 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	canReachViewer := false
 	replyReason := ""
 
-	// Forward direction: caller → target
+	// Forward direction: caller → target. The lookup answers only for
+	// targets the caller may message; any other target, including one that
+	// could only reply to the caller, gets the same answer as an unknown
+	// target and the reason is logged.
 	forwardAllowed, _, _ := s.authorizeAgentMessage(ctx, identity, targetAgent, false)
 	canMessage = forwardAllowed
+	if !canMessage {
+		logReferenceRefused(ctx, logging.RequestPath(r), "target not messageable", identity)
+		NotFound(w, "Target")
+		return
+	}
 
 	// Reverse direction: target → caller (for reply capability).
 	// Only evaluate if the caller is an agent.
@@ -134,14 +138,6 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 				replyReason = reverseReason
 			}
 		}
-	}
-
-	// Privacy-preserving: if the caller cannot message the target in either
-	// direction, return the same NotFound as for nonexistent targets so that
-	// existence cannot be distinguished from non-existence.
-	if !canMessage && !canReachViewer {
-		NotFound(w, "Target")
-		return
 	}
 
 	resp := targetResolveResponse{
@@ -182,3 +178,31 @@ func (w *peerAgentIdentity) OriginUserID() string {
 	return ""
 }
 func (w *peerAgentIdentity) TokenID() string { return "" }
+
+// localAncestryProvenance reports that this ancestry chain was read back
+// from a hub-persisted store.Agent record, not from a JWT.
+func (w *peerAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceStoreAgent
+}
+
+// findLiveProjectAgent resolves ref as an agent slug, then as an agent ID,
+// within projectID. Slug matching is exact and case-sensitive. An ID is
+// parsed as a UUID, so any spelling uuid.Parse accepts (uppercase,
+// urn:uuid:, braced) resolves to the same agent. It returns
+// (nil, nil) when no live (non-soft-deleted) agent in the project matches,
+// and an error only when the lookup itself failed.
+func (s *Server) findLiveProjectAgent(ctx context.Context, projectID, ref string) (*store.Agent, error) {
+	agent, err := s.resolveProjectAgent(ctx, projectID, ref)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The slug lookup excludes soft-deleted agents; the ID lookup does not.
+	// A (nil, nil) result from the store is treated as not found.
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		return nil, nil
+	}
+	return agent, nil
+}

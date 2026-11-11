@@ -19,48 +19,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 )
-
-// newTestDBServer creates a test Server configured in postgres mode with a
-// fakeHubSettingStore and OperationalSettings wired up for testing.
-func newTestDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fileK := emptyKoanf()
-	envK := emptyKoanf()
-
-	ops := NewOperationalSettings(fakeStore, fileK, envK)
-
-	srv := &Server{
-		dbDriver:    "postgres",
-		maintenance: NewMaintenanceState(false, ""),
-	}
-	srv.SetOperationalSettings(ops)
-
-	return srv, fakeStore, ops
-}
-
-func adminRequest(method, url, body string) *http.Request {
-	var r *http.Request
-	if body != "" {
-		r = httptest.NewRequest(method, url, strings.NewReader(body))
-		r.Header.Set("Content-Type", "application/json")
-	} else {
-		r = httptest.NewRequest(method, url, nil)
-	}
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	r = r.WithContext(contextWithIdentity(r.Context(), admin))
-	return r
-}
 
 // ---- GET /api/v1/admin/server-config (postgres mode) ----
 
@@ -307,10 +278,7 @@ func TestPutServerConfigDB_Layer0Keys_Rejected422(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -375,10 +343,7 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "unclassified_keys_rejected" {
 		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
@@ -428,10 +393,7 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) 
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "unclassified_keys_rejected" {
 		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
@@ -556,10 +518,7 @@ func TestPutServerConfigDB_ExplicitLayer0_Still422(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -647,10 +606,7 @@ func TestPutServerConfigDB_CAS_StaleRevision_409(t *testing.T) {
 		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
@@ -1057,6 +1013,383 @@ func TestExtractKoanfKeys_AllFieldCategories(t *testing.T) {
 	}
 	if !keySet["server.database"] {
 		t.Error("missing server.database")
+	}
+}
+
+func TestExtractKoanfKeys_Quotas(t *testing.T) {
+	enforced := false
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enforced},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "quotas.enforce_broker_quotas" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected quotas.enforce_broker_quotas in keys, got %v", keys)
+	}
+}
+
+func TestExtractKoanfKeys_AgentSecrets(t *testing.T) {
+	on := true
+	req := &ServerConfigUpdateRequest{
+		AgentSecrets: &config.AgentSecretsSettings{UserScopeOnly: &on},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "agent_secrets.user_scope_only" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected agent_secrets.user_scope_only in keys, got %v", keys)
+	}
+}
+
+// Test 1/2/3 (design 4.7 P1b), DB-mode: PUT of the quotas section persists
+// it and the snapshot reflects the new value immediately (no restart).
+func TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	// Wire ops server for self-apply (F4): without this, Update()'s
+	// self-apply is a no-op and srv.brokerQuotasEnforced() is never
+	// exercised in DB mode.
+	ops.server = srv
+
+	if !srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true before any PUT (fail-safe default)")
+	}
+
+	body := `{"quotas": {"enforce_broker_quotas": false}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected 'quotas' section in store after PUT")
+	}
+	if row.Revision == 0 {
+		t.Error("expected revision > 0")
+	}
+
+	snap := ops.Snapshot()
+	if snap.EnforceBrokerQuotas == nil || *snap.EnforceBrokerQuotas != false {
+		t.Errorf("EnforceBrokerQuotas: want false, got %v", snap.EnforceBrokerQuotas)
+	}
+
+	// The self-apply on the writing node must take effect live, without a
+	// restart — this is the actual guarantee the switch provides.
+	if srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false immediately after the DB-mode PUT self-apply")
+	}
+
+	// GET must reflect it too.
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.Quotas == nil || resp.Quotas.EnforceBrokerQuotas == nil || *resp.Quotas.EnforceBrokerQuotas != false {
+		t.Errorf("GET quotas: want enforce_broker_quotas=false, got %+v", resp.Quotas)
+	}
+}
+
+// Test AC5 (design 4.8), simulated cross-replica: a second OperationalSettings
+// instance sharing the same store (standing in for a second Hub replica in
+// postgres mode) picks up the change via refreshAndApply — the same call the
+// LISTEN/NOTIFY subscription and the 60s poll backstop both make — without
+// going through its own PUT. No live Postgres is available in this sandbox
+// (per review F4); this exercises the same propagation code path
+// (`Refresh` -> `ApplySnapshot`) against a shared fake store instead of a
+// second real connection.
+func TestPutServerConfigDB_Quotas_CrossReplicaPropagation(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	opsA := NewOperationalSettings(fakeStore, fileK, envK)
+	srvA := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	opsA.server = srvA
+
+	opsB := NewOperationalSettings(fakeStore, fileK, envK)
+	srvB := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	// opsB.server is deliberately left unset: replica B applies only through
+	// refreshAndApply, exactly like a poll-backstop or NOTIFY tick would.
+
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true on replica B before any propagation")
+	}
+
+	// Replica A writes the section (simulates the admin PUT landing on A).
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`)
+	rr := httptest.NewRecorder()
+	srvA.handlePutServerConfigDB(rr, req, opsA)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replica A, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srvA.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=false on replica A immediately after its own PUT")
+	}
+
+	// Replica B has not refreshed yet — still stale/enforced.
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("replica B should not see the change before refreshAndApply runs")
+	}
+
+	// Simulate B's poll backstop (or a NOTIFY wakeup) picking up the change.
+	opsB.refreshAndApply(context.Background(), srvB)
+
+	if srvB.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false on replica B after refreshAndApply propagated the change")
+	}
+}
+
+// Review finding N3 (ptone/scion#2270 round 2): an explicit end-to-end test
+// that PUT {"quotas":{}} in DB mode — not just DELETE /sections/quotas —
+// resets the live brokerQuotasEnforced() value back to enforced. The section
+// row remains (unlike a DELETE), but its document is now {}, so the next
+// Snapshot() sees no quotas.enforce_broker_quotas key, which is exactly the
+// "unset -> enforced" case F3 fixed.
+func TestPutServerConfigDB_Quotas_ExplicitNullResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	// First, turn enforcement off.
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the first PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false after the first PUT")
+	}
+
+	// A quotas object that omits enforce_broker_quotas keeps the stored
+	// value (ptone/scion#3720).
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the PUT omitting the key, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=false kept after PUT {\"quotas\":{}}")
+	}
+
+	// An explicit null clears the key, distinct from deleting the section
+	// entirely via the "reset to bootstrap" endpoint.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": null}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected the quotas row to still exist after the clearing PUT (clear, not delete)")
+	}
+	if string(row.Value) != "{}" {
+		t.Errorf("expected the stored quotas doc to be {}, got %s", row.Value)
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after the clearing PUT (fail-safe default), not fail-open")
+	}
+}
+
+// Test 7 (design 4.7 P1b): a non-boolean enforce_broker_quotas is rejected.
+func TestPutServerConfigDB_Quotas_NonBooleanRejected(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{"quotas": {"enforce_broker_quotas": "yes"}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-boolean quotas.enforce_broker_quotas, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_WriteAndReflectInSnapshot mirrors
+// TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot (design ptone/scion#2291 §10 test 3).
+func TestPutServerConfigDB_AgentSecrets_WriteAndReflectInSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	// Wire ops server for self-apply: without this, Update()'s self-apply
+	// is a no-op and srv.agentSecretsUserScopeOnly() is never exercised in
+	// DB mode.
+	ops.server = srv
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=false before any PUT (permissive default)")
+	}
+
+	body := `{"agent_secrets": {"user_scope_only": true}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected 'agent_secrets' section in store after PUT")
+	}
+	if row.Revision == 0 {
+		t.Error("expected revision > 0")
+	}
+
+	snap := ops.Snapshot()
+	if snap.AgentSecretsUserScopeOnly == nil || *snap.AgentSecretsUserScopeOnly != true {
+		t.Errorf("AgentSecretsUserScopeOnly: want true, got %v", snap.AgentSecretsUserScopeOnly)
+	}
+
+	// The self-apply on the writing node must take effect live, without a
+	// restart — this is the actual guarantee the switch provides.
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=true immediately after the DB-mode PUT self-apply")
+	}
+
+	// GET must reflect it too.
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.AgentSecrets == nil || resp.AgentSecrets.UserScopeOnly == nil || *resp.AgentSecrets.UserScopeOnly != true {
+		t.Errorf("GET agent_secrets: want user_scope_only=true, got %+v", resp.AgentSecrets)
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_CrossReplicaPropagation mirrors
+// TestPutServerConfigDB_Quotas_CrossReplicaPropagation. No live Postgres is
+// available in this sandbox; this exercises the same propagation code path
+// (Refresh -> ApplySnapshot) against a shared fake store instead of a
+// second real connection.
+func TestPutServerConfigDB_AgentSecrets_CrossReplicaPropagation(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	opsA := NewOperationalSettings(fakeStore, fileK, envK)
+	srvA := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	opsA.server = srvA
+
+	opsB := NewOperationalSettings(fakeStore, fileK, envK)
+	srvB := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	// opsB.server is deliberately left unset: replica B applies only through
+	// refreshAndApply, exactly like a poll-backstop or NOTIFY tick would.
+
+	if srvB.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=false on replica B before any propagation")
+	}
+
+	// Replica A writes the section (simulates the admin PUT landing on A).
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": true}}`)
+	rr := httptest.NewRecorder()
+	srvA.handlePutServerConfigDB(rr, req, opsA)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replica A, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srvA.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=true on replica A immediately after its own PUT")
+	}
+
+	// Replica B has not refreshed yet — still stale/permissive.
+	if srvB.agentSecretsUserScopeOnly() {
+		t.Fatal("replica B should not see the change before refreshAndApply runs")
+	}
+
+	// Simulate B's poll backstop (or a NOTIFY wakeup) picking up the change.
+	opsB.refreshAndApply(context.Background(), srvB)
+
+	if !srvB.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=true on replica B after refreshAndApply propagated the change")
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive mirrors
+// TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue: PUT
+// {"agent_secrets":{}} — not just DELETE /sections/agent_secrets — resets
+// the live agentSecretsUserScopeOnly() value back to permissive.
+func TestPutServerConfigDB_AgentSecrets_ExplicitNullResetsToPermissive(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	// First, turn the restriction on.
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": true}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the first PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true after the first PUT")
+	}
+
+	// An agent_secrets object that omits user_scope_only keeps the stored
+	// value (ptone/scion#3720).
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the PUT omitting the key, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=true kept after PUT {\"agent_secrets\":{}}")
+	}
+
+	// An explicit null clears the key — clear, not delete.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": null}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected the agent_secrets row to still exist after the clearing PUT (clear, not delete)")
+	}
+	if string(row.Value) != "{}" {
+		t.Errorf("expected the stored agent_secrets doc to be {}, got %s", row.Value)
+	}
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=false immediately after the clearing PUT (permissive default), not left on")
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_NonBooleanRejected mirrors
+// TestPutServerConfigDB_Quotas_NonBooleanRejected.
+func TestPutServerConfigDB_AgentSecrets_NonBooleanRejected(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{"agent_secrets": {"user_scope_only": "yes"}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-boolean agent_secrets.user_scope_only, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -1478,6 +1811,287 @@ func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
 	}
 }
 
+// TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence checks the
+// source reported for superseded keys when the unseeded bootstrap is set,
+// as startup does: a key with both a SCION_SEED_* value and a settings.yaml
+// value is attributed to settings.yaml, which wins over the seed layer; a
+// key with only a seed value or only a settings.yaml value keeps its source;
+// and the public URL keeps its settings.yaml attribution (ptone/scion#4865,
+// ptone/scion#4904). A saved authorized_domains is applied
+// (ptone/scion#6000), so with no SCION_SERVER_* pin it supersedes the
+// settings.yaml value like the other access keys.
+func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_MONITORINGDASHBOARDURL",
+		"SCION_SERVER_AUTH_DEFAULTUSERROLE", "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
+		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS",
+		"SCION_SERVER_AUTH_USERACCESSMODE", "SCION_SEED_SERVER_AUTH_USERACCESSMODE",
+	} {
+		t.Setenv(name, "")
+	}
+	// Both a seed value and a settings.yaml value.
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_MONITORINGDASHBOARDURL", "https://seed-dash.example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", "https://seed.example.com")
+	// Only a seed value.
+	t.Setenv("SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE", "viewer")
+
+	scionDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `schema_version: "1"
+server:
+  hub:
+    admin_emails: ["file@example.com"]
+    monitoring_dashboard_url: https://file-dash.example.com
+    public_url: https://file.example.com
+  auth:
+    authorized_domains: ["file.example.com"]
+    user_access_mode: domain_restricted
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bootK := config.LoadBootstrapKoanf()
+	if got := bootK.Strings("server.hub.admin_emails"); len(got) != 1 || got[0] != "file@example.com" {
+		t.Fatalf("bootstrap admin_emails = %v, want the settings.yaml value over the seed value", got)
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, bootK, emptyKoanf())
+	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"default_user_role":"member","authorized_domains":["db.example.com"],"user_access_mode":"open"}`), "managed")
+	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"monitoring_dashboard_url":"https://db-dash.example.com","public_url":"https://saved.example.com"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, keys := range getServerConfigDB(t, srv, ops).SupersededKeys {
+		for _, sk := range keys {
+			got[sk.Key] = sk.Source
+		}
+	}
+	for key, want := range map[string]string{
+		"server.hub.admin_emails":             "yaml",     // seed and settings.yaml
+		"server.hub.monitoring_dashboard_url": "yaml",     // seed and settings.yaml
+		"server.hub.public_url":               "yaml",     // seed and settings.yaml
+		"server.auth.default_user_role":       "seed_env", // seed only
+		"server.auth.user_access_mode":        "yaml",     // settings.yaml only
+		"server.auth.authorized_domains":      "yaml",     // settings.yaml only, applied (ptone/scion#6000)
+	} {
+		if got[key] != want {
+			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
+// TestGetServerConfigDB_SupersededSeedOnlyKeyOverDefault checks, with the
+// unseeded bootstrap set, that a key whose only value besides a coded
+// default comes from SCION_SEED_* is still attributed to the seed layer:
+// the merge without the seed layer has the key (the coded default), but
+// with a different value. It also checks that a key with both a seed value
+// and a SCION_SERVER_* value is attributed to the server environment
+// (ptone/scion#4904).
+func TestGetServerConfigDB_SupersededSeedOnlyKeyOverDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	// Only a seed value over the coded default ([]).
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
+	// Both a seed value and a SCION_SERVER_* value.
+	t.Setenv("SCION_SEED_SERVER_AUTH_USERACCESSMODE", "invite")
+	t.Setenv("SCION_SERVER_AUTH_USERACCESSMODE", "closed")
+
+	unseededK := config.LoadUnseededBootstrapKoanfWithConfigPath("")
+	if !unseededK.Exists("server.hub.admin_emails") {
+		t.Fatal("precondition: the merge without the seed layer should carry the coded admin_emails default")
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, config.LoadBootstrapKoanf(), emptyKoanf())
+	ops.SetUnseededBootstrap(unseededK)
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"user_access_mode":"open"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, sk := range getServerConfigDB(t, srv, ops).SupersededKeys["access"] {
+		got[sk.Key] = sk.Source
+	}
+	if got["server.hub.admin_emails"] != "seed_env" {
+		t.Errorf("superseded server.hub.admin_emails source = %q, want seed_env (all: %v)", got["server.hub.admin_emails"], got)
+	}
+	if got["server.auth.user_access_mode"] != "server_env" {
+		t.Errorf("superseded server.auth.user_access_mode source = %q, want server_env (all: %v)", got["server.auth.user_access_mode"], got)
+	}
+}
+
+// TestGetServerConfigDB_SupersededKeyDefaultSource checks the source
+// reported for superseded keys with the unseeded and above-seed bootstraps
+// set, as startup does: a seed value equal to the coded default is
+// attributed to the seed layer, a settings.yaml value equal to the coded
+// default to settings.yaml, a key only the coded defaults set to the
+// defaults, and a public URL with both a seed and a settings.yaml value to
+// settings.yaml (ptone/scion#4983).
+func TestGetServerConfigDB_SupersededKeyDefaultSource(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_DEFAULTTEMPLATE", "SCION_SERVER_DEFAULTHARNESSCONFIG",
+		"SCION_SEED_DEFAULTHARNESSCONFIG", "SCION_SERVER_HUB_ADMINEMAILS",
+		"SCION_SEED_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	defaultsK := config.LoadUnseededBootstrapKoanfWithConfigPath("")
+	defaultTemplate := defaultsK.String("default_template")
+	defaultHarnessConfig := defaultsK.String("default_harness_config")
+	if defaultTemplate == "" || defaultHarnessConfig == "" {
+		t.Fatalf("precondition: coded defaults should set default_template and default_harness_config, got %q and %q", defaultTemplate, defaultHarnessConfig)
+	}
+	if !defaultsK.Exists("server.hub.admin_emails") {
+		t.Fatal("precondition: the coded defaults should set server.hub.admin_emails")
+	}
+
+	// A seed value equal to the coded default.
+	t.Setenv("SCION_SEED_DEFAULTTEMPLATE", defaultTemplate)
+	// Both a seed value and a settings.yaml value.
+	t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", "https://seed.example.com")
+
+	scionDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A settings.yaml value equal to the coded default.
+	settings := `schema_version: "1"
+default_harness_config: ` + defaultHarnessConfig + `
+server:
+  hub:
+    public_url: https://file.example.com
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := supersededSourcesWithAboveSeed(t)
+	for key, want := range map[string]string{
+		"default_template":        "seed_env", // seed value equal to the default
+		"default_harness_config":  "yaml",     // settings.yaml value equal to the default
+		"server.hub.admin_emails": "default",  // only the coded default
+		"server.hub.public_url":   "yaml",     // seed and settings.yaml
+	} {
+		if got[key] != want {
+			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
+// TestGetServerConfigDB_SupersededServerEnvEqualToDefault checks, with the
+// unseeded and above-seed bootstraps set, that a SCION_SERVER_* value equal
+// to the coded default is attributed to the server environment, also when a
+// seed value sets the key to the same value (ptone/scion#4983).
+func TestGetServerConfigDB_SupersededServerEnvEqualToDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{
+		"SCION_SERVER_DEFAULTHARNESSCONFIG", "SCION_SEED_DEFAULTHARNESSCONFIG",
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SEED_SERVER_HUB_ADMINEMAILS",
+		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	defaultTemplate := config.LoadUnseededBootstrapKoanfWithConfigPath("").String("default_template")
+	if defaultTemplate == "" {
+		t.Fatal("precondition: the coded defaults should set default_template")
+	}
+	t.Setenv("SCION_SERVER_DEFAULTTEMPLATE", defaultTemplate)
+	t.Setenv("SCION_SEED_DEFAULTTEMPLATE", defaultTemplate)
+
+	got := supersededSourcesWithAboveSeed(t)
+	if got["default_template"] != "server_env" {
+		t.Errorf("superseded default_template source = %q, want server_env (all: %v)", got["default_template"], got)
+	}
+}
+
+// TestDetectKeySource_UnmappedSectionKey checks detectKeySource for a key of
+// a section without a JSON field mapping (agent_defaults, whose keys are
+// their koanf paths): the server environment wins over the seed layer,
+// which wins over the yaml fallback, as for a mapped key (ptone/scion#4983).
+func TestDetectKeySource_UnmappedSectionKey(t *testing.T) {
+	seed := map[string]interface{}{"default_template": "seed-template"}
+	server := map[string]interface{}{"default_template": "server-template"}
+	none := map[string]interface{}{}
+	for _, tc := range []struct {
+		name, section, key string
+		seed, server       map[string]interface{}
+		want               string
+	}{
+		{"server env", "agent_defaults", "default_template", seed, server, "server_env"},
+		{"seed env", "agent_defaults", "default_template", seed, none, "seed_env"},
+		{"neither", "agent_defaults", "default_template", none, none, "yaml"},
+		{"other key", "agent_defaults", "default_harness_config", seed, server, "yaml"},
+		{"mapped key", "access", "admin_emails", map[string]interface{}{"server.hub.admin_emails": "a@example.com"}, none, "seed_env"},
+	} {
+		got := detectKeySource(newEnvKoanf(t, tc.seed), newEnvKoanf(t, tc.server), tc.section, tc.key)
+		if got != tc.want {
+			t.Errorf("%s: detectKeySource(%s, %s) = %q, want %q", tc.name, tc.section, tc.key, got, tc.want)
+		}
+	}
+}
+
+// supersededSourcesWithAboveSeed builds the bootstrap merges from HOME and
+// the environment as startup does, with the unseeded and above-seed merges
+// set, saves managed agent_defaults, access and endpoints rows that differ
+// from them, and returns the source of each superseded key.
+func supersededSourcesWithAboveSeed(t *testing.T) map[string]string {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, config.LoadBootstrapKoanf(), emptyKoanf())
+	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
+	ops.SetAboveSeedBootstrap(config.LoadAboveSeedBootstrapKoanfWithConfigPath(""))
+	fakeStore.seedWithOrigin("agent_defaults", json.RawMessage(`{"default_template":"db-template","default_harness_config":"db-harness"}`), "managed")
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"]}`), "managed")
+	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://saved.example.com"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, keys := range getServerConfigDB(t, srv, ops).SupersededKeys {
+		for _, sk := range keys {
+			got[sk.Key] = sk.Source
+		}
+	}
+	return got
+}
+
 func TestGetServerConfigDB_DeprecatedEnvKeys(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	bootstrapK := emptyKoanf()
@@ -1633,6 +2247,96 @@ func TestPutServerConfigDB_ServerEnv_422(t *testing.T) {
 	}
 }
 
+func TestExtractKoanfKeys_AsyncLaunchSettings_AreLayer0(t *testing.T) {
+	// The two async-launch settings are documented as Layer 0 (restart
+	// required, not writable via the admin API) in server-config.md's
+	// Layer-0 table. They must be extracted so ClassifyKeys sees them.
+	// Async create itself is the hub.async_agent_launch experiment.
+	keepalive := 20
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Hub: &config.V1ServerHubConfig{
+				LaunchTimeout:          "10m",
+				LaunchKeepaliveSeconds: &keepalive,
+			},
+		},
+	}
+
+	keys := extractKoanfKeysFromRequest(req)
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	for _, want := range []string{
+		"server.hub.launch_timeout",
+		"server.hub.launch_keepalive_seconds",
+	} {
+		if !keySet[want] {
+			t.Errorf("%s not extracted", want)
+		}
+	}
+}
+
+func TestPutServerConfigDB_AsyncLaunchSettings_422(t *testing.T) {
+	// A PUT carrying either async-launch setting must be rejected
+	// with 422 layer0_rejected, matching server-config.md's Layer-0 table,
+	// rather than silently dropping them.
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "launch_timeout",
+			body: `{"server": {"hub": {"launch_timeout": "10m"}}}`,
+		},
+		{
+			name: "launch_keepalive_seconds",
+			body: `{"server": {"hub": {"launch_keepalive_seconds": 20}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for %s, got %d: %s", tt.name, rr.Code, rr.Body.String())
+			}
+			resp := settingsErrorFields(t, rr.Body.Bytes())
+			if resp["error"] != "layer0_rejected" {
+				t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+			}
+		})
+	}
+}
+
+// TestPutServerConfigDB_ProjectStorage_422: server.project_storage is
+// Layer-0. A DB-mode PUT carrying it is rejected with 422 layer0_rejected
+// and never stored.
+func TestPutServerConfigDB_ProjectStorage_422(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	body := `{"server": {"project_storage": {"backend": "nfs", "nfs": {"mount_root": "/mnt/x", "shares": [{"id": "a", "server": "10.0.0.2", "export": "/e"}]}}}}`
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
+	if resp["error"] != "layer0_rejected" {
+		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+	}
+	if !strings.Contains(rr.Body.String(), "server.project_storage") {
+		t.Errorf("the refusal should name server.project_storage, got: %s", rr.Body.String())
+	}
+	// Never stored: the refused PUT wrote no settings section at all.
+	if len(fakeStore.settings) != 0 {
+		t.Errorf("a layer0_rejected PUT must store nothing, got sections: %v", fakeStore.settings)
+	}
+}
+
 // ---- N6: Presence-aware field clearing tests ----
 
 func TestPutServerConfigDB_ExplicitEmptyAdminEmails_ClearsField(t *testing.T) {
@@ -1710,8 +2414,8 @@ func TestPutServerConfigDB_ExplicitEmptyUserAccessMode_ClearsField(t *testing.T)
 
 func TestPutServerConfigDB_OmittedFieldsPreserved(t *testing.T) {
 	// N6: Omitting a field from the PUT payload should NOT clear it.
-	// When admin_emails is omitted, the section doc should not contain it,
-	// and on refresh the existing DB value is preserved.
+	// When admin_emails is omitted, the access doc is built on the current
+	// row, so the existing value is written back unchanged.
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["existing@admin.com"],"user_access_mode":"open"}`))
@@ -1744,8 +2448,11 @@ func TestPutServerConfigDB_OmittedFieldsPreserved(t *testing.T) {
 	if access.UserAccessMode != "invite_only" {
 		t.Errorf("N6: expected user_access_mode=invite_only, got %q", access.UserAccessMode)
 	}
-	// admin_emails was omitted — should be nil/empty in the section doc
-	// (the existing DB value is preserved by the OperationalSettings merge).
+	// admin_emails was omitted: the access doc is rebuilt on the current row
+	// (design §5.A item 3a), so the existing value must survive the write.
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "existing@admin.com" {
+		t.Errorf("N6: omitted admin_emails must be preserved, got %v", access.AdminEmails)
+	}
 }
 
 func TestPutServerConfigDB_ExplicitEmptyNotificationChannels_ClearsField(t *testing.T) {
@@ -1784,7 +2491,7 @@ func TestPutServerConfigDB_ExplicitEmptyNotificationChannels_ClearsField(t *test
 
 func TestPutServerConfigDB_ExplicitEmptyPublicURL_ClearsField(t *testing.T) {
 	// N6: Explicitly sending public_url as "" should clear it.
-	srv, fakeStore, ops := newTestDBServer(t)
+	srv, fakeStore, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 
 	fakeStore.seed("endpoints", json.RawMessage(`{"public_url":"https://old.url","image_registry":"registry.test"}`))
 	_, _ = ops.Refresh(context.Background())
@@ -2032,6 +2739,12 @@ func TestIsZeroStruct(t *testing.T) {
 	if !isZeroStruct(&config.V1MessageBrokerConfig{}) {
 		t.Error("expected zero V1MessageBrokerConfig")
 	}
+	if !isZeroStruct(&config.QuotaSettings{}) {
+		t.Error("expected zero QuotaSettings")
+	}
+	if !isZeroStruct(&config.AutoExposePortsSettings{}) {
+		t.Error("expected zero AutoExposePortsSettings")
+	}
 
 	// Non-zero structs.
 	if isZeroStruct(&config.V1DatabaseConfig{Driver: "postgres"}) {
@@ -2045,6 +2758,14 @@ func TestIsZeroStruct(t *testing.T) {
 	}
 	if isZeroStruct(&config.V1MessageBrokerConfig{Enabled: true}) {
 		t.Error("V1MessageBrokerConfig with enabled=true should not be zero")
+	}
+	enforced := false
+	if isZeroStruct(&config.QuotaSettings{EnforceBrokerQuotas: &enforced}) {
+		t.Error("QuotaSettings with EnforceBrokerQuotas set should not be zero")
+	}
+	autoExposeEnabled := true
+	if isZeroStruct(&config.AutoExposePortsSettings{Enabled: &autoExposeEnabled}) {
+		t.Error("AutoExposePortsSettings with Enabled set should not be zero")
 	}
 
 	// Nil.
@@ -2088,10 +2809,7 @@ func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
 		t.Fatalf("expected 409 Conflict, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
@@ -2421,6 +3139,75 @@ func TestResetSection_DeletesManagedSection(t *testing.T) {
 	fakeStore.mu.Unlock()
 	if exists {
 		t.Error("expected access row to be deleted after reset")
+	}
+}
+
+// Regression test for review finding F3 (ptone/scion#2270 round 1): DELETE
+// on the quotas section ("Reset to bootstrap") self-applies a snapshot with
+// EnforceBrokerQuotas==nil. That must flip a previously-set false back to
+// enforced live, on the node that issued the DELETE — not leave the old
+// false in place while GET/the UI both report "enforced" (fail-open).
+func TestResetSection_QuotasDeleteResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	fakeStore.seedWithOrigin("quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+	// Self-apply the initial state, the same way Update()'s self-apply would
+	// after the PUT that produced this row.
+	ApplySnapshot(srv, ops.Snapshot())
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false before the reset")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/quotas", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected quotas row to be deleted after reset")
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after DELETE-ing the quotas section (fail-safe default), not fail-open")
+	}
+}
+
+// TestResetSection_AgentSecretsDeleteResetsToPermissive mirrors
+// TestResetSection_QuotasDeleteResetsEnforcementToTrue.
+func TestResetSection_AgentSecretsDeleteResetsToPermissive(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	fakeStore.seedWithOrigin("agent_secrets", json.RawMessage(`{"user_scope_only":true}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+	// Self-apply the initial state, the same way Update()'s self-apply would
+	// after the PUT that produced this row.
+	ApplySnapshot(srv, ops.Snapshot())
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true before the reset")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/agent_secrets", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected agent_secrets row to be deleted after reset")
+	}
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=false immediately after DELETE-ing the agent_secrets section (permissive default), not left on")
 	}
 }
 
@@ -2767,5 +3554,595 @@ func TestPutThenGetServerConfigDB_RuntimesRoundTrip(t *testing.T) {
 		}
 	} else {
 		t.Error("expected runtimes in section_metadata")
+	}
+}
+
+// TestPutServerConfigDB_DefaultTimezone_Valid accepts a valid hub default timezone.
+func TestPutServerConfigDB_DefaultTimezone_Valid(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"default_timezone": "Europe/Berlin"
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid default_timezone, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_DefaultTimezone_Invalid rejects an invalid hub default timezone.
+func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"default_timezone": "Not/A/Timezone"
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid default_timezone, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Not/A/Timezone") {
+		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected covers
+// time.LoadLocation accepting "Local", "localtime", "posixrules" and
+// "Factory" (Go's embedded tzdata ships those files) and, on a host with
+// the right/ and posix/ zoneinfo trees, any "right/..."- or "posix/..."-
+// prefixed name — but none of these name a portable IANA zone: "Local" is
+// the host's ambient zone, "localtime"/"posixrules"/"Factory" are tzdata's
+// own implementation files, and right/posix are whole-tree duplicates under
+// a path prefix that isn't part of any IANA name. So the hub default must
+// reject all of them explicitly, the same denylist the per-user
+// display-timezone preference uses (design §3 A (d)).
+//
+// The assertion below checks for errNonPortableTimezone's own message
+// rather than just the 422 status, so this test fails if the denylist
+// branch in validateIANATimezone is ever removed — including on a host
+// without the right/ and posix/ zoneinfo trees, where time.LoadLocation
+// would otherwise fail on those two names anyway for an unrelated reason
+// ("unknown time zone") and mask the regression.
+func TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected(t *testing.T) {
+	for _, tz := range []string{"Local", "localtime", "posixrules", "Factory", "right/Asia/Tokyo", "posix/Asia/Tokyo"} {
+		t.Run(tz, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			body := `{"default_timezone": "` + tz + `"}`
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for default_timezone %q, got %d: %s", tz, rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tz) {
+				t.Errorf("error message should mention %q: %s", tz, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), errNonPortableTimezone.Error()) {
+				t.Errorf("error message for %q should contain the denylist message %q, got: %s", tz, errNonPortableTimezone.Error(), rr.Body.String())
+			}
+		})
+	}
+}
+
+// ---- default_user_role (design §5.A) ----
+
+// readAccessRow returns the persisted access section doc from the fake store.
+func readAccessRow(t *testing.T, fakeStore *fakeHubSettingStore) (opsettings.AccessSettings, map[string]json.RawMessage) {
+	t.Helper()
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected an access row to be written")
+	}
+	var access opsettings.AccessSettings
+	if err := json.Unmarshal(row.Value, &access); err != nil {
+		t.Fatalf("json.Unmarshal access: %v", err)
+	}
+	var rawDoc map[string]json.RawMessage
+	if err := json.Unmarshal(row.Value, &rawDoc); err != nil {
+		t.Fatalf("json.Unmarshal access raw: %v", err)
+	}
+	return access, rawDoc
+}
+
+func TestExtractKoanfKeys_DefaultUserRole(t *testing.T) {
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Auth: &config.V1AuthConfig{DefaultUserRole: "viewer"},
+		},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "server.auth.default_user_role" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected server.auth.default_user_role in keys, got %v", keys)
+	}
+	layer1, layer0, unclassified := opsettings.ClassifyKeys(keys)
+	if len(layer0) != 0 || len(unclassified) != 0 {
+		t.Errorf("default_user_role must be Layer-1 only; layer0=%v unclassified=%v", layer0, unclassified)
+	}
+	if _, ok := layer1["access"]; !ok {
+		t.Errorf("default_user_role must classify into the access section, got %v", layer1)
+	}
+}
+
+func TestAppendPresenceAwareKeys_ExplicitEmptyDefaultUserRole(t *testing.T) {
+	keys := appendPresenceAwareKeys(nil, []byte(`{"server":{"auth":{"default_user_role":""}}}`))
+	if len(keys) != 1 || keys[0] != "server.auth.default_user_role" {
+		t.Errorf("explicit empty default_user_role should add its key, got %v", keys)
+	}
+	keys = appendPresenceAwareKeys(nil, []byte(`{"server":{"auth":{"user_access_mode":"open"}}}`))
+	for _, k := range keys {
+		if k == "server.auth.default_user_role" {
+			t.Errorf("omitted default_user_role must not add its key, got %v", keys)
+		}
+	}
+}
+
+func TestBuildSingleSectionDoc_AccessDefaultUserRole(t *testing.T) {
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Auth: &config.V1AuthConfig{DefaultUserRole: "viewer"},
+		},
+	}
+	doc, err := buildSingleSectionDoc(req, "access", nil)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	var access opsettings.AccessSettings
+	if err := json.Unmarshal(doc, &access); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role: want viewer, got %q", access.DefaultUserRole)
+	}
+}
+
+// AC5: saving only Default User Role persists it and the snapshot follows.
+func TestPutServerConfigDB_DefaultUserRoleOnly_PersistedAndSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("access doc default_user_role: want viewer, got %q", access.DefaultUserRole)
+	}
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := ops.Snapshot().DefaultUserRole; got != "viewer" {
+		t.Errorf("snapshot DefaultUserRole after refresh: want viewer, got %q", got)
+	}
+}
+
+// Invalid values are rejected by the access-section schema in DB mode.
+func TestPutServerConfigDB_DefaultUserRoleInvalid_422NothingWritten(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"superuser"}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if entries := settingsErrorEntries(t, rr); entries[0].Field != "server.auth.default_user_role" {
+		t.Errorf("field = %q, want server.auth.default_user_role", entries[0].Field)
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("existing value must be untouched, got %q", access.DefaultUserRole)
+	}
+}
+
+// §5.A item 3a: a PUT carrying only user_access_mode keeps the existing
+// default_user_role (the old wipe-on-save bug).
+func TestPutServerConfigDB_UserAccessModeOnly_PreservesDefaultUserRole(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["a@b.com"],"user_access_mode":"open","default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"invite_only"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.UserAccessMode != "invite_only" {
+		t.Errorf("user_access_mode: want invite_only, got %q", access.UserAccessMode)
+	}
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role must be preserved, got %q", access.DefaultUserRole)
+	}
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "a@b.com" {
+		t.Errorf("admin_emails must be preserved, got %v", access.AdminEmails)
+	}
+	if got := ops.Snapshot().DefaultUserRole; got != "viewer" {
+		t.Errorf("snapshot DefaultUserRole: want viewer, got %q", got)
+	}
+}
+
+// Explicit "" clears default_user_role; the live default falls back to member.
+func TestPutServerConfigDB_ExplicitEmptyDefaultUserRole_ClearsField(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"user_access_mode":"open","default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"open","default_user_role":""}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "" {
+		t.Errorf("default_user_role should be cleared by explicit \"\", got %q", access.DefaultUserRole)
+	}
+	if access.UserAccessMode != "open" {
+		t.Errorf("user_access_mode: want open, got %q", access.UserAccessMode)
+	}
+	ApplySnapshot(srv, ops.Snapshot())
+	if got := srv.DefaultUserRole(); got != "member" {
+		t.Errorf("DefaultUserRole() after clear: want member, got %q", got)
+	}
+}
+
+// With no access row yet, omitted fields carry forward from the effective
+// (bootstrap/file) snapshot, so the first UI save does not wipe a
+// file-seeded default_user_role.
+func TestPutServerConfigDB_NoAccessRow_CarriesBootstrapValues(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := newFileKoanf(t, map[string]interface{}{
+		"server.auth.default_user_role": "viewer",
+		"server.hub.admin_emails":       []interface{}{"file@admin.com"},
+	})
+	ops := NewOperationalSettings(fakeStore, fileK, emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"invite_only"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role should carry forward from bootstrap, got %q", access.DefaultUserRole)
+	}
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "file@admin.com" {
+		t.Errorf("admin_emails should carry forward from bootstrap, got %v", access.AdminEmails)
+	}
+	if access.UserAccessMode != "invite_only" {
+		t.Errorf("user_access_mode: want invite_only, got %q", access.UserAccessMode)
+	}
+}
+
+// A node-local env override is not baked into the shared access row when
+// the row is first created from the effective snapshot.
+func TestPutServerConfigDB_NoAccessRow_EnvOverrideNotBakedIn(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	envK := newEnvKoanf(t, map[string]interface{}{
+		"server.auth.default_user_role": "viewer",
+	})
+	bootstrapK := newFileKoanf(t, map[string]interface{}{
+		"server.auth.default_user_role": "viewer", // bootstrap merge includes SERVER env
+	})
+	ops := NewOperationalSettings(fakeStore, bootstrapK, envK)
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"open"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if access.DefaultUserRole != "" {
+		t.Errorf("env-overridden default_user_role must not be written to the shared row, got %q", access.DefaultUserRole)
+	}
+}
+
+// casRaceStore simulates another replica writing the access row between the
+// PUT handler's read of the current row and its write.
+type casRaceStore struct {
+	*fakeHubSettingStore
+	once sync.Once
+}
+
+func (c *casRaceStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	row, err := c.fakeHubSettingStore.GetHubSetting(ctx, section)
+	if err == nil && section == "access" {
+		snapshot := *row
+		c.once.Do(func() {
+			_, _ = c.UpsertHubSetting(ctx, "access",
+				json.RawMessage(`{"default_user_role":"member"}`), "other-replica", -1, "managed")
+		})
+		return &snapshot, nil
+	}
+	return row, err
+}
+
+// The carry-forward write is CAS-guarded on the revision it read, so a
+// concurrent access write yields 409 instead of a silent lost update.
+func TestPutServerConfigDB_AccessCarryForward_ConcurrentWrite409(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	fake.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
+	raceStore := &casRaceStore{fakeHubSettingStore: fake}
+	ops := NewOperationalSettings(raceStore, emptyKoanf(), emptyKoanf())
+	_, _ = ops.Refresh(context.Background())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"open"}}}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fake)
+	if access.DefaultUserRole != "member" || access.UserAccessMode != "" {
+		t.Errorf("the concurrent writer's row must stand, got %+v", access)
+	}
+}
+
+// GET returns the DB snapshot value, not the settings.yaml value.
+func TestGetServerConfigDB_DefaultUserRoleFromSnapshot(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "schema_version: \"1\"\nserver:\n  auth:\n    default_user_role: member\n"
+	if err := os.WriteFile(filepath.Join(tmpHome, ".scion", "settings.yaml"), []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Server == nil || resp.Server.Auth == nil {
+		t.Fatal("expected server.auth in response")
+	}
+	if resp.Server.Auth.DefaultUserRole != "viewer" {
+		t.Errorf("GET default_user_role: want viewer (DB), got %q", resp.Server.Auth.DefaultUserRole)
+	}
+}
+
+// casRaceNoRowStore reports the access row as missing on the first read and
+// then simulates another replica creating it before the PUT's write.
+type casRaceNoRowStore struct {
+	*fakeHubSettingStore
+	once sync.Once
+}
+
+func (c *casRaceNoRowStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	if section == "access" {
+		raced := false
+		c.once.Do(func() {
+			raced = true
+			_, _ = c.UpsertHubSetting(ctx, "access",
+				json.RawMessage(`{"default_user_role":"member"}`), "other-replica", -1, "managed")
+		})
+		if raced {
+			return nil, store.ErrNotFound
+		}
+	}
+	return c.fakeHubSettingStore.GetHubSetting(ctx, section)
+}
+
+// With no access row, the carry-forward write is create-only (revision 0),
+// so a concurrent insert yields 409 rather than being overwritten.
+func TestPutServerConfigDB_AccessCarryForward_NoRowConcurrentCreate409(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	raceStore := &casRaceNoRowStore{fakeHubSettingStore: fake}
+	ops := NewOperationalSettings(raceStore, emptyKoanf(), emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fake)
+	if access.DefaultUserRole != "member" {
+		t.Errorf("the concurrent creator's row must stand, got %+v", access)
+	}
+}
+
+// newEnvDBServer builds a postgres-mode server whose node has the given
+// SCION_SERVER_* overrides (flat opsettings keys) in its env koanf.
+func newEnvDBServer(t *testing.T, env map[string]interface{}) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), newEnvKoanf(t, env))
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+	return srv, fakeStore, ops
+}
+
+// du-rev-3a finding 1: a seeded access row carries node-local SCION_SERVER_*
+// values (bootstrap puts env on top). A PUT that omits such a field must not
+// pin the env value into the shared row as managed.
+func TestPutServerConfigDB_SeededRow_EnvOverriddenFieldNotCarried(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access",
+		json.RawMessage(`{"admin_emails":["env-only@x.com"],"user_access_mode":"open"}`), "seeded")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 0 {
+		t.Errorf("env-derived admin_emails must not be carried into the shared row, got %v", access.AdminEmails)
+	}
+	if access.UserAccessMode != "open" {
+		t.Errorf("non-env field user_access_mode must still be carried, got %q", access.UserAccessMode)
+	}
+	if access.DefaultUserRole != "viewer" {
+		t.Errorf("default_user_role: want viewer, got %q", access.DefaultUserRole)
+	}
+	fakeStore.mu.Lock()
+	origin := fakeStore.settings["access"].Origin
+	fakeStore.mu.Unlock()
+	if origin != "managed" {
+		t.Errorf("row origin after PUT: want managed, got %q", origin)
+	}
+}
+
+// An explicit request value for an env-overridden field is still written.
+func TestPutServerConfigDB_SeededRow_EnvOverriddenFieldExplicitWritten(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["env-only@x.com"]}`), "seeded")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"admin_emails":["chosen@x.com"]}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "chosen@x.com" {
+		t.Errorf("explicit admin_emails must be written, got %v", access.AdminEmails)
+	}
+}
+
+// A managed row's values came from an admin write, not env, so they are
+// carried forward even when the same key is env-overridden on this node.
+func TestPutServerConfigDB_ManagedRow_EnvOverriddenFieldCarried(t *testing.T) {
+	srv, fakeStore, ops := newEnvDBServer(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env-only@x.com"},
+	})
+	fakeStore.seedWithOrigin("access",
+		json.RawMessage(`{"admin_emails":["admin-set@x.com"],"user_access_mode":"open"}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"viewer"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	access, _ := readAccessRow(t, fakeStore)
+	if len(access.AdminEmails) != 1 || access.AdminEmails[0] != "admin-set@x.com" {
+		t.Errorf("managed admin_emails must be carried forward, got %v", access.AdminEmails)
+	}
+}
+
+func TestDropEnvOverriddenSectionKeys_Access(t *testing.T) {
+	base := map[string]json.RawMessage{
+		"admin_emails":       json.RawMessage(`["a@x.com"]`),
+		"user_access_mode":   json.RawMessage(`"open"`),
+		"default_user_role":  json.RawMessage(`"viewer"`),
+		"authorized_domains": json.RawMessage(`["x.com"]`),
+	}
+	dropEnvOverriddenSectionKeys(base, "access", []string{
+		"server.auth.default_user_role", "server.auth.authorized_domains", "telemetry.enabled",
+	})
+	if _, ok := base["default_user_role"]; ok {
+		t.Errorf("env-overridden default_user_role should be dropped, got %v", base)
+	}
+	if _, ok := base["authorized_domains"]; ok {
+		t.Errorf("env-overridden authorized_domains should be dropped, got %v", base)
+	}
+	if len(base) != 2 {
+		t.Errorf("other fields must be untouched, got %v", base)
+	}
+}
+
+// A shared_dir_size that is not a Kubernetes quantity is rejected on a
+// runtime entry and on a profile, naming the key; a valid one is accepted.
+func TestPutServerConfigDB_SharedDirSize(t *testing.T) {
+	tests := []struct {
+		name, body, wantKey string
+		wantCode            int
+	}{
+		{"runtime invalid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1TB"}}}`, "runtimes.gke.shared_dir_size", http.StatusUnprocessableEntity},
+		{"profile invalid", `{"profiles": {"big": {"runtime": "gke", "shared_dir_size": "lots"}}}`, "profiles.big.shared_dir_size", http.StatusUnprocessableEntity},
+		{"valid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1Ti", "shared_dir_storage_class": "standard-rwx"}},
+			"profiles": {"big": {"runtime": "gke", "shared_dir_size": "10Gi"}}}`, "", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+			if rr.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tt.wantCode, rr.Code, rr.Body.String())
+			}
+			if tt.wantKey != "" && !strings.Contains(rr.Body.String(), tt.wantKey) {
+				t.Errorf("error should name %s: %s", tt.wantKey, rr.Body.String())
+			}
+		})
+	}
+}
+
+// shared_dir_storage_backend is checked on a DB-mode write: an unknown
+// value is rejected by the schema, and "nfs" without a complete
+// server.shared_dir_storage.nfs block in the global settings is rejected
+// naming the key.
+func TestPutServerConfigDB_SharedDirStorageBackend_Invalid(t *testing.T) {
+	t.Run("unknown value", func(t *testing.T) {
+		sdsWriteGlobalNFSBlock(t)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backend": "ceph"}}}`), ops)
+		if rr.Code < 400 {
+			t.Fatalf("expected a 4xx, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("nfs without an nfs block", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"runtimes": {"k8s": {"type": "kubernetes", "shared_dir_storage_backend": "nfs"}}}`), ops)
+		if rr.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "runtimes.k8s.shared_dir_storage_backend") {
+			t.Errorf("error should name the key: %s", rr.Body.String())
+		}
+	})
+}
+
+// Unknown home storage values are rejected on a DB-mode write.
+func TestPutServerConfigDB_HomeStorage_Invalid(t *testing.T) {
+	for _, body := range []string{
+		`{"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "ceph"}}}`,
+		`{"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "node"}}}`,
+	} {
+		sdsWriteGlobalNFSBlock(t)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code < 400 {
+			t.Fatalf("%s: expected a 4xx, got %d: %s", body, rr.Code, rr.Body.String())
+		}
 	}
 }

@@ -15,75 +15,25 @@
 package cmd
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 )
 
+// TestGetAgentNames covers agent-name completion. The names come from the
+// current hub; agent directories on disk are not scanned.
 func TestGetAgentNames(t *testing.T) {
-	// Isolate from user environment
-	originalHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-
-	// Setup temp directory for project
-	tmpDir, err := os.MkdirTemp("", "scion-completion-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	projectDir := filepath.Join(tmpDir, ".scion")
-	agentsDir := filepath.Join(projectDir, "agents")
-	err = os.MkdirAll(agentsDir, 0755)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create some dummy agents
-	createAgent := func(name string) {
-		agentDir := filepath.Join(agentsDir, name)
-		err := os.MkdirAll(agentDir, 0755)
-		if err != nil {
-			t.Fatal(err)
-		}
-		f, err := os.Create(filepath.Join(agentDir, "scion-agent.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = f.Close()
-	}
-
-	createAgent("agent1")
-	createAgent("agent2")
-	createAgent("foobar")
-
-	// Create a directory that is NOT an agent
-	err = os.MkdirAll(filepath.Join(agentsDir, "not-an-agent"), 0755)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Mock command
-	cmd := &cobra.Command{}
-	cmd.Flags().String("project", "", "")
-	cmd.Flags().Bool("global", false, "")
-
-	// Test with explicit project path
-	if err := cmd.Flags().Set("project", projectDir); err != nil {
-		t.Fatal(err)
-	}
+	setupContextTest(t)
+	hub := agentListHub(t, "agent1", "agent2", "foobar")
+	saveTestContext(t, hub.URL, "")
+	cmd := completionCmd()
 
 	t.Run("Complete all agents", func(t *testing.T) {
 		names, _ := getAgentNames(cmd, []string{}, "")
 		assert.Contains(t, names, "agent1")
 		assert.Contains(t, names, "agent2")
 		assert.Contains(t, names, "foobar")
-		assert.NotContains(t, names, "not-an-agent")
 		assert.Len(t, names, 3)
 	})
 

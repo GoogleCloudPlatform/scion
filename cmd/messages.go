@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -37,7 +38,9 @@ var messagesCmd = &cobra.Command{
 	Short:   "View messages from agents",
 	Long: `View and manage messages sent to you by agents.
 
-Messages require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Messages go through the hub (start the local one with 'scion server start',
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>').
 
 Commands:
   scion messages                            List your unread messages
@@ -109,10 +112,12 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s\n", "ID", "AGENT", "TYPE", "TIME", "MESSAGE")
-	fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s\n",
-		"------------", "--------------", "--------------", "--------------------", "-------")
-	for _, m := range msgs {
+	fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s\n", "ID", "AGENT", "TYPE", "TIME", "MESSAGE")
+	fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s\n",
+		"------------", "--------------", "--------------", "----------------------", "-------")
+	label := newUserLabeler(ctx, client)
+	for i := range msgs {
+		m := &msgs[i]
 		shortID := m.ID
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
@@ -121,7 +126,7 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 		if len(agentDisplay) > 14 {
 			agentDisplay = agentDisplay[:11] + "..."
 		}
-		timeStr := m.CreatedAt.Format("2006-01-02 15:04")
+		timeStr := clitime.Format(m.CreatedAt, clitime.Minute)
 		msgText := m.Msg
 		if len(msgText) > 60 {
 			msgText = msgText[:57] + "..."
@@ -134,7 +139,12 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 			}
 			dispatchInfo += "]"
 		}
-		fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s%s\n",
+		// A message sent with an agent delegated credential names the
+		// user who authorized it; other messages print as before.
+		if authorizedBy := messageAuthorizedBy(m, label); authorizedBy != "" {
+			dispatchInfo += " [" + authorizedBy + "]"
+		}
+		fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s%s\n",
 			shortID, agentDisplay, truncate(m.Type, 14), timeStr, msgText, dispatchInfo)
 	}
 

@@ -1,0 +1,49 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package hubtestutil holds generic test helpers for pkg/hub and its
+// subpackages: deterministic test IDs, in-memory SQLite, the TestMain memory
+// and leak guards, hermetic git runners, small fault-injection and buffer
+// types, JSON response decoding, slog capture, koanf builders, small value
+// helpers, authz store seeders (users, role definitions, role bindings and
+// group members), permission-ceiling and provenance values, and a go/ast
+// receiver-name helper.
+//
+// Only test code imports it. It must never import pkg/hub
+// (no_hub_import_test.go enforces this), so that future pkg/hub/<area>
+// packages, whose tests cannot import pkg/hub, can use it. The pkg/hub tests
+// reach these helpers under their old names through
+// pkg/hub/zz_alias_hubtestutil_test.go.
+//
+// The declarations were moved verbatim from pkg/hub's *_helpers_test.go files
+// by hack/hubshard/extract export (family
+// hack/hubshard/extract/families/hubtestutil-wave1.txt); only the names that
+// pkg/hub uses were exported. A separate comment-only commit then updated
+// their doc comments to the exported names. The web chat store tests'
+// database helpers (chatdb.go) followed the same way (family
+// hack/hubshard/extract/families/hubtestutil-wave2-webchat.txt; pkg/hub
+// keeps their names through pkg/hub/zz_alias_hubtestutil_chatdb_test.go).
+// So did the generic helpers in basic.go, httpjson.go, koanf.go and
+// slogcapture.go (family
+// hack/hubshard/extract/families/hubtestutil-wave2.txt; pkg/hub keeps their
+// names through pkg/hub/zz_alias_hubtestutil_wave2_test.go).
+// So did the Server-free authz-family seeders and value helpers in
+// access_sqlite.go and authz_sqlite.go (family
+// hack/hubshard/extract/families/hubtestutil-wave3.txt; pkg/hub keeps their
+// names through pkg/hub/zz_alias_hubtestutil_wave3_test.go).
+//
+// Hand-written: OpenMigratedTestStore (teststore.go), a migrated test store
+// for area packages, and RunTestMain (runtestmain.go and
+// runtestmain_integration.go), the TestMain harness pkg/hub delegates to.
+package hubtestutil

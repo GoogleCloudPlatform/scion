@@ -71,7 +71,7 @@ func TestMetricStreamsTenHooksAcrossWindows(t *testing.T) {
 
 func TestHookTokenNamespaceIsSeparateFromNativeUsage(t *testing.T) {
 	s := newMetricStreams()
-	hook := testMetricResource("sciontool", hookMetricScope, "", "", testNumber("scion.hook.tokens.input", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, 1, 2, 5))
+	hook := testMetricResource("sciontool", hookMetricScope, "", "", testNumber("scion.usage.tokens", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, 1, 2, 5))
 	native := testMetricResource("native", "native.scope", "", "", testNumber("gen_ai.tokens.input", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 7))
 	for _, input := range []*metricpb.ResourceMetrics{hook, native} {
 		if err := s.add([]*metricpb.ResourceMetrics{input}); err != nil {
@@ -87,6 +87,16 @@ func TestHookTokenNamespaceIsSeparateFromNativeUsage(t *testing.T) {
 	}
 	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{oldHook}); err == nil || err.Error() != "unsupported normalized hook token name" {
 		t.Fatalf("old hook token name Cloud adapter = %v", err)
+	}
+	// scion.hook.tokens.* (design §3.5) is retired the same way gen_ai.tokens.*
+	// is: rejected on the hook scope, on both the streams admission path and
+	// the Cloud identity adapter.
+	retiredHook := testMetricResource("sciontool", hookMetricScope, "", "", testNumber("scion.hook.tokens.input", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, 5, 6, 1))
+	if err := s.add([]*metricpb.ResourceMetrics{retiredHook}); err == nil || err.Error() != "retired hook token name" {
+		t.Fatalf("retired hook token name admission = %v", err)
+	}
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{retiredHook}); err == nil || err.Error() != "retired hook token name" {
+		t.Fatalf("retired hook token name Cloud adapter = %v", err)
 	}
 	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{native}); err != nil {
 		t.Fatalf("genuine native token Cloud adapter = %v", err)

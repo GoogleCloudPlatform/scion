@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -31,20 +32,6 @@ import (
 // error caused the middleware to silently continue, admitting suspended users.
 // The fix returns 503 on non-ErrNotFound store errors. This test proves that
 // behavior.
-
-// stubUserStore implements the subset of store.UserStore needed by the JWT
-// auth middleware. It returns a configurable error from GetUser.
-type stubUserStore struct {
-	store.UserStore
-	getUser func(ctx context.Context, id string) (*store.User, error)
-}
-
-func (s *stubUserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if s.getUser != nil {
-		return s.getUser(ctx, id)
-	}
-	return nil, store.ErrNotFound
-}
 
 func TestJWTAuth_StoreError_Returns503(t *testing.T) {
 	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
@@ -186,7 +173,10 @@ func TestJWTAuth_ActiveUser_PassesThrough(t *testing.T) {
 	}
 }
 
-func TestJWTAuth_DeletedUser_PassesThroughToHandler(t *testing.T) {
+// TestJWTAuth_DeletedUser_Returns401 verifies that a hub-issued user JWT
+// whose subject has no user record in the store is rejected with 401
+// user_not_found, and the handler is never reached.
+func TestJWTAuth_DeletedUser_Returns401(t *testing.T) {
 	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	if err != nil {
 		t.Fatalf("failed to create user token service: %v", err)
@@ -211,9 +201,8 @@ func TestJWTAuth_DeletedUser_PassesThroughToHandler(t *testing.T) {
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)
-	var handlerReached bool
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlerReached = true
+		t.Error("handler must not be reached for a token with no user record")
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -223,13 +212,18 @@ func TestJWTAuth_DeletedUser_PassesThroughToHandler(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	// ErrNotFound (deleted user) falls through — downstream handlers will
-	// fail closed when the identity has no matching store record.
-	if !handlerReached {
-		t.Error("expected handler to be reached for deleted user (ErrNotFound)")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for deleted user, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for deleted user pass-through, got %d", rec.Code)
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeUserNotFound {
+		t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeUserNotFound)
+	}
+	if want := "invalid access token: no user record for this token"; errResp.Error.Message != want {
+		t.Errorf("error message = %q, want %q", errResp.Error.Message, want)
 	}
 }
 

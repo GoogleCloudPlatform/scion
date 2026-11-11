@@ -18,8 +18,12 @@ package entadapter
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"testing"
+	"time"
 
+	entskillversion "github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -38,7 +42,6 @@ func TestSkillStore_CreateAndGet(t *testing.T) {
 		Tags:        []string{"test", "example"},
 		Scope:       "global",
 		Status:      "active",
-		Visibility:  "private",
 	}
 
 	err := cs.CreateSkill(ctx, skill)
@@ -60,12 +63,11 @@ func TestSkillStore_GetBySlug(t *testing.T) {
 	ctx := context.Background()
 
 	skill := &store.Skill{
-		ID:         uuid.New().String(),
-		Name:       "my-skill",
-		Slug:       "my-skill",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     uuid.New().String(),
+		Name:   "my-skill",
+		Slug:   "my-skill",
+		Scope:  "global",
+		Status: "active",
 	}
 	require.NoError(t, cs.CreateSkill(ctx, skill))
 
@@ -82,12 +84,11 @@ func TestSkillStore_Update(t *testing.T) {
 	ctx := context.Background()
 
 	skill := &store.Skill{
-		ID:         uuid.New().String(),
-		Name:       "old-name",
-		Slug:       "old-name",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     uuid.New().String(),
+		Name:   "old-name",
+		Slug:   "old-name",
+		Scope:  "global",
+		Status: "active",
 	}
 	require.NoError(t, cs.CreateSkill(ctx, skill))
 
@@ -107,12 +108,11 @@ func TestSkillStore_DeleteSoftArchives(t *testing.T) {
 	ctx := context.Background()
 
 	skill := &store.Skill{
-		ID:         uuid.New().String(),
-		Name:       "to-delete",
-		Slug:       "to-delete",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     uuid.New().String(),
+		Name:   "to-delete",
+		Slug:   "to-delete",
+		Scope:  "global",
+		Status: "active",
 	}
 	require.NoError(t, cs.CreateSkill(ctx, skill))
 
@@ -137,12 +137,11 @@ func TestSkillStore_ListWithFilters(t *testing.T) {
 		{"gamma-skill", "project"},
 	} {
 		require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-			ID:         uuid.New().String(),
-			Name:       s.name,
-			Slug:       s.name,
-			Scope:      s.scope,
-			Status:     "active",
-			Visibility: "private",
+			ID:     uuid.New().String(),
+			Name:   s.name,
+			Slug:   s.name,
+			Scope:  s.scope,
+			Status: "active",
 		}))
 	}
 
@@ -163,18 +162,40 @@ func TestSkillStore_ListWithFilters(t *testing.T) {
 	assert.Equal(t, "alpha-skill", result.Items[0].Name)
 }
 
+// TestSkillStore_ListSkipTotalCountReturnsPageWithoutTotal pins that
+// ListSkills honours SkipTotalCount: the page and its cursor are the same,
+// and the total is left at zero instead of being counted.
+func TestSkillStore_ListSkipTotalCountReturnsPageWithoutTotal(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("skip-count-%d", i)
+		require.NoError(t, cs.CreateSkill(ctx, &store.Skill{ID: uuid.New().String(), Name: name, Slug: name, Scope: "global", Status: "active"}))
+	}
+
+	counted, err := cs.ListSkills(ctx, store.SkillFilter{}, store.ListOptions{Limit: 2})
+	require.NoError(t, err)
+	assert.Equal(t, 3, counted.TotalCount)
+
+	skipped, err := cs.ListSkills(ctx, store.SkillFilter{}, store.ListOptions{Limit: 2, SkipTotalCount: true})
+	require.NoError(t, err)
+	assert.Equal(t, 0, skipped.TotalCount)
+	require.Len(t, skipped.Items, 2)
+	assert.Equal(t, counted.Items, skipped.Items)
+	assert.Equal(t, counted.NextCursor, skipped.NextCursor)
+}
+
 func TestSkillStore_VersionCRUD(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "versioned-skill",
-		Slug:       "versioned-skill",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "versioned-skill",
+		Slug:   "versioned-skill",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	// Create version
@@ -208,7 +229,7 @@ func TestSkillStore_VersionCRUD(t *testing.T) {
 	assert.Equal(t, "sha256:abc123", got.ContentHash)
 
 	// List versions
-	result, err := cs.ListSkillVersions(ctx, skillID, store.ListOptions{})
+	result, err := cs.ListSkillVersions(ctx, skillID, store.SkillVersionFilter{}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
 }
@@ -219,12 +240,11 @@ func TestSkillStore_VersionImmutability(t *testing.T) {
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "immutable-test",
-		Slug:       "immutable-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "immutable-test",
+		Slug:   "immutable-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
@@ -250,12 +270,11 @@ func TestSkillStore_ResolveVersion_Latest(t *testing.T) {
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "resolve-test",
-		Slug:       "resolve-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "resolve-test",
+		Slug:   "resolve-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	// Create v1.0.0 and v1.1.0 as published
@@ -293,12 +312,11 @@ func TestSkillStore_ResolveVersion_Exact(t *testing.T) {
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "exact-test",
-		Slug:       "exact-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "exact-test",
+		Slug:   "exact-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
@@ -323,12 +341,11 @@ func TestSkillStore_ResolveVersion_Constraint(t *testing.T) {
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "constraint-test",
-		Slug:       "constraint-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "constraint-test",
+		Slug:   "constraint-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	for _, v := range []string{"1.0.0", "1.1.0", "1.2.0", "2.0.0"} {
@@ -362,12 +379,11 @@ func TestSkillStore_ResolveVersion_ContentHash(t *testing.T) {
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "hash-test",
-		Slug:       "hash-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "hash-test",
+		Slug:   "hash-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
@@ -386,18 +402,159 @@ func TestSkillStore_ResolveVersion_ContentHash(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestSkillStore_ResolveVersion_ContentHashOldestWins covers ptone/scion#6248:
+// when several versions share a content hash (the same files republished
+// under a new version number), a "sha256:" constraint resolves to the oldest
+// version (created ascending, then ID ascending), the same order as the hub's
+// v2 content-hash lookup. Each case inserts the expected winner second, so
+// insertion (rowid) order alone would return the wrong row. The test runs on
+// whichever backend enttest selects (SQLite by default, Postgres with
+// -tags integration).
+func TestSkillStore_ResolveVersion_ContentHashOldestWins(t *testing.T) {
+	const hash = "sha256:republished"
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	lowID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	highID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	type row struct {
+		id      uuid.UUID
+		version string
+		created time.Time
+	}
+	tests := []struct {
+		name string
+		rows []row // in insertion order
+		want uuid.UUID
+	}{
+		{
+			name: "older created wins",
+			rows: []row{
+				{id: lowID, version: "2.0.0", created: base.Add(time.Hour)},
+				{id: highID, version: "1.0.0", created: base},
+			},
+			want: highID,
+		},
+		{
+			name: "equal created, lower ID wins",
+			rows: []row{
+				{id: highID, version: "2.0.0", created: base},
+				{id: lowID, version: "1.0.0", created: base},
+			},
+			want: lowID,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := newTestCompositeStore(t)
+			ctx := context.Background()
+
+			skillID := uuid.New().String()
+			require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+				ID:     skillID,
+				Name:   "republished",
+				Slug:   "republished",
+				Scope:  "global",
+				Status: "active",
+			}))
+
+			// CreateSkillVersion stamps Created with time.Now(), so insert
+			// through the ent client to control it.
+			for _, r := range tt.rows {
+				_, err := cs.client.SkillVersion.Create().
+					SetID(r.id).
+					SetSkillID(skillID).
+					SetVersion(r.version).
+					SetStatus(entskillversion.StatusPublished).
+					SetContentHash(hash).
+					SetCreated(r.created).
+					Save(ctx)
+				require.NoError(t, err)
+			}
+
+			sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want.String(), sv.ID)
+		})
+	}
+}
+
+// TestSkillStore_ResolveVersion_ContentHashUsesStatusFilter: a "sha256:"
+// constraint considers the same statuses as the semver forms, published and
+// deprecated. It runs on whichever backend enttest selects (SQLite by default,
+// Postgres with -tags integration).
+func TestSkillStore_ResolveVersion_ContentHashUsesStatusFilter(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	skillID := uuid.New().String()
+	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+		ID:     skillID,
+		Name:   "hash-status",
+		Slug:   "hash-status",
+		Scope:  "global",
+		Status: "active",
+	}))
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	create := func(version string, status entskillversion.Status, hash string, created time.Time) uuid.UUID {
+		t.Helper()
+		e, err := cs.client.SkillVersion.Create().
+			SetSkillID(skillID).
+			SetVersion(version).
+			SetStatus(status).
+			SetContentHash(hash).
+			SetCreated(created).
+			Save(ctx)
+		require.NoError(t, err)
+		return e.ID
+	}
+
+	t.Run("each status with its own hash", func(t *testing.T) {
+		for i, tc := range []struct {
+			status   entskillversion.Status
+			resolves bool
+		}{
+			{entskillversion.StatusPublished, true},
+			{entskillversion.StatusDeprecated, true},
+			{entskillversion.StatusDraft, false},
+			{entskillversion.StatusArchived, false},
+		} {
+			hash := "sha256:status-" + string(tc.status)
+			id := create(fmt.Sprintf("1.%d.0", i), tc.status, hash, base)
+
+			sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+			if tc.resolves {
+				require.NoError(t, err, tc.status)
+				assert.Equal(t, id.String(), sv.ID, tc.status)
+			} else {
+				assert.ErrorIs(t, err, store.ErrNotFound, tc.status)
+			}
+		}
+	})
+
+	t.Run("older draft and archived versions sharing a hash are skipped", func(t *testing.T) {
+		const hash = "sha256:shared-status"
+		create("2.0.0", entskillversion.StatusDraft, hash, base)
+		create("2.1.0", entskillversion.StatusArchived, hash, base.Add(time.Minute))
+		published := create("2.2.0", entskillversion.StatusPublished, hash, base.Add(time.Hour))
+
+		sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+		require.NoError(t, err)
+		assert.Equal(t, published.String(), sv.ID)
+	})
+}
+
 func TestSkillStore_ResolveVersion_ExcludesDrafts(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "draft-test",
-		Slug:       "draft-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "draft-test",
+		Slug:   "draft-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	// Only a draft version exists
@@ -418,34 +575,31 @@ func TestSkillStore_UniqueSlugPerScope(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         uuid.New().String(),
-		Name:       "unique-test",
-		Slug:       "unique-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     uuid.New().String(),
+		Name:   "unique-test",
+		Slug:   "unique-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	// Duplicate slug in same scope should fail
 	err := cs.CreateSkill(ctx, &store.Skill{
-		ID:         uuid.New().String(),
-		Name:       "unique-test",
-		Slug:       "unique-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     uuid.New().String(),
+		Name:   "unique-test",
+		Slug:   "unique-test",
+		Scope:  "global",
+		Status: "active",
 	})
 	assert.Error(t, err)
 
 	// Same slug in different scope should succeed
 	err = cs.CreateSkill(ctx, &store.Skill{
-		ID:         uuid.New().String(),
-		Name:       "unique-test",
-		Slug:       "unique-test",
-		Scope:      "project",
-		ScopeID:    "proj-1",
-		Status:     "active",
-		Visibility: "private",
+		ID:      uuid.New().String(),
+		Name:    "unique-test",
+		Slug:    "unique-test",
+		Scope:   "project",
+		ScopeID: "proj-1",
+		Status:  "active",
 	})
 	assert.NoError(t, err)
 }
@@ -456,12 +610,11 @@ func TestSkillStore_DeleteSkillVersion(t *testing.T) {
 
 	skillID := uuid.New().String()
 	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
-		ID:         skillID,
-		Name:       "delete-version-test",
-		Slug:       "delete-version-test",
-		Scope:      "global",
-		Status:     "active",
-		Visibility: "private",
+		ID:     skillID,
+		Name:   "delete-version-test",
+		Slug:   "delete-version-test",
+		Scope:  "global",
+		Status: "active",
 	}))
 
 	// Create a draft version and delete it successfully.
@@ -505,4 +658,249 @@ func TestSkillStore_DeleteSkillVersion_NotFound(t *testing.T) {
 
 	err := cs.DeleteSkillVersion(ctx, uuid.New().String())
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestSkillStore_ListLimitClamped is part of the ptone/scion#1901 pagination
+// follow-up (uat PG-pagination-default50): before this fix, ListSkills
+// honored any caller-supplied limit outright and never emitted a cursor, so
+// a large limit could return the entire table in one page. The store must
+// clamp to maxSkillListLimit (200) and report a nextCursor when more rows
+// remain. This must fail against ac8fc87a6, which has no upper bound and
+// never sets NextCursor.
+func TestSkillStore_ListLimitClamped(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	const total = 210
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf("clamp-skill-%03d", i)
+		require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+			ID:     uuid.New().String(),
+			Name:   name,
+			Slug:   name,
+			Scope:  store.SkillScopeGlobal,
+			Status: "active",
+		}))
+	}
+
+	page, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active"}, store.ListOptions{Limit: 100000})
+	require.NoError(t, err)
+	assert.Equal(t, total, page.TotalCount)
+	assert.LessOrEqual(t, len(page.Items), 200, "a caller-supplied limit must be clamped to the documented max of 200")
+	assert.NotEmpty(t, page.NextCursor, "more than 200 matching rows exist, so a cursor must be returned")
+}
+
+// TestSkillStore_ListCursorWalkVisitsEveryRowOnce walks ListSkills with a
+// small page size and confirms every matching row is visited exactly once
+// with no duplicates and none left behind — the keyset cursor ListSkills
+// previously ignored entirely (opts.Cursor was never read and NextCursor
+// was never set, so ?cursor= was silently a no-op).
+func TestSkillStore_ListCursorWalkVisitsEveryRowOnce(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	const total = 23
+	want := make(map[string]bool, total)
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf("cursor-walk-skill-%03d", i)
+		skill := &store.Skill{
+			ID:     uuid.New().String(),
+			Name:   name,
+			Slug:   name,
+			Scope:  store.SkillScopeGlobal,
+			Status: "active",
+		}
+		require.NoError(t, cs.CreateSkill(ctx, skill))
+		want[skill.ID] = true
+	}
+
+	seen := make(map[string]bool, total)
+	cursor := ""
+	for pages := 0; ; pages++ {
+		require.LessOrEqual(t, pages, total, "cursor walk did not terminate")
+
+		page, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active"}, store.ListOptions{Limit: 5, Cursor: cursor})
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(page.Items), 5)
+
+		for _, it := range page.Items {
+			require.True(t, want[it.ID], "unexpected row %s in cursor walk", it.Name)
+			assert.False(t, seen[it.ID], "duplicate row %s across pages", it.Name)
+			seen[it.ID] = true
+		}
+
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	assert.Len(t, seen, total, "cursor walk must visit every matching row exactly once")
+}
+
+// TestSkillStore_ListMalformedCursorIsInvalidInput proves that a malformed
+// cursor is reported as store.ErrInvalidInput (which the hub handler maps to
+// HTTP 400), not a bare error that falls through to a 500. ptone/scion#1954:
+// decodeListCursor's error used to be wrapped in a plain fmt.Errorf with no
+// sentinel, so pkg/hub's writeErrorFromErr had nothing to match and returned
+// 500 for any caller sending a garbled cursor.
+func TestSkillStore_ListMalformedCursorIsInvalidInput(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	for _, cursor := range []string{
+		"not-base64-!!!",
+		"====",
+		base64.URLEncoding.EncodeToString([]byte("not-enough-parts")),
+		base64.URLEncoding.EncodeToString([]byte("not-a-timestamp,not-a-uuid")),
+	} {
+		_, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active"}, store.ListOptions{Limit: 5, Cursor: cursor})
+		require.Error(t, err, "cursor %q should fail to decode", cursor)
+		assert.ErrorIs(t, err, store.ErrInvalidInput, "cursor %q: expected store.ErrInvalidInput so the hub maps it to 400", cursor)
+	}
+}
+
+// TestSkillStore_ListAccessScope_UserAndProjectCombineWithScopeFilter is the
+// store-level regression for the read boundary pushed down in ListSkills:
+// hub-scoped skills are visible to anyone with IncludeHubScope, a
+// user-scoped skill only to its owning caller, a project-scoped skill only
+// to a caller whose project is in ProjectIDs, and none of that widens when
+// combined with the ordinary Scope/ScopeID query filters.
+func TestSkillStore_ListAccessScope_UserAndProjectCombineWithScopeFilter(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	const callerID = "caller-user"
+	const memberProjectID = "member-project"
+	const otherProjectID = "other-project"
+
+	mine := &store.Skill{ID: uuid.New().String(), Name: "mine-user-skill", Slug: "mine-user-skill",
+		Scope: store.SkillScopeUser, ScopeID: callerID, Status: "active"}
+	require.NoError(t, cs.CreateSkill(ctx, mine))
+
+	othersUser := &store.Skill{ID: uuid.New().String(), Name: "others-user-skill", Slug: "others-user-skill",
+		Scope: store.SkillScopeUser, ScopeID: "someone-else", Status: "active"}
+	require.NoError(t, cs.CreateSkill(ctx, othersUser))
+
+	myProject := &store.Skill{ID: uuid.New().String(), Name: "my-project-skill", Slug: "my-project-skill",
+		Scope: store.SkillScopeProject, ScopeID: memberProjectID, Status: "active"}
+	require.NoError(t, cs.CreateSkill(ctx, myProject))
+
+	otherProject := &store.Skill{ID: uuid.New().String(), Name: "other-project-skill", Slug: "other-project-skill",
+		Scope: store.SkillScopeProject, ScopeID: otherProjectID, Status: "active"}
+	require.NoError(t, cs.CreateSkill(ctx, otherProject))
+
+	global := &store.Skill{ID: uuid.New().String(), Name: "hub-catalog-skill", Slug: "hub-catalog-skill",
+		Scope: store.SkillScopeGlobal, Status: "active"}
+	require.NoError(t, cs.CreateSkill(ctx, global))
+
+	scope := &store.SkillAccessScope{
+		IncludeHubScope: true,
+		CallerID:        callerID,
+		ProjectIDs:      []string{memberProjectID},
+	}
+
+	all, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active", AccessScope: scope}, store.ListOptions{})
+	require.NoError(t, err)
+	gotIDs := make(map[string]bool, len(all.Items))
+	for _, it := range all.Items {
+		gotIDs[it.ID] = true
+	}
+	assert.True(t, gotIDs[mine.ID], "caller's own user-scoped skill must be visible")
+	assert.True(t, gotIDs[myProject.ID], "caller's member-project skill must be visible")
+	assert.True(t, gotIDs[global.ID], "hub-scoped skill must be visible")
+	assert.False(t, gotIDs[othersUser.ID], "another user's user-scoped skill must not be visible")
+	assert.False(t, gotIDs[otherProject.ID], "a non-member project's skill must not be visible")
+	assert.Equal(t, 3, all.TotalCount)
+
+	// Combining with an explicit ?scope=user filter (no scopeId) must AND
+	// with the access scope, not widen it: only the caller's own skill.
+	userOnly, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active", Scope: store.SkillScopeUser, AccessScope: scope}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, userOnly.Items, 1)
+	assert.Equal(t, mine.ID, userOnly.Items[0].ID)
+}
+
+// TestSkillStore_ListSkillVersions_StatusFilter: a status filter restricts
+// the rows and TotalCount in the query, before LIMIT; an empty filter lists
+// every status; an unknown status is invalid input. It runs on whichever
+// backend enttest selects (SQLite by default, Postgres with -tags
+// integration).
+func TestSkillStore_ListSkillVersions_StatusFilter(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	skillID := uuid.New().String()
+	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+		ID:     skillID,
+		Name:   "list-status",
+		Slug:   "list-status",
+		Scope:  "global",
+		Status: "active",
+	}))
+
+	// Newest first in the list, so the filtered-out rows are created last
+	// and would fill a small page if the filter ran after LIMIT.
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for i, r := range []struct {
+		version string
+		status  entskillversion.Status
+	}{
+		{"1.0.0", entskillversion.StatusPublished},
+		{"1.1.0", entskillversion.StatusDeprecated},
+		{"1.2.0", entskillversion.StatusDraft},
+		{"1.3.0", entskillversion.StatusArchived},
+	} {
+		_, err := cs.client.SkillVersion.Create().
+			SetSkillID(skillID).
+			SetVersion(r.version).
+			SetStatus(r.status).
+			SetCreated(base.Add(time.Duration(i) * time.Hour)).
+			Save(ctx)
+		require.NoError(t, err)
+	}
+
+	versions := func(items []store.SkillVersion) []string {
+		out := make([]string, 0, len(items))
+		for _, sv := range items {
+			out = append(out, sv.Version)
+		}
+		return out
+	}
+
+	t.Run("no filter", func(t *testing.T) {
+		result, err := cs.ListSkillVersions(ctx, skillID, store.SkillVersionFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 4, result.TotalCount)
+		assert.Equal(t, []string{"1.3.0", "1.2.0", "1.1.0", "1.0.0"}, versions(result.Items))
+	})
+
+	t.Run("published and deprecated", func(t *testing.T) {
+		filter := store.SkillVersionFilter{Statuses: []string{
+			store.SkillVersionStatusPublished, store.SkillVersionStatusDeprecated,
+		}}
+		result, err := cs.ListSkillVersions(ctx, skillID, filter, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount)
+		assert.Equal(t, []string{"1.1.0", "1.0.0"}, versions(result.Items))
+
+		result, err = cs.ListSkillVersions(ctx, skillID, filter, store.ListOptions{Limit: 2})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount)
+		assert.Equal(t, []string{"1.1.0", "1.0.0"}, versions(result.Items))
+	})
+
+	t.Run("single status", func(t *testing.T) {
+		result, err := cs.ListSkillVersions(ctx, skillID,
+			store.SkillVersionFilter{Statuses: []string{store.SkillVersionStatusDraft}}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.TotalCount)
+		assert.Equal(t, []string{"1.2.0"}, versions(result.Items))
+	})
+
+	t.Run("unknown status", func(t *testing.T) {
+		_, err := cs.ListSkillVersions(ctx, skillID,
+			store.SkillVersionFilter{Statuses: []string{"bogus"}}, store.ListOptions{})
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+	})
 }

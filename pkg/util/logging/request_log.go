@@ -61,6 +61,26 @@ type RequestMeta struct {
 	RequestID string
 	TraceID   string
 	Component string
+
+	// AuthType and AuthAttrs are set by the auth layer via SetRequestAuth
+	// once it has classified (or rejected) the credential. Auth calls
+	// SetRequestAuth on this shared, pointer-identical RequestMeta —
+	// reachable from every context derived from the one RequestLogMiddleware
+	// installs — and RequestLogMiddleware reads it back after next returns,
+	// so a request auth rejects outright is logged too.
+	AuthType  string
+	AuthAttrs []slog.Attr
+
+	// deferToNested is set when the RequestLogMiddleware that installed this
+	// record was built with DeferToNestedRequestLog. nestedLogged is set by
+	// a RequestLogMiddleware nested directly inside that one once this
+	// request's line has been written (by it, or below it through loggers
+	// that deferred in turn), so the deferring logger writes none.
+	// nestedSlowLogged is set the same way once a slow-request line has
+	// been written. All three are read and written under mu.
+	deferToNested    bool
+	nestedLogged     bool
+	nestedSlowLogged bool
 }
 
 // InstrumentedResponseWriter captures status code and bytes written.
@@ -157,6 +177,28 @@ func SetRequestBrokerID(ctx context.Context, brokerID string) {
 	}
 }
 
+// SetRequestAuth records the outcome of authentication for RequestLogMiddleware
+// to render once the request completes: the coarse auth mechanism (authType,
+// e.g. "uat", "agent", "jwt") plus any additional attributes the caller wants
+// attached to the request-log line (for example a user_id, principal_kind, or
+// a "credential" group). Logging does not interpret attrs — callers control
+// exactly what is rendered, and nothing is logged if SetRequestAuth is never
+// called (e.g. a request with no credential at all).
+//
+// Safe to call more than once per request (e.g. once per credential branch as
+// auth narrows down the token type); the last call before the handler chain
+// returns wins. See RequestMeta.AuthType/AuthAttrs for why this indirection
+// through a shared, mutable, pointer-identity struct is necessary once
+// RequestLogMiddleware wraps auth instead of being wrapped by it.
+func SetRequestAuth(ctx context.Context, authType string, attrs ...slog.Attr) {
+	if meta := RequestMetaFromContext(ctx); meta != nil {
+		meta.mu.Lock()
+		meta.AuthType = authType
+		meta.AuthAttrs = attrs
+		meta.mu.Unlock()
+	}
+}
+
 // RequestLoggerConfig configures the dedicated request logger.
 type RequestLoggerConfig struct {
 	FilePath    string         // From SCION_SERVER_REQUEST_LOG_PATH
@@ -168,7 +210,7 @@ type RequestLoggerConfig struct {
 	HubID       string         // Stable unique hub instance ID for log labels
 	UseGCP      bool           // Format output as GCP-compatible JSON
 	Foreground  bool           // If true, suppress stdout output
-	Level       slog.Level
+	Level       slog.Leveler   // Floor, consulted per record (nil = info)
 }
 
 // NewRequestLogger creates a dedicated request logger with the configured outputs.
@@ -201,17 +243,17 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
-			_ = ch.logger.Flush()
+			// Shutdown flush failure: counted (writer=cloud,
+			// reason=flush_error); still no stderr line here.
+			if err := ch.logger.Flush(); err != nil {
+				CloudWriter().RecordFailure(CloudReasonFlushError)
+			}
 		})
 	}
 
 	// Stdout fallback: only if NOT foreground AND no other targets configured
 	if !cfg.Foreground && len(handlers) == 0 {
-		if cfg.UseGCP {
-			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
-		} else {
-			handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts))
-		}
+		handlers = append(handlers, newStdoutHandler(stdoutWriter(), opts, cfg.Component, cfg.HubName, cfg.UseGCP, false))
 	}
 
 	// If no handlers at all (foreground with no file/cloud), use discard
@@ -237,7 +279,7 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 
 // PathPattern defines a URL pattern for extracting project/agent IDs.
 type PathPattern struct {
-	Prefix     string // e.g. "/api/v1/groves/"
+	Prefix     string // e.g. "/api/v1/projects/"
 	ProjectIdx int    // segment index after prefix for project ID (-1 if N/A)
 	AgentIdx   int    // segment index after prefix for agent ID (-1 if N/A)
 }
@@ -246,7 +288,6 @@ type PathPattern struct {
 func HubPathPatterns() []PathPattern {
 	return []PathPattern{
 		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }
@@ -255,7 +296,6 @@ func HubPathPatterns() []PathPattern {
 func BrokerPathPatterns() []PathPattern {
 	return []PathPattern{
 		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }
@@ -285,18 +325,49 @@ func extractIDsFromPath(path string, patterns []PathPattern) (projectID, agentID
 // request is logged as slow when no explicit threshold is configured.
 const DefaultSlowRequestThreshold = 10 * time.Second
 
+// RequestLogOption configures RequestLogMiddleware.
+type RequestLogOption func(*requestLogOptions)
+
+type requestLogOptions struct {
+	deferToNested bool
+}
+
+// DeferToNestedRequestLog makes a RequestLogMiddleware write no line for a
+// request that a RequestLogMiddleware nested directly inside it has already
+// logged (itself, or below it through loggers that deferred in turn). Use
+// it on an outer chain that mounts a handler with its own request logger
+// (the web server mounting the Hub API), so such a request is logged once,
+// by the inner logger, which sees the inner chain's auth attribution. A
+// request the outer chain answers without reaching an inner logger is
+// still logged by the outer one. The deferring logger still writes the
+// slow-request line when its own elapsed time is over its threshold and no
+// nested logger wrote one, so time spent in the outer chain is not lost.
+// Only the logger built with this option is ever suppressed: two nested
+// loggers without it both log, each with its own request ID.
+func DeferToNestedRequestLog() RequestLogOption {
+	return func(o *requestLogOptions) { o.deferToNested = true }
+}
+
 // RequestLogMiddleware creates HTTP middleware that logs each request
 // to the dedicated request logger using the HttpRequest format.
 // slowThreshold controls when a request is logged as slow; zero uses
 // DefaultSlowRequestThreshold. Streaming responses (Content-Type:
 // text/event-stream) are exempt from the slow request check.
-func RequestLogMiddleware(logger *slog.Logger, component string, patterns []PathPattern, slowThreshold time.Duration) func(http.Handler) http.Handler {
+func RequestLogMiddleware(logger *slog.Logger, component string, patterns []PathPattern, slowThreshold time.Duration, opts ...RequestLogOption) func(http.Handler) http.Handler {
 	if slowThreshold <= 0 {
 		slowThreshold = DefaultSlowRequestThreshold
+	}
+	var o requestLogOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+
+			// The record of the request logger directly enclosing this
+			// one, if any; told below when this line is written.
+			enclosing := RequestMetaFromContext(r.Context())
 
 			// Extract and normalize trace ID from headers.
 			traceID := ExtractTraceIDFromHeaders(r)
@@ -314,12 +385,16 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				RequestID: requestID,
 				TraceID:   traceID,
 				Component: component,
+
+				deferToNested: o.deferToNested,
 			}
 			ctx := ContextWithRequestMeta(r.Context(), meta)
 			r = r.WithContext(ctx)
 
-			// Read auth type from context (set by auth middleware before this point)
-			authType, _ := r.Context().Value(AuthTypeKey{}).(string)
+			// Echo the request ID so a caller and this line can be joined
+			// without parsing the body, and so APIError responses that choose
+			// to surface it (writeErrorFromErr) agree with what got logged.
+			w.Header().Set("X-Request-ID", requestID)
 
 			// Wrap response writer
 			wrapped := &InstrumentedResponseWriter{
@@ -327,44 +402,66 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				statusCode:     http.StatusOK,
 			}
 
-			next.ServeHTTP(wrapped, r)
+			aborted := ServeCatchingAbort(next, wrapped, r)
 
-			// Read final metadata (handlers may have enriched it)
+			// Read final metadata (handlers/auth may have enriched it).
+			// auth_type and its attributes are read here, after next returns,
+			// so that a request auth rejects outright (writing a response and
+			// never calling next further down) still reaches this point with
+			// wrapped.statusCode set to whatever auth wrote, and with
+			// AuthType/AuthAttrs set if auth called SetRequestAuth before
+			// rejecting. A request with no credential at all leaves AuthType
+			// empty.
 			meta.mu.Lock()
 			finalProjectID := meta.ProjectID
 			finalAgentID := meta.AgentID
 			finalBrokerID := meta.BrokerID
+			finalAuthType := meta.AuthType
+			finalAuthAttrs := append([]slog.Attr(nil), meta.AuthAttrs...)
+			nestedLogged := meta.nestedLogged
+			slowLogged := meta.nestedSlowLogged
 			meta.mu.Unlock()
 
-			finalAuthType := authType
-
 			duration := time.Since(start)
+
+			// Log slow requests via the default logger, exempting streaming
+			// responses. This runs for a deferring logger too, so time spent
+			// outside a nested logger still counts; a request a nested logger
+			// already logged as slow gets no second slow-request line.
+			contentType := strings.ToLower(wrapped.Header().Get("Content-Type"))
+			isStreaming := strings.HasPrefix(contentType, "text/event-stream")
+			isUpgrade := r.Header.Get("Upgrade") != ""
+			if !isStreaming && !isUpgrade && duration > slowThreshold && !slowLogged {
+				slog.Info("Slow request",
+					slog.String("method", r.Method),
+					slog.String("path", RequestPath(r)),
+					slog.Duration("elapsed", duration),
+					slog.Int("status", wrapped.statusCode),
+				)
+				slowLogged = true
+			}
+
+			// A nested request logger already wrote this request's line.
+			if nestedLogged {
+				tellEnclosingLogger(enclosing, slowLogged)
+				if aborted {
+					panic(http.ErrAbortHandler)
+				}
+				return
+			}
 
 			// Build HttpRequest struct
 			httpReq := HttpRequest{
 				RequestMethod: r.Method,
-				RequestUrl:    r.URL.String(),
+				RequestUrl:    RedactURL(r.URL),
 				RequestSize:   r.ContentLength,
 				Status:        wrapped.statusCode,
 				ResponseSize:  wrapped.bytesWritten,
 				UserAgent:     r.UserAgent(),
 				RemoteIp:      r.RemoteAddr,
-				Referer:       r.Referer(),
+				Referer:       RedactReferer(r.Referer()),
 				Latency:       fmt.Sprintf("%.3fs", duration.Seconds()),
 				Protocol:      r.Proto,
-			}
-
-			// Log slow requests via the default logger, exempting streaming responses.
-			contentType := strings.ToLower(wrapped.Header().Get("Content-Type"))
-			isStreaming := strings.HasPrefix(contentType, "text/event-stream")
-			isUpgrade := r.Header.Get("Upgrade") != ""
-			if !isStreaming && !isUpgrade && duration > slowThreshold {
-				slog.Info("Slow request",
-					slog.String("method", r.Method),
-					slog.String("path", r.URL.Path),
-					slog.Duration("elapsed", duration),
-					slog.Int("status", wrapped.statusCode),
-				)
 			}
 
 			// Determine log level
@@ -401,7 +498,66 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				attrs = append(attrs, slog.String(AttrTraceID, traceID))
 			}
 
+			// E.2a: principal/credential attributes set by auth via
+			// SetRequestAuth (e.g. user_id, principal_kind, a "credential"
+			// decoration group). Emitted only when auth actually set them.
+			attrs = append(attrs, finalAuthAttrs...)
+			if aborted {
+				attrs = append(attrs, slog.Bool(AttrAborted, true))
+			}
+
 			logger.LogAttrs(ctx, level, "", attrs...)
+			tellEnclosingLogger(enclosing, slowLogged)
+			if aborted {
+				panic(http.ErrAbortHandler)
+			}
 		})
 	}
+}
+
+// tellEnclosingLogger records on enclosing, the record of the request
+// logger directly enclosing this one (nil if none), that this request's
+// line has been written and, if slowLogged, that a slow-request line has
+// been too. Only a logger built with DeferToNestedRequestLog is told.
+func tellEnclosingLogger(enclosing *RequestMeta, slowLogged bool) {
+	if enclosing == nil {
+		return
+	}
+	enclosing.mu.Lock()
+	if enclosing.deferToNested {
+		enclosing.nestedLogged = true
+		if slowLogged {
+			enclosing.nestedSlowLogged = true
+		}
+	}
+	enclosing.mu.Unlock()
+}
+
+// AttrAborted marks a request line whose response was aborted mid-way
+// (the handler panicked with http.ErrAbortHandler).
+const AttrAborted = "aborted"
+
+// ServeCatchingAbort calls next.ServeHTTP and reports whether it ended by
+// panicking with http.ErrAbortHandler, the net/http signal to cut the
+// client connection without completing the response (a proxied stream
+// that lost its upstream after the headers went out). A request logger
+// uses it so the aborted request is still logged; it must then panic
+// with http.ErrAbortHandler itself so the server still aborts the
+// response. Any other panic propagates unchanged.
+func ServeCatchingAbort(next http.Handler, w http.ResponseWriter, r *http.Request) (aborted bool) {
+	defer func() {
+		if !aborted {
+			return
+		}
+		switch p := recover(); p {
+		case nil: // runtime.Goexit: nothing to recover; unwinding continues and the caller never resumes
+		case http.ErrAbortHandler: // compared by identity, as net/http does
+		default:
+			panic(p)
+		}
+	}()
+	aborted = true
+	next.ServeHTTP(w, r)
+	aborted = false
+	return false
 }

@@ -22,6 +22,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -73,6 +75,11 @@ func NewProjectDeletionService(
 type ProjectDeleteRequest struct {
 	ProjectID string
 	Actor     UserIdentity
+	// Force deletes the project even while it has agents whose runtime
+	// deletion is not confirmed (see checkProjectAgentsDeletedTx): their
+	// records are removed with the project and their runtime deletes are
+	// dispatched best-effort afterwards.
+	Force bool
 }
 
 // ProjectDeleteDecision captures the authorization/governance outcome.
@@ -81,12 +88,21 @@ type ProjectDeleteDecision struct {
 	DenialCode string
 	Reason     string
 	HTTPStatus int
+	// Details carries structured denial context. The credential refusal
+	// sets the session-only reason fields (session_only_gate.go), and the
+	// 409 refusal while agents remain sets agents and truncated
+	// (project_delete_agents_guard.go); every other denial leaves it nil.
+	Details map[string]interface{}
 }
 
 // ProjectDeleteResult is the outcome of a successful project deletion.
 type ProjectDeleteResult struct {
 	Project        *store.Project // The project record before deletion.
 	CascadeSummary CascadeSummary // Summary of cascade-deleted state.
+	// PendingSecretValueRefs are the held values of the deleted pending
+	// secrets, for the caller to release with the secret backend after
+	// the commit.
+	PendingSecretValueRefs []string
 }
 
 // CascadeSummary records what was cascade-deleted in the transaction.
@@ -106,6 +122,24 @@ type CascadeSummary struct {
 	PreStartHooks     int `json:"pre_start_hooks_deleted"`
 	ProjectProviders  int `json:"project_providers_deleted"`
 	ProjectSyncStates int `json:"project_sync_states_deleted"`
+	DelegationEdges   int `json:"delegation_edges_deactivated"`
+	// ProjectVisitorRules is the number of project visitor rules deleted;
+	// their bindings and exclusions are deleted with them.
+	ProjectVisitorRules int `json:"project_visitor_rules_deleted"`
+	// DelegationEdgeOpID is the operation ID stamped on every edge
+	// deactivated by the delete; empty when no edge was deactivated.
+	DelegationEdgeOpID string `json:"delegation_edge_op_id,omitempty"`
+	// AgentDelegationGrants is the number of agent delegation grants of
+	// the project's agents revoked by the delete; their credentials are
+	// revoked with them.
+	AgentDelegationGrants int `json:"agent_delegation_grants_revoked"`
+	// PendingSecrets is the number of pending secrets written from the
+	// project that were deleted.
+	PendingSecrets int `json:"pending_secrets_deleted"`
+
+	// pendingSecretValueRefs are the value refs of the deleted pending
+	// secrets (never serialized).
+	pendingSecretValueRefs []string
 }
 
 // ---------------------------------------------------------------------------
@@ -136,15 +170,18 @@ const (
 //
 // The method:
 //  1. Resolves the target project (fail-closed on not-found).
-//  2. Checks base permission (project.delete).
-//  3. Enforces ownership/ancestry governance.
-//  4. Checks actor status (not suspended).
+//  2. Checks actor status (not suspended).
+//  3. Checks base permission (project.delete).
+//  4. Enforces ownership/ancestry governance.
 //  5. Checks credential ceiling (session JWT only, no scoped UAT/agent).
 //  6. Acquires the project membership lock for serialization.
 //  7. Re-evaluates authority under lock (TOCTOU closure).
-//  8. Performs security-relevant cascading deletes within the transaction.
-//  9. Deletes the project row.
-//  10. Writes the atomic audit record.
+//  8. Locks the project's agent rows (PostgreSQL: FOR UPDATE, by ID) and,
+//     unless req.Force, refuses with 409 while any agent's runtime
+//     deletion is not confirmed.
+//  9. Performs security-relevant cascading deletes within the transaction.
+//  10. Deletes the project row.
+//  11. Writes the atomic audit record.
 //
 // Returns (result, nil) on success, (nil, decision) on denial.
 func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDeleteRequest) (*ProjectDeleteResult, *ProjectDeleteDecision) {
@@ -173,7 +210,14 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// 2. Check base permission (project.delete) via the authz evaluator.
+	// 2. Check actor status — suspended users cannot delete projects.
+	// Runs before the permission check, which denies every account that is
+	// not active, so a suspended actor keeps its own denial code.
+	if err := svc.checkActorStatus(ctx, req.Actor.ID()); err != nil {
+		return nil, err
+	}
+
+	// 3. Check base permission (project.delete) via the authz evaluator.
 	if svc.authz != nil {
 		resource := Resource{
 			Type:    "project",
@@ -192,7 +236,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// 3. Enforce ownership/ancestry governance.
+	// 4. Enforce ownership/ancestry governance.
 	// Project deletion requires the actor to be:
 	//   - A direct project owner (active binding), OR
 	//   - A super-admin (system-scoped)
@@ -203,14 +247,10 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		return nil, &govDecision
 	}
 
-	// 4. Check actor status — suspended users cannot delete projects.
-	if err := svc.checkActorStatus(ctx, req.Actor.ID()); err != nil {
-		return nil, err
-	}
-
 	// 5. Credential ceiling — project deletion is restricted to full session.
 	// Scoped UATs and agent JWTs are not admitted.
 	// Dev credentials (local development mode) are equivalent to interactive.
+	// Session-only with the IRREVERSIBLE_CASCADE reason.
 	credential := GetCredentialContextFromContext(ctx)
 	if credential.Kind != "" && credential.Kind != CredentialKindInteractive && credential.Kind != CredentialKindDev {
 		return nil, &ProjectDeleteDecision{
@@ -218,6 +258,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			DenialCode: ErrCodeCredentialInsufficient,
 			Reason:     "project deletion requires a full session credential",
 			HTTPStatus: 403,
+			Details:    sessionOnlyDenialDetails(authzop.ReasonIrreversibleCascade),
 		}
 	}
 
@@ -232,7 +273,8 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		isSuperAdmin = svc.authz.IsSystemAdmin(ctx, req.Actor.ID())
 	}
 
-	// 6–10. Transactional phase: lock, re-check, cascade, delete, audit.
+	// 6–11. Transactional phase: lock, re-check, lock agents, cascade,
+	// delete, audit.
 	var result *ProjectDeleteResult
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// 6. Acquire project-scoped serialization lock.
@@ -247,21 +289,52 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		// is re-evaluated from the transactional store.
 		reGov := svc.checkDeletionGovernanceFromStore(ctx, tx, req, isSuperAdmin)
 		if !reGov.Allowed {
-			return fmt.Errorf("governance:%d:%s", reGov.HTTPStatus, reGov.Reason)
+			// The deletion decision travels in a MembershipDecision on
+			// purpose: ProjectDeleteDecision has exactly the four fields
+			// below, and all four are copied back after WithTx. DenialCode
+			// is hard-coded to ErrCodeProjectDeleteForbidden so the response
+			// stays byte-identical to the pre-change behaviour.
+			return asGovernanceDenial(MembershipDecision{
+				Allowed:    false,
+				DenialCode: ErrCodeProjectDeleteForbidden,
+				Reason:     reGov.Reason,
+				HTTPStatus: reGov.HTTPStatus,
+			})
 		}
 
-		// 8. Cascade security-relevant state within the transaction.
+		// 8. Lock the project's agent rows (PostgreSQL: FOR UPDATE, in
+		// agent-ID order) before the cascade deletes any group or
+		// membership. A project-scoped group can contain agent memberships,
+		// and purge, finalize-hard and DeleteAgent lock the agent before
+		// deleting its memberships; deleting memberships first here would
+		// invert that order and could deadlock (40P01). DeleteProject below
+		// re-locks the same rows in the same order, which is a no-op. A
+		// concurrent user delete locks the groups the user owns before the
+		// user's memberships (DeleteGroupMembershipsForUser), matching the
+		// cascade's group-row-then-memberships order below.
+		if err := tx.LockProjectAgents(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project agents for deletion: %w", err)
+		}
+		// 8b. Refuse while agents remain whose runtime deletion is not
+		// confirmed, unless forced (ptone/scion#4811).
+		if !req.Force {
+			if err := checkProjectAgentsDeletedTx(ctx, tx, req.ProjectID); err != nil {
+				return err
+			}
+		}
+
+		// 9. Cascade security-relevant state within the transaction.
 		cascadeSummary, err := svc.cascadeSecurityState(ctx, tx, req.ProjectID)
 		if err != nil {
 			return fmt.Errorf("cascade security state: %w", err)
 		}
 
-		// 9. Delete the project row.
+		// 10. Delete the project row.
 		if err := tx.DeleteProject(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("delete project: %w", err)
 		}
 
-		// 10. Write atomic audit record with before and after state.
+		// 11. Write atomic audit record with before and after state.
 		afterJSON, _ := json.Marshal(cascadeSummary)
 		auditRecord := &store.MutationAuditRecord{
 			MutationType: "project_delete",
@@ -280,20 +353,26 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 
 		result = &ProjectDeleteResult{
-			Project:        project,
-			CascadeSummary: cascadeSummary,
+			Project:                project,
+			CascadeSummary:         cascadeSummary,
+			PendingSecretValueRefs: cascadeSummary.pendingSecretValueRefs,
 		}
 		return nil
 	})
 
 	if txErr != nil {
-		// Parse governance denial from tx error.
-		if status, code, reason, ok := parseGovernanceError(txErr); ok {
+		var agentsErr *projectHasAgentsDeleteError
+		if errors.As(txErr, &agentsErr) {
+			return nil, agentsErr.decision()
+		}
+		// Governance denial re-evaluated under lock.
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
 			return nil, &ProjectDeleteDecision{
 				Allowed:    false,
-				DenialCode: code,
-				Reason:     reason,
-				HTTPStatus: status,
+				DenialCode: gdErr.decision.DenialCode,
+				Reason:     gdErr.decision.Reason,
+				HTTPStatus: gdErr.decision.HTTPStatus,
 			}
 		}
 		svc.logger.Error("project deletion transaction failed",
@@ -306,6 +385,12 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
+	// The project's storage (its tree on the shared project storage, the
+	// legacy slug-keyed trees naming it, and its object-storage prefix) is
+	// removed by the caller after this commit, best-effort and audited
+	// (Server.startProjectStorageCleanup, ptone/scion#5835): the DB row is
+	// the source of truth for "the project is deleted", and a storage
+	// failure never rolls it back.
 	return result, nil
 }
 
@@ -367,6 +452,15 @@ func (svc *ProjectDeletionService) checkDeletionGovernanceFromStore(ctx context.
 			HTTPStatus: 500,
 		}
 	}
+	// Unclamped read (the tx store): apply the test identity clamps.
+	if bindings, err = clampBindingsForUser(ctx, tx, svc.authz, actorID, bindings); err != nil {
+		return ProjectDeleteDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeProjectDeleteForbidden,
+			Reason:     "authority lookup failed under lock",
+			HTTPStatus: 500,
+		}
+	}
 
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeProject || b.ScopeID != req.ProjectID {
@@ -379,7 +473,7 @@ func (svc *ProjectDeletionService) checkDeletionGovernanceFromStore(ctx context.
 		if rdErr != nil {
 			continue
 		}
-		if rd.Name == store.ProjectRoleOwner {
+		if builtInRoleName(rd) == store.ProjectRoleOwner {
 			return ProjectDeleteDecision{Allowed: true}
 		}
 	}
@@ -443,6 +537,20 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		}
 	}
 
+	// 1b. Project visitor rules — each rule, with the bindings it created
+	// and its exclusions. The rule rows have no foreign key to the project;
+	// a rule left behind would bind matching visitors at the deleted
+	// project's ID again on their next request. Bindings are deleted here
+	// before the rules are locked, while removing or changing one rule
+	// locks the rule before its bindings; both take the project row lock
+	// first (Delete step 6, purgeFixtureProject), so they do not run
+	// interleaved.
+	if n, err := tx.DeleteProjectVisitorRulesByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade project visitor rules: %w", err)
+	} else {
+		cs.ProjectVisitorRules = n
+	}
+
 	// 2. Groups — project-scoped groups (which may carry role bindings).
 	// Paginate to ensure completeness for projects with many groups.
 	for {
@@ -466,6 +574,18 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		return cs, fmt.Errorf("cascade secrets: %w", err)
 	} else {
 		cs.Secrets = n
+	}
+
+	// 3b. Pending secrets written by the project's agents. They are
+	// user-scope secrets awaiting their owners' decision; the project is
+	// their provenance, and a pending secret from a deleted project is
+	// not offered for approval. Their held values are released by the
+	// caller after the commit (ProjectDeleteResult.PendingSecretValueRefs).
+	if refs, err := tx.DeletePendingSecretsByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade pending secrets: %w", err)
+	} else {
+		cs.PendingSecrets = len(refs)
+		cs.pendingSecretValueRefs = refs
 	}
 
 	// 4. Env vars — project-scoped environment variables.
@@ -532,8 +652,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 
 	// 11. Agent credentials — project-scoped agent auth tokens.
 	// No FK from credentials to agents. Parent agent records are deleted by
-	// CompositeStore.DeleteProject (step 9), but credential rows would survive
-	// as orphans. Delete transactionally before agent deletion.
+	// CompositeStore.DeleteProject (Delete step 10), but credential rows
+	// would survive as orphans. Delete transactionally before agent deletion.
 	if n, err := tx.DeleteAgentCredentialsByProject(ctx, projectID); err != nil {
 		return cs, fmt.Errorf("cascade agent credentials: %w", err)
 	} else {
@@ -571,14 +691,44 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		cs.ProjectSyncStates = n
 	}
 
+	// 16. Delegation edges — every active edge where an agent of the project
+	// (soft-deleted ones included) is the delegate or the delegator. The edge
+	// rows have no foreign key to the agent and survive the agent delete in
+	// CompositeStore.DeleteProject, so they are deactivated here, as a hard
+	// delete of each agent would, under one operation ID. The audit summary
+	// records that ID so each edge can be traced to this delete.
+	if n, opID, err := deactivateProjectAgentEdges(ctx, tx, projectID, svc.nowFunc()); err != nil {
+		return cs, err
+	} else {
+		cs.DelegationEdges = n
+		if n > 0 {
+			cs.DelegationEdgeOpID = opID
+		}
+	}
+
+	// 16b. Agent delegation grants — every unrevoked grant bound to an
+	// agent of the project (soft-deleted ones included) and the
+	// credentials exchanged from it. The project delete runs no agent
+	// lifecycle hooks, and grant rows have no foreign key to the agent, so
+	// they are revoked here, each with its own revocation audit
+	// (.design/agent-delegation.md §16.3).
+	if n, err := revokeProjectAgentDelegationGrantsTx(ctx, tx, projectID, auditActorFromContext(ctx), svc.nowFunc().UTC()); err != nil {
+		return cs, err
+	} else {
+		cs.AgentDelegationGrants = n
+	}
+
 	// ---------------------------------------------------------------------------
 	// Cascade inventory disposition — complete project-linked table audit
 	//
 	// | Table                  | Mechanism                                              | Security |
 	// |------------------------|---------------------------------------------------------|----------|
 	// | role_bindings          | Transactional: DeleteRoleBindingsForScope (step 1)      | Auth     |
+	// | project_visitor_rules  | Transactional: DeleteProjectVisitorRulesByProject (1b)   | Auth     |
+	// |   (+ project_visitor_exclusions and the rules' role_bindings)                       |          |
 	// | groups                 | Transactional: ListGroups + DeleteGroup (step 2)         | Auth     |
 	// | secrets                | Transactional: DeleteSecretsByScope (step 3)             | Cred     |
+	// | pending_secrets        | Transactional: DeletePendingSecretsByProject (step 3b)   | Cred     |
 	// | env_vars               | Transactional: DeleteEnvVarsByScope (step 4)             | Config   |
 	// | skill_injections       | Transactional: DeleteSkillInjectionsByScope (step 5)     | Config   |
 	// | gcp_service_accounts   | Transactional: List + DeleteGCPServiceAccount (step 6)   | Cred     |
@@ -592,7 +742,10 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | project_providers      | Transactional: DeleteProjectProvidersByProject (step 14) | Data     |
 	// |   (DB: project_contributors — store layer uses "provider" vocabulary)              |          |
 	// | project_sync_state     | Transactional: DeleteProjectSyncStatesByProject (step 15)| Data     |
-	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 16)  | Runtime  |
+	// | delegation_edges       | Transactional: deactivated, rows kept (step 16)          | Auth     |
+	// | agent_delegation_grants| Transactional: revoked, rows kept (step 16b)             | Auth     |
+	// |   (+ agent_delegated_credentials, revoked with each grant)                          |          |
+	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 17)  | Runtime  |
 	// | notifications          | Explicit code in CompositeStore.DeleteProject            | Data     |
 	// | notification_subs      | Explicit code in CompositeStore.DeleteProject            | Data     |
 	// | conversations          | Retained — historical audit/chat data; no auth grants    | None     |
@@ -604,24 +757,59 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	return cs, nil
 }
 
+// deactivateProjectAgentEdges deactivates every active delegation edge where
+// an agent of projectID, soft-deleted or not, is the delegate or the
+// delegator, with cause agent_hard_delete under one operation ID. It returns
+// the number of edges deactivated and the operation ID.
+func deactivateProjectAgentEdges(ctx context.Context, tx store.Store, projectID string, now time.Time) (int, string, error) {
+	d := store.Deactivation{Cause: store.EdgeDeactivationAgentHardDelete, At: &now, OpID: api.NewUUID()}
+	total := 0
+	cursor := ""
+	for {
+		page, err := tx.ListAgents(ctx, store.AgentFilter{ProjectID: projectID, IncludeDeleted: true},
+			store.ListOptions{Limit: 100, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return total, d.OpID, fmt.Errorf("list project agents for edge deactivation: %w", err)
+		}
+		if page == nil {
+			// Items holds values, so a page is the only nil the walk can
+			// meet. Fail rather than treat it as empty and leave edges active.
+			return total, d.OpID, fmt.Errorf("%w: nil agent page in deactivateProjectAgentEdges", store.ErrInvalidInput)
+		}
+		for _, a := range page.Items {
+			n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
+			if err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate edges delegated to agent %s: %w", a.ID, err)
+			}
+			total += n
+			n, err = tx.DeactivateDelegationEdgesForDelegator(ctx, store.DelegationPrincipalAgent, a.ID, d)
+			if err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate edges delegated by agent %s: %w", a.ID, err)
+			}
+			total += n
+			// The agent's service-account assignment ends with it, under
+			// the same operation ID. It is not counted as an edge.
+			if _, err := tx.DeactivateAgentServiceAccountAssignments(ctx, a.ID, d); err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate service-account assignments of agent %s: %w", a.ID, err)
+			}
+		}
+		if page.NextCursor == "" {
+			return total, d.OpID, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 
 // createAuditRecord writes a mutation audit record within the transaction.
 func (svc *ProjectDeletionService) createAuditRecord(ctx context.Context, txStore store.Store, record *store.MutationAuditRecord) error {
-	if record.ActorPrincipalKind == "" || record.ActorPrincipalID == "" {
-		identity := GetIdentityFromContext(ctx)
-		if identity != nil {
-			record.ActorPrincipalKind = identity.Type()
-			record.ActorPrincipalID = identity.ID()
-			credential := GetCredentialContextFromContext(ctx)
-			if credential.Kind != "" {
-				record.ActorCredentialID = credential.ID
-				record.ActorCredentialType = string(credential.Kind)
-			}
-		}
-	}
+	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
+	// §3.3), replacing this function's own copy of the extraction logic.
+	// ApplyActor only fills fields the caller has not already set explicitly.
+	auditActorFromContext(ctx).ApplyActor(record)
 	if record.Timestamp.IsZero() {
 		record.Timestamp = svc.nowFunc()
 	}
@@ -635,35 +823,4 @@ func marshalDeletionAuditJSON(m map[string]string) string {
 		return "{}"
 	}
 	return string(b)
-}
-
-// ---------------------------------------------------------------------------
-// Governance error parsing (reuses RS1 pattern)
-// ---------------------------------------------------------------------------
-
-// parseGovernanceError extracts governance denial details from a formatted
-// transaction error. Format: "governance:<status>:<reason>"
-func parseGovernanceError(err error) (status int, code string, reason string, ok bool) {
-	msg := err.Error()
-	var s int
-	var r string
-	if n, _ := fmt.Sscanf(msg, "governance:%d:", &s); n == 1 {
-		// Extract reason after second colon.
-		idx := 0
-		colons := 0
-		for i, c := range msg {
-			if c == ':' {
-				colons++
-				if colons == 2 {
-					idx = i + 1
-					break
-				}
-			}
-		}
-		if idx > 0 && idx < len(msg) {
-			r = msg[idx:]
-		}
-		return s, ErrCodeProjectDeleteForbidden, r, true
-	}
-	return 0, "", "", false
 }

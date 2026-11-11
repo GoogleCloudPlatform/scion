@@ -1,0 +1,345 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package auditevent
+
+import "slices"
+
+// PhaseOutcome is one exact phase/result pair declared by the catalog.
+type PhaseOutcome struct {
+	Phase   Phase
+	Outcome Outcome
+}
+
+// Destination is a declared output for an event family/action.
+type Destination string
+
+const (
+	DestinationStructuredLog Destination = "structured_log"
+	DestinationHistory       Destination = "history"
+)
+
+// PayloadValueType identifies the concrete Go value shape admitted for a
+// payload leaf. Validation is driven exclusively by the leaf declarations in
+// the action's catalog entry.
+type PayloadValueType string
+
+const (
+	PayloadString       PayloadValueType = "string"
+	PayloadInt64        PayloadValueType = "int64"
+	PayloadHexString    PayloadValueType = "hex_string"
+	PayloadImpactCounts PayloadValueType = "impact_counts"
+	PayloadStringArray  PayloadValueType = "string_array"
+)
+
+// PayloadLeafSchema is the complete machine-readable contract for one
+// payload leaf. Zero bounds mean that the corresponding bound is not used.
+type PayloadLeafSchema struct {
+	Name          string
+	Type          PayloadValueType
+	MaxBytes      int
+	ExactLength   int
+	MaxItems      int
+	ItemMaxBytes  int
+	AllowedValues []string
+}
+
+// ResourceProjectIDRule declares how project_id relates to a resource scope.
+type ResourceProjectIDRule string
+
+const (
+	ResourceProjectIDOmitted  ResourceProjectIDRule = "omitted"
+	ResourceProjectIDRequired ResourceProjectIDRule = "required"
+)
+
+// ResourceScopeSchema declares the project-ID contract for one resource scope.
+type ResourceScopeSchema struct {
+	Scope     ResourceScope
+	ProjectID ResourceProjectIDRule
+}
+
+// CatalogEntry is the machine-readable schema for one action.
+type CatalogEntry struct {
+	Family                  string
+	Action                  string
+	AllowedPairs            []PhaseOutcome
+	ResourceKind            string
+	AdditionalResourceKinds []string
+	RequiredEnvelopeLeaves  []string
+	ResourceScopes          []ResourceScopeSchema
+	RequiredPayloadLeaves   []PayloadLeafSchema
+	OptionalPayloadLeaves   []PayloadLeafSchema
+	Destinations            []Destination
+}
+
+var catalog = []CatalogEntry{{
+	Family:                 "access_boundary",
+	Action:                 "create",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
+}, {
+	// History-only: the envelope is validated and mapped to one
+	// access_constraint_history row inside the update transaction. It is
+	// never dispatched to a log sink.
+	Family:                 "access_boundary",
+	Action:                 "update",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationHistory},
+}, {
+	// History-only: one row per constraint disabled by RecoveryService,
+	// written in that constraint's own transaction. Never dispatched.
+	Family:                 "access_boundary",
+	Action:                 "recovery_disable",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationHistory},
+}, {
+	// History-only: one row per constraint re-enabled by RecoveryService,
+	// written in that constraint's own transaction. Never dispatched.
+	Family:                 "access_boundary",
+	Action:                 "recovery_enable",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationHistory},
+}, {
+	// Structured-log only: deleting a constraint cascades its history, so a
+	// delete has no history row. This log event is dispatched after commit,
+	// best-effort, and is not a persisted record.
+	Family:                 "access_boundary",
+	Action:                 "delete",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{{Name: "before_revision", Type: PayloadInt64}},
+	Destinations:          []Destination{DestinationStructuredLog},
+}, {
+	Family:                  "authorization",
+	Action:                  "decide",
+	AllowedPairs:            []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
+	ResourceKind:            "project",
+	AdditionalResourceKinds: []string{"agent"},
+	RequiredEnvelopeLeaves:  []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes:          []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
+	RequiredPayloadLeaves: []PayloadLeafSchema{
+		{Name: "permission_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "permission", Type: PayloadString, MaxBytes: 128},
+		{Name: "reason", Type: PayloadString, MaxBytes: 256},
+		{Name: "sampled", Type: PayloadString, MaxBytes: 5, AllowedValues: []string{"true", "false"}},
+	},
+	OptionalPayloadLeaves: []PayloadLeafSchema{{Name: "denied_by", Type: PayloadString, MaxBytes: 64}},
+	Destinations:          []Destination{DestinationStructuredLog},
+}, {
+	// Broker family (remaining-audit P4 slice 1): the Runtime Broker
+	// credential lifecycle and broker authentication failures. Principal and
+	// resource are required only for the authenticated administrative
+	// actions. The shared leaf schemas and their comments are in broker.go.
+	Family: BrokerFamily,
+	Action: string(BrokerActionAuthFailure),
+	// The caller is unauthenticated, so there is no principal. The
+	// resource ID, when present, is the caller's CLAIMED broker ID from
+	// the X-Scion-Broker-ID header: unauthenticated, and admitted only
+	// within the resource.id bound (otherwise omitted with
+	// broker_id_invalid=true, or when it holds a Unicode format (Cf) rune
+	// (R15)). The event is never dropped for it.
+	// The event is pre-authentication and caller-claimed: failure_code only
+	// classifies why the request was rejected, and neither it nor
+	// resource.id authenticates or identifies the caller.
+	// missing_credentials, malformed, clock_skew and replay are decided
+	// before any secret lookup. With resource.id they show neither that the
+	// claimed broker exists nor that a legitimate request was captured;
+	// replay means only that the nonce had been presented before (the nonce
+	// is recorded before signature verification; follow-up
+	// ptone/scion#5677).
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeDeny}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith(),
+	ResourceScopes:         brokerSystemScope,
+	RequiredPayloadLeaves:  []PayloadLeafSchema{brokerFailureCodeLeaf},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf,
+		brokerUserAgentLeaf, brokerUserAgentTruncatedLeaf, brokerUserAgentSanitizedLeaf,
+		brokerIDInvalidLeaf,
+	},
+	Destinations: []Destination{DestinationStructuredLog},
+}, {
+	Family:                 BrokerFamily,
+	Action:                 string(BrokerActionRegister),
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith("principal", "resource"),
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	OptionalPayloadLeaves: []PayloadLeafSchema{brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf, brokerOperationLeaf},
+	Destinations:          []Destination{DestinationStructuredLog},
+}, {
+	Family: BrokerFamily,
+	Action: string(BrokerActionJoin),
+	// The joining broker is the subject, not an authenticated actor, so
+	// there is no principal; the resource is the request's broker ID
+	// under the same bound rule as auth_failure. A failed join is
+	// (failure, failed): the common matrix admits failed only there.
+	// failure_code is optional here because the catalog has no per-pair
+	// required leaves; BuildBrokerEvent enforces the per-pair rule
+	// (required on failure/failed, absent on commit/succeeded).
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}, {Phase: PhaseFailure, Outcome: OutcomeFailed}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith(),
+	ResourceScopes:         brokerSystemScope,
+	OptionalPayloadLeaves:  []PayloadLeafSchema{brokerFailureCodeLeaf, brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf, brokerIDInvalidLeaf},
+	Destinations:           []Destination{DestinationStructuredLog},
+}, {
+	Family:                 BrokerFamily,
+	Action:                 string(BrokerActionRotate),
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith("principal", "resource"),
+	ResourceScopes:         brokerSystemScope,
+	OptionalPayloadLeaves:  []PayloadLeafSchema{brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf},
+	Destinations:           []Destination{DestinationStructuredLog},
+}, {
+	Family:                 BrokerFamily,
+	Action:                 string(BrokerActionDeregister),
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith("principal", "resource"),
+	ResourceScopes:         brokerSystemScope,
+	OptionalPayloadLeaves:  []PayloadLeafSchema{brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf},
+	Destinations:           []Destination{DestinationStructuredLog},
+}}
+
+// Catalog returns a defensive snapshot of the schemas implemented in this
+// milestone. Later family adapters add literal entries here.
+func Catalog() []CatalogEntry {
+	result := make([]CatalogEntry, len(catalog))
+	for i, entry := range catalog {
+		result[i] = entry
+		result[i].AdditionalResourceKinds = slices.Clone(entry.AdditionalResourceKinds)
+		result[i].AllowedPairs = append([]PhaseOutcome(nil), entry.AllowedPairs...)
+		result[i].RequiredEnvelopeLeaves = append([]string(nil), entry.RequiredEnvelopeLeaves...)
+		result[i].ResourceScopes = append([]ResourceScopeSchema(nil), entry.ResourceScopes...)
+		result[i].RequiredPayloadLeaves = clonePayloadLeafSchemas(entry.RequiredPayloadLeaves)
+		result[i].OptionalPayloadLeaves = clonePayloadLeafSchemas(entry.OptionalPayloadLeaves)
+		result[i].Destinations = append([]Destination(nil), entry.Destinations...)
+	}
+	return result
+}
+
+func clonePayloadLeafSchemas(schemas []PayloadLeafSchema) []PayloadLeafSchema {
+	clones := make([]PayloadLeafSchema, len(schemas))
+	for i, schema := range schemas {
+		clones[i] = schema
+		clones[i].AllowedValues = append([]string(nil), schema.AllowedValues...)
+	}
+	return clones
+}
+
+func catalogEntry(family, action string) (CatalogEntry, bool) {
+	for _, entry := range catalog {
+		if entry.Family == family && entry.Action == action {
+			entry.AdditionalResourceKinds = slices.Clone(entry.AdditionalResourceKinds)
+			return entry, true
+		}
+	}
+	return CatalogEntry{}, false
+}

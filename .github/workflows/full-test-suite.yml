@@ -1,0 +1,89 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Full Test Suite (reporting only), moved out of ci.yml (ptone/scion#2845).
+#
+# It no longer runs on pull_request. It is reporting-only (continue-on-error)
+# and duplicates Build & Test's `make test-fast-ci` plus the SQLite Tests
+# (non-hub) job and the pkg/hub shard jobs (which the pkg/hub SQLite Tests
+# check aggregates), yet it accounted for about a third of billed CI
+# minutes when it ran on every PR push. It now runs post-merge on push to
+# main, nightly, and on demand via workflow_dispatch.
+#
+# It lives in its own file, rather than in ci.yml behind
+# `if: github.event_name != 'pull_request'`, so that the nightly schedule
+# does not also start every other ci.yml job. The job ID and name are
+# unchanged.
+name: Full Test Suite
+
+on:
+  push:
+    branches: [ main ]
+  # 07:17 UTC: off-peak. That is late night in US time zones and before the
+  # European working day, when PR traffic and runner contention are lowest.
+  # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+# Deliberately no concurrency group. Runs on main must never be cancelled,
+# and even with cancel-in-progress: false a shared group cancels older
+# *pending* runs.
+
+permissions:
+  contents: read
+
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
+jobs:
+  test-full-suite:
+    name: Full Test Suite (reporting only)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # Every package but pkg/hub in one go test, then pkg/hub shard by shard
+      # (make test-hub-shards; the shard list comes from hack/hubshard): no
+      # step compiles the whole pkg/hub test binary, which got the runner
+      # killed (exit 143) on every run (ptone/scion#4636).
+      - name: Run full test suite (with SQLite)
+        run: |
+          set -o pipefail
+          {
+            rc=0
+            go test -count=1 -timeout 60m \
+              $(go list ./... | grep -vx 'github.com/GoogleCloudPlatform/scion/pkg/hub') || rc=1
+            make test-hub-shards || rc=1
+            exit "$rc"
+          } 2>&1 | tee test-full-suite-output.txt
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: full-test-suite-results
+          path: test-full-suite-output.txt
+          retention-days: 14

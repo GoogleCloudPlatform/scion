@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
@@ -55,6 +57,8 @@ func (h *EnvHarness) Provision(ctx context.Context, agentName, agentDir, agentHo
 }
 func (h *EnvHarness) GetInterruptKey() string                                        { return "C-c" }
 func (h *EnvHarness) GetInterruptSequence() []string                                 { return nil }
+func (h *EnvHarness) DeliverySpec() api.DeliverySpec                                 { return api.DeliverySpec{} }
+func (h *EnvHarness) ReadySpec() api.ReadySpec                                       { return api.ReadySpec{} }
 func (h *EnvHarness) GetHarnessEmbedsFS() (embed.FS, string)                         { return embed.FS{}, "" }
 func (h *EnvHarness) InjectAgentInstructions(agentHome string, content []byte) error { return nil }
 func (h *EnvHarness) InjectSystemPrompt(agentHome string, content []byte) error      { return nil }
@@ -171,6 +175,254 @@ func TestBuildPod_ResolvedAuth_ComposesWithSecrets(t *testing.T) {
 	}
 }
 
+// --- Env precedence: the Docker order (ptone/scion#7382) ---
+
+// agentEnvEntries returns the agent container's env entries in pod order.
+func agentEnvEntries(t *testing.T, pod *corev1.Pod) []corev1.EnvVar {
+	t.Helper()
+	for _, c := range pod.Spec.Containers {
+		if c.Name == agentContainerName {
+			return c.Env
+		}
+	}
+	t.Fatalf("no %s container in the pod", agentContainerName)
+	return nil
+}
+
+// effectiveEnvEntry returns the last entry for name, which is the one
+// Kubernetes applies.
+func effectiveEnvEntry(entries []corev1.EnvVar, name string) (corev1.EnvVar, bool) {
+	var got corev1.EnvVar
+	found := false
+	for _, ev := range entries {
+		if ev.Name == name {
+			got, found = ev, true
+		}
+	}
+	return got, found
+}
+
+// emptyTelemetryHarness is EnvHarness with a telemetry env that sets one of
+// its GetEnv names to an empty value.
+type emptyTelemetryHarness struct{ EnvHarness }
+
+func (h *emptyTelemetryHarness) GetTelemetryEnv() map[string]string {
+	return map[string]string{"HARNESS_AGENT_NAME": "", "TELEMETRY_ENABLED": "true"}
+}
+
+// requirePremise stops a precedence test whose sources would not really
+// collide, so the test cannot pass vacuously.
+func requirePremise(t *testing.T, ok bool, premise string) {
+	t.Helper()
+	if !ok {
+		t.Fatalf("test premise does not hold: %s", premise)
+	}
+}
+
+// The harness env wins over resolved auth for a name both set, as on Docker.
+func TestBuildPod_HarnessEnvWinsOverResolvedAuth(t *testing.T) {
+	cfg := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+		ResolvedAuth: &api.ResolvedAuth{Method: "api-key", EnvVars: map[string]string{
+			"HARNESS_AGENT_NAME": "from-resolved-auth",
+			"AUTH_ONLY":          "from-resolved-auth",
+		}},
+	}
+	requirePremise(t, cfg.Harness.GetEnv(cfg.Name, cfg.HomeDir, cfg.UnixUsername)["HARNESS_AGENT_NAME"] != "",
+		"the harness env sets HARNESS_AGENT_NAME to a non-empty value")
+	requirePremise(t, cfg.ResolvedAuth.EnvVars["HARNESS_AGENT_NAME"] != "",
+		"resolved auth sets HARNESS_AGENT_NAME to a non-empty value")
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", cfg)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	entries := agentEnvEntries(t, pod)
+	if ev, _ := effectiveEnvEntry(entries, "HARNESS_AGENT_NAME"); ev.Value != "test-agent" {
+		t.Errorf("HARNESS_AGENT_NAME = %q, want the harness env value %q", ev.Value, "test-agent")
+	}
+	if ev, _ := effectiveEnvEntry(entries, "AUTH_ONLY"); ev.Value != "from-resolved-auth" {
+		t.Errorf("control: AUTH_ONLY = %q, want %q", ev.Value, "from-resolved-auth")
+	}
+}
+
+// Resolved-auth entries are emitted in sorted name order, so the pod spec
+// does not vary between starts.
+func TestBuildPod_ResolvedAuthEnvSorted(t *testing.T) {
+	auth := map[string]string{}
+	for _, n := range []string{"AUTH_H", "AUTH_C", "AUTH_F", "AUTH_A", "AUTH_G", "AUTH_D", "AUTH_B", "AUTH_E"} {
+		auth[n] = "v-" + n
+	}
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		ResolvedAuth: &api.ResolvedAuth{Method: "api-key", EnvVars: auth},
+	})
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	var order []string
+	for _, ev := range agentEnvEntries(t, pod) {
+		if _, ok := auth[ev.Name]; ok {
+			order = append(order, ev.Name)
+		}
+	}
+	if len(order) != len(auth) || !slices.IsSorted(order) {
+		t.Errorf("resolved-auth env order = %v, want all %d names in sorted order", order, len(auth))
+	}
+}
+
+// An empty telemetry value does not blank a GetEnv value for the same name,
+// as on Docker.
+func TestBuildPod_EmptyTelemetryValueKeepsGetEnvValue(t *testing.T) {
+	cfg := RunConfig{
+		Name:             "test-agent",
+		Image:            "test:latest",
+		UnixUsername:     "scion",
+		Harness:          &emptyTelemetryHarness{},
+		TelemetryEnabled: true,
+	}
+	requirePremise(t, cfg.Harness.GetEnv(cfg.Name, cfg.HomeDir, cfg.UnixUsername)["HARNESS_AGENT_NAME"] != "",
+		"GetEnv sets HARNESS_AGENT_NAME to a non-empty value")
+	tv, inTelemetry := cfg.Harness.GetTelemetryEnv()["HARNESS_AGENT_NAME"]
+	requirePremise(t, inTelemetry && tv == "", "GetTelemetryEnv sets HARNESS_AGENT_NAME to an empty value")
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", cfg)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	entries := agentEnvEntries(t, pod)
+	if ev, _ := effectiveEnvEntry(entries, "HARNESS_AGENT_NAME"); ev.Value != "test-agent" {
+		t.Errorf("HARNESS_AGENT_NAME = %q, want the GetEnv value %q", ev.Value, "test-agent")
+	}
+	if ev, _ := effectiveEnvEntry(entries, "TELEMETRY_ENABLED"); ev.Value != "true" {
+		t.Errorf("control: TELEMETRY_ENABLED = %q, want %q", ev.Value, "true")
+	}
+}
+
+// An env-type secret wins over a harness env name, as on Docker. The
+// harness sets HARNESS_AGENT_NAME to the agent name (never empty), so the
+// harness entry is really emitted and the two sources collide.
+func TestBuildPod_SecretWinsOverHarnessEnv(t *testing.T) {
+	cfg := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "harness-name-secret", Type: "environment", Target: "HARNESS_AGENT_NAME", Value: "from-secret", Source: "user"},
+		},
+	}
+	requirePremise(t, cfg.Harness.GetEnv(cfg.Name, cfg.HomeDir, cfg.UnixUsername)["HARNESS_AGENT_NAME"] != "",
+		"the harness env sets HARNESS_AGENT_NAME to a non-empty value")
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", cfg)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	ev, ok := effectiveEnvEntry(agentEnvEntries(t, pod), "HARNESS_AGENT_NAME")
+	if !ok || ev.ValueFrom == nil || ev.ValueFrom.SecretKeyRef == nil || ev.ValueFrom.SecretKeyRef.Key != "harness-name-secret" {
+		t.Errorf("HARNESS_AGENT_NAME = %+v (present %v), want the secretKeyRef for harness-name-secret", ev, ok)
+	}
+}
+
+// SCION_START_CMD stays the runtime's value even when an env-type secret
+// targets it.
+func TestBuildPod_StartCmdWinsOverSecret(t *testing.T) {
+	cfg := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "start-cmd-secret", Type: "environment", Target: "SCION_START_CMD", Value: "from-secret", Source: "user"},
+		},
+	}
+	requirePremise(t, cfg.ResolvedSecrets[0].Value != "", "the secret targeting SCION_START_CMD has a non-empty value")
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", cfg)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	entries := agentEnvEntries(t, pod)
+	_, hasStart := effectiveEnvEntry(entries, "SCION_START_CMD")
+	requirePremise(t, hasStart, "buildPod emits a SCION_START_CMD entry")
+	for _, ev := range entries {
+		if ev.Name == "SCION_START_CMD" && ev.ValueFrom != nil {
+			t.Errorf("SCION_START_CMD has a secret-backed entry: %+v", ev)
+		}
+	}
+	if ev, ok := effectiveEnvEntry(entries, "SCION_START_CMD"); !ok || !strings.Contains(ev.Value, "tmux") {
+		t.Errorf("SCION_START_CMD = %q (present %v), want the runtime's tmux start command", ev.Value, ok)
+	}
+}
+
+// SCION_START_CMD stays the runtime's value when the merged environment
+// (config.Env) sets it, as on Docker, including a value that references
+// the name itself.
+func TestBuildPod_StartCmdWinsOverConfigEnv(t *testing.T) {
+	base := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+	}
+	rt, _, _ := newTestK8sRuntime()
+	basePod, err := rt.buildPod("default", base)
+	if err != nil {
+		t.Fatalf("buildPod (no config env): %v", err)
+	}
+	want, ok := effectiveEnvEntry(agentEnvEntries(t, basePod), "SCION_START_CMD")
+	requirePremise(t, ok && strings.Contains(want.Value, "tmux"),
+		"buildPod without config env emits the runtime's tmux start command")
+
+	for _, tc := range []struct {
+		name  string
+		entry string
+	}{
+		{name: "plain value", entry: "SCION_START_CMD=from-config-env"},
+		{name: "self-reference", entry: "SCION_START_CMD=$(SCION_START_CMD) extra"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Env = []string{tc.entry, "FOO=bar"}
+			conflicting := false
+			for _, e := range cfg.Env {
+				if name, value, ok := strings.Cut(e, "="); ok && name == "SCION_START_CMD" && value != want.Value {
+					conflicting = true
+				}
+			}
+			requirePremise(t, conflicting,
+				"cfg.Env holds a SCION_START_CMD entry whose value differs from the runtime's")
+			pod, err := rt.buildPod("default", cfg)
+			if err != nil {
+				t.Fatalf("buildPod: %v", err)
+			}
+			entries := agentEnvEntries(t, pod)
+			var got []corev1.EnvVar
+			for _, ev := range entries {
+				if ev.Name == "SCION_START_CMD" {
+					got = append(got, ev)
+				}
+			}
+			if ev, ok := effectiveEnvEntry(entries, "FOO"); !ok || ev.Value != "bar" {
+				t.Errorf("FOO = %q (present %v), want the config.Env value %q", ev.Value, ok, "bar")
+			}
+			if len(got) != 1 {
+				t.Fatalf("SCION_START_CMD entries = %+v, want exactly one", got)
+			}
+			if got[0].ValueFrom != nil || got[0].Value != want.Value {
+				t.Errorf("SCION_START_CMD = %+v, want the runtime's start command %q", got[0], want.Value)
+			}
+		})
+	}
+}
+
 func TestBuildPod_ResolvedAuth_NoHostPath(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 
@@ -223,19 +475,10 @@ func TestBuildPod_ResolvedAuth_NoHostPath(t *testing.T) {
 		t.Error("expected auth-files volume")
 	}
 
-	// Should have volume mount at expanded target path
-	foundMount := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "auth-files" && vm.MountPath == "/home/scion/.config/gcloud/adc.json" {
-			foundMount = true
-			if vm.SubPath != "auth-file-0" {
-				t.Errorf("expected SubPath auth-file-0, got %s", vm.SubPath)
-			}
-		}
-	}
-	if !foundMount {
-		t.Error("expected auth-files volume mount at /home/scion/.config/gcloud/adc.json")
-	}
+	// The auth file target is under home: it is staged, not mounted there.
+	assertNoMountsUnderHome(t, pod, "/home/scion")
+	assertStagingMount(t, pod, "auth-files")
+	assertPlacement(t, rt.k8sHomeFilePlacements(config), "/home/scion/.config/gcloud/adc.json", "/run/scion/auth-files/auth-file-0")
 }
 
 // --- Stage 1.2: Non-GCS volume handling ---

@@ -7,6 +7,7 @@ package log
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/user"
@@ -14,29 +15,99 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 var (
-	logPath     string
-	debug       bool
+	logPath string
+	// debug and initialized are atomic so the hot paths (Debug, write,
+	// slogHandler.Enabled) can read them without taking mu. Writers still
+	// hold mu where they also touch logPath/logFile, so that Init and the
+	// lazy init in write() stay mutually exclusive.
+	// debug governs Debug lines. It is synced from the shared level state
+	// (SCION_LOG_LEVEL, --log-level) at Init and by ApplyLogLevel, and can
+	// be forced with SetDebug. Info/Warn/Error lines read the shared level
+	// state directly.
+	debug       atomic.Bool
 	quiet       atomic.Bool
 	mu          sync.Mutex
-	initialized bool
+	initialized atomic.Bool
+	// initRuns counts executions of initLocked. It is test-only, with no
+	// production purpose: tests use it to check that concurrent first log
+	// calls run the lazy init exactly once.
+	initRuns atomic.Int64
+	// subsystemScans counts record attribute scans for a subsystem in
+	// slogHandler.Handle. It is test-only: tests use it to check that the
+	// scan is skipped when the spec has no per-component levels.
+	subsystemScans atomic.Int64
+	// logFile is the cached, already-opened handle for logPath, guarded by
+	// mu, and reused for every log line for the life of the process:
+	// reopening logPath from scratch on each line would give a workload a
+	// fresh chance, on every single line, to swap in a hardlink to a
+	// root-owned file (a regular file, so it passes the open regular-file
+	// check) between one line and the next. Only the very first open can be
+	// raced this way, and it's checked (Nlink==1, single-link regular file)
+	// before ever being cached; every later line reuses that already-open,
+	// already-verified fd. SetLogPath and the /tmp/agent.log fallback both
+	// close and nil this so the next line reopens against the new path.
+	logFile *os.File
 )
+
+// Timestamp formats t the way sciontool stamps the log files it writes for
+// the system (agent.log and the service lifecycle logs): a UTC RFC 3339
+// instant with nanoseconds. The agent process keeps its own TZ for the
+// workload; only the log written for the system is UTC, so lines from
+// agents in different zones name the same instant the same way. The
+// fraction is variable width (time.RFC3339Nano trims trailing zeros), so
+// parse timestamps before comparing or ordering them; do not compare the
+// strings.
+func Timestamp(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
 
 // SetQuiet suppresses stderr log output (but preserves file logging).
 // Used when running as a hook/status subprocess where stderr is captured by the host.
+// It also silences the shared one-time level warnings (such as the
+// SCION_DEBUG deprecation notice), which would otherwise repeat on every
+// short-lived hook invocation.
 func SetQuiet(enabled bool) {
 	quiet.Store(enabled)
+	if enabled {
+		loglevel.SetWarningOutput(io.Discard)
+	} else {
+		loglevel.SetWarningOutput(os.Stderr)
+	}
 }
 
-// Init initializes the logging system.
+// Init initializes the logging system. It may be called more than once
+// (each call re-installs the slog default handler), so lazy init in write()
+// uses a double-checked lock rather than sync.Once.
 func Init() {
 	mu.Lock()
 	defer mu.Unlock()
+	initLocked()
+}
 
-	// If already initialized, we might still want to re-init slog if logPath changed
-	// but for now let's just allow re-setting slog default to our handler
+// ensureInit runs the init logic (initLocked) once if nothing has initialized the package yet.
+// Concurrent first callers serialize on mu; only the first one runs
+// initLocked, the rest see initialized set and return.
+func ensureInit() {
+	if initialized.Load() {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if initialized.Load() {
+		return
+	}
+	initLocked()
+}
+
+// initLocked does the work of Init. Callers must hold mu.
+func initLocked() {
+	initRuns.Add(1)
 
 	if logPath == "" {
 		// Priority 1: Check if /home/scion exists (standard agent home)
@@ -52,73 +123,158 @@ func Init() {
 		}
 	}
 
-	if os.Getenv("SCION_DEBUG") != "" {
-		debug = true
-	}
+	// Levels come from the shared parser: SCION_LOG_LEVEL, or the
+	// deprecated SCION_DEBUG alias. A --log-level flag applied later via
+	// ApplyLogLevel takes precedence.
+	syncLevelFromShared()
 
 	// Set as default slog handler to capture all debug lines from shared packages
-	slog.SetDefault(slog.New(newHandler()))
+	slog.SetDefault(slog.New(defaultSlogHandler()))
 
-	initialized = true
+	initialized.Store(true)
 }
 
 // SetDebug enables or disables debug logging.
 func SetDebug(enabled bool) {
-	mu.Lock()
-	defer mu.Unlock()
-	debug = enabled
+	debug.Store(enabled)
 }
 
-// Chown changes the ownership of the log file.
+// syncLevelFromShared sets the debug switch from the shared default level.
+func syncLevelFromShared() {
+	debug.Store(loglevel.DebugEnabled(""))
+}
+
+// ApplyLogLevel applies a --log-level flag value (a level spec such as
+// "warn" or "info,hooks=debug") through the shared parser at flag
+// precedence, so it overrides SCION_LOG_LEVEL and SCION_DEBUG. On a parse
+// problem the fallback spec (info for an invalid default) is still applied
+// and the error is returned for the caller to report.
+func ApplyLogLevel(spec string) error {
+	_, err := loglevel.ApplyString(spec, loglevel.SourceFlag)
+	syncLevelFromShared()
+	return err
+}
+
+// levelValue maps the level names used by write to slog levels.
+func levelValue(level string) slog.Level {
+	switch level {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "WARN":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	}
+	return slog.LevelInfo
+}
+
+// enabled reports whether a line at level for component (a tag or slog
+// subsystem; may be empty) should be written. An explicit per-component
+// level wins; otherwise debug lines follow the debug switch and the rest
+// follow the shared default level.
+func enabled(level slog.Level, component string) bool {
+	if component != "" {
+		if lvl, ok := loglevel.ComponentLevel(component); ok {
+			return level >= lvl
+		}
+	}
+	if level < slog.LevelInfo {
+		return debug.Load()
+	}
+	return level >= loglevel.Effective("")
+}
+
+// Chown changes the ownership of the log file. It chowns the already-open
+// cached fd (fchown) rather than the path, so a symlink or hardlink swapped
+// in at logPath after the fact can't redirect it. If no line has been
+// logged yet, there's no fd to chown; the next write() call opens and
+// caches one under the current (already correct, post-drop) ownership
+// path, so this is a no-op rather than a gap.
 func Chown(uid, gid int) error {
 	mu.Lock()
 	defer mu.Unlock()
-	if logPath == "" {
+	if logFile == nil {
 		return nil
 	}
-	if _, err := os.Stat(logPath); os.IsNotExist(err) {
-		return nil
-	}
-	return os.Chown(logPath, uid, gid)
+	return logFile.Chown(uid, gid)
 }
 
-// SetLogPath sets the path to the log file. Primarily for testing.
+// SetLogPath sets the path to the log file. Primarily for testing. Closes
+// and drops any cached fd for the previous path so the next line opens
+// (and re-validates) the new one.
+//
+// It does not mark the package initialized: if it is called before Init,
+// the lazy init on the first log line still resolves the log level
+// (SCION_LOG_LEVEL, or the deprecated SCION_DEBUG) and installs the slog
+// default handler, and keeps this path (initLocked only picks a default
+// path when none is set).
 func SetLogPath(path string) {
 	mu.Lock()
 	defer mu.Unlock()
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
 	logPath = path
-	initialized = true // Consider it initialized if path is explicitly set
 }
 
 // Info logs an informational message.
 func Info(format string, args ...interface{}) {
-	write("INFO", "", format, args...)
+	logf("INFO", "", format, args...)
 }
 
-// TaggedInfo logs an informational message with an additional tag.
+// TaggedInfo logs an informational message with an additional tag. The tag
+// is also a component name for per-component levels.
 func TaggedInfo(tag string, format string, args ...interface{}) {
-	write("INFO", tag, format, args...)
+	logf("INFO", tag, format, args...)
 }
 
 // Error logs an error message.
 func Error(format string, args ...interface{}) {
-	write("ERROR", "", format, args...)
+	logf("ERROR", "", format, args...)
 }
 
-// Debug logs a debug message if SCION_DEBUG is set.
+// Warn logs a warning: something an operator should notice and act on, but
+// that does not itself abort whatever operation triggered it (unlike Error,
+// which this codebase's convention reserves for a failure the caller is
+// already handling as one). Always emitted, the same as Error — never
+// gated behind the debug level the way Debug is. Suppressed only when the
+// level is explicitly raised to error.
+func Warn(format string, args ...interface{}) {
+	logf("WARN", "", format, args...)
+}
+
+// WarnAlways logs a warning that bypasses level filtering. It is for
+// problems with the logging configuration itself (such as an invalid
+// --log-level), which must be reported even when the level is raised to
+// error. Quiet mode still suppresses the stderr copy.
+func WarnAlways(format string, args ...interface{}) {
+	write("WARN", "", format, args...)
+}
+
+// Debug logs a debug message if the debug level is enabled
+// (SCION_LOG_LEVEL=debug, --log-level debug, or the deprecated SCION_DEBUG).
 func Debug(format string, args ...interface{}) {
-	if !debug {
+	if !debug.Load() {
 		return
 	}
-	write("DEBUG", "", format, args...)
+	logf("DEBUG", "", format, args...)
+}
+
+// logf initializes the package if needed, applies level filtering and
+// writes the line.
+func logf(level, tag, format string, args ...interface{}) {
+	ensureInit()
+	if !enabled(levelValue(level), tag) {
+		return
+	}
+	write(level, tag, format, args...)
 }
 
 func write(level, tag, format string, args ...interface{}) {
-	if !initialized {
-		Init()
-	}
+	ensureInit()
 
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	timestamp := Timestamp(time.Now())
 	message := fmt.Sprintf(format, args...)
 
 	tagStr := ""
@@ -137,77 +293,119 @@ func write(level, tag, format string, args ...interface{}) {
 		fmt.Fprint(os.Stderr, stderrEntry)
 	}
 
-	// Write to agent.log
+	// Write to agent.log, through the cached fd (opened and validated once;
+	// see logFile's doc comment).
 	mu.Lock()
+	f, err := getLogFileLocked()
+	if err == nil {
+		_, _ = f.WriteString(fileEntry)
+	}
+	mu.Unlock()
+}
+
+// getLogFileLocked returns the cached log file, opening (and validating)
+// one against logPath if none is cached yet, falling back to
+// /tmp/agent.log on failure exactly as the historical per-line open did.
+// Callers must hold mu.
+func getLogFileLocked() (*os.File, error) {
+	if logFile != nil {
+		return logFile, nil
+	}
+
 	// Use more permissive 0666 so that if created as root, it can be written to by others
 	// (subject to directory permissions and umask).
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		// If we can't write to agent.log, try to fall back to /tmp and enable debug
-		if logPath != "/tmp/agent.log" {
-			debug = true
-			oldPath := logPath
-			logPath = "/tmp/agent.log"
-
-			// Get system info for debugging
-			uid := os.Getuid()
-			gid := os.Getgid()
-			username := "unknown"
-			if u, err := user.Current(); err == nil {
-				username = u.Username
-			}
-			sysInfo := fmt.Sprintf("UID=%d, GID=%d, USER=%s, HOME=%s, SCION_HOST_UID=%s, SCION_HOST_GID=%s",
-				uid, gid, username, os.Getenv("HOME"), os.Getenv("SCION_HOST_UID"), os.Getenv("SCION_HOST_GID"))
-
-			fallbackMsg := fmt.Sprintf("[sciontool] WARNING: Failed to write to %s: %v. Falling back to /tmp/agent.log and enabling debug mode. %s\n", oldPath, err, sysInfo)
-			fmt.Fprint(os.Stderr, fallbackMsg)
-
-			// Retry with new path
-			f, err = os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-			if err != nil {
-				// Total failure
-				mu.Unlock()
-				return
-			}
-			// Write the fallback message to the new log file too
-			_, _ = f.WriteString(timestamp + " " + fallbackMsg)
-		} else {
-			// Already at /tmp/agent.log and it failed
-			mu.Unlock()
-			return
-		}
+	f, err := openLogFileNoFollow(logPath, 0666)
+	if err == nil {
+		logFile = f
+		return logFile, nil
 	}
-	_, _ = f.WriteString(fileEntry)
-	_ = f.Close()
-	mu.Unlock()
+
+	// If we can't write to agent.log, try to fall back to /tmp and enable debug
+	if logPath == "/tmp/agent.log" {
+		// Already at /tmp/agent.log and it failed
+		return nil, err
+	}
+
+	debug.Store(true)
+	oldPath := logPath
+	logPath = "/tmp/agent.log"
+
+	// Get system info for debugging
+	uid := os.Getuid()
+	gid := os.Getgid()
+	username := "unknown"
+	if u, uerr := user.Current(); uerr == nil {
+		username = u.Username
+	}
+	sysInfo := fmt.Sprintf("UID=%d, GID=%d, USER=%s, HOME=%s, SCION_HOST_UID=%s, SCION_HOST_GID=%s",
+		uid, gid, username, os.Getenv("HOME"), os.Getenv("SCION_HOST_UID"), os.Getenv("SCION_HOST_GID"))
+
+	fallbackMsg := fmt.Sprintf("[sciontool] WARNING: Failed to write to %s: %v. Falling back to /tmp/agent.log and enabling debug mode. %s\n", oldPath, err, sysInfo)
+	fmt.Fprint(os.Stderr, fallbackMsg)
+
+	// Retry with new path
+	f, err = openLogFileNoFollow(logPath, 0666)
+	if err != nil {
+		// Total failure
+		return nil, err
+	}
+	logFile = f
+	// Write the fallback message to the new log file too
+	_, _ = logFile.WriteString(Timestamp(time.Now()) + " " + fallbackMsg)
+	return logFile, nil
 }
 
 // slogHandler implements slog.Handler by bridging to our write function.
 type slogHandler struct {
 	attrs []slog.Attr
+	// subsystem is the value of a "subsystem" attr added via WithAttrs,
+	// used for per-component levels.
+	subsystem string
 }
 
 func newHandler() *slogHandler {
 	return &slogHandler{}
 }
 
+// defaultSlogHandler is the default slog handler: slogHandler with every
+// error-valued attribute rendered as a sanitized string.
+func defaultSlogHandler() slog.Handler {
+	return logging.WithSanitizedErrorAttrs(newHandler())
+}
+
 func (h *slogHandler) Enabled(_ context.Context, level slog.Level) bool {
-	if level >= slog.LevelError {
+	ensureInit()
+	if level < slog.LevelDebug {
+		return false
+	}
+	if h.subsystem != "" {
+		return enabled(level, h.subsystem)
+	}
+	// A record-level subsystem attribute may carry its own level, so admit
+	// anything a configured component could want; Handle decides.
+	if level >= loglevel.MinLevel().Level() {
 		return true
 	}
-	if level >= slog.LevelInfo {
-		return true
-	}
-	if level >= slog.LevelDebug {
-		mu.Lock()
-		d := debug
-		mu.Unlock()
-		return d
-	}
-	return false
+	return enabled(level, "")
 }
 
 func (h *slogHandler) Handle(_ context.Context, r slog.Record) error {
+	sub := h.subsystem
+	// A record-level subsystem attribute only matters when some component
+	// has its own level.
+	if sub == "" && loglevel.HasComponents() {
+		subsystemScans.Add(1)
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "subsystem" {
+				sub = a.Value.String()
+				return false
+			}
+			return true
+		})
+	}
+	if !enabled(r.Level, sub) {
+		return nil
+	}
 	level := r.Level.String()
 	msg := r.Message
 	if r.NumAttrs() > 0 || len(h.attrs) > 0 {
@@ -233,7 +431,13 @@ func (h *slogHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (h *slogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &slogHandler{attrs: append(h.attrs, attrs...)}
+	next := &slogHandler{attrs: append(h.attrs[:len(h.attrs):len(h.attrs)], attrs...), subsystem: h.subsystem}
+	for _, a := range attrs {
+		if a.Key == "subsystem" {
+			next.subsystem = a.Value.String()
+		}
+	}
+	return next
 }
 
 func (h *slogHandler) WithGroup(name string) slog.Handler {

@@ -33,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 )
 
 // PostgresEventPublisher is an EventPublisher backed by PostgreSQL LISTEN/NOTIFY.
@@ -42,21 +43,22 @@ import (
 // subscribers using the same NATS-style subject matching as
 // ChannelEventPublisher.
 //
-// Channel model — per grove plus a global channel (flat exact-match, since
+// Channel model — per project plus a global channel (flat exact-match, since
 // Postgres channels do not support wildcards):
 //
-//   - Grove-scoped subjects ("project.<id>.*" / "grove.<id>.*") are published
-//     to a per-grove channel (scion_ev_g_<id>) AND to the global channel. The
-//     per-grove channel lets a replica that only watches a specific grove (e.g.
+//   - Project-scoped subjects ("project.<id>.*") are published to a per-project
+//     channel (scion_ev_g_<id>) AND to the global channel. The per-project
+//     channel lets a replica that only watches a specific project (e.g.
 //     a browser SSE stream) LISTEN on just that channel instead of the firehose.
 //   - All other subjects ("agent.*", "user.*", "broker.*", "admin.*",
 //     "notification.*") are published to the global channel only.
-//   - Subscriptions with a concrete grove id resolve to that grove's channel;
-//     everything else (grove-spanning wildcards used by the notification
-//     dispatcher and message-broker proxy, and non-grove subjects) resolves to
-//     the global channel. Each subscriber's patterns are grouped by the channel
-//     they resolve to, so an event arriving on a channel is only matched against
-//     the patterns that opted into that channel — no double delivery.
+//   - Subscriptions with a concrete project id resolve to that project's
+//     channel; everything else (project-spanning wildcards used by the
+//     notification dispatcher and message-broker proxy, and non-project
+//     subjects) resolves to the global channel. Each subscriber's patterns are
+//     grouped by the channel they resolve to, so an event arriving on a
+//     channel is only matched against the patterns that opted into that
+//     channel — no double delivery.
 //
 // Delivery is performed exclusively by the listener (events are not fanned out
 // locally at publish time). This gives transactional publish semantics for free
@@ -92,7 +94,28 @@ type PostgresEventPublisher struct {
 	// connection loss. Used by settings propagation (Phase 4) to trigger
 	// an unconditional Refresh that covers notifications missed during the gap.
 	onReconnect func()
+
+	// onListen holds the AddOnListen callbacks, each run once per
+	// listener connection after its channels are LISTENed.
+	onListen map[*listenHook]struct{}
+
+	// testHookBeforeConnect, when set, runs before every listener
+	// connection attempt. Tests only (it lets a test hold the listener
+	// down).
+	testHookBeforeConnect func()
+	// testHookInUnsubscribe, when set, runs inside an unsubscribe's once
+	// before it takes mu; testHookBeforeCloseSubs, when set, runs in Close
+	// after mu is released and before the subscriber channels are closed.
+	// Tests only (they order an unsubscribe against Close).
+	testHookInUnsubscribe   func()
+	testHookBeforeCloseSubs func()
+	// testNotifyExec, when set, replaces the pool as the executor of
+	// publish. Tests only (they publish without a database).
+	testNotifyExec pgExecutor
 }
+
+// listenHook is one AddOnListen registration.
+type listenHook struct{ fn func() }
 
 // pgSubscription is a single Subscribe registration.
 type pgSubscription struct {
@@ -186,7 +209,7 @@ func NewPostgresEventPublisher(ctx context.Context, dsn string, metrics dbmetric
 		subs:    make(map[string]map[*pgSubscription][]string),
 		desired: make(map[string]int),
 	}
-	p.sink = p.publish
+	p.wireSinks()
 
 	if err := p.ensurePayloadTable(ctx); err != nil {
 		cancel()
@@ -219,18 +242,39 @@ CREATE INDEX IF NOT EXISTS scion_event_payloads_created_at_idx
 	return nil
 }
 
+// wireSinks wires publish into eventBuilder: as the sink, and, counting
+// the event as trigger=heartbeat, as the heartbeat sink.
+func (p *PostgresEventPublisher) wireSinks() {
+	p.sink = p.publish
+	p.heartbeatSink = func(subject string, event interface{}) {
+		p.publishTriggered(subject, event, ssemetrics.TriggerHeartbeat)
+	}
+}
+
 // publish is the sink wired into eventBuilder. It marshals and NOTIFYs on the
 // pool (autocommit). Errors are logged rather than returned because the
 // EventPublisher Publish* methods are fire-and-forget.
 func (p *PostgresEventPublisher) publish(subject string, event interface{}) {
+	p.publishTriggered(subject, event, ssemetrics.TriggerChange)
+}
+
+// publishTriggered is publish, counting a published event on
+// scion.hub.events.published with the given trigger.
+func (p *PostgresEventPublisher) publishTriggered(subject string, event interface{}, trigger string) {
 	// Bound the publish so a saturated event pool surfaces a logged error instead
 	// of blocking the calling (often request-handler) goroutine forever. See
 	// publishTimeout.
 	ctx, cancel := context.WithTimeout(p.ctx, publishTimeout)
 	defer cancel()
-	if err := p.buildAndNotify(ctx, p.pool, subject, event); err != nil {
-		p.log.Error("Failed to publish event via NOTIFY", "subject", subject, "error", err)
+	var exec pgExecutor = p.pool
+	if p.testNotifyExec != nil {
+		exec = p.testNotifyExec
 	}
+	if err := p.buildAndNotify(ctx, exec, subject, event); err != nil {
+		p.log.Error("Failed to publish event via NOTIFY", "subject", subject, "error", err)
+		return
+	}
+	p.published.Count(subject, trigger)
 }
 
 // PublishTx publishes an event using a caller-supplied executor, giving an
@@ -281,7 +325,16 @@ func (p *PostgresEventPublisher) buildAndNotify(ctx context.Context, exec pgExec
 		}
 	}
 
+	conduitPayload := conduitNoticeFor(subject, event)
 	for _, channel := range channelsForSubject(subject) {
+		if channel == pgGlobalChannel && conduitPayload != "" {
+			// The conduit notice goes in the same statement as the global
+			// one: both are delivered on commit, or neither is.
+			if _, err := exec.Exec(ctx, `SELECT pg_notify($1, $2), pg_notify($3, $4)`, channel, string(payload), pgConduitChannel, conduitPayload); err != nil {
+				return fmt.Errorf("pg_notify on %s and %s: %w", channel, pgConduitChannel, err)
+			}
+			continue
+		}
 		if _, err := exec.Exec(ctx, `SELECT pg_notify($1, $2)`, channel, string(payload)); err != nil {
 			return fmt.Errorf("pg_notify on %s: %w", channel, err)
 		}
@@ -324,6 +377,9 @@ func (p *PostgresEventPublisher) Subscribe(patterns ...string) (<-chan Event, fu
 
 	unsubscribe := func() {
 		sub.once.Do(func() {
+			if h := p.testHookInUnsubscribe; h != nil {
+				h()
+			}
 			p.mu.Lock()
 			for channel := range byChannel {
 				if m := p.subs[channel]; m != nil {
@@ -358,23 +414,38 @@ func (p *PostgresEventPublisher) Close() {
 	p.closed = true
 	p.mu.Unlock()
 
-	p.cancel()
+	if p.cancel != nil {
+		p.cancel()
+	}
 	p.wg.Wait()
-	p.pool.Close()
+	if p.pool != nil {
+		p.pool.Close()
+	}
 
+	// Collect the subscribers under mu, then close them with mu released:
+	// an unsubscribe running at the same time holds its subscription's once
+	// while it waits for mu, so closing under mu would deadlock with it.
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	seen := make(map[*pgSubscription]bool)
+	var subs []*pgSubscription
 	for _, m := range p.subs {
 		for sub := range m {
 			if !seen[sub] {
-				sub.once.Do(func() { close(sub.ch) })
 				seen[sub] = true
+				subs = append(subs, sub)
 			}
 		}
 	}
 	p.subs = make(map[string]map[*pgSubscription][]string)
 	p.desired = make(map[string]int)
+	p.mu.Unlock()
+
+	if h := p.testHookBeforeCloseSubs; h != nil {
+		h()
+	}
+	for _, sub := range subs {
+		sub.once.Do(func() { close(sub.ch) })
+	}
 }
 
 // SetOnReconnect sets a callback invoked each time the listener reconnects
@@ -384,6 +455,47 @@ func (p *PostgresEventPublisher) SetOnReconnect(fn func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onReconnect = fn
+}
+
+// AddOnListen registers fn to run each time the listener connection is
+// established (first connect and every reconnect) once it is LISTENing on
+// every desired channel, so an event committed after fn starts is
+// delivered. Subscribers use it to re-read state that may have changed
+// while no connection was listening. fn runs on its own goroutine. The
+// returned function removes the registration.
+func (p *PostgresEventPublisher) AddOnListen(fn func()) (remove func()) {
+	h := &listenHook{fn: fn}
+	p.mu.Lock()
+	if p.onListen == nil {
+		p.onListen = make(map[*listenHook]struct{})
+	}
+	p.onListen[h] = struct{}{}
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		delete(p.onListen, h)
+		p.mu.Unlock()
+	}
+}
+
+// runOnListen starts every AddOnListen callback.
+func (p *PostgresEventPublisher) runOnListen() {
+	p.mu.RLock()
+	hooks := make([]func(), 0, len(p.onListen))
+	for h := range p.onListen {
+		hooks = append(hooks, h.fn)
+	}
+	p.mu.RUnlock()
+	for _, fn := range hooks {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.log.Error("Listen callback panicked", "panic", r)
+				}
+			}()
+			fn()
+		}()
+	}
 }
 
 // runListener maintains a dedicated connection that LISTENs on the desired
@@ -404,6 +516,12 @@ func (p *PostgresEventPublisher) runListener() {
 			return
 		}
 
+		p.mu.RLock()
+		hook := p.testHookBeforeConnect
+		p.mu.RUnlock()
+		if hook != nil {
+			hook()
+		}
 		conn, err := p.connectListener(p.ctx)
 		if err != nil {
 			if p.ctx.Err() != nil {
@@ -490,6 +608,7 @@ func (p *PostgresEventPublisher) connectListener(ctx context.Context) (*pgx.Conn
 // conn until the context is canceled or the connection fails. A returned error
 // other than context cancellation signals the caller to reconnect.
 func (p *PostgresEventPublisher) listenLoop(conn *pgx.Conn, active map[string]bool) error {
+	listening := false
 	for {
 		if p.ctx.Err() != nil {
 			return p.ctx.Err()
@@ -511,6 +630,11 @@ func (p *PostgresEventPublisher) listenLoop(conn *pgx.Conn, active map[string]bo
 				}
 				delete(active, channel)
 			}
+		}
+		if !listening {
+			// Every desired channel is LISTENed on this connection.
+			listening = true
+			p.runOnListen()
 		}
 
 		waitCtx, cancel := context.WithTimeout(p.ctx, listenPollInterval)
@@ -535,7 +659,7 @@ func (p *PostgresEventPublisher) handleNotification(channel, payload string) {
 	var env pgEnvelope
 	if err := json.Unmarshal([]byte(payload), &env); err != nil {
 		p.log.Error("Failed to decode NOTIFY payload", "channel", channel, "error", err)
-		p.metrics.IncDropped(p.ctx, 1, attribute.String("reason", "decode"))
+		p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "decode"))
 		return
 	}
 
@@ -544,7 +668,7 @@ func (p *PostgresEventPublisher) handleNotification(channel, payload string) {
 		fetched, err := p.refetchPayload(env.Ref)
 		if err != nil {
 			p.log.Error("Failed to refetch oversized payload", "ref", env.Ref, "subject", env.Subject, "error", err)
-			p.metrics.IncDropped(p.ctx, 1, attribute.String("reason", "refetch"))
+			p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "refetch"))
 			return
 		}
 		data = fetched
@@ -572,20 +696,37 @@ func (p *PostgresEventPublisher) refetchPayload(ref string) ([]byte, error) {
 // fanout delivers evt to every subscriber of channel whose patterns (scoped to
 // that channel) match the event subject. Sends are non-blocking; a full
 // subscriber buffer drops the event (backpressure).
+//
+// It also records the subscriber lag: the number of notifications the event
+// queues behind in the most-behind matching subscriber's buffer, read before
+// the send, so a subscriber that keeps up reports 0. A full buffer, which
+// drops the event, counts as its capacity. runMaintenance samples the lag
+// again on every tick so the gauge decays to 0 once traffic stops.
 func (p *PostgresEventPublisher) fanout(channel string, evt Event) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	matched := false
+	var maxLag int64
 	for sub, patterns := range p.subs[channel] {
 		if !anyPatternMatches(patterns, evt.Subject) {
 			continue
 		}
+		matched = true
+		lag := int64(len(sub.ch))
 		select {
 		case sub.ch <- evt:
 			p.metrics.IncDelivered(p.ctx, 1, attribute.String("scope", channelScope(evt.Subject)))
 		default:
-			p.metrics.IncDropped(p.ctx, 1, attribute.String("reason", "full_buffer"))
+			lag = int64(cap(sub.ch))
+			p.metrics.IncDropped(p.ctx, 1, attribute.String(dbmetrics.AttrDropReason, "full_buffer"))
 		}
+		if lag > maxLag {
+			maxLag = lag
+		}
+	}
+	if matched {
+		p.metrics.ObserveSubscriberLag(p.ctx, maxLag, attribute.String("scope", channelScope(evt.Subject)))
 	}
 }
 
@@ -619,21 +760,56 @@ func (p *PostgresEventPublisher) runMaintenance() {
 				p.log.Warn("Failed to purge expired event payloads", "error", err)
 			}
 			p.observePoolStats()
+			p.observeSubscriberLag()
 		}
 	}
 }
 
-// observePoolStats records a snapshot of the pgx pool gauges.
+// observeSubscriberLag samples the subscriber lag outside of event delivery,
+// so the gauge does not hold the depth of the last burst while the hub is
+// idle. For each scope it records the number of notifications queued in the
+// most-behind subscriber that can receive events of that scope; a scope with
+// no such subscriber records 0. Without this sample the synchronous gauge
+// would keep exporting the last value written by fanout.
+func (p *PostgresEventPublisher) observeSubscriberLag() {
+	if !p.metrics.Enabled() {
+		return
+	}
+	var globalLag, projectLag int64
+	p.mu.RLock()
+	for _, subs := range p.subs {
+		for sub, patterns := range subs {
+			lag := int64(len(sub.ch))
+			for _, pattern := range patterns {
+				global, project := patternScopes(pattern)
+				if global && lag > globalLag {
+					globalLag = lag
+				}
+				if project && lag > projectLag {
+					projectLag = lag
+				}
+			}
+		}
+	}
+	p.mu.RUnlock()
+	p.metrics.ObserveSubscriberLag(p.ctx, globalLag, attribute.String("scope", "global"))
+	p.metrics.ObserveSubscriberLag(p.ctx, projectLag, attribute.String("scope", "project"))
+}
+
+// observePoolStats records a snapshot of the pgx event pool.
 func (p *PostgresEventPublisher) observePoolStats() {
 	if !p.metrics.Enabled() {
 		return
 	}
 	s := p.pool.Stat()
-	p.metrics.ObservePoolStats(p.ctx, dbmetrics.PoolStats{
-		Active:  int64(s.AcquiredConns()),
-		Idle:    int64(s.IdleConns()),
-		Waiting: int64(s.EmptyAcquireCount()),
-		Max:     int64(s.MaxConns()),
+	// EmptyAcquireCount, the cumulative number of acquires that had to wait
+	// because the pool had no idle connection, is the pgx equivalent of
+	// database/sql's WaitCount.
+	p.metrics.ObservePoolStats(p.ctx, dbmetrics.PoolEvents, dbmetrics.PoolStats{
+		Active:    int64(s.AcquiredConns()),
+		Idle:      int64(s.IdleConns()),
+		WaitCount: s.EmptyAcquireCount(),
+		Max:       int64(s.MaxConns()),
 	})
 }
 
@@ -712,36 +888,40 @@ func execListen(ctx context.Context, conn *pgx.Conn, verb, channel string) error
 
 // channelsForSubject returns the Postgres channels a subject is published to.
 func channelsForSubject(subject string) []string {
-	if gc := groveChannelForSubject(subject); gc != "" {
-		return []string{gc, pgGlobalChannel}
+	if pc := projectChannelForSubject(subject); pc != "" {
+		return []string{pc, pgGlobalChannel}
 	}
 	return []string{pgGlobalChannel}
 }
 
 // channelsForPattern returns the Postgres channels a subscription pattern needs.
-// A concrete grove/project pattern resolves to that grove's channel; everything
-// else (wildcard grove, or non-grove subjects) resolves to the global channel.
+// A concrete project pattern resolves to that project's channel; everything
+// else (wildcard project, or non-project subjects) resolves to the global channel.
 func channelsForPattern(pattern string) []string {
 	parts := strings.SplitN(pattern, ".", 3)
-	if len(parts) >= 2 && (parts[0] == "project" || parts[0] == "grove") && isConcreteToken(parts[1]) {
-		return []string{groveChannel(parts[1])}
+	if len(parts) >= 2 && parts[0] == "project" && isConcreteToken(parts[1]) {
+		return []string{projectChannel(parts[1])}
 	}
 	return []string{pgGlobalChannel}
 }
 
-// groveChannelForSubject returns the per-grove channel for a grove-scoped
-// subject, or "" if the subject is not grove-scoped.
-func groveChannelForSubject(subject string) string {
+// projectChannelForSubject returns the per-project channel for a project-scoped
+// subject, or "" if the subject is not project-scoped.
+func projectChannelForSubject(subject string) string {
 	parts := strings.SplitN(subject, ".", 3)
-	if len(parts) >= 2 && (parts[0] == "project" || parts[0] == "grove") {
-		return groveChannel(parts[1])
+	if len(parts) >= 2 && parts[0] == "project" {
+		return projectChannel(parts[1])
 	}
 	return ""
 }
 
-// groveChannel builds the Postgres channel name for a grove id, hashing the id
-// if the resulting identifier would exceed the Postgres length limit.
-func groveChannel(id string) string {
+// projectChannel builds the Postgres channel name for a project id, hashing
+// the id if the resulting identifier would exceed the Postgres length limit.
+//
+// The "g_" wire prefix is an internal key shared by hub replicas; it must not
+// change, or a rolling deploy would drop cross-replica events between a
+// replica running the old prefix and one running a new one.
+func projectChannel(id string) string {
 	name := pgChannelPrefix + "g_" + id
 	if len(name) <= maxPGIdentifier {
 		return name
@@ -750,13 +930,27 @@ func groveChannel(id string) string {
 	return pgChannelPrefix + "g_" + hex.EncodeToString(sum[:])[:32]
 }
 
-// channelScope returns a low-cardinality label ("grove" or "global") for the
+// channelScope returns a low-cardinality label ("project" or "global") for the
 // channel a subject maps to, suitable for use as a metric attribute.
 func channelScope(subject string) string {
-	if groveChannelForSubject(subject) != "" {
-		return "grove"
+	if projectChannelForSubject(subject) != "" {
+		return "project"
 	}
 	return "global"
+}
+
+// patternScopes reports which channelScope values a subscription pattern can
+// match: project-scoped subjects ("project.<id>...") and/or global ones.
+func patternScopes(pattern string) (global, project bool) {
+	first, _, _ := strings.Cut(pattern, ".")
+	switch first {
+	case "project":
+		return false, true
+	case "*", ">":
+		return true, true
+	default:
+		return true, false
+	}
 }
 
 func isConcreteToken(t string) bool { return t != "" && t != "*" && t != ">" }

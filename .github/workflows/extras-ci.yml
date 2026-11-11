@@ -40,6 +40,15 @@ on:
       - 'go.mod'
       - 'go.sum'
 
+# One run per PR: a new push to the same PR cancels the superseded run
+# (ptone/scion#2845). Cancelling is limited to pull_request events. Outside
+# pull_request the group is the unique run_id, not github.ref, so runs on
+# main (should a push trigger ever be added) never share a group and are
+# never cancelled, even while pending.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -114,7 +123,8 @@ jobs:
   build-and-test:
     name: ${{ matrix.module }}
     needs: discover
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
@@ -128,7 +138,14 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: '${{ matrix.module }}/go.mod'
-          cache: true
+          # No Go cache (ptone/scion#4251). This workflow runs only on pull
+          # requests, and setup-go's cache saved a fresh, PR-scoped cache per
+          # module on every run: about 5.4 GB of the repo's 10 GB cache
+          # budget per PR touching extras/, evicting ci.yml's main caches.
+          # Cold, these jobs take 0.5-5 min (the a2a PostgreSQL job about 9),
+          # well under ci.yml's run on the same PR, so they are off the
+          # critical path.
+          cache: false
 
       - name: Build
         working-directory: ${{ matrix.module }}
@@ -213,7 +230,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:15
         env:
           POSTGRES_USER: scion
           POSTGRES_PASSWORD: scion
@@ -235,7 +253,8 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'extras/scion-a2a-bridge/go.mod'
-          cache: true
+          # No Go cache (see build-and-test above).
+          cache: false
 
       - name: Run Integration Tests
         working-directory: extras/scion-a2a-bridge

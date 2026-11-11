@@ -27,37 +27,6 @@ import (
 // Mock EventPublisher — records PublishRaw calls for assertions.
 // ---------------------------------------------------------------------------
 
-type publishedEvent struct {
-	subject string
-	data    interface{}
-}
-
-type mockEventPublisher struct {
-	mu     sync.Mutex
-	events []publishedEvent
-	noopEventPublisher
-}
-
-func (m *mockEventPublisher) PublishRaw(subject string, data interface{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.events = append(m.events, publishedEvent{subject: subject, data: data})
-}
-
-func (m *mockEventPublisher) getEvents() []publishedEvent {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]publishedEvent, len(m.events))
-	copy(out, m.events)
-	return out
-}
-
-func (m *mockEventPublisher) reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.events = nil
-}
-
 // ---------------------------------------------------------------------------
 // Helper: create a PresenceManager with a mock publisher and nil store.
 // The caller must call pm.Stop() when done.
@@ -367,11 +336,17 @@ func TestPresenceManager_GetAllStates(t *testing.T) {
 	assert.Equal(t, "idle", states["user2"])
 }
 
+// TestPresenceManager_StopIsIdempotent proves that calling Stop() more than
+// once does not panic. Before the stopOnce guard, a second Stop() call
+// panicked on close of a closed channel: a real failure mode once
+// Server.Shutdown() started actually reaching PresenceManager.Stop() for a
+// manager a test had already stopped directly (ptone/scion#2433).
 func TestPresenceManager_StopIsIdempotent(t *testing.T) {
 	pub := &mockEventPublisher{}
 	pm := NewPresenceManager(pub, nil)
-	pm.Stop()
-	// Calling Stop only once; calling it twice would deadlock since stopCh
-	// is already closed and stopped channel already received. The test
-	// verifies that Stop returns promptly.
+
+	require.NotPanics(t, func() {
+		pm.Stop()
+		pm.Stop()
+	})
 }

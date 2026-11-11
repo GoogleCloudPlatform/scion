@@ -18,7 +18,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -38,9 +40,10 @@ type Store interface {
 	GetConversationContext(ctx context.Context, telegramUserID string, projectID string, agentSlug string) (*ConversationContext, error)
 	GetLatestConversationContext(ctx context.Context, telegramUserID string, projectID string) (*ConversationContext, error)
 
-	// ProjectAgents cache
+	// ProjectAgents cache, per user and project. Saving also evicts
+	// entries older than agentCacheRetention.
 	SaveProjectAgents(ctx context.Context, pa *ProjectAgents) error
-	GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error)
+	GetProjectAgents(ctx context.Context, user, projectID string) (*ProjectAgents, error)
 
 	// User mappings
 	SaveUserMapping(ctx context.Context, mapping *TelegramUserMapping) error
@@ -82,17 +85,16 @@ type Store interface {
 
 // GroupLink represents a Telegram group chat linked to a Scion project.
 type GroupLink struct {
-	ChatID             int64
-	ChatTitle          string
-	ProjectID          string
-	ProjectSlug        string
-	DefaultAgent       string
-	LinkedBy           string
-	LinkedAt           time.Time
-	Active             bool
-	ShowAgentToAgent   bool
-	NotifyInGroup      bool
-	ShowAssistantReply bool
+	ChatID           int64
+	ChatTitle        string
+	ProjectID        string
+	ProjectSlug      string
+	DefaultAgent     string
+	LinkedBy         string
+	LinkedAt         time.Time
+	Active           bool
+	ShowAgentToAgent bool
+	NotifyInGroup    bool
 }
 
 // ConversationContext tracks the last chat context for a user+project+agent tuple.
@@ -104,8 +106,24 @@ type ConversationContext struct {
 	LastMessageAt  time.Time
 }
 
-// ProjectAgents caches the list of agents for a project.
+// agentCacheRetention bounds how long a cached agent list is kept: older
+// entries are never returned and are evicted when any list is saved. It
+// must stay at least three times every TTL applied to the cache (routing
+// agent_cache_ttl, clamped to maxAgentCacheTTL, and
+// notificationAgentCacheTTL), so a fresh entry is never dropped before its
+// TTL and a stale one can still cover a hub outage for a while.
+const agentCacheRetention = time.Hour
+
+// maxAgentCacheTTL is the longest accepted agent_cache_ttl; longer values
+// are clamped (see agentCacheRetention).
+const maxAgentCacheTTL = agentCacheRetention / 3
+
+// ProjectAgents caches the list of agents of a project as fetched by one
+// linked user.
 type ProjectAgents struct {
+	// User is the linked-user principal the list was fetched as. A cached
+	// list is only ever served to that user.
+	User        string
 	ProjectID   string
 	Agents      []AgentInfo
 	RefreshedAt time.Time
@@ -197,8 +215,7 @@ CREATE TABLE IF NOT EXISTS group_links (
 	linked_at          TEXT NOT NULL,
 	active             INTEGER NOT NULL DEFAULT 1,
 	show_agent_to_agent    INTEGER NOT NULL DEFAULT 0,
-	notify_in_group        INTEGER NOT NULL DEFAULT 0,
-	show_assistant_reply   INTEGER NOT NULL DEFAULT 1
+	notify_in_group        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_group_links_project ON group_links(project_id);
@@ -212,11 +229,20 @@ CREATE TABLE IF NOT EXISTS conversation_contexts (
 	PRIMARY KEY (telegram_user_id, project_id, agent_slug)
 );
 
-CREATE TABLE IF NOT EXISTS project_agents (
-	project_id   TEXT PRIMARY KEY,
-	agent_slugs  TEXT NOT NULL,
-	refreshed_at TEXT NOT NULL
+-- The agent-list cache was keyed by project only; it is now keyed by user
+-- and project. The old table only held a cache, so it is dropped.
+-- TODO: remove this DROP one release after the per-user cache ships.
+DROP TABLE IF EXISTS project_agents;
+
+CREATE TABLE IF NOT EXISTS user_project_agents (
+	user_principal TEXT NOT NULL,
+	project_id     TEXT NOT NULL,
+	agent_slugs    TEXT NOT NULL,
+	refreshed_at   TEXT NOT NULL,
+	PRIMARY KEY (user_principal, project_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_user_project_agents_refreshed ON user_project_agents(refreshed_at);
 
 CREATE TABLE IF NOT EXISTS user_mappings (
 	telegram_user_id   TEXT PRIMARY KEY,
@@ -269,7 +295,6 @@ CREATE TABLE IF NOT EXISTS topic_defaults (
 
 func (s *sqliteStore) migrate() error {
 	s.addColumnIfNotExists("group_links", "notify_in_group", "INTEGER NOT NULL DEFAULT 0")
-	s.addColumnIfNotExists("group_links", "show_assistant_reply", "INTEGER NOT NULL DEFAULT 1")
 	return nil
 }
 
@@ -286,28 +311,27 @@ func (s *sqliteStore) Close() error {
 
 func (s *sqliteStore) SaveGroupLink(ctx context.Context, link *GroupLink) error {
 	const q = `
-INSERT INTO group_links (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO group_links (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chat_id) DO UPDATE SET
 	chat_title=excluded.chat_title, project_id=excluded.project_id, project_slug=excluded.project_slug,
 	default_agent=excluded.default_agent, linked_by=excluded.linked_by, linked_at=excluded.linked_at,
-	active=excluded.active, show_agent_to_agent=excluded.show_agent_to_agent, notify_in_group=excluded.notify_in_group,
-	show_assistant_reply=excluded.show_assistant_reply`
+	active=excluded.active, show_agent_to_agent=excluded.show_agent_to_agent, notify_in_group=excluded.notify_in_group`
 	_, err := s.db.ExecContext(ctx, q,
 		link.ChatID, link.ChatTitle, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC().Format(time.RFC3339),
-		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent), boolToInt(link.NotifyInGroup), boolToInt(link.ShowAssistantReply))
+		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent), boolToInt(link.NotifyInGroup))
 	return err
 }
 
 func (s *sqliteStore) GetGroupLink(ctx context.Context, chatID int64) (*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM group_links WHERE chat_id = ?`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM group_links WHERE chat_id = ?`
 	row := s.db.QueryRowContext(ctx, q, chatID)
 	return scanGroupLink(row)
 }
 
 func (s *sqliteStore) GetGroupLinksForProject(ctx context.Context, projectID string) ([]*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM group_links WHERE project_id = ?`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM group_links WHERE project_id = ?`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err
@@ -317,7 +341,7 @@ func (s *sqliteStore) GetGroupLinksForProject(ctx context.Context, projectID str
 }
 
 func (s *sqliteStore) GetAllGroupLinks(ctx context.Context) ([]*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM group_links`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM group_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -341,8 +365,8 @@ func (s *sqliteStore) MigrateGroupLink(ctx context.Context, oldChatID, newChatID
 	// Copy the group_link to the new chat_id.
 	_, err = tx.ExecContext(ctx, `
 INSERT OR REPLACE INTO group_links
-  (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply)
-SELECT ?, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply
+  (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group)
+SELECT ?, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group
 FROM group_links WHERE chat_id = ?`, newChatID, oldChatID)
 	if err != nil {
 		return fmt.Errorf("copy group_link: %w", err)
@@ -429,26 +453,41 @@ ORDER BY last_message_at DESC LIMIT 1`
 // --- ProjectAgents ---
 
 func (s *sqliteStore) SaveProjectAgents(ctx context.Context, pa *ProjectAgents) error {
+	if pa.User == "" {
+		return errors.New("save agent cache: user is required")
+	}
 	slugsJSON, err := json.Marshal(pa.Agents)
 	if err != nil {
 		return fmt.Errorf("marshal agent_slugs: %w", err)
 	}
 	const q = `
-INSERT INTO project_agents (project_id, agent_slugs, refreshed_at)
-VALUES (?, ?, ?)
-ON CONFLICT(project_id) DO UPDATE SET
+INSERT INTO user_project_agents (user_principal, project_id, agent_slugs, refreshed_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(user_principal, project_id) DO UPDATE SET
 	agent_slugs=excluded.agent_slugs, refreshed_at=excluded.refreshed_at`
-	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC().Format(time.RFC3339))
-	return err
+	if _, err := s.db.ExecContext(ctx, q, pa.User, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-agentCacheRetention).UTC().Format(time.RFC3339)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM user_project_agents WHERE refreshed_at < ?`, cutoff); err != nil {
+		// The list is saved; old rows are retried on the next save and are
+		// never served meanwhile.
+		slog.Warn("Failed to evict expired agent-cache entries", "error", err)
+	}
+	return nil
 }
 
-func (s *sqliteStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`
-	row := s.db.QueryRowContext(ctx, q, projectID)
+func (s *sqliteStore) GetProjectAgents(ctx context.Context, user, projectID string) (*ProjectAgents, error) {
+	if user == "" {
+		return nil, nil
+	}
+	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM user_project_agents WHERE user_principal = ? AND project_id = ? AND refreshed_at >= ?`
+	cutoff := time.Now().Add(-agentCacheRetention).UTC().Format(time.RFC3339)
+	row := s.db.QueryRowContext(ctx, q, user, projectID, cutoff)
 
 	var pa ProjectAgents
 	var slugsJSON, refreshedAt string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
+	err := row.Scan(&pa.User, &pa.ProjectID, &slugsJSON, &refreshedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -706,9 +745,9 @@ func (s *sqliteStore) DeleteTopicDefault(ctx context.Context, chatID int64, thre
 func scanGroupLink(row *sql.Row) (*GroupLink, error) {
 	var link GroupLink
 	var linkedAt string
-	var active, showA2A, notifyInGroup, showAssistantReply int
+	var active, showA2A, notifyInGroup int
 	err := row.Scan(&link.ChatID, &link.ChatTitle, &link.ProjectID, &link.ProjectSlug,
-		&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup, &showAssistantReply)
+		&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -722,7 +761,6 @@ func scanGroupLink(row *sql.Row) (*GroupLink, error) {
 	link.Active = active != 0
 	link.ShowAgentToAgent = showA2A != 0
 	link.NotifyInGroup = notifyInGroup != 0
-	link.ShowAssistantReply = showAssistantReply != 0
 	return &link, nil
 }
 
@@ -731,9 +769,9 @@ func scanGroupLinks(rows *sql.Rows) ([]*GroupLink, error) {
 	for rows.Next() {
 		var link GroupLink
 		var linkedAt string
-		var active, showA2A, notifyInGroup, showAssistantReply int
+		var active, showA2A, notifyInGroup int
 		err := rows.Scan(&link.ChatID, &link.ChatTitle, &link.ProjectID, &link.ProjectSlug,
-			&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup, &showAssistantReply)
+			&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup)
 		if err != nil {
 			return nil, err
 		}
@@ -744,7 +782,6 @@ func scanGroupLinks(rows *sql.Rows) ([]*GroupLink, error) {
 		link.Active = active != 0
 		link.ShowAgentToAgent = showA2A != 0
 		link.NotifyInGroup = notifyInGroup != 0
-		link.ShowAssistantReply = showAssistantReply != 0
 		links = append(links, &link)
 	}
 	return links, rows.Err()

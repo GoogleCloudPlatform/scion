@@ -17,11 +17,15 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
 func TestNew(t *testing.T) {
@@ -101,8 +105,11 @@ func TestAgentsList(t *testing.T) {
 		}
 
 		// Check query params
-		if r.URL.Query().Get("groveId") != "grove-123" {
-			t.Errorf("expected groveId=grove-123, got %s", r.URL.Query().Get("groveId"))
+		if r.URL.Query().Get("projectId") != "project-123" {
+			t.Errorf("expected projectId=project-123, got %s", r.URL.Query().Get("projectId"))
+		}
+		if r.URL.Query().Get("groveId") != "" {
+			t.Errorf("expected no groveId query param, got %s", r.URL.Query().Get("groveId"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -128,7 +135,7 @@ func TestAgentsList(t *testing.T) {
 
 	client, _ := New(server.URL)
 	resp, err := client.Agents().List(context.Background(), &ListAgentsOptions{
-		ProjectID: "grove-123",
+		ProjectID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -171,6 +178,49 @@ func TestAgentsGet(t *testing.T) {
 	}
 }
 
+func TestAgentsGet_UnfollowedRedirect(t *testing.T) {
+	var originCalls, targetCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirected" {
+			targetCalls.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		originCalls.Add(1)
+		if r.URL.Path != "/api/v1/agents/test-agent" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Location", "/redirected")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Request-ID", "redirect-request")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = w.Write([]byte(`{"error":{"code":"wrong_endpoint","message":"use the new endpoint"}}`))
+	}))
+	defer server.Close()
+
+	hc := server.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client, err := New(server.URL, WithHTTPClient(hc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := client.Agents().Get(t.Context(), "test-agent")
+	if originCalls.Load() != 1 || targetCalls.Load() != 0 {
+		t.Errorf("requests = (%d origin, %d target), want (1, 0)", originCalls.Load(), targetCalls.Load())
+	}
+	if agent != nil {
+		t.Errorf("returned an agent from a redirect error body: %+v", agent)
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected an APIError for an unfollowed redirect, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusTemporaryRedirect || apiErr.RequestID != "redirect-request" ||
+		apiErr.Code != "wrong_endpoint" || apiErr.Message != "use the new endpoint" {
+		t.Errorf("redirect error details not preserved: %+v", apiErr)
+	}
+}
+
 func TestAgentsCreate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -184,8 +234,8 @@ func TestAgentsCreate(t *testing.T) {
 		if req.Name != "new-agent" {
 			t.Errorf("expected name 'new-agent', got %q", req.Name)
 		}
-		if req.ProjectID != "grove-123" {
-			t.Errorf("expected groveId 'grove-123', got %q", req.ProjectID)
+		if req.ProjectID != "project-123" {
+			t.Errorf("expected projectId 'project-123', got %q", req.ProjectID)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -195,7 +245,7 @@ func TestAgentsCreate(t *testing.T) {
 				ID:        "uuid-new",
 				Slug:      "new-agent",
 				Name:      "new-agent",
-				ProjectID: "grove-123",
+				ProjectID: "project-123",
 				Status:    "provisioning",
 			},
 		})
@@ -205,7 +255,7 @@ func TestAgentsCreate(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Agents().Create(context.Background(), &CreateAgentRequest{
 		Name:      "new-agent",
-		ProjectID: "grove-123",
+		ProjectID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -240,6 +290,44 @@ func TestAgentsDelete(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAgentsDelete_UnfollowedRedirect(t *testing.T) {
+	var deleteRequests, redirectedRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/moved" {
+			redirectedRequests.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		deleteRequests.Add(1)
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/agents/agent-to-delete" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("X-Request-ID", "delete-redirect")
+		http.Redirect(w, r, "/moved", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	hc := server.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client, err := New(server.URL, WithHTTPClient(hc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.Agents().Delete(context.Background(), "agent-to-delete", nil)
+	if deleteRequests.Load() != 1 || redirectedRequests.Load() != 0 {
+		t.Errorf("request replayed: DELETE requests=%d, redirect requests=%d", deleteRequests.Load(), redirectedRequests.Load())
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("unfollowed redirect must not report a successful deletion, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusTemporaryRedirect || apiErr.RequestID != "delete-redirect" {
+		t.Errorf("redirect details not preserved: %+v", apiErr)
 	}
 }
 
@@ -326,62 +414,16 @@ func TestProjectsRegister(t *testing.T) {
 	}
 }
 
-func TestFallback(t *testing.T) {
+// TestProjectsGet_JSONNotFound_ReturnsError covers the application-level 404
+// path for Projects().Get: the route matched but the resource doesn't exist,
+// so the client must surface an error from a single request.
+func TestProjectsGet_JSONNotFound_ReturnsError(t *testing.T) {
 	var attempts []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts = append(attempts, r.URL.Path)
-		if r.URL.Path == "/api/v1/projects/my-project" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.URL.Path == "/api/v1/groves/my-project" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	client, _ := New(server.URL)
-	project, err := client.Projects().Get(context.Background(), "my-project")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if project.Name != "My Project" {
-		t.Errorf("expected 'My Project', got %q", project.Name)
-	}
-
-	if len(attempts) != 2 {
-		t.Errorf("expected 2 attempts, got %d", len(attempts))
-	}
-	if attempts[0] != "/api/v1/projects/my-project" {
-		t.Errorf("expected first attempt to /api/v1/projects/my-project, got %s", attempts[0])
-	}
-	if attempts[1] != "/api/v1/groves/my-project" {
-		t.Errorf("expected second attempt to /api/v1/groves/my-project, got %s", attempts[1])
-	}
-}
-
-func TestFallbackSkippedOnJSONNotFound(t *testing.T) {
-	var attempts []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts = append(attempts, r.URL.Path)
-		if r.URL.Path == "/api/v1/projects/my-project" {
-			// Application-level 404: the route matched, but the resource doesn't exist.
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "project not found"})
-			return
-		}
-		// The groves fallback should never be reached.
-		if r.URL.Path == "/api/v1/groves/my-project" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "project not found"})
 	}))
 	defer server.Close()
 
@@ -392,7 +434,7 @@ func TestFallbackSkippedOnJSONNotFound(t *testing.T) {
 	}
 
 	if len(attempts) != 1 {
-		t.Errorf("expected 1 attempt (no fallback), got %d: %v", len(attempts), attempts)
+		t.Errorf("expected 1 attempt, got %d: %v", len(attempts), attempts)
 	}
 	if attempts[0] != "/api/v1/projects/my-project" {
 		t.Errorf("expected attempt to /api/v1/projects/my-project, got %s", attempts[0])
@@ -456,18 +498,18 @@ func TestEnvList(t *testing.T) {
 		if r.URL.Query().Get("scope") != "project" {
 			t.Errorf("expected scope=project, got %s", r.URL.Query().Get("scope"))
 		}
-		if r.URL.Query().Get("scopeId") != "grove-123" {
-			t.Errorf("expected scopeId=grove-123, got %s", r.URL.Query().Get("scopeId"))
+		if r.URL.Query().Get("scopeId") != "project-123" {
+			t.Errorf("expected scopeId=project-123, got %s", r.URL.Query().Get("scopeId"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ListEnvResponse{
 			EnvVars: []EnvVar{
-				{ID: "1", Key: "API_URL", Value: "https://api.example.com", Scope: "project", ScopeID: "grove-123"},
-				{ID: "2", Key: "LOG_LEVEL", Value: "debug", Scope: "project", ScopeID: "grove-123"},
+				{ID: "1", Key: "API_URL", Value: "https://api.example.com", Scope: "project", ScopeID: "project-123"},
+				{ID: "2", Key: "LOG_LEVEL", Value: "debug", Scope: "project", ScopeID: "project-123"},
 			},
 			Scope:   "project",
-			ScopeID: "grove-123",
+			ScopeID: "project-123",
 		})
 	}))
 	defer server.Close()
@@ -475,7 +517,7 @@ func TestEnvList(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Env().List(context.Background(), &ListEnvOptions{
 		Scope:   "project",
-		ScopeID: "grove-123",
+		ScopeID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -545,7 +587,7 @@ func TestEnvSet(t *testing.T) {
 				Key:     "LOG_LEVEL",
 				Value:   "debug",
 				Scope:   "project",
-				ScopeID: "grove-123",
+				ScopeID: "project-123",
 			},
 			Created: true,
 		})
@@ -556,7 +598,7 @@ func TestEnvSet(t *testing.T) {
 	resp, err := client.Env().Set(context.Background(), "LOG_LEVEL", &SetEnvRequest{
 		Value:   "debug",
 		Scope:   "project",
-		ScopeID: "grove-123",
+		ScopeID: "project-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -794,8 +836,8 @@ func TestTokenCreate(t *testing.T) {
 		if req.Name != "ci-token" {
 			t.Errorf("expected name 'ci-token', got %q", req.Name)
 		}
-		if req.ProjectID != "grove-123" {
-			t.Errorf("expected groveId 'grove-123', got %q", req.ProjectID)
+		if req.ProjectID != "project-123" {
+			t.Errorf("expected projectId 'project-123', got %q", req.ProjectID)
 		}
 		if len(req.Scopes) != 2 {
 			t.Errorf("expected 2 scopes, got %d", len(req.Scopes))
@@ -809,7 +851,7 @@ func TestTokenCreate(t *testing.T) {
 				ID:        "token-uuid",
 				Name:      "ci-token",
 				Prefix:    "scion_pat_abc1",
-				ProjectID: "grove-123",
+				ProjectID: "project-123",
 				Scopes:    []string{"agent:dispatch", "agent:read"},
 				ExpiresAt: &expires,
 				Created:   time.Now(),
@@ -821,7 +863,7 @@ func TestTokenCreate(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Tokens().Create(context.Background(), &CreateTokenRequest{
 		Name:      "ci-token",
-		ProjectID: "grove-123",
+		ProjectID: "project-123",
 		Scopes:    []string{"agent:dispatch", "agent:read"},
 		ExpiresAt: &expires,
 	})
@@ -834,8 +876,8 @@ func TestTokenCreate(t *testing.T) {
 	if resp.AccessToken.Name != "ci-token" {
 		t.Errorf("expected name 'ci-token', got %q", resp.AccessToken.Name)
 	}
-	if resp.AccessToken.ProjectID != "grove-123" {
-		t.Errorf("expected groveId 'grove-123', got %q", resp.AccessToken.ProjectID)
+	if resp.AccessToken.ProjectID != "project-123" {
+		t.Errorf("expected projectId 'project-123', got %q", resp.AccessToken.ProjectID)
 	}
 }
 
@@ -851,8 +893,8 @@ func TestTokenList(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ListTokensResponse{
 			Items: []TokenInfo{
-				{ID: "t1", Name: "ci-token", Prefix: "scion_pat_abc1", ProjectID: "grove-1", Scopes: []string{"agent:dispatch"}},
-				{ID: "t2", Name: "deploy", Prefix: "scion_pat_def2", ProjectID: "grove-2", Scopes: []string{"agent:manage"}},
+				{ID: "t1", Name: "ci-token", Prefix: "scion_pat_abc1", ProjectID: "project-1", Scopes: []string{"agent:dispatch"}},
+				{ID: "t2", Name: "deploy", Prefix: "scion_pat_def2", ProjectID: "project-2", Scopes: []string{"agent:manage"}},
 			},
 		})
 	}))
@@ -882,7 +924,7 @@ func TestTokenGet(t *testing.T) {
 			ID:        "token-123",
 			Name:      "ci-token",
 			Prefix:    "scion_pat_abc1",
-			ProjectID: "grove-1",
+			ProjectID: "project-1",
 			Scopes:    []string{"agent:dispatch"},
 			Created:   time.Now(),
 		})
@@ -918,6 +960,200 @@ func TestTokenRevoke(t *testing.T) {
 	err := client.Tokens().Revoke(context.Background(), "token-123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestListScopes verifies the plain catalog call (no options) and the
+// project-boundary eligibility call both reach GET /api/v1/auth/scopes with
+// the expected query string, and decode the eligibility fields.
+func TestListScopes(t *testing.T) {
+	t.Run("catalog only", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Errorf("expected GET, got %s", r.Method)
+			}
+			if r.URL.Path != "/api/v1/auth/scopes" {
+				t.Errorf("expected path /api/v1/auth/scopes, got %s", r.URL.Path)
+			}
+			if r.URL.RawQuery != "" {
+				t.Errorf("expected no query string, got %q", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ScopesResponse{
+				Scopes: []ScopeInfo{
+					{ID: "agent:read", Resource: "agent", Action: "read", Description: "Read agents", PermissionID: "agent.read"},
+				},
+				Aliases: []ScopeAliasInfo{
+					{ID: "agent:manage", Description: "All agent management operations", ExpandsTo: []string{"agent:read"}},
+				},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		resp, err := client.Tokens().ListScopes(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(resp.Scopes) != 1 || resp.Scopes[0].ID != "agent:read" {
+			t.Errorf("unexpected scopes: %+v", resp.Scopes)
+		}
+		if resp.Scopes[0].Eligibility != nil {
+			t.Error("catalog-only response must not carry eligibility")
+		}
+	})
+
+	t.Run("project eligibility", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("projectId"); got != "project-123" {
+				t.Errorf("expected projectId=project-123, got %q", got)
+			}
+			if got := r.URL.Query().Get("boundary"); got != "" {
+				t.Errorf("expected no boundary param, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ScopesResponse{
+				Scopes: []ScopeInfo{
+					{
+						ID: "agent:attach", Resource: "agent", Action: "attach", Description: "Attach", PermissionID: "agent.attach",
+						EligibilityKind: "relationship", Relationships: []string{"owner", "ancestor"},
+						Eligibility: &ScopeEligibility{
+							Boundary: TokenBoundary{Kind: "project", ProjectID: "project-123"},
+							Eligible: true,
+						},
+					},
+					{
+						ID: "agent:delete", Resource: "agent", Action: "delete", Description: "Delete", PermissionID: "agent.delete",
+						Eligibility: &ScopeEligibility{
+							Boundary: TokenBoundary{Kind: "project", ProjectID: "project-123"},
+							Eligible: false,
+							Reason:   "flat_role_insufficient",
+						},
+					},
+				},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		resp, err := client.Tokens().ListScopes(context.Background(), &ListScopesOptions{ProjectID: "project-123"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(resp.Scopes) != 2 {
+			t.Fatalf("expected 2 scopes, got %d", len(resp.Scopes))
+		}
+		attach := resp.Scopes[0]
+		if attach.Eligibility == nil || !attach.Eligibility.Eligible {
+			t.Errorf("expected agent:attach eligible, got %+v", attach.Eligibility)
+		}
+		del := resp.Scopes[1]
+		if del.Eligibility == nil || del.Eligibility.Eligible || del.Eligibility.Reason != "flat_role_insufficient" {
+			t.Errorf("expected agent:delete ineligible with reason flat_role_insufficient, got %+v", del.Eligibility)
+		}
+	})
+}
+
+// TestListScopes_HubBoundaryQuery verifies a hub-boundary request sends
+// boundary=hub without a projectId, decodes authority_required, and
+// surfaces unsupported_boundary from a hub without hub eligibility as a
+// typed APIError.
+func TestListScopes_HubBoundaryQuery(t *testing.T) {
+	t.Run("hub eligibility", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("boundary"); got != BoundaryHub {
+				t.Errorf("expected boundary=hub, got %q", got)
+			}
+			if _, ok := r.URL.Query()["projectId"]; ok {
+				t.Errorf("hub boundary must not send projectId, got %q", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ScopesResponse{
+				Scopes: []ScopeInfo{{
+					ID: "broker:read", Resource: "broker", Action: "read", AllowedBoundaries: []string{BoundaryHub},
+					Eligibility: &ScopeEligibility{
+						Boundary: TokenBoundary{Kind: BoundaryHub},
+						Reason:   "authority_required",
+					},
+				}},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		resp, err := client.Tokens().ListScopes(context.Background(), &ListScopesOptions{Boundary: BoundaryHub})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(resp.Scopes) != 1 || resp.Scopes[0].Eligibility == nil {
+			t.Fatalf("unexpected scopes: %+v", resp.Scopes)
+		}
+		e := resp.Scopes[0].Eligibility
+		if e.Eligible || e.Reason != "authority_required" || e.Boundary.Kind != BoundaryHub {
+			t.Errorf("unexpected eligibility: %+v", e)
+		}
+	})
+
+	t.Run("hub without hub eligibility answers unsupported_boundary", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": "unsupported_boundary", "message": "hub boundary eligibility is not available"},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		_, err := client.Tokens().ListScopes(context.Background(), &ListScopesOptions{Boundary: BoundaryHub})
+		var apiErr *apiclient.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "unsupported_boundary" {
+			t.Fatalf("expected APIError with code unsupported_boundary, got %v", err)
+		}
+	})
+}
+
+// TestAsScopeViolation verifies the typed helper extracts the selector and
+// reason from a 403 scope_violation error, and returns ok=false for the
+// detail-free, oracle-resistant project-forbidden error.
+func TestAsScopeViolation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "scope_violation",
+				"message": `requested scopes exceed issuer authority: selector "agent:delete" denied (flat_role_insufficient)`,
+				"details": map[string]interface{}{
+					"selector": "agent:delete",
+					"reason":   "flat_role_insufficient",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	_, err := client.Tokens().Create(context.Background(), &CreateTokenRequest{
+		Name: "t", ProjectID: "p", Scopes: []string{"agent:delete"},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+
+	selector, reason, ok := AsScopeViolation(err)
+	if !ok {
+		t.Fatal("expected ok=true for a scope_violation error")
+	}
+	if selector != "agent:delete" || reason != "flat_role_insufficient" {
+		t.Errorf("expected selector=agent:delete reason=flat_role_insufficient, got selector=%q reason=%q", selector, reason)
+	}
+
+	// A detail-free forbidden error must not be mistaken for a scope
+	// violation.
+	notScopeViolation := &apiclient.APIError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "forbidden"}
+	if _, _, ok := AsScopeViolation(notScopeViolation); ok {
+		t.Error("expected ok=false for a plain forbidden error")
 	}
 }
 
@@ -1067,5 +1303,19 @@ func TestHealth_AbsentContentType_NonJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to decode response") {
 		t.Errorf("expected decode error, got: %v", err)
+	}
+}
+
+func TestWithTimeout_NilHTTPClient(t *testing.T) {
+	c, err := New("http://hub.example", WithHTTPClient(nil), WithTimeout(10*time.Second))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	concrete := c.(*client)
+	if concrete.transport.HTTPClient == nil {
+		t.Fatal("transport.HTTPClient is nil")
+	}
+	if concrete.transport.HTTPClient.Timeout != 10*time.Second {
+		t.Errorf("Timeout = %v, want 10s", concrete.transport.HTTPClient.Timeout)
 	}
 }

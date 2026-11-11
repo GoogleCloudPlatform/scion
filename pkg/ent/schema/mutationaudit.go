@@ -60,6 +60,55 @@ func (MutationAudit) Fields() []ent.Field {
 			Optional(),
 		field.String("can_delegate_reason").
 			Optional(),
+
+		// E.2a additive fields (ptone/scion#2127, plan §3.3). All optional,
+		// default "".
+		field.String("credential_name").
+			Optional(),
+		field.String("credential_boundary_kind").
+			Optional(),
+		field.String("credential_boundary_project_id").
+			Optional(),
+		field.String("credential_labels").
+			Optional(),
+		field.String("correlation_id").
+			Optional(),
+		field.String("executor_kind").
+			Optional(),
+		field.String("executor_id").
+			Optional(),
+
+		// Agent delegation block (.design/agent-delegation.md §18.1). All
+		// optional, default "", and written only by the agent delegation
+		// paths (grant issuance, credential exchange, revocation); every
+		// other writer leaves them empty.
+		field.String("actor_agent_id").
+			Optional(),
+		field.String("authorizing_user_id").
+			Optional(),
+		field.String("source_grant_id").
+			Optional(),
+		field.String("parent_grant_id").
+			Optional(),
+		field.String("delegation_edge_id").
+			Optional(),
+		field.String("exchange_agent_credential_id").
+			Optional(),
+		field.String("actor_kind").
+			Optional(),
+		field.String("agent_delegation_code").
+			Optional(),
+
+		// Test identity cleanup (ptone/scion#4240, Phase 3c). A JSON
+		// object naming the creation-time provenance stamp a delete
+		// relied on (fixture_root_id, fixture_issuer_id, the column it was
+		// selected by and the run). Written on every delete of the test
+		// identity purge (3b), the purge of admin kinds (A3) and the
+		// issuer cleanup (3c); empty, default "", for every other row.
+		// Immutable: an audit row is never rewritten.
+		field.String("provenance_basis").
+			Optional().
+			Immutable(),
 	}
 }
 
@@ -76,6 +125,8 @@ func (MutationAudit) Indexes() []ent.Index {
 		index.Fields("actor_credential_id"),
 		// Target queries
 		index.Fields("target_type", "target_id"),
+		// Request correlation (E.2a)
+		index.Fields("correlation_id"),
 	}
 }
 

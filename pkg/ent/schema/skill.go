@@ -63,8 +63,6 @@ func (Skill) Fields() []ent.Field {
 			Optional(),
 		field.String("updated_by").
 			Optional(),
-		field.String("visibility").
-			Default("private"),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

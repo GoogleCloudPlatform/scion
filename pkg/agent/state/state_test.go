@@ -17,6 +17,7 @@ package state
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestPhaseIsValid(t *testing.T) {
@@ -24,7 +25,7 @@ func TestPhaseIsValid(t *testing.T) {
 		phase Phase
 		want  bool
 	}{
-		// All 9 valid phases.
+		// All 10 valid phases.
 		{PhaseCreated, true},
 		{PhaseProvisioning, true},
 		{PhaseCloning, true},
@@ -34,6 +35,7 @@ func TestPhaseIsValid(t *testing.T) {
 		{PhaseStopping, true},
 		{PhaseStopped, true},
 		{PhaseError, true},
+		{PhaseHalted, true},
 		// Legacy values that should NOT be valid.
 		{"pending", false},
 		{"deleted", false},
@@ -77,6 +79,7 @@ func TestActivityIsValid(t *testing.T) {
 		want     bool
 	}{
 		// All 10 valid activities.
+		{ActivityInitializing, true},
 		{ActivityWorking, true},
 		{ActivityThinking, true},
 		{ActivityExecuting, true},
@@ -462,8 +465,8 @@ func TestJSONOmitempty(t *testing.T) {
 
 func TestPhasesEnumeration(t *testing.T) {
 	phases := Phases()
-	if len(phases) != 9 {
-		t.Fatalf("Phases() returned %d items, want 9", len(phases))
+	if len(phases) != 10 {
+		t.Fatalf("Phases() returned %d items, want 10", len(phases))
 	}
 
 	// Verify all returned phases are valid.
@@ -495,6 +498,7 @@ func TestPhaseOrdinal(t *testing.T) {
 		{PhaseStopping, 0},
 		{PhaseStopped, 0},
 		{PhaseError, 0},
+		{PhaseHalted, 0},
 	}
 	for _, tt := range tests {
 		if got := tt.phase.Ordinal(); got != tt.ordinal {
@@ -520,7 +524,7 @@ func TestPhaseIsActivePhase(t *testing.T) {
 		}
 	}
 
-	notActive := []Phase{PhaseSuspended, PhaseStopping, PhaseStopped, PhaseError}
+	notActive := []Phase{PhaseSuspended, PhaseStopping, PhaseStopped, PhaseError, PhaseHalted}
 	for _, p := range notActive {
 		if p.IsActivePhase() {
 			t.Errorf("Phase(%q).IsActivePhase() = true, want false", p)
@@ -547,8 +551,8 @@ func TestActivityImpliesRunning(t *testing.T) {
 
 func TestActivitiesEnumeration(t *testing.T) {
 	activities := Activities()
-	if len(activities) != 10 {
-		t.Fatalf("Activities() returned %d items, want 10", len(activities))
+	if len(activities) != 11 {
+		t.Fatalf("Activities() returned %d items, want 11", len(activities))
 	}
 
 	// Verify all returned activities are valid.
@@ -563,5 +567,126 @@ func TestActivitiesEnumeration(t *testing.T) {
 	fresh := Activities()
 	if fresh[0] == "mutated" {
 		t.Error("Activities() did not return a defensive copy; mutation leaked")
+	}
+}
+
+func TestExitReasonIsValid(t *testing.T) {
+	tests := []struct {
+		reason ExitReason
+		want   bool
+	}{
+		// Empty is valid: no reason given.
+		{"", true},
+		{ExitReasonCrashed, true},
+		{ExitReasonLimitsExceeded, true},
+		{ExitReasonPreempted, true},
+		{ExitReasonEvicted, true},
+		{ExitReasonOOMKilled, true},
+		{"oom_killed", true},
+		{ExitReasonSignaled, true},
+		{"signaled", true},
+		// Unrecognised values.
+		{"OOMKilled", false},
+		{"bogus", false},
+		{"Preempted", false},
+		{"EVICTED", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.reason), func(t *testing.T) {
+			if got := tt.reason.IsValid(); got != tt.want {
+				t.Errorf("ExitReason(%q).IsValid() = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentStateAcceptsInput(t *testing.T) {
+	tests := []struct {
+		phase    Phase
+		activity Activity
+		want     bool
+	}{
+		{PhaseRunning, ActivityInitializing, false},
+		{PhaseRunning, "", false},
+		{PhaseRunning, ActivityWorking, true},
+		{PhaseRunning, ActivityThinking, true},
+		{PhaseRunning, ActivityExecuting, true},
+		{PhaseRunning, ActivityWaitingForInput, true},
+		{PhaseRunning, ActivityBlocked, true},
+		{PhaseRunning, ActivityCompleted, true},
+		{PhaseRunning, ActivityStalled, true},
+		{PhaseRunning, ActivityOffline, true},
+		{PhaseRunning, Activity("some_future_value"), true},
+		{PhaseStarting, "", false},
+		{PhaseStarting, ActivityInitializing, false},
+		{PhaseStarting, ActivityWorking, false},
+		{PhaseCreated, "", false},
+		{PhaseProvisioning, "", false},
+		{PhaseCloning, "", false},
+		{PhaseSuspended, "", false},
+		{PhaseStopping, ActivityWorking, false},
+		{PhaseStopped, ActivityCrashed, false},
+		{PhaseError, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.phase)+"/"+string(tt.activity), func(t *testing.T) {
+			s := AgentState{Phase: tt.phase, Activity: tt.activity}
+			if got := s.AcceptsInput(); got != tt.want {
+				t.Errorf("AgentState{%q,%q}.AcceptsInput() = %v, want %v", tt.phase, tt.activity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInitializingClassification(t *testing.T) {
+	a := ActivityInitializing
+	if a.IsSticky() || a.IsTerminal() || a.ImpliesRunning() || a.IsPlatformSet() {
+		t.Errorf("initializing must be non-sticky, non-terminal, not implying running, not platform-set")
+	}
+	if err := (AgentState{Phase: PhaseRunning, Activity: a}).Validate(); err != nil {
+		t.Errorf("running/initializing should validate: %v", err)
+	}
+	if err := (AgentState{Phase: PhaseStopped, Activity: a}).Validate(); err == nil {
+		t.Error("stopped/initializing should not validate")
+	}
+}
+
+func TestInitializingDisplay(t *testing.T) {
+	// The legacy Status string must stay "running" so older hubs and CLIs
+	// keep treating the agent as running.
+	if got := (AgentState{Phase: PhaseRunning, Activity: ActivityInitializing}).DisplayStatus(); got != "running" {
+		t.Errorf("DisplayStatus() = %q, want running", got)
+	}
+	if got := ActivityInitializing.DisplayLabel(); got != "starting" {
+		t.Errorf("DisplayLabel() = %q, want starting", got)
+	}
+	if got := ActivityWorking.DisplayLabel(); got != "working" {
+		t.Errorf("DisplayLabel() = %q, want working", got)
+	}
+}
+
+func TestReadyTiming(t *testing.T) {
+	if ReadySettleSession != 8*time.Second || ReadyDeadline != 90*time.Second {
+		t.Errorf("readiness timing changed: settle=%s deadline=%s", ReadySettleSession, ReadyDeadline)
+	}
+}
+
+func TestExitReasonLabel(t *testing.T) {
+	cases := map[ExitReason]string{
+		ExitReasonPreempted:        "preempted",
+		ExitReasonEvicted:          "evicted",
+		ExitReasonOOMKilled:        "out of memory",
+		ExitReasonContainerMissing: "container lost",
+		ExitReasonCrashed:          "crashed",
+		ExitReasonLimitsExceeded:   "limits exceeded",
+		ExitReasonSignaled:         "signal",
+		"":                         "unknown",
+		"something-else":           "unknown",
+	}
+	for r, want := range cases {
+		if got := r.Label(); got != want {
+			t.Errorf("ExitReason(%q).Label() = %q, want %q", r, got, want)
+		}
 	}
 }

@@ -34,25 +34,25 @@ scion_harness = provision.scion_harness
 MANAGED_BEGIN = "<!-- BEGIN SCION MANAGED -->"
 MANAGED_END = "<!-- END SCION MANAGED -->"
 
-# Seed settings.json content matching the home/ seed file.
-SEED_SETTINGS = {
-    "schema_version": 1,
-    "hooks": {
-        "SessionStart": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SessionEnd": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "UserPromptSubmit": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreToolUse": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostToolUse": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreLLMCall": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostLLMCall": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PermissionRequest": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreCompact": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostCompact": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SubagentStart": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SubagentStop": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "Stop": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-    },
-}
+# Seed settings.json content, loaded from the shipped home/ seed file so the
+# tests always exercise the exact bytes the image ships (ptone/scion#5023).
+SHIPPED_SETTINGS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "home", ".config", "muse", "settings.json"
+)
+with open(SHIPPED_SETTINGS_PATH, "r", encoding="utf-8") as _f:
+    SEED_SETTINGS = json.load(_f)
+
+# The exact key set of scion-owned hook handlers, pinned here independently of
+# provision.py so a change on either side fails a test. muse 1.4.7 rejects the
+# "name" handler key ("unknown handler field name") and skips the handler
+# (ptone/scion#5023).
+EXPECTED_SCION_HANDLER_KEYS = {"type", "command"}
+EXPECTED_HOOK_EVENTS = (
+    "SessionStart", "SessionEnd", "UserPromptSubmit",
+    "PreToolUse", "PostToolUse", "PreLLMCall", "PostLLMCall",
+    "PermissionRequest", "PreCompact", "PostCompact",
+    "SubagentStart", "SubagentStop", "Stop",
+)
 
 
 @contextmanager
@@ -91,6 +91,8 @@ def _make_bundle(tmp: str, home: str, *, candidates: dict | None = None,
                  harness_config: dict | None = None) -> dict:
     """Create a fake harness bundle and return the manifest dict."""
     bundle = os.path.join(tmp, "bundle")
+    workspace = os.path.join(tmp, "workspace")
+    os.makedirs(workspace, exist_ok=True)
     inputs_dir = os.path.join(bundle, "inputs")
     outputs_dir = os.path.join(bundle, "outputs")
     os.makedirs(inputs_dir, exist_ok=True)
@@ -140,7 +142,9 @@ def _make_bundle(tmp: str, home: str, *, candidates: dict | None = None,
     manifest = {
         "harness_bundle_dir": bundle,
         "agent_home": home,
-        "agent_workspace": "/workspace",
+        # Keep the workspace inside the test's tempdir so provisioning can
+        # never write into a live checkout mounted at /workspace.
+        "agent_workspace": workspace,
         "harness_config": config,
     }
 
@@ -228,17 +232,18 @@ class MuseCodeProvisionTest(unittest.TestCase):
 
             manifest = _make_bundle(tmp, home)
 
+            messages: list[str] = []
             with temporary_home(home), temporary_env("SCION_MODEL", "small"):
                 ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                ctx.info = messages.append  # type: ignore[method-assign]
                 provision.provision(ctx)
 
             # Model should be muse-spark-1.2 (all aliases map to it).
-            # Verify provision completed without error (model is written
-            # to env overlay or passed via host).
             auth_json = _read_json(
                 os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
             )
             self.assertEqual(auth_json["method"], "none")
+            self.assertTrue(any("model=muse-spark-1.2" in m for m in messages), messages)
 
     def test_model_passthrough_for_unknown(self) -> None:
         """Unknown model names are passed through as-is."""
@@ -249,8 +254,10 @@ class MuseCodeProvisionTest(unittest.TestCase):
 
             manifest = _make_bundle(tmp, home)
 
+            messages: list[str] = []
             with temporary_home(home), temporary_env("SCION_MODEL", "custom-model-v2"):
                 ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                ctx.info = messages.append  # type: ignore[method-assign]
                 provision.provision(ctx)
 
             # Should succeed without error.
@@ -258,6 +265,30 @@ class MuseCodeProvisionTest(unittest.TestCase):
                 os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
             )
             self.assertIsNotNone(auth_json)
+            self.assertTrue(any("model=custom-model-v2" in m for m in messages), messages)
+
+    def test_model_shorthand_now_resolves_through_aliases(self) -> None:
+        """Behavior difference from the pre-G3 lowercase-only lookup: that
+        code did `aliases.get(raw.lower(), raw)` with no shorthand table, so
+        a bare "s" never matched a model_aliases key and was logged as the
+        literal (invalid) model name "s". The shared resolve_model helper
+        expands shorthand the same way Go's NormalizeModelAlias does, so
+        this now resolves to the tier's concrete model.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            _write_seed_settings(home)
+
+            manifest = _make_bundle(tmp, home)
+
+            messages: list[str] = []
+            with temporary_home(home), temporary_env("SCION_MODEL", "s"):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                ctx.info = messages.append  # type: ignore[method-assign]
+                provision.provision(ctx)
+
+            self.assertTrue(any("model=muse-spark-1.2" in m for m in messages), messages)
 
     def test_instruction_projection(self) -> None:
         """Instructions and system prompt are projected into AGENTS.md."""
@@ -568,6 +599,765 @@ class MuseCodeProvisionTest(unittest.TestCase):
 
             # Managed block should appear exactly once.
             self.assertEqual(content.count(MANAGED_BEGIN), 1)
+
+
+# --- Hook handler format (ptone/scion#5023) ---------------------------------
+
+
+class MuseHookHandlerFormatTest(unittest.TestCase):
+    """Pins the muse hook handler format the harness ships and writes.
+
+    muse 1.4.7 rejects the "name" handler key ("unknown handler field name")
+    and skips the handler, which silently disabled every sciontool hook.
+    Scion-owned handlers carry exactly EXPECTED_SCION_HANDLER_KEYS; a format
+    change must fail here, not in a live agent.
+    """
+
+    def _assert_scion_hooks(self, hooks: dict) -> None:
+        self.assertEqual(sorted(hooks), sorted(EXPECTED_HOOK_EVENTS))
+        for event in EXPECTED_HOOK_EVENTS:
+            entries = hooks[event]
+            self.assertEqual(len(entries), 1, event)
+            self.assertEqual(entries[0]["matcher"], "*", event)
+            handlers = entries[0]["hooks"]
+            self.assertEqual(len(handlers), 1, event)
+            self.assertEqual(set(handlers[0]), EXPECTED_SCION_HANDLER_KEYS, event)
+            self.assertEqual(handlers[0]["type"], "command", event)
+            self.assertEqual(
+                handlers[0]["command"], "sciontool hook --dialect=muse-code", event
+            )
+
+    def test_scion_handler_keys_match_pin(self) -> None:
+        self.assertEqual(set(provision.SCION_HANDLER_KEYS), EXPECTED_SCION_HANDLER_KEYS)
+        self.assertEqual(tuple(provision._HOOK_EVENTS), EXPECTED_HOOK_EVENTS)
+
+    def test_shipped_settings_handler_format(self) -> None:
+        self.assertEqual(SEED_SETTINGS.get("schema_version"), 1)
+        self._assert_scion_hooks(SEED_SETTINGS["hooks"])
+
+    def test_default_hook_entry_handler_format(self) -> None:
+        hooks = {event: provision._DEFAULT_HOOK_ENTRY for event in provision._HOOK_EVENTS}
+        self._assert_scion_hooks(hooks)
+
+    def test_cold_start_writes_pinned_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            manifest = _make_bundle(tmp, home)
+
+            with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                provision.provision(ctx)
+
+            settings = _read_json(os.path.join(home, ".config", "muse", "settings.json"))
+            self._assert_scion_hooks(settings["hooks"])
+
+    def test_seeded_provision_keeps_pinned_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            _write_seed_settings(home)
+            manifest = _make_bundle(tmp, home)
+
+            with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                provision.provision(ctx)
+
+            settings = _read_json(os.path.join(home, ".config", "muse", "settings.json"))
+            self._assert_scion_hooks(settings["hooks"])
+
+    def test_repair_strips_legacy_name_and_keeps_user_handler(self) -> None:
+        user_handler = {
+            "name": "my-audit",
+            "type": "command",
+            "command": "/usr/local/bin/audit --json",
+        }
+        legacy = json.loads(json.dumps(SEED_SETTINGS))
+        for entries in legacy["hooks"].values():
+            entries[0]["hooks"][0]["name"] = "scion-hook"
+        legacy["hooks"]["PreToolUse"].append(
+            {"matcher": "Bash", "hooks": [dict(user_handler)]}
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            settings_dir = os.path.join(home, ".config", "muse")
+            settings_path = os.path.join(settings_dir, "settings.json")
+            os.makedirs(settings_dir)
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(legacy, f)
+            manifest = _make_bundle(tmp, home)
+
+            results = []
+            for _ in range(2):
+                with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                    ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                    provision.provision(ctx)
+                results.append(_read_json(settings_path))
+
+        # A second provision of the same home is a no-op on settings.json.
+        self.assertEqual(results[1], results[0])
+        hooks = results[0]["hooks"]
+        user_entries = hooks["PreToolUse"][1:]
+        self.assertEqual(user_entries, [{"matcher": "Bash", "hooks": [user_handler]}])
+        hooks["PreToolUse"] = hooks["PreToolUse"][:1]
+        self._assert_scion_hooks(hooks)
+
+    def test_repair_strips_only_scion_handler_in_shared_hooks_list(self) -> None:
+        scion_command = "sciontool hook --dialect=muse-code"
+        # User handlers, including near misses of the scion command, are never
+        # treated as scion-owned and keep every key.
+        user_handlers = [
+            {"name": "my-audit", "type": "command", "command": "audit --json"},
+            {"name": "other-dialect", "type": "command",
+             "command": "sciontool hook --dialect=claude"},
+            {"name": "extra-flag", "type": "command",
+             "command": scion_command + " --verbose"},
+            {"name": "trailing-space", "type": "command",
+             "command": scion_command + " "},
+        ]
+        hooks = {
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {"name": "scion-hook", "type": "command",
+                         "command": scion_command},
+                        *[dict(h) for h in user_handlers],
+                    ],
+                }
+            ]
+        }
+        provision._repair_scion_handlers(hooks)
+        self.assertEqual(
+            hooks["PreToolUse"][0]["hooks"],
+            [{"type": "command", "command": scion_command}, *user_handlers],
+        )
+
+    def test_repair_tolerates_malformed_shapes(self) -> None:
+        malformed = [
+            None,
+            [],
+            "hooks",
+            {"Stop": None},
+            {"Stop": "x"},
+            {"Stop": [None, "x", 3]},
+            {"Stop": [{"matcher": "*"}]},
+            {"Stop": [{"matcher": "*", "hooks": None}]},
+            {"Stop": [{"matcher": "*", "hooks": "x"}]},
+            {"Stop": [{"matcher": "*", "hooks": [None, "x", 3, []]}]},
+            {"Stop": [{"matcher": "*", "hooks": [{"name": "n", "command": None}]}]},
+        ]
+        for value in malformed:
+            with self.subTest(value=value):
+                before = json.dumps(value, sort_keys=True)
+                provision._repair_scion_handlers(value)  # type: ignore[arg-type]
+                self.assertEqual(json.dumps(value, sort_keys=True), before)
+
+
+# --- Agent Plugins ----------------------------------------------------------
+
+
+class _FakeMuseCLI:
+    """Stands in for scion_harness.run_cli and simulates the muse plugins CLI
+    against $XDG_DATA_HOME/muse, pinned to the surface and output shapes of
+    the real muse 1.4.6-R6000.1 / 1.4.7-R6101.1 (smoke run,
+    muse-code-smoke.md): install --scope user --json, approve/enable/remove
+    <id> --json with no --scope, remove of an unknown id exits 1 with
+    "unknown-plugin", and `uninstall` does not exist (exit 2)."""
+
+    def __init__(self, version: str = "Muse Code 1.4.7 (1.4.7-R6101.1)"):
+        self.version = version
+        self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
+        self.timeouts: list[float | None] = []
+        self.install_rc = 0
+        self.install_enabled = True
+        self.install_trust = "user-local"
+        self.install_registers = True
+        self.remove_keeps_record = False
+        self.remove_rc: int | None = None
+        self.enable_rc = 0
+        self.enable_noop = False
+        # Applied to the install JSON before it is printed (malformed output).
+        self.install_output_patch: dict = {}
+
+    def _lockfile(self, env) -> str:
+        return os.path.join(env["XDG_DATA_HOME"], "muse", "plugins", "installed.json")
+
+    def _load(self, env) -> dict | None:
+        """The lockfile, an empty one when absent, None when unparsable."""
+        try:
+            with open(self._lockfile(env)) as f:
+                return json.load(f)
+        except OSError:
+            return {"version": 1, "plugins": {}}
+        except json.JSONDecodeError:
+            return None
+
+    def _save(self, env, doc: dict) -> None:
+        path = self._lockfile(env)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(doc, f, indent=2)
+
+    @staticmethod
+    def _package_sha(path: str) -> str:
+        import hashlib
+        h = hashlib.sha256()
+        for root, dirs, files in sorted(os.walk(path)):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(root, name)
+                h.update(os.path.relpath(full, path).encode())
+                with open(full, "rb") as f:
+                    h.update(f.read())
+        return h.hexdigest()
+
+    def __call__(self, argv, *, timeout=None, env=None):
+        import shutil
+        import subprocess
+        env = env or {}
+        self.calls.append(list(argv))
+        self.envs.append(dict(env))
+        self.timeouts.append(timeout)
+        args = argv[1:]
+
+        def done(rc: int, out: object = None, err: str = ""):
+            text = "" if out is None else json.dumps(out, indent=2)
+            return subprocess.CompletedProcess(argv, rc, text, err)
+
+        if args == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, self.version + "\n", "")
+        if args[:1] != ["plugins"] or len(args) < 3:
+            return done(2, err="unsupported command")
+        verb, rest = args[1], args[2:]
+        if verb == "uninstall":
+            return done(2, err="unsupported plugins command `uninstall`")
+        if verb in ("approve", "enable", "remove") and "--scope" in rest:
+            return done(2, err=f"unknown plugins {verb} option `--scope`")
+        doc = self._load(env)
+        if doc is None:
+            return done(1, err="error: cannot parse plugin lockfile installed.json")
+        if verb == "install":
+            src = rest[0]
+            if rest[1:] != ["--scope", "user", "--json"] or not os.path.isabs(src):
+                return done(2, err="bad install argv")
+            if self.install_rc != 0:
+                return done(self.install_rc, err="error: plugin bundle is invalid")
+            with open(os.path.join(src, "plugin.json")) as f:
+                pid = json.load(f)["name"]
+            sha = self._package_sha(src)
+            rel = f"plugins/cache/local/{pid}/{sha}/package"
+            cache = os.path.join(env["XDG_DATA_HOME"], "muse", rel)
+            os.makedirs(cache, exist_ok=True)
+            rec = {"id": pid, "display_name": None, "version": "0.1.0", "description": "x",
+                   "manifest_family": "agent", "source_format_version": "1.0.0",
+                   "enabled": self.install_enabled, "trust": self.install_trust,
+                   "source": {"provenance": "foreign-import", "path": src},
+                   "installed_at": "2026-10-13T23:39:42Z", "updated_at": None,
+                   "manifest_sha256": "sha256:m", "package_sha256": f"sha256:{sha}",
+                   "cache_path": rel}
+            if self.install_registers:
+                doc["plugins"][pid] = rec
+                self._save(env, doc)
+            diagnostics = []
+            if os.path.exists(os.path.join(src, "mcp.json")):
+                diagnostics.append({
+                    "code": "unsupported-capability", "id": "mcp:smoke-stdio", "kind": "mcp",
+                    "message": 'Agent Plugins MCP server "smoke-stdio" is not supported in this release; it stays visible and inactive',
+                    "path": os.path.join(src, "mcp.json"), "severity": "warning"})
+            installed = {k: v for k, v in rec.items()
+                         if k not in ("source_format_version", "manifest_family", "cache_path")}
+            installed.update({"cache_path": cache, "manifest_family": "agent-plugins"})
+            out = {"diagnostics": diagnostics, "installed": installed,
+                   "lockfile_path": self._lockfile(env), "plugin": {"id": pid}, "warning": None}
+            out.update(self.install_output_patch)
+            return done(0, out)
+        pid = rest[0]
+        if rest[1:] != ["--json"]:
+            return done(2, err="bad argv")
+        rec = doc["plugins"].get(pid)
+        if verb == "approve":
+            return done(0, {"decision": "approve", "runtime_capabilities": []})
+        if verb == "enable":
+            if rec is None:
+                return done(1, {"error": {"code": "unknown-plugin", "message": f"plugin `{pid}` is not installed"}},
+                            f"plugin `{pid}` is not installed")
+            if self.enable_rc != 0:
+                return done(self.enable_rc, err="error: plugin lock busy")
+            if self.enable_noop:
+                return done(0, {"enable": rec})
+            rec["enabled"] = True
+            self._save(env, doc)
+            return done(0, {"enable": rec})
+        if verb == "remove":
+            if rec is None:
+                return done(1, {"error": {"code": "unknown-plugin", "message": f"plugin `{pid}` is not installed"}},
+                            f"plugin `{pid}` is not installed")
+            if self.remove_keeps_record:
+                return done(self.remove_rc or 0, None, "error: lock busy" if self.remove_rc else "")
+            shutil.rmtree(os.path.join(env["XDG_DATA_HOME"], "muse", "plugins", "cache", "local", pid),
+                          ignore_errors=True)
+            del doc["plugins"][pid]
+            self._save(env, doc)
+            return done(self.remove_rc or 0, {"cache_path": "...", "data_path": None,
+                                              "lockfile_path": self._lockfile(env), "removed": pid, "warning": None})
+        return done(2, err=f"unsupported plugins command `{verb}`")
+
+
+class TestMuseAgentPlugins(unittest.TestCase):
+    def setUp(self) -> None:
+        from unittest import mock
+        tmp = tempfile.TemporaryDirectory(prefix="muse-plugins-test-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.home = os.path.join(self.tmp, "home")
+        self.bundle = os.path.join(self.home, ".scion", "harness")
+        self.inputs = os.path.join(self.bundle, "inputs")
+        os.makedirs(self.inputs)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("XDG_")}
+        env["HOME"] = self.home
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.cli = _FakeMuseCLI()
+        p = mock.patch.object(scion_harness, "run_cli", self.cli)
+        p.start()
+        self.addCleanup(p.stop)
+        self.data = os.path.join(self.home, ".local", "share")
+
+    def stage(self, names: dict[str, str], mcp: bool = False, skill: str = "PLUM-7") -> None:
+        import shutil
+        shutil.rmtree(os.path.join(self.inputs, "plugins"), ignore_errors=True)
+        entries = []
+        for name, digest in names.items():
+            d = os.path.join(self.inputs, "plugins", name)
+            os.makedirs(os.path.join(d, "skills", "hello"))
+            with open(os.path.join(d, "plugin.json"), "w") as f:
+                json.dump({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": name}, f)
+            with open(os.path.join(d, "skills", "hello", "SKILL.md"), "w") as f:
+                f.write(f"---\nname: hello\n---\nanswer {skill} ({digest})\n")
+            if mcp:
+                with open(os.path.join(d, "mcp.json"), "w") as f:
+                    json.dump({"$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                               "mcpServers": {"smoke-stdio": {"type": "stdio", "command": "./bin/x"}}}, f)
+            entries.append({"name": name, "version": "0.1.0", "dir": f"plugins/{name}", "digest": digest,
+                            "skills": ["hello"], "skills_dir_conflict": False, "mcp": None})
+        with open(os.path.join(self.inputs, "plugins.json"), "w") as f:
+            json.dump({"schema_version": 1, "spec_version": "1.0.0", "plugins": entries}, f)
+
+    def ctx(self, warnings: list[str] | None = None) -> "scion_harness.ProvisionContext":
+        ctx = scion_harness.ProvisionContext("muse-code", {
+            "harness_bundle_dir": self.bundle,
+            "agent_workspace": os.path.join(self.tmp, "workspace"),
+        })
+        if warnings is not None:
+            ctx.warn = warnings.append  # type: ignore[method-assign]
+        return ctx
+
+    def reconcile(self, warnings: list[str] | None = None, **kw) -> None:
+        ctx = self.ctx(warnings)
+        scion_harness.reconcile_agent_plugins(ctx, provision.MuseInstaller(ctx), **kw)
+
+    def registry(self, data: str | None = None) -> dict:
+        with open(os.path.join(data or self.data, "muse", "plugins", "installed.json")) as f:
+            return json.load(f)["plugins"]
+
+    def state(self) -> dict:
+        with open(os.path.join(self.home, ".scion", "agent-plugins", "state-muse-code.json")) as f:
+            return json.load(f)["plugins"]
+
+    def bundle_dir(self, name: str) -> str:
+        return os.path.join(self.home, ".scion", "agent-plugins", "bundles", name)
+
+    def install_argv(self, name: str) -> list[str]:
+        return ["muse", "plugins", "install", self.bundle_dir(name), "--scope", "user", "--json"]
+
+    def test_install_runs_cli_and_records_state(self) -> None:
+        self.stage({"scion-smoke": "sha256:1", "acme.tools": "sha256:2"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls, [
+            ["muse", "--version"],
+            self.install_argv("scion-smoke"),
+            self.install_argv("acme.tools"),
+        ])
+        # Installs from the stable mirror, never from inputs/.
+        self.assertTrue(os.path.isfile(os.path.join(self.bundle_dir("scion-smoke"), "plugin.json")))
+        reg = self.registry()
+        self.assertTrue(reg["scion-smoke"]["enabled"])
+        ref = self.state()["scion-smoke"]["native_ref"]
+        self.assertEqual(ref["id"], "scion-smoke")
+        self.assertTrue(os.path.isdir(ref["cache_path"]))
+        self.assertEqual(ref["package_sha256"], reg["scion-smoke"]["package_sha256"])
+
+        # Steady state: no CLI call at all.
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+
+    def test_cli_env_pins_xdg_and_disables_auto_update(self) -> None:
+        # R4: sciontool's minimal env carries no XDG_*; the installer passes
+        # muse's defaults explicitly so the CLI and is_present agree.
+        self.stage({"a": "d1"})
+        self.reconcile()
+        for env in self.cli.envs:
+            self.assertEqual(env["XDG_DATA_HOME"], self.data)
+            self.assertEqual(env["XDG_CONFIG_HOME"], os.path.join(self.home, ".config"))
+            self.assertEqual(env["MUSE_NO_AUTO_UPDATE"], "1")
+            self.assertEqual(env["HOME"], self.home)
+
+    def test_cli_env_honours_absolute_xdg_overrides(self) -> None:
+        data = os.path.join(self.tmp, "xdg-data")
+        os.environ["XDG_DATA_HOME"] = data
+        os.environ["XDG_CONFIG_HOME"] = "relative/ignored"
+        self.stage({"a": "d1"})
+        self.reconcile()
+        self.assertEqual({e["XDG_DATA_HOME"] for e in self.cli.envs}, {data})
+        self.assertEqual({e["XDG_CONFIG_HOME"] for e in self.cli.envs}, {os.path.join(self.home, ".config")})
+        self.assertIn("a", self.registry(data))
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [], "is_present reads the same XDG_DATA_HOME")
+
+    def test_no_approve_or_enable_when_install_enabled(self) -> None:
+        # muse 1.4.6/1.4.7: install enables by default (trust user-local).
+        self.stage({"a": "d1"})
+        self.reconcile()
+        self.assertEqual([c[2] for c in self.cli.calls if len(c) > 2], ["install"])
+
+    def test_enable_when_install_reports_disabled(self) -> None:
+        self.cli.install_enabled = False
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls[1:], [
+            self.install_argv("a"),
+            ["muse", "plugins", "enable", "a", "--json"],
+        ])
+        self.assertTrue(self.registry()["a"]["enabled"])
+        self.assertIn("a", self.state())
+
+    def test_approve_when_install_asks(self) -> None:
+        self.cli.install_trust = "untrusted"
+        self.stage({"a": "d1"})
+        self.reconcile()
+        self.assertEqual(self.cli.calls[1:], [
+            self.install_argv("a"),
+            ["muse", "plugins", "approve", "a", "--json"],
+        ])
+
+    def test_needs_approval_signals(self) -> None:
+        f = provision.MuseInstaller._needs_approval
+        self.assertFalse(f({"warning": None}, {"enabled": True, "trust": "user-local"}))
+        self.assertTrue(f({"needs_approval": True}, {}))
+        self.assertTrue(f({}, {"approval_required": True}))
+        self.assertTrue(f({}, {"trust": "pending"}))
+        self.assertTrue(f({"warning": "run `muse plugins approve a` to trust it"}, {}))
+
+    def test_install_not_registered_is_a_failure(self) -> None:
+        self.cli.install_registers = False
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("is not in installed.json", warnings[0])
+        state_path = os.path.join(self.home, ".scion", "agent-plugins", "state-muse-code.json")
+        if os.path.exists(state_path):
+            self.assertNotIn("a", self.state())
+
+    def test_install_left_disabled_is_removed_not_orphaned(self) -> None:
+        # enable exits 0 but the record stays disabled: the install fails,
+        # and the muse install is removed so Scion never orphans it.
+        self.cli.install_enabled = False
+        self.cli.enable_noop = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("muse plugins install exit 0 but a is not enabled in installed.json", warnings[0])
+        self.assertIn("will retry next start", warnings[0])
+        self.assertEqual(self.cli.calls[1:], [
+            self.install_argv("a"),
+            ["muse", "plugins", "enable", "a", "--json"],
+            ["muse", "plugins", "remove", "a", "--json"],
+        ])
+        self.assertNotIn("a", self.registry())
+        self.assertNotIn("a", self.state() if os.path.exists(
+            os.path.join(self.home, ".scion", "agent-plugins", "state-muse-code.json")) else {})
+
+    def test_enable_failure_removes_install(self) -> None:
+        self.cli.install_enabled = False
+        self.cli.enable_rc = 1
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [
+            "agent plugin a: install failed (muse plugins enable exit 1: error: plugin lock busy); will retry next start",
+        ])
+        self.assertEqual(self.cli.calls[-1], ["muse", "plugins", "remove", "a", "--json"])
+        self.assertNotIn("a", self.registry())
+
+    def test_enable_and_cleanup_failure_keeps_ownership(self) -> None:
+        # The cleanup removal does not take effect either: Scion records the
+        # install (it owns it), is_present reports it missing (disabled), so
+        # the next start retries, and dropping it from the template removes it.
+        self.cli.install_enabled = False
+        self.cli.enable_rc = 1
+        self.cli.remove_keeps_record = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Scion keeps ownership and retries next start", warnings[0])
+        self.assertIn("a", self.state())
+        self.assertFalse(self.registry()["a"]["enabled"])
+
+        self.cli.enable_rc = 0
+        self.cli.remove_keeps_record = False
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls[:2], [["muse", "--version"], self.install_argv("a")])
+        self.assertTrue(self.registry()["a"]["enabled"])
+
+        self.stage({})
+        self.reconcile()
+        self.assertNotIn("a", self.registry())
+        self.assertEqual(self.state(), {})
+
+    def test_uninstall_unreadable_registry_keeps_state(self) -> None:
+        self.stage({"a": "d1"})
+        self.reconcile()
+        path = os.path.join(self.data, "muse", "plugins", "installed.json")
+        with open(path, "w") as f:
+            f.write("{not json")
+        inst = provision.MuseInstaller(self.ctx())
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "cannot read muse registry"):
+            inst.uninstall("a", {"id": "a"})
+        # Through reconcile: the removal fails, ownership is kept and retried.
+        self.stage({})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("agent plugin a: removal failed", warnings[0])
+        self.assertIn("muse plugins remove exit 1", warnings[0])
+        self.assertIn("a", self.state())
+        self.assertTrue(os.path.isdir(self.bundle_dir("a")))
+
+    def test_is_present_requires_installed_package(self) -> None:
+        # The same id reinstalled from another source (a different package)
+        # is not Scion's install: reinstall from Scion's bundle.
+        self.stage({"a": "d1"})
+        self.reconcile()
+        inst = provision.MuseInstaller(self.ctx())
+        ref = self.state()["a"]["native_ref"]
+        self.assertTrue(inst.is_present("a", ref))
+        self.assertFalse(inst.is_present("a", {**ref, "package_sha256": "sha256:other"}))
+        self.assertTrue(inst.is_present("a", {**ref, "package_sha256": ""}))
+
+    def test_malformed_install_diagnostics_tolerated(self) -> None:
+        # Upstream review (GoogleCloudPlatform/scion#3726): a non-list
+        # diagnostics field must not raise; the install is still recorded.
+        for bad in (7, True, {"severity": "warning"}, "warning"):
+            with self.subTest(diagnostics=bad):
+                self.cli.install_output_patch = {"diagnostics": bad}
+                self.stage({"a": f"d-{bad!r}"})
+                warnings: list[str] = []
+                self.reconcile(warnings)
+                self.assertEqual(warnings, [])
+                self.assertIn("a", self.state())
+                self.assertTrue(self.registry()["a"]["enabled"])
+
+    def test_unexpected_error_after_install_does_not_orphan(self) -> None:
+        # Any unexpected exception after a successful `plugins install`
+        # goes through the same cleanup as a PluginInstallError.
+        from unittest import mock
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        with mock.patch.object(provision.MuseInstaller, "_needs_approval", side_effect=RuntimeError("boom")):
+            self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("unexpected error after muse plugins install: RuntimeError: boom", warnings[0])
+        self.assertEqual(self.cli.calls[-1], ["muse", "plugins", "remove", "a", "--json"])
+        self.assertNotIn("a", self.registry())
+
+    def test_mcp_diagnostics_surface_as_warnings(self) -> None:
+        # muse <= 1.4.9 keeps Agent Plugins MCP servers inactive (M3).
+        self.stage({"a": "d1"}, mcp=True)
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [
+            'agent plugin a: muse: Agent Plugins MCP server "smoke-stdio" is not supported '
+            "in this release; it stays visible and inactive",
+        ])
+        self.assertIn("a", self.state())
+
+    def test_remove_and_digest_change(self) -> None:
+        self.stage({"a": "d1", "b": "d1"})
+        self.reconcile()
+        old_cache = self.state()["b"]["native_ref"]["cache_path"]
+        self.stage({"b": "d2"}, skill="PLUM-8")
+        self.cli.calls.clear()
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls, [
+            ["muse", "--version"],
+            ["muse", "plugins", "remove", "a", "--json"],
+            # M5: uninstall first on a digest change.
+            ["muse", "plugins", "remove", "b", "--json"],
+            self.install_argv("b"),
+        ])
+        self.assertEqual(sorted(self.registry()), ["b"])
+        self.assertEqual(sorted(self.state()), ["b"])
+        new_cache = self.state()["b"]["native_ref"]["cache_path"]
+        self.assertNotEqual(old_cache, new_cache)
+        # The mirror the CLI installed from has the new content.
+        with open(os.path.join(self.bundle_dir("b"), "skills", "hello", "SKILL.md")) as f:
+            self.assertIn("PLUM-8", f.read())
+        self.assertFalse(os.path.exists(self.bundle_dir("a")))
+        with open(os.path.join(self.home, ".scion", "agent-plugins", "status-muse-code.json")) as f:
+            self.assertEqual(json.load(f)["removed"], ["a"])
+
+    def test_uninstall_judged_by_registry(self) -> None:
+        self.stage({"a": "d1"})
+        self.reconcile()
+        inst = provision.MuseInstaller(self.ctx())
+        # exit 0 but still registered: not a success.
+        self.cli.remove_keeps_record = True
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "still in installed.json"):
+            inst.uninstall("a", {"id": "a"})
+        # non-zero and still registered: the CLI error.
+        self.cli.remove_rc = 1
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "muse plugins remove exit 1"):
+            inst.uninstall("a", {"id": "a"})
+        # Removed for real.
+        self.cli.remove_keeps_record = False
+        self.cli.remove_rc = None
+        inst.uninstall("a", {"id": "a"})
+        self.assertNotIn("a", self.registry())
+        # Already gone: muse exits 1 "unknown-plugin"; that is a success.
+        inst.uninstall("a", {"id": "a"})
+        inst.uninstall("never-installed", {})
+        self.assertEqual(self.cli.calls[-1], ["muse", "plugins", "remove", "never-installed", "--json"])
+
+    def test_is_present_checks_registry_and_cache(self) -> None:
+        self.stage({"a": "d1"})
+        self.reconcile()
+        inst = provision.MuseInstaller(self.ctx())
+        ref = self.state()["a"]["native_ref"]
+        self.assertTrue(inst.is_present("a", ref))
+        path = os.path.join(self.data, "muse", "plugins", "installed.json")
+        with open(path) as f:
+            text = f.read()
+        # Disabled in muse's registry.
+        with open(path, "w") as f:
+            f.write(text.replace('"enabled": true', '"enabled": false'))
+        self.assertFalse(inst.is_present("a", ref))
+        # Registry unreadable.
+        with open(path, "w") as f:
+            f.write("{not json")
+        self.assertFalse(inst.is_present("a", ref))
+        with open(path, "w") as f:
+            f.write(text)
+        self.assertTrue(inst.is_present("a", ref))
+        # Cache dir gone while the record survives.
+        import shutil
+        shutil.rmtree(ref["cache_path"])
+        self.assertFalse(inst.is_present("a", ref))
+
+    def test_registry_reset_reinstalls(self) -> None:
+        # Regression (slice review lesson): Scion's state and the cache dir
+        # survive but muse's own registry was reset; the plugin must be
+        # reinstalled, not skipped by the fast path.
+        self.stage({"scion-smoke": "d1"})
+        self.reconcile()
+        ref = self.state()["scion-smoke"]["native_ref"]
+        with open(os.path.join(self.data, "muse", "plugins", "installed.json"), "w") as f:
+            json.dump({"version": 1, "plugins": {}}, f)
+        self.assertTrue(os.path.isdir(ref["cache_path"]))
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [["muse", "--version"], self.install_argv("scion-smoke")])
+        self.assertTrue(self.registry()["scion-smoke"]["enabled"])
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+
+    def test_reprovision_shipped_home_reset(self) -> None:
+        # A re-provision recopies the harness-config home/ tree. For muse it
+        # holds only .config/muse/settings.json and .bashrc; registration
+        # lives in $XDG_DATA_HOME/muse/plugins/installed.json (real muse
+        # 1.4.7), so the plugin stays registered and the fast path holds.
+        # If the reset does reach muse's registry, it is reinstalled.
+        import shutil
+        self.stage({"scion-smoke": "d1"})
+        self.reconcile()
+        shipped = os.path.join(os.path.dirname(os.path.abspath(PROVISION_PATH)), "home")
+        shutil.copytree(shipped, self.home, dirs_exist_ok=True)
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+        # Same reset, but covering muse's data dir too (a home/ tree or volume
+        # reset that wipes ~/.local/share).
+        shutil.rmtree(os.path.join(self.data, "muse"))
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [["muse", "--version"], self.install_argv("scion-smoke")])
+        self.assertTrue(self.registry()["scion-smoke"]["enabled"])
+
+    def test_install_failure_warns_with_stderr(self) -> None:
+        self.cli.install_rc = 1
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [
+            "agent plugin a: install failed (muse plugins install exit 1: error: plugin bundle is invalid); "
+            "will retry next start",
+        ])
+
+    def test_old_muse_skips(self) -> None:
+        self.cli.version = "Muse Code 1.4.5 (1.4.5-R5900.1)"
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(self.cli.calls, [["muse", "--version"]])
+        self.assertIn("muse 1.4.5 is older than 1.4.6", warnings[0])
+
+    def test_min_version_accepts_1_4_6(self) -> None:
+        self.cli.version = "Muse Code 1.4.6 (1.4.6-R6000.1)"
+        self.stage({"a": "d1"})
+        self.reconcile()
+        self.assertIn("a", self.state())
+
+    def test_cli_timeouts_capped_by_budget(self) -> None:
+        self.cli.install_enabled = False
+        self.stage({"a": "d1"})
+        ticks = iter([0.0] + [17.0] * 50)
+        self.reconcile(budget_s=20.0, clock=lambda: next(ticks))
+        # --version, install and enable are each capped to the 20 - 17 = 3s
+        # left (the 10s/15s defaults would overrun the budget).
+        self.assertEqual(self.cli.timeouts, [3.0, 3.0, 3.0])
+
+    def test_provision_reconciles_last(self) -> None:
+        home = self.home
+        _write_seed_settings(home)
+        manifest = _make_bundle(self.tmp, home, instructions="hi")
+        # Stage into the manifest's bundle.
+        self.inputs = os.path.join(manifest["harness_bundle_dir"], "inputs")
+        self.stage({"scion-smoke": "d1"})
+        with temporary_env("SCION_MODEL", "medium"):
+            provision.provision(scion_harness.ProvisionContext("muse-code", manifest))
+        self.assertEqual(self.cli.calls[-1], self.install_argv("scion-smoke"))
+        with open(os.path.join(home, ".config", "muse", "settings.json")) as f:
+            self.assertIn("hooks", json.load(f))
+        self.assertTrue(self.registry()["scion-smoke"]["enabled"])
+        self.cli.calls.clear()
+        with temporary_env("SCION_MODEL", "medium"):
+            provision.provision(scion_harness.ProvisionContext("muse-code", manifest))
+        self.assertEqual(self.cli.calls, [])
 
 
 if __name__ == "__main__":

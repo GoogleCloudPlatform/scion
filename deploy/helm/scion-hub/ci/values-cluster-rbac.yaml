@@ -25,8 +25,19 @@ image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   sessionSecret: ci-cluster-rbac-session-secret-not-real
+  # PROBE VALUE, not a real resource. auth.mode defaults to proxy, and the hub
+  # refuses to start in proxy mode without an IAP audience, so every proxy
+  # fixture carries one. Cloud Run form.
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-ci-cluster-rbac
 
 runtime:
   listAllNamespaces: true

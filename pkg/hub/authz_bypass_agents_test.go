@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -56,225 +55,6 @@ import (
 // ============================================================================
 // Fixture
 // ============================================================================
-
-// bypassAgentsFixture is the world these tests reason about, mirroring the
-// narrated scenario in design §5.3:
-//
-//	project (P1), owned by owner
-//	  caller   — the agent presenting the token in most tests
-//	  sibling  — a project peer of caller; NOT a descendant of it
-//	  child    — a descendant of caller (caller.ID in its ancestry)
-//	other (P2)
-//	  stranger — an agent in a project the caller has nothing to do with
-//
-// The sibling/child distinction is load-bearing: the ancestry bypass grants
-// caller full access to child, so a denial test written against child would
-// pass for the wrong reason.
-type bypassAgentsFixture struct {
-	srv      *Server
-	store    store.Store
-	owner    *store.User
-	proj     *store.Project
-	other    *store.Project
-	caller   *store.Agent
-	sibling  *store.Agent
-	child    *store.Agent
-	stranger *store.Agent
-	broker   *store.RuntimeBroker
-	// brokerSecret is the HMAC key for broker-authenticated requests.
-	brokerSecret []byte
-	brokerAuthID string
-}
-
-// bypassAgentsServer builds a server that accepts all three identity kinds:
-// the dev user token, agent JWTs, and HMAC-signed broker requests. The stock
-// testServer has no broker auth, and the #591 bypass admitted brokers as well
-// as agents, so the tests need a server where a broker caller can actually
-// reach a handler.
-func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Skipf("skipping: test store unavailable (%v)", err)
-	}
-	require.NoError(t, s.Migrate(context.Background()))
-	// Remove backfill marker — see testServer comment for rationale.
-	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	cfg.DevUserConfig = DevUserConfig{
-		Username:    "dev",
-		DisplayName: "Development User",
-		Email:       "dev@localhost",
-	}
-	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
-	srv, err := New(cfg, s)
-	require.NoError(t, err)
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	return srv, s
-}
-
-func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
-	t.Helper()
-	srv, s := bypassAgentsServer(t)
-	ctx := context.Background()
-	f := &bypassAgentsFixture{srv: srv, store: s}
-
-	f.owner = &store.User{
-		ID:          tid("bypass-owner"),
-		Email:       "bypass-owner@example.com",
-		DisplayName: "Bypass Owner",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, f.owner))
-
-	f.proj = &store.Project{
-		ID:      tid("bypass-p1"),
-		Name:    "Bypass P1",
-		Slug:    "bypass-p1",
-		OwnerID: f.owner.ID,
-	}
-	require.NoError(t, s.CreateProject(ctx, f.proj))
-
-	f.other = &store.Project{
-		ID:      tid("bypass-p2"),
-		Name:    "Bypass P2",
-		Slug:    "bypass-p2",
-		OwnerID: f.owner.ID,
-	}
-	require.NoError(t, s.CreateProject(ctx, f.other))
-
-	// An auto-provide broker, so that agent creation can resolve a broker and
-	// the create tests exercise the authorization gate rather than dying at
-	// broker selection.
-	f.brokerSecret = []byte("bypass-secret-key-32-bytes-ok!!")
-	f.brokerAuthID = uuid.New().String()
-	f.broker = &store.RuntimeBroker{
-		ID:          f.brokerAuthID,
-		Name:        "bypass-broker",
-		Slug:        "bypass-broker",
-		Status:      store.BrokerStatusOnline,
-		AutoProvide: true,
-		Created:     time.Now(),
-		Updated:     time.Now(),
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, f.broker))
-	require.NoError(t, s.CreateBrokerSecret(ctx, &store.BrokerSecret{
-		BrokerID:  f.broker.ID,
-		SecretKey: f.brokerSecret,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		Status:    store.BrokerSecretStatusActive,
-	}))
-	for _, p := range []*store.Project{f.proj, f.other} {
-		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-			ProjectID:  p.ID,
-			BrokerID:   f.broker.ID,
-			BrokerName: f.broker.Name,
-			Status:     store.BrokerStatusOnline,
-		}))
-		p.DefaultRuntimeBrokerID = f.broker.ID
-		require.NoError(t, s.UpdateProject(ctx, p))
-	}
-
-	mk := func(name, projectID string, ancestry []string) *store.Agent {
-		a := &store.Agent{
-			ID:        tid(name),
-			Slug:      tid(name),
-			Name:      name,
-			ProjectID: projectID,
-			Phase:     string(state.PhaseRunning),
-			CreatedBy: f.owner.ID,
-			OwnerID:   f.owner.ID,
-			Ancestry:  ancestry,
-		}
-		require.NoError(t, s.CreateAgent(ctx, a))
-		return a
-	}
-	f.caller = mk("bypass-caller", f.proj.ID, []string{f.owner.ID})
-	f.sibling = mk("bypass-sibling", f.proj.ID, []string{f.owner.ID})
-	f.child = mk("bypass-child", f.proj.ID, []string{f.owner.ID, tid("bypass-caller")})
-	f.stranger = mk("bypass-stranger", f.other.ID, []string{f.owner.ID})
-
-	return f
-}
-
-// token mints an agent JWT for the calling agent with the given scopes.
-// ScopeProjectRead is always included because the baseline role grants it to
-// every agent; without it, checkAgentReadScope rejects read requests before
-// the handler-level authorization these tests are designed to exercise.
-func (f *bypassAgentsFixture) token(t *testing.T, scopes ...AgentTokenScope) string {
-	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
-	tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, allScopes, nil)
-	require.NoError(t, err)
-	return tok
-}
-
-// asAgent issues a request carrying the calling agent's token.
-func (f *bypassAgentsFixture) asAgent(t *testing.T, method, path string, body interface{}, scopes ...AgentTokenScope) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestWithAgentToken(t, f.srv, method, path, body, f.token(t, scopes...))
-}
-
-// asAgentWithHeaders issues a request carrying the calling agent's token with additional headers.
-func (f *bypassAgentsFixture) asAgentWithHeaders(t *testing.T, method, path string, body interface{}, headers map[string]string, scopes ...AgentTokenScope) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("X-Scion-Agent-Token", f.token(t, scopes...))
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	rec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// asBroker issues an HMAC-signed broker request. Brokers implement neither
-// UserIdentity nor AgentIdentity, so before #591 they slipped through every one
-// of these guards exactly as agents did.
-func (f *bypassAgentsFixture) asBroker(t *testing.T, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var raw []byte
-	if body != nil {
-		var err error
-		raw, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	nonce := "bypass-nonce-" + uuid.New().String()
-	req.Header.Set(HeaderBrokerID, f.broker.ID)
-	req.Header.Set(HeaderTimestamp, timestamp)
-	req.Header.Set(HeaderNonce, nonce)
-
-	svc := f.srv.brokerAuthService
-	require.NotNil(t, svc, "broker auth service must be configured for broker tests")
-	mac := hmac.New(sha256.New, f.brokerSecret)
-	mac.Write(svc.buildCanonicalString(req, timestamp, nonce))
-	req.Header.Set(HeaderSignature, base64.StdEncoding.EncodeToString(mac.Sum(nil)))
-
-	rec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
 
 // ============================================================================
 // Denials — one per converted site, agent-authenticated
@@ -452,23 +232,6 @@ func TestBypassAgents_Denials(t *testing.T) {
 	})
 }
 
-// bypassAgentsCreateSA registers a project-scoped GCP service account.
-func bypassAgentsCreateSA(t *testing.T, f *bypassAgentsFixture, scopeID string, verified bool) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:        uuid.New().String(),
-		Scope:     store.ScopeProject,
-		ScopeID:   scopeID,
-		Email:     fmt.Sprintf("sa-%s@proj.iam.gserviceaccount.com", uuid.New().String()[:8]),
-		ProjectID: "gcp-proj",
-		CreatedBy: f.owner.ID,
-		Verified:  verified,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, f.store.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
 // TestBypassAgents_UpdateAgentServiceAccountChecks covers the PATCH twin of the
 // create path's service-account checks.
 //
@@ -568,6 +331,9 @@ func TestBypassAgents_UpdateAgentServiceAccountChecks(t *testing.T) {
 			Created:     time.Now(),
 		}
 		require.NoError(t, f.store.CreateUser(context.Background(), updater))
+		// Active project access for the owner relationship (ptone/scion#2141);
+		// the binding grants no permission, including no service account read.
+		grantProjectAccessOnly(t, f.store, updater.ID, f.proj.ID)
 
 		owned := &store.Agent{
 			ID:        uuid.New().String(),
@@ -692,23 +458,23 @@ func TestBypassAgents_BrokerCallerDenied(t *testing.T) {
 // distinguish a fix from an outage. If one of these fails, the change is wrong.
 func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("agent reads itself", func(t *testing.T) {
-		// CO1: agent.read has no AgentScopes mapping in the permissions
-		// registry, so the agent JWT scope restriction blocks this
-		// permission. An agent cannot read specific agents by ID (including
-		// itself) — agent list endpoints remain accessible via agent.list.
+		// An agent may read its own record by ID, as it already may on the
+		// project-scoped route; this is what `scion whoami --full` calls.
+		// CO1 still applies to every other agent (next case).
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping; agent must be denied; got %d: %s",
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"an agent must be able to read its own record; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
 
 	t.Run("agent reads a project peer", func(t *testing.T) {
 		// CO1: same as self-read — agent.read has no AgentScopes mapping,
 		// so the credential scope restriction blocks individual agent reads.
+		// An agent caller's denial reads as not found (ptone/scion#3409).
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
+		assert.Equal(t, http.StatusNotFound, rec.Code,
 			"CO1: agent.read has no AgentScopes mapping; agent must be denied; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
@@ -785,6 +551,7 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("project owner retains full access", func(t *testing.T) {
 		// The conversion must not change the user path at all.
 		f := bypassAgentsSetup(t)
+		bindFixtureOwner(t, f)
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
 			"/api/v1/projects/"+f.proj.ID, map[string]interface{}{"name": "Renamed By Owner"})
 		assert.Equal(t, http.StatusOK, rec.Code,
@@ -797,9 +564,69 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	})
 }
 
+// TestGetAgent_SelfRead covers `scion whoami --full`, which reads the agent's
+// own record through GET /api/v1/agents/{id}: a baseline-role token may read
+// itself, a token without project:read may not, peers stay denied, and a
+// token carrying the caller's own agent ID but bound to another project is
+// answered 404 rather than treated as a self-read.
+func TestGetAgent_SelfRead(t *testing.T) {
+	t.Run("baseline role reads itself", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, ScopesForRole(AgentRoleBaseline)...)
+		require.Equal(t, http.StatusOK, rec.Code, "baseline self-read: %s", rec.Body.String())
+		var body map[string]interface{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, f.caller.ID, body["id"], "the response must be the caller's own record")
+	})
+
+	t.Run("baseline role still cannot read a peer", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil, ScopesForRole(AgentRoleBaseline)...)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "peer read: %s", rec.Body.String())
+	})
+
+	t.Run("token without project:read cannot read itself", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		svc := f.srv.GetAgentTokenService()
+		require.NotNil(t, svc)
+		tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+		require.NoError(t, err)
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "self-read without project:read: %s", rec.Body.String())
+	})
+
+	t.Run("self ID with a token bound to another project is 404", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		svc := f.srv.GetAgentTokenService()
+		require.NotNil(t, svc)
+		tok, err := svc.GenerateAgentToken(f.caller.ID, f.other.ID, ScopesForRole(AgentRoleBaseline), nil)
+		require.NoError(t, err)
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"project isolation must run before the self-read exemption: %s", rec.Body.String())
+	})
+}
+
 // ============================================================================
 // Cross-route parity — the regression guard for the drift class itself
 // ============================================================================
+
+// TestBypassAgents_SelfReadRouteParity asserts that a self-read returns an
+// identical decoded JSON body whether it goes through the unscoped
+// GET /api/v1/agents/{id} route or the project-scoped
+// GET /api/v1/projects/{id}/agents/{id} route.
+func TestBypassAgents_SelfReadRouteParity(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	unscoped := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil)
+	scoped := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents/"+f.caller.ID, nil)
+	require.Equal(t, http.StatusOK, unscoped.Code, "unscoped self-read: %s", unscoped.Body.String())
+	require.Equal(t, http.StatusOK, scoped.Code, "project-scoped self-read: %s", scoped.Body.String())
+
+	var unscopedBody, scopedBody map[string]interface{}
+	require.NoError(t, json.Unmarshal(unscoped.Body.Bytes(), &unscopedBody))
+	require.NoError(t, json.Unmarshal(scoped.Body.Bytes(), &scopedBody))
+	assert.Equal(t, unscopedBody, scopedBody, "self-read must return the same body on both routes")
+}
 
 // TestBypassAgents_CreateRouteParity asserts that the same request body gets
 // the same verdict on both create routes.
@@ -1163,6 +990,16 @@ type bypassAgentsDevIdentity struct {
 
 func (d *bypassAgentsDevIdentity) Type() string { return "dev" }
 
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification (reached through CheckAccess
+// inside canDispatchToBroker's own "user"/"dev" switch, which keys on
+// Type()). Those two classifier functions key on concrete type, not Type(),
+// so a wrapper type distinct from the production DevUser must opt in
+// explicitly, naming the dev principal/credential kinds directly.
+func (d *bypassAgentsDevIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindDev, CredentialKindDev
+}
+
 // TestBypassAgents_UnauthenticatedDenied is the floor. authorize() answers 401
 // rather than 403 for a caller with no identity at all, and no converted site
 // may be reachable without authentication.
@@ -1247,7 +1084,7 @@ func TestBypassAgents_CheckBrokerDispatchAccess(t *testing.T) {
 	// wrote, because "denied" here means both false and a 403 on the wire.
 	check := func(f *bypassAgentsFixture, ctx context.Context, brokerID string) (bool, *httptest.ResponseRecorder) {
 		rec := httptest.NewRecorder()
-		return f.srv.checkBrokerDispatchAccess(ctx, rec, brokerID), rec
+		return f.srv.checkBrokerDispatchAccess(ctx, rec, brokerID, f.proj), rec
 	}
 
 	t.Run("agent may not dispatch to a broker serving another project", func(t *testing.T) {
@@ -1334,6 +1171,38 @@ func TestBypassAgents_CheckBrokerDispatchAccess(t *testing.T) {
 		ok, rec := check(f, strangerCtx, b.ID)
 		assert.False(t, ok, "an unrelated user must not dispatch to someone else's broker")
 		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("user may use a broker its owner associated with the project", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, "")
+		require.NoError(t, f.store.AddProjectProvider(context.Background(), &store.ProjectProvider{
+			ProjectID:  f.proj.ID,
+			BrokerID:   b.ID,
+			BrokerName: b.Name,
+			Status:     store.BrokerStatusOnline,
+			LinkedBy:   f.owner.ID,
+		}))
+		member := &store.User{
+			ID:          tid("dispatch-consent-member"),
+			Email:       "dispatch-consent-member@example.com",
+			DisplayName: "Member",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), member))
+		memberCtx := contextWithIdentity(context.Background(),
+			NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, string(member.Role), "cli"))
+
+		ok, _ := check(f, memberCtx, b.ID)
+		assert.True(t, ok, "an owner-linked provider is usable for agents in its project")
+
+		rec := httptest.NewRecorder()
+		assert.False(t, f.srv.checkBrokerDispatchAccess(memberCtx, rec, b.ID, f.other),
+			"the association covers only its own project")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.False(t, f.srv.canDispatchToBroker(memberCtx, b),
+			"without a project, the user still needs broker.dispatch")
 	})
 
 	t.Run("unknown broker is an error, not an allow", func(t *testing.T) {

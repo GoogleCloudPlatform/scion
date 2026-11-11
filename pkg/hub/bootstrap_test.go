@@ -21,283 +21,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
-
-// testBootstrapDevToken is the development token used for bootstrap testing.
-const testBootstrapDevToken = "scion_dev_bootstrap_test_token_1234567890"
-
-// mockStorage implements storage.Storage for testing.
-type mockStorage struct {
-	bucket string
-	// mu guards objects and content: the Phase-4 import path uploads files and
-	// resources concurrently, so real backends (GCS / local FS) are exercised
-	// concurrently and the mock must be safe for concurrent access too (and
-	// race-clean under `go test -race`).
-	mu      sync.Mutex
-	objects map[string]*storage.Object // objectPath -> Object
-	content map[string][]byte          // objectPath -> file data
-}
-
-func newMockStorage(bucket string) *mockStorage {
-	return &mockStorage{
-		bucket:  bucket,
-		objects: make(map[string]*storage.Object),
-	}
-}
-
-func (m *mockStorage) Bucket() string             { return m.bucket }
-func (m *mockStorage) Provider() storage.Provider { return storage.ProviderLocal }
-func (m *mockStorage) Close() error               { return nil }
-
-func (m *mockStorage) GenerateSignedURL(_ context.Context, objectPath string, opts storage.SignedURLOptions) (*storage.SignedURL, error) {
-	return &storage.SignedURL{
-		URL:     fmt.Sprintf("https://storage.example.com/%s/%s?signed=true", m.bucket, objectPath),
-		Method:  opts.Method,
-		Expires: time.Now().Add(opts.Expires),
-	}, nil
-}
-
-func (m *mockStorage) GetObject(_ context.Context, objectPath string) (*storage.Object, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	obj, ok := m.objects[objectPath]
-	if !ok {
-		return nil, storage.ErrNotFound
-	}
-	return obj, nil
-}
-
-func (m *mockStorage) Exists(_ context.Context, objectPath string) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.objects[objectPath]
-	return ok, nil
-}
-
-func (m *mockStorage) Upload(_ context.Context, objectPath string, r io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
-	var data []byte
-	if r != nil {
-		var err error
-		data, err = io.ReadAll(r)
-		if err != nil {
-			return nil, err
-		}
-	}
-	obj := &storage.Object{
-		Name:     objectPath,
-		Size:     int64(len(data)),
-		Metadata: opts.Metadata,
-	}
-	m.mu.Lock()
-	m.objects[objectPath] = obj
-	if data != nil {
-		if m.content == nil {
-			m.content = make(map[string][]byte)
-		}
-		m.content[objectPath] = data
-	}
-	m.mu.Unlock()
-	return obj, nil
-}
-
-func (m *mockStorage) Download(_ context.Context, objectPath string) (io.ReadCloser, *storage.Object, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	obj, ok := m.objects[objectPath]
-	if !ok {
-		return nil, nil, storage.ErrNotFound
-	}
-	data := m.content[objectPath]
-	return io.NopCloser(bytes.NewReader(data)), obj, nil
-}
-
-func (m *mockStorage) Delete(_ context.Context, objectPath string) error {
-	m.mu.Lock()
-	delete(m.objects, objectPath)
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *mockStorage) DeletePrefix(_ context.Context, _ string) error { return nil }
-func (m *mockStorage) List(_ context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	res := &storage.ListResult{}
-	for path, obj := range m.objects {
-		if opts.Prefix != "" && !strings.HasPrefix(path, opts.Prefix) {
-			continue
-		}
-		res.Objects = append(res.Objects, *obj)
-	}
-	return res, nil
-}
-
-func (m *mockStorage) Copy(_ context.Context, _, _ string) (*storage.Object, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-// mockDispatcher implements AgentDispatcher for testing bootstrap dispatch.
-type mockDispatcher struct {
-	dispatchedAgents []*store.Agent
-	startedAgents    []*store.Agent
-	returnErr        error
-}
-
-func (d *mockDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
-	if d.returnErr != nil {
-		return d.returnErr
-	}
-	d.dispatchedAgents = append(d.dispatchedAgents, agent)
-	agent.Phase = string(state.PhaseProvisioning)
-	return nil
-}
-
-func (d *mockDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
-	if d.returnErr != nil {
-		return d.returnErr
-	}
-	d.dispatchedAgents = append(d.dispatchedAgents, agent)
-	agent.Phase = string(state.PhaseCreated)
-	return nil
-}
-func (d *mockDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
-	d.startedAgents = append(d.startedAgents, agent)
-	return nil
-}
-func (d *mockDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error { return nil }
-func (d *mockDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *mockDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *mockDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
-	return nil
-}
-func (d *mockDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
-	return nil
-}
-func (d *mockDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *mockDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	return nil, d.DispatchAgentCreate(context.Background(), agent)
-}
-func (d *mockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
-}
-func (d *mockDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return "", 0, nil
-}
-func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
-}
-
-// testBootstrapServer creates a test server with storage and dispatcher configured.
-func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *mockDispatcher) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-
-	stor := newMockStorage("test-bucket")
-	srv.SetStorage(stor)
-
-	disp := &mockDispatcher{}
-	srv.SetDispatcher(disp)
-
-	return srv, s, stor, disp
-}
-
-// doBootstrapRequest performs an authenticated HTTP request for bootstrap tests.
-func doBootstrapRequest(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		if err != nil {
-			t.Fatalf("failed to marshal body: %v", err)
-		}
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+testBootstrapDevToken)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// setupProjectAndBroker creates a project and broker for agent creation tests.
-func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
-	t.Helper()
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker_bootstrap_test"),
-		Slug:   "bootstrap-host",
-		Name:   "Bootstrap Host",
-		Status: store.BrokerStatusOnline,
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create runtime broker: %v", err)
-	}
-
-	project := &store.Project{
-		ID:                     tid("project_bootstrap_test"),
-		Slug:                   "bootstrap-project",
-		Name:                   "Bootstrap Project",
-		GitRemote:              "https://github.com/test/bootstrap",
-		DefaultRuntimeBrokerID: broker.ID,
-		Created:                time.Now(),
-		Updated:                time.Now(),
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	provider := &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}
-	if err := s.AddProjectProvider(ctx, provider); err != nil {
-		t.Fatalf("failed to add project provider: %v", err)
-	}
-
-	return project.ID, broker.ID
-}
 
 // ============================================================================
 // Bootstrap CreateAgent Tests
@@ -435,17 +169,14 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -822,6 +553,52 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	if dispatched.AppliedConfig.WorkspaceStoragePath != storagePath {
 		t.Errorf("expected WorkspaceStoragePath %q, got %q", storagePath, dispatched.AppliedConfig.WorkspaceStoragePath)
 	}
+	// The mock storage is the local provider, which a broker cannot
+	// download from, so no bucket is handed to the broker.
+	if dispatched.AppliedConfig.WorkspaceStorageBucket != "" {
+		t.Errorf("expected no WorkspaceStorageBucket for local storage, got %q", dispatched.AppliedConfig.WorkspaceStorageBucket)
+	}
+}
+
+// TestSyncToFinalize_BootstrapMode_GCSRecordsBucket covers the finalize path
+// recording the GCS bucket the workspace was uploaded to next to its storage
+// path, so the create dispatch can hand it to a broker that has no bucket
+// setting of its own (ptone/scion#3422).
+func TestSyncToFinalize_BootstrapMode_GCSRecordsBucket(t *testing.T) {
+	srv, s, stor, disp := testBootstrapServer(t)
+	stor.provider = storage.ProviderGCS
+	projectID, _ := setupProjectAndBroker(t, s)
+	ctx := context.Background()
+
+	agentID := tid("agent_bootstrap_finalize_gcs")
+	agent := &store.Agent{
+		ID:              agentID,
+		Slug:            "bootstrap-finalize-gcs",
+		Name:            "Bootstrap Finalize GCS",
+		ProjectID:       projectID,
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
+		Phase:           string(state.PhaseProvisioning),
+		AppliedConfig:   &store.AgentAppliedConfig{Task: "test task"},
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+	storagePath := "workspaces/" + projectID + "/" + agentID
+	stor.objects[storagePath+"/files/main.go"] = &storage.Object{Name: storagePath + "/files/main.go"}
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{{Path: "main.go", Size: 10, Hash: "sha256:abc"}}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(disp.dispatchedAgents) != 1 {
+		t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
+	}
+	cfg := disp.dispatchedAgents[0].AppliedConfig
+	if cfg == nil || cfg.WorkspaceStoragePath != storagePath || cfg.WorkspaceStorageBucket != "test-bucket" {
+		t.Fatalf("applied config = %+v, want storage path %q in bucket test-bucket", cfg, storagePath)
+	}
 }
 
 func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
@@ -900,17 +677,14 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	// Create server without dispatcher
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1166,4 +940,143 @@ func TestAgentAppliedConfig_OmitsEmpty(t *testing.T) {
 	if bytes.Contains(data, []byte("workspaceStoragePath")) {
 		t.Error("expected WorkspaceStoragePath to be omitted when empty")
 	}
+}
+
+// setupEmptyPerAgentFinalizeAgent turns the bootstrap project into a non-git
+// empty-per-agent project and creates a provisioning agent in it, as the
+// bootstrap create leaves it before sync-to/finalize.
+func setupEmptyPerAgentFinalizeAgent(t *testing.T, s store.Store, stor *mockStorage, agentID string) (*store.Agent, string) {
+	t.Helper()
+	ctx := context.Background()
+	projectID, brokerID := setupProjectAndBroker(t, s)
+	project, err := s.GetProject(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project.GitRemote = ""
+	project.Labels = map[string]string{store.LabelWorkspaceMode: string(store.SharingModeEmptyPerAgent)}
+	if err := s.UpdateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	agent := &store.Agent{
+		ID:              agentID,
+		Slug:            "empty-finalize",
+		Name:            "Empty Finalize",
+		ProjectID:       projectID,
+		RuntimeBrokerID: brokerID,
+		Phase:           string(state.PhaseProvisioning),
+		AppliedConfig:   &store.AgentAppliedConfig{Task: "test task"},
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	storagePath := "workspaces/" + projectID + "/" + agentID
+	stor.objects[storagePath+"/files/main.go"] = &storage.Object{Name: storagePath + "/files/main.go"}
+	return agent, storagePath
+}
+
+// TestSyncToFinalize_BootstrapMode_EmptyPerAgentIgnoresFiles is the N2
+// carry-over (design #2703 P2): finalize for an empty-per-agent agent
+// dispatches without a workspace storage path, so the broker never seeds
+// the private directory, and reports the ignored files as a warning.
+func TestSyncToFinalize_BootstrapMode_EmptyPerAgentIgnoresFiles(t *testing.T) {
+	srv, s, stor, disp := testBootstrapServer(t)
+	agentID := tid("agent_empty_finalize")
+	setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{{Path: "main.go", Size: 100, Hash: "sha256:abc123"}}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp SyncToFinalizeResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Applied || resp.FilesApplied != 0 {
+		t.Errorf("Applied=%v FilesApplied=%d, want false/0 (files are ignored)", resp.Applied, resp.FilesApplied)
+	}
+	if len(resp.Warnings) != 1 || resp.Warnings[0] != api.WarningEmptyPerAgentWorkspaceFilesIgnored {
+		t.Errorf("Warnings = %v, want [%q]", resp.Warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
+	}
+	if len(disp.dispatchedAgents) != 1 {
+		t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
+	}
+	if got := disp.dispatchedAgents[0].AppliedConfig.WorkspaceStoragePath; got != "" {
+		t.Errorf("dispatched WorkspaceStoragePath = %q, want empty", got)
+	}
+	stored, err := s.GetAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AppliedConfig != nil && stored.AppliedConfig.WorkspaceStoragePath != "" {
+		t.Errorf("stored WorkspaceStoragePath = %q, want empty", stored.AppliedConfig.WorkspaceStoragePath)
+	}
+}
+
+// TestSyncToFinalize_BootstrapMode_EmptyPerAgentCapability412 is the N2
+// carry-over's status mapping: a broker lacking empty-per-agent support
+// surfaces as 412, as on create, not a generic 500.
+func TestSyncToFinalize_BootstrapMode_EmptyPerAgentCapability412(t *testing.T) {
+	srv, s, stor, disp := testBootstrapServer(t)
+	agentID := tid("agent_empty_finalize_412")
+	setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+	disp.returnErr = fmt.Errorf("dispatch: %w", errBrokerLacksEmptyPerAgent)
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{{Path: "main.go", Size: 100, Hash: "sha256:abc123"}}},
+	})
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected status 412, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), ErrCodeUnsupportedCapability) {
+		t.Errorf("body %s should carry %s", rec.Body.String(), ErrCodeUnsupportedCapability)
+	}
+}
+
+// TestSyncToFinalize_BootstrapMode_EmptyPerAgentNilOrEmptyManifest pins that
+// the empty-per-agent branch never sees a nil manifest: a missing manifest
+// is rejected with 400 before the agent is touched (nothing dispatched),
+// and a manifest with no files reaches the branch and dispatches without a
+// warning.
+func TestSyncToFinalize_BootstrapMode_EmptyPerAgentNilOrEmptyManifest(t *testing.T) {
+	t.Run("nil manifest", func(t *testing.T) {
+		srv, s, stor, disp := testBootstrapServer(t)
+		agentID := tid("agent_empty_finalize_nil")
+		setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+		rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if len(disp.dispatchedAgents) != 0 {
+			t.Fatalf("expected no dispatch, got %d", len(disp.dispatchedAgents))
+		}
+	})
+	t.Run("manifest without files", func(t *testing.T) {
+		srv, s, stor, disp := testBootstrapServer(t)
+		agentID := tid("agent_empty_finalize_nofiles")
+		setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+		rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+			Manifest: &transfer.Manifest{Version: "1.0"},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp SyncToFinalizeResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Warnings) != 0 {
+			t.Errorf("Warnings = %v, want none", resp.Warnings)
+		}
+		if len(disp.dispatchedAgents) != 1 {
+			t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
+		}
+		if got := disp.dispatchedAgents[0].AppliedConfig.WorkspaceStoragePath; got != "" {
+			t.Errorf("dispatched WorkspaceStoragePath = %q, want empty", got)
+		}
+	})
 }

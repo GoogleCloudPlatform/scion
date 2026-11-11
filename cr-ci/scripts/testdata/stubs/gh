@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Test stub for gh: records argv.
+set -u
+calls="$STUB_DIR/calls"
+mkdir -p "$calls"
+n=$(find "$calls" -name '*.args' | wc -l)
+id=$(printf '%04d' $((n + 1)))
+printf '%s\0' gh "$@" >"$calls/$id.args"
+if [[ ${1:-} == --version ]]; then
+  echo "gh version ${STUB_GH_VERSION:-2.60.0} (2026-01-01)"
+fi
+# gh variable get NAME ...: present if NAME is listed in $STUB_DIR/exists.
+if [[ ${1:-} == variable && ${2:-} == get ]]; then
+  if ! grep -qxF -- "${3:-}" "$STUB_DIR/exists" 2>/dev/null; then
+    echo "variable ${3:-} was not found" >&2
+    exit 1
+  fi
+  echo "${STUB_GH_VALUE:-value}"
+fi
+exit 0

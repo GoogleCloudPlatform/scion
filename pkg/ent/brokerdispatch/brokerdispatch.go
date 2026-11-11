@@ -42,6 +42,16 @@ const (
 	FieldUpdatedAt = "updated_at"
 	// FieldDeadlineAt holds the string denoting the deadline_at field in the database.
 	FieldDeadlineAt = "deadline_at"
+	// FieldInitiatorPrincipalKind holds the string denoting the initiator_principal_kind field in the database.
+	FieldInitiatorPrincipalKind = "initiator_principal_kind"
+	// FieldInitiatorPrincipalID holds the string denoting the initiator_principal_id field in the database.
+	FieldInitiatorPrincipalID = "initiator_principal_id"
+	// FieldInitiatorCredentialKind holds the string denoting the initiator_credential_kind field in the database.
+	FieldInitiatorCredentialKind = "initiator_credential_kind"
+	// FieldInitiatorCredentialID holds the string denoting the initiator_credential_id field in the database.
+	FieldInitiatorCredentialID = "initiator_credential_id"
+	// FieldCorrelationID holds the string denoting the correlation_id field in the database.
+	FieldCorrelationID = "correlation_id"
 	// Table holds the table name of the brokerdispatch in the database.
 	Table = "broker_dispatch"
 )
@@ -63,6 +73,11 @@ var Columns = []string{
 	FieldCreatedAt,
 	FieldUpdatedAt,
 	FieldDeadlineAt,
+	FieldInitiatorPrincipalKind,
+	FieldInitiatorPrincipalID,
+	FieldInitiatorCredentialKind,
+	FieldInitiatorCredentialID,
+	FieldCorrelationID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -168,4 +183,29 @@ func ByUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByDeadlineAt orders the results by the deadline_at field.
 func ByDeadlineAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDeadlineAt, opts...).ToFunc()
+}
+
+// ByInitiatorPrincipalKind orders the results by the initiator_principal_kind field.
+func ByInitiatorPrincipalKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalKind, opts...).ToFunc()
+}
+
+// ByInitiatorPrincipalID orders the results by the initiator_principal_id field.
+func ByInitiatorPrincipalID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalID, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialKind orders the results by the initiator_credential_kind field.
+func ByInitiatorCredentialKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialKind, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialID orders the results by the initiator_credential_id field.
+func ByInitiatorCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialID, opts...).ToFunc()
+}
+
+// ByCorrelationID orders the results by the correlation_id field.
+func ByCorrelationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCorrelationID, opts...).ToFunc()
 }

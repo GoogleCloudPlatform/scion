@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -32,38 +35,99 @@ import (
 // SignedURLExpiry is the duration signed URLs are valid for.
 const SignedURLExpiry = 15 * time.Minute
 
-// CreateTemplateRequest is the request body for creating a template.
-type CreateTemplateRequest struct {
-	Name         string                `json:"name"`
-	Slug         string                `json:"slug,omitempty"`
-	DisplayName  string                `json:"displayName,omitempty"`
-	Description  string                `json:"description,omitempty"`
-	Harness      string                `json:"harness,omitempty"`
-	Scope        string                `json:"scope"`
-	ScopeID      string                `json:"scopeId,omitempty"`
-	ProjectID    string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
-	Config       *store.TemplateConfig `json:"config,omitempty"`
-	BaseTemplate string                `json:"baseTemplate,omitempty"`
-	Visibility   string                `json:"visibility,omitempty"`
-	Files        []FileUploadRequest   `json:"files,omitempty"`
+// isValidTemplateScope reports whether scope is an accepted template scope.
+// An empty scope is valid: callers default it (to "global" for create, to
+// "project" for clone). Any other value — including removed legacy scope
+// names — is rejected outright rather than stored as-is.
+func isValidTemplateScope(scope string) bool {
+	switch scope {
+	case "", store.TemplateScopeGlobal, store.TemplateScopeProject, store.TemplateScopeUser:
+		return true
+	default:
+		return false
+	}
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
+// CreateTemplateRequest is the request body for creating a template.
+type CreateTemplateRequest struct {
+	Name         string              `json:"name"`
+	Slug         string              `json:"slug,omitempty"`
+	DisplayName  string              `json:"displayName,omitempty"`
+	Description  string              `json:"description,omitempty"`
+	Harness      string              `json:"harness,omitempty"`
+	Scope        string              `json:"scope"`
+	ScopeID      string              `json:"scopeId,omitempty"`
+	ProjectID    string              `json:"projectId,omitempty"` // Deprecated: use ScopeID
+	BaseTemplate string              `json:"baseTemplate,omitempty"`
+	Files        []FileUploadRequest `json:"files,omitempty"`
+
+	// Config and Image are not settable (ptone/scion#4223); they are
+	// decoded only so a body that carries them is refused
+	// (refuseTemplateConfigFields).
+	Config json.RawMessage `json:"config,omitempty"`
+	Image  json.RawMessage `json:"image,omitempty"`
+}
+
+// UpdateTemplateRequest is the request body of a template PUT. A PUT
+// replaces only the template's metadata; every other field keeps its stored
+// value (ptone/scion#4223). Content and what is derived from it change only
+// through the upload/finalize and file APIs.
+type UpdateTemplateRequest struct {
+	Name        string `json:"name"`
+	Slug        string `json:"slug,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
+
+	// Config and Image are refused, as on create.
+	Config json.RawMessage `json:"config,omitempty"`
+	Image  json.RawMessage `json:"image,omitempty"`
+}
+
+// Error codes for template fields the API no longer writes
+// (ptone/scion#4223).
+const (
+	ErrCodeTemplateConfigInFile      = "template_config_in_file"
+	ErrCodeTemplateImageNotSupported = "template_image_not_supported"
+	templateConfigInFileMessage      = "template config is not settable through the API; set it in scion-agent.yaml"
+	templateImageNotSupportedMessage = "template image is not settable through the API; image comes from the harness-config or settings"
+)
+
+// carriesJSONValue reports whether a decoded body field holds a value: it is
+// present and not null. An empty string counts as absent, so a client that
+// round-trips a template's empty "image" is not refused.
+func carriesJSONValue(raw json.RawMessage) bool {
+	v := bytes.TrimSpace(raw)
+	return len(v) > 0 && !bytes.Equal(v, []byte("null")) && !bytes.Equal(v, []byte(`""`))
+}
+
+// refuseTemplateConfigFields writes a 400 and returns true when a template
+// create or PUT body carries config or image (ptone/scion#4223). A
+// template's job config comes from its scion-agent.yaml; its image from the
+// harness-config or settings.
+func refuseTemplateConfigFields(w http.ResponseWriter, config, image json.RawMessage) bool {
+	if carriesJSONValue(config) {
+		writeError(w, http.StatusBadRequest, ErrCodeTemplateConfigInFile, templateConfigInFileMessage, nil)
+		return true
 	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
+	if carriesJSONValue(image) {
+		writeError(w, http.StatusBadRequest, ErrCodeTemplateImageNotSupported, templateImageNotSupportedMessage, nil)
+		return true
 	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
+	return false
+}
+
+// applyTemplateMetadataUpdate returns a copy of existing with req's metadata
+// (name, slug, display name, description) applied and UpdatedBy set. Every
+// other field, including the derived, content, storage, scope, ownership,
+// inheritance and provenance fields, keeps its stored value.
+func applyTemplateMetadataUpdate(existing *store.Template, req *UpdateTemplateRequest, updatedBy string) store.Template {
+	updated := *existing
+	updated.Name = req.Name
+	updated.Slug = req.Slug
+	updated.DisplayName = req.DisplayName
+	updated.Description = req.Description
+	updated.UpdatedBy = updatedBy
+	return updated
 }
 
 // FileUploadRequest describes a file to upload.
@@ -77,13 +141,22 @@ type CreateTemplateResponse struct {
 	Template    *store.Template `json:"template"`
 	UploadURLs  []UploadURLInfo `json:"uploadUrls,omitempty"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory the upload URLs write to. A
+	// client may send it back in the finalize request (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 type ListTemplatesResponse struct {
-	Templates    []TemplateWithCapabilities `json:"templates"`
-	NextCursor   string                     `json:"nextCursor,omitempty"`
-	TotalCount   int                        `json:"totalCount"`
-	Capabilities *Capabilities              `json:"_capabilities,omitempty"`
+	Templates  []TemplateWithCapabilities `json:"templates"`
+	NextCursor string                     `json:"nextCursor,omitempty"`
+	TotalCount int                        `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound rather than an
+	// exact count (ptone/scion#1916 follow-up, C3): set when the hub-wide
+	// candidate pool crossed authorizedListMaxCandidates before the count
+	// scan finished. Never affects Templates or NextCursor, which are always
+	// exactly the caller's authorized page regardless of this flag.
+	TotalCountApproximate bool          `json:"totalCountApproximate,omitempty"`
+	Capabilities          *Capabilities `json:"_capabilities,omitempty"`
 }
 
 // UploadURLInfo contains a signed URL for uploading a file.
@@ -104,17 +177,39 @@ type UploadRequest struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory a template's or harness-config's
+	// upload URLs write to; a client may send it back in the finalize
+	// request (ptone/scion#4221, ptone/scion#4219). Empty for resources that
+	// do not stage uploads.
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // FinalizeRequest is the request body for finalizing a template upload.
 type FinalizeRequest struct {
 	Manifest *TemplateManifest `json:"manifest"`
+	// ExpectedContentHash, when set, is the template content hash the
+	// client diffed its upload against. Finalize commits only if the
+	// template still has that hash and otherwise answers 409
+	// template_conflict (ptone/scion#4221). Clients that omit it get the
+	// same check against the hash the hub read when the finalize request
+	// arrived.
+	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
+	// UploadID, when set, is the uploadId of the upload response whose
+	// staged files this finalize commits. Clients that omit it are served
+	// by matching staged files to the manifest by hash (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
+//
+// Files is the complete file list (mirror semantics): finalize deletes the
+// storage objects of files the template listed before but Files does not.
+// Harness is ignored: the hub derives the template's harness from its
+// scion-agent.yaml (ptone/scion#4217). It stays in the wire format for
+// compatibility with existing clients.
 type TemplateManifest struct {
 	Version string               `json:"version"`
-	Harness string               `json:"harness,omitempty"`
+	Harness string               `json:"harness,omitempty"` // ignored; see above
 	Files   []store.TemplateFile `json:"files"`
 }
 
@@ -123,6 +218,11 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
+	// ContentHash is the content hash of the template or harness-config
+	// row the URLs were signed from, so a client can cache the files under
+	// the hash they really have (ptone/scion#4221, ptone/scion#4219). Set
+	// for templates and harness-configs.
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 // DownloadURLInfo contains info for downloading a file.
@@ -131,31 +231,19 @@ type DownloadURLInfo struct {
 	URL  string `json:"url"`
 	Size int64  `json:"size"`
 	Hash string `json:"hash,omitempty"`
+	// Mode is the file's normalised mode, "0755" (executable) or "0644",
+	// so a client can write the file with its executable bit
+	// (ptone/scion#5652). Hubs before that do not send it; clients treat
+	// a missing mode as "0644".
+	Mode string `json:"mode,omitempty"`
 }
 
 // CloneTemplateRequest is the request for cloning a template.
 type CloneTemplateRequest struct {
-	Name       string `json:"name"`
-	Scope      string `json:"scope"`
-	ScopeID    string `json:"scopeId,omitempty"`
-	ProjectID  string `json:"projectId,omitempty"` // Deprecated
-	Visibility string `json:"visibility,omitempty"`
-}
-
-// UnmarshalJSON implements backward compatibility for the grove-to-project rename.
-func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CloneTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{Alias: (*Alias)(r)}
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	ScopeID   string `json:"scopeId,omitempty"`
+	ProjectID string `json:"projectId,omitempty"` // Deprecated
 }
 
 // handleTemplatesV2 handles the /api/v1/templates endpoint with storage support.
@@ -166,8 +254,24 @@ func (s *Server) handleTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createTemplateV2(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
+}
+
+// legacyResourceScope is the retired name for what is now the "project"
+// resource scope (templates, harness configs, skills, and any other
+// file-based resource organized by scope).
+const legacyResourceScope = "grove"
+
+// canonicalResourceScope maps the legacy scope name to "project"; other
+// values are returned unchanged. listTemplatesV2 applies it once, before the
+// scope drives the switch or the store filter. Create and clone handlers
+// reject the legacy name instead of normalizing it.
+func canonicalResourceScope(scope string) string {
+	if scope == legacyResourceScope {
+		return "project"
+	}
+	return scope
 }
 
 // listTemplatesV2 lists templates with extended filtering.
@@ -177,8 +281,19 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, query := r.Context(), r.URL.Query()
 	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: query.Get("scopeId"), ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
+	// Normalize a legacy scope name to its canonical form before it drives
+	// the scope switch below or the store filter (ptone/scion#1977).
+	filter.Scope = canonicalResourceScope(filter.Scope)
 	if filter.Status == "" {
 		filter.Status = store.TemplateStatusActive
+	}
+
+	// An agent delegated credential lists project-scoped templates only, with
+	// its scope from the delegated list arm (.design/agent-delegation.md
+	// §11.8). It is not a user: scope=user lists nothing for it.
+	if d, ok := GetIdentityFromContext(ctx).(*DelegatedAgentIdentity); ok && d != nil {
+		s.listTemplatesDelegated(w, r, d, filter)
+		return
 	}
 
 	// When listing without explicit scope, include user-scoped templates
@@ -205,33 +320,23 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("templates", filter)
-	if cursor != "" {
-		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
-	}
+	cursorBinding := scopedCursorBinding("templates", filter, identity)
 	wideAccess := s.hasCatalogWideListAccess(ctx, identity, "template", "template.list")
 	authorizeEach := identity != nil && !wideAccess
 	result, err := listAuthorizedOrAll(
-		ctx, identity, cursor, limit, cursorBinding, authorizeEach,
+		ctx, identity, cursor, limit, cursorBinding, s.listCursorSealer, authorizeEach,
 		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.Template], error) {
 			return s.store.ListTemplates(ctx, filter, opts)
 		},
 		templateResource,
 		func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID, cursorBinding) },
-		s.authzService.AuthorizeReadBatch,
+		s.catalogListReadBatch(identity),
 	)
 	if err != nil {
-		if authorizeEach {
-			writeAuthorizedListError(w, err)
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
-	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
+	items, nextCursor, totalCount, totalApprox := result.Items, result.NextCursor, result.TotalCount, result.TotalCountApproximate
 	templates := make([]TemplateWithCapabilities, 0, len(items))
 	if identity == nil {
 		for i := range items {
@@ -250,7 +355,7 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "template")
 	}
-	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, Capabilities: scopeCap})
+	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, TotalCountApproximate: totalApprox, Capabilities: scopeCap})
 }
 
 // createTemplateV2 creates a template with optional file upload URLs.
@@ -262,10 +367,20 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
 
 	// Validate required fields
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
+	}
+	if !isValidTemplateScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
 		return
 	}
 	// Resolve scope ID
@@ -277,12 +392,33 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// SECURITY-GATE: require template.create permission before any mutation.
 	// Scope-aware: project-scoped requests authorize against the project parent
 	// so that project-level role bindings (owner/admin/member) grant access.
-	res := Resource{Type: "template"}
-	if scopeID != "" {
-		res.ParentType = "project"
-		res.ParentID = scopeID
+	//
+	// User-scoped requests never authorize against a caller-supplied scopeID
+	// at all: templateUserScopeResource takes the authenticated UserIdentity
+	// directly rather than a bare string, so there is no request field this
+	// gate could be tricked into authorizing against (e.g. another user's
+	// ID) — an attacker-supplied scopeID is simply never consulted. scopeID
+	// is still forced to the caller's own ID here, ahead of the redundant
+	// forcing on the template record below, so the persisted record agrees
+	// with what was authorized.
+	createScope := req.Scope
+	if createScope == "" {
+		createScope = store.TemplateScopeGlobal
 	}
-	if !s.authorize(w, r, res, ActionCreate) {
+	if createScope == store.TemplateScopeUser {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			Unauthorized(w)
+			return
+		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
+		scopeID = userIdent.ID()
+		if !s.authorize(w, r, templateUserScopeResource(userIdent), ActionCreate) {
+			return
+		}
+	} else if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
 		return
 	}
 
@@ -300,12 +436,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate MessageMode in template config if specified.
-	if req.Config != nil && req.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(req.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+req.Config.MessageMode, nil)
-			return
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
 		}
+		return
 	}
 
 	// Create template record
@@ -316,20 +451,15 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  req.DisplayName,
 		Description:  req.Description,
 		Harness:      req.Harness,
-		Config:       req.Config,
 		Scope:        req.Scope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID, // Keep for backwards compat
 		BaseTemplate: req.BaseTemplate,
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending, // Start as pending until files uploaded
 	}
 
 	if template.Scope == "" {
 		template.Scope = store.TemplateScopeGlobal
-	}
-	if template.Visibility == "" {
-		template.Visibility = store.VisibilityPrivate
 	}
 
 	// For user-scoped templates, always set the owner and scope ID from the
@@ -353,15 +483,17 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// Templates with files are also created as 'pending' and promoted to
 	// 'active' during finalize (handleTemplateFinalize).
 
-	// Generate storage path and URI
-	storagePath := storage.TemplateStoragePath(s.HubID(), template.Scope, template.ScopeID, template.Slug)
+	// New templates start in the blob layout, with a row-unique storage
+	// path (ptone/scion#4221).
+	storagePath := s.templateBlobStoragePath(template)
 	template.StoragePath = storagePath
+	template.Layout = store.TemplateLayoutBlobs
 
 	// Get storage client if available
 	stor := s.GetStorage()
 	if stor != nil {
 		template.StorageBucket = stor.Bucket()
-		template.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), template.Scope, template.ScopeID, template.Slug)
+		template.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	// Create the template record
@@ -374,17 +506,14 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		Template: template,
 	}
 
-	// Generate upload URLs if files were specified and storage is available
+	// Generate staging upload URLs if files were specified and storage is
+	// available. Finalize commits them.
 	if len(req.Files) > 0 && stor != nil {
-		uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, storagePath, req.Files)
-		if err == nil || len(uploadURLs) > 0 {
-			// For local storage, rewrite file:// URLs to HTTP proxy URLs
-			if stor.Provider() == storage.ProviderLocal {
-				hubURL := requestBaseURL(r)
-				uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", template.ID)
-			}
+		uploadID := api.NewUUID()
+		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, s.requestBaseURL(r))
+		if err == nil {
 			response.UploadURLs = uploadURLs
-			response.ManifestURL = manifestURL
+			response.UploadID = uploadID
 		}
 	}
 
@@ -421,6 +550,8 @@ func (s *Server) handleTemplateByIDV2(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplateClone(w, r, templateID)
 	case "validate":
 		s.handleTemplateValidate(w, r, templateID)
+	case "reimport":
+		s.handleTemplateReimport(w, r, templateID)
 	case "files":
 		s.handleTemplateFiles(w, r, templateID, "")
 	default:
@@ -445,7 +576,7 @@ func (s *Server) handleTemplateCRUD(w http.ResponseWriter, r *http.Request, id s
 	case http.MethodDelete:
 		s.deleteTemplateV2(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -458,21 +589,18 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
-	// Authenticated runtime brokers read templates during agent creation
-	// (template hydration). They pass HMAC auth via middleware but are not
-	// user principals, so the authorization kernel cannot evaluate them.
-	// Allow read access for brokers; the HMAC credential is the trust basis.
-	if GetBrokerIdentityFromContext(ctx) == nil {
-		// SECURITY-GATE: authorize read access to this specific template.
-		// The list endpoint filters via AuthorizeReadBatch; without this check
-		// a caller could bypass list filtering by addressing the template by ID.
-		if !s.authorize(w, r, templateResource(template), ActionRead) {
-			return
-		}
+	// SECURITY-GATE: authorize read access to this specific template.
+	// The list endpoint filters via AuthorizeReadBatch; without this check
+	// a caller could bypass list filtering by addressing the template by ID.
+	// A denial reads as 404 (ptone/scion#1916), matching the skill fix: a
+	// template a caller may not read must not be distinguishable from one
+	// that does not exist.
+	if !s.authorizeTemplateReadRoute(w, r, template) {
+		return
 	}
 
 	resp := TemplateWithCapabilities{Template: *template}
@@ -493,24 +621,35 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	var template store.Template
-	if err := readJSON(r, &template); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
+	// SECURITY-GATE: authorize update access to this specific template.
+	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
 	}
 
-	// Validate MessageMode in template config if specified.
-	if template.Config != nil && template.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(template.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+template.Config.MessageMode, nil)
-			return
-		}
+	var req UpdateTemplateRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
 	}
 
-	// Preserve immutable fields
-	template.ID = existing.ID
-	template.Created = existing.Created
-	template.CreatedBy = existing.CreatedBy
+	// A PUT replaces only the metadata. Everything else keeps its stored
+	// value (applyTemplateMetadataUpdate): identity, scope and ownership
+	// (scope reparenting needs its own endpoint with dual-scope
+	// authorization), the files and what is derived from them (managed by
+	// the upload/finalize workflow), storage, inheritance, provenance and
+	// the creation audit fields. UpdatedBy comes from the authenticated
+	// caller; the deref is safe because authorize above returns false on a
+	// nil identity.
+	template := applyTemplateMetadataUpdate(existing, &req, GetIdentityFromContext(ctx).ID())
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
@@ -533,12 +672,19 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
+	// SECURITY-GATE: authorize update access to this specific template.
+	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
+		return
+	}
+
 	if !applyResourceMetadataPatch(w, r, resourceMetadataFields{
 		Name:        &existing.Name,
 		Slug:        &existing.Slug,
 		DisplayName: &existing.DisplayName,
 		Description: &existing.Description,
-		Visibility:  &existing.Visibility,
 	}) {
 		return
 	}
@@ -564,6 +710,10 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
+
 	// Authorize: check source scope for ActionDelete
 	switch existing.Scope {
 	case store.TemplateScopeGlobal:
@@ -572,7 +722,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionDelete)
+		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionDelete)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
 			return
@@ -588,9 +738,8 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "template", ParentType: "project", ParentID: existing.ScopeID,
-			}, ActionDelete)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				templateScopeResource(store.TemplateScopeProject, existing.ScopeID), ActionDelete)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete resources in this project", nil)
 				return
@@ -609,12 +758,21 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only delete your own user-scoped templates", nil)
 			return
 		}
+		// The record is the caller's own, so the check runs on the caller's
+		// user scope: a user access token needs template:delete on a hub
+		// boundary.
+		userRecord := templateUserScopeResource(userIdent)
+		userRecord.ID = existing.ID
+		if !s.authzService.CheckAccess(ctx, userIdent, userRecord, ActionDelete).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete templates in your user scope", nil)
+			return
+		}
 	}
 
 	// If deleteFiles is true and we have storage, delete the files
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			if err := stor.DeletePrefix(ctx, existing.StoragePath); err != nil {
+			if err := s.deleteTemplateStorage(ctx, stor, existing); err != nil {
 				slog.Warn("failed to delete template files", "template_id", id, "storage_path", existing.StoragePath, "error", err)
 			}
 		}
@@ -632,7 +790,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 // handleTemplateUpload handles requests for upload URLs.
 func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -640,7 +798,16 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, template) {
+		return
+	}
+
+	// SECURITY-GATE: authorize update access to this template (upload mutates content).
+	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
 	}
 
@@ -667,10 +834,17 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Generate upload URLs using shared helper
-	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, template.StoragePath, req.Files)
+	// Upload URLs stage the files under a fresh upload ID; finalize hashes
+	// them and commits (ptone/scion#4221). Local-storage URLs point at the
+	// hub's raw file endpoint with ?uploadId=, which stages only.
+	uploadID := api.NewUUID()
+	uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, s.requestBaseURL(r))
 	if err != nil {
-		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
+		slog.ErrorContext(ctx, "template upload URLs failed", "template_id", id, "error", upstreamText(err.Error()))
+		RuntimeError(w, "Failed to generate upload URLs")
 		return
 	}
 	if len(uploadURLs) == 0 && len(req.Files) > 0 {
@@ -678,15 +852,9 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// For local storage, rewrite file:// URLs to HTTP proxy URLs
-	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
-		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", id)
-	}
-
 	response := UploadResponse{
-		UploadURLs:  uploadURLs,
-		ManifestURL: manifestURL,
+		UploadURLs: uploadURLs,
+		UploadID:   uploadID,
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -695,7 +863,7 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 // handleTemplateFinalize finalizes a template after file upload.
 func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -703,7 +871,16 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, template) {
+		return
+	}
+
+	// SECURITY-GATE: authorize update access to this template (finalize mutates state).
+	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
 	}
 
@@ -724,20 +901,25 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Verify files exist in storage and compute content hash using shared helper
-	contentHash, err := verifyAndFinalizeFiles(ctx, stor, template.StoragePath, req.Manifest.Files)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
+	if req.UploadID != "" && !validTemplateUploadID(req.UploadID) {
+		ValidationError(w, "uploadId is invalid", map[string]interface{}{"field": "uploadId"})
 		return
 	}
 
-	// Update template with manifest and mark as active
-	template.Files = req.Manifest.Files
-	template.ContentHash = contentHash
+	// Commit the manifest and mark the template active. The commit hashes
+	// the staged uploads and moves them into blobs (400 on a hash mismatch,
+	// "file not found" when a file was neither staged nor already stored),
+	// re-derives the index from the new scion-agent.yaml and refuses an
+	// unusable bundled harness-config (422) before the row is updated.
+	// Every finalize client (`scion templates sync/push`, its retry, and the
+	// agent-start updateHubTemplate path) sends the full manifest.
 	template.Status = store.TemplateStatusActive
-
-	if err := s.store.UpdateTemplate(ctx, template); err != nil {
-		writeErrorFromErr(w, err, "")
+	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{
+		expectedContentHash: req.ExpectedContentHash,
+		fromStaging:         true,
+		uploadID:            req.UploadID,
+	}); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 
@@ -747,7 +929,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 // handleTemplateDownload returns signed URLs for downloading template files.
 func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -755,7 +937,13 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to this template's files. A
+	// denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
+	if !s.authorizeTemplateReadRoute(w, r, template) {
 		return
 	}
 
@@ -774,23 +962,27 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Generate download URLs using shared helper
-	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, template.StoragePath, s.legacyFallbackPath(template.StoragePath), template.Files)
+	// Every URL comes from this one row read: a blob row's URLs name
+	// immutable blobs, so they keep returning this version even if a commit
+	// lands while the client downloads.
+	downloadURLs, manifestURL, expires, err := s.generateTemplateDownloadURLs(ctx, stor, template)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("template %q: %s — run 'scion template validate %s' to diagnose", template.Name, err, template.Name))
+		slog.ErrorContext(ctx, "template download URLs failed", "template_id", id, "error", upstreamText(err.Error()))
+		RuntimeError(w, fmt.Sprintf("template %q: failed to generate download URLs — run 'scion template validate %s' to diagnose", template.Name, template.Name))
 		return
 	}
 
 	// For local storage, rewrite file:// URLs to HTTP proxy URLs
 	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
-		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "templates", id)
+		hubURL := s.requestBaseURL(r)
+		downloadURLs = rewriteLocalTemplateDownloadURLs(downloadURLs, hubURL, id, isBlobLayout(template))
 	}
 
 	response := DownloadResponse{
 		Files:       downloadURLs,
 		ManifestURL: manifestURL,
 		Expires:     expires,
+		ContentHash: template.ContentHash,
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -799,14 +991,20 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 // handleTemplateValidate validates a template's storage consistency.
 func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to this template's validation
+	// report. A denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
+	if !s.authorizeRead(w, r, templateResource(template), "Template") {
 		return
 	}
 
@@ -814,7 +1012,11 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	rs := s.templateStore()
 	report, err := rs.ValidateStorage(ctx, rec)
 	if err != nil {
-		RuntimeError(w, fmt.Sprintf("validation failed: %v", err))
+		// The error can carry the storage object path and the wrapped
+		// backend error: log it rendered, answer fixed text
+		// (ptone/scion#7498).
+		slog.ErrorContext(ctx, "template validation failed", "template_id", template.ID, "error", upstreamText(err.Error()))
+		RuntimeError(w, "validation failed")
 		return
 	}
 
@@ -824,7 +1026,7 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 // handleTemplateClone creates a copy of a template.
 func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -832,7 +1034,23 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	source, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		// A genuinely missing source uses the same "Template not found"
+		// message authorizeRead below writes on denial (ptone/scion#1916),
+		// so the two outcomes cannot be told apart by message text either.
+		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to the source template before its
+	// content is copied into the clone. The destination-scope check below
+	// only authorizes ActionCreate at the destination; without this gate
+	// that check alone would let any caller who may create a template
+	// somewhere copy the contents of a source template they cannot
+	// otherwise read. Reading the clone source is a read like any other
+	// (ptone/scion#1916): use authorizeRead so a forbidden source template
+	// reads as the same 404 as a nonexistent one, rather than a 403 that
+	// confirms it exists.
+	if !s.authorizeRead(w, r, templateResource(source), "Template") {
 		return
 	}
 
@@ -846,6 +1064,13 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		ValidationError(w, "name is required", nil)
 		return
 	}
+	if refuseNonComponentResourceName(w, req.Name) {
+		return
+	}
+	if !isValidTemplateScope(req.Scope) {
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
+		return
+	}
 
 	// Resolve scope ID
 	scopeID := req.ScopeID
@@ -853,7 +1078,13 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		scopeID = req.ProjectID
 	}
 
-	// Authorize: check destination scope for ActionCreate
+	// Authorize: check destination scope for ActionCreate. destScope is the
+	// single value shared by this switch, the clone record below, and the
+	// storage path resolution further down, so all three always agree on
+	// which scope a clone targets (ptone/scion#1977). isValidTemplateScope
+	// above already rejected anything other than "", "global", "project" or
+	// "user" — including removed legacy scope names — so no further
+	// normalization is needed here.
 	destScope := req.Scope
 	if destScope == "" {
 		destScope = store.TemplateScopeProject
@@ -865,7 +1096,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionCreate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
 			return
@@ -881,9 +1112,8 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 				return
 			}
 		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type: "template", ParentType: "project", ParentID: scopeID,
-			}, ActionCreate)
+			decision := s.authzService.CheckAccess(ctx, userIdent,
+				templateScopeResource(store.TemplateScopeProject, scopeID), ActionCreate)
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create resources in this project", nil)
 				return
@@ -898,6 +1128,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		// User scope: scopeID must match the authenticated user
 		if scopeID == "" {
 			scopeID = userIdent.ID()
@@ -905,6 +1138,15 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone templates into your own user scope", nil)
 			return
 		}
+		// The destination is a new record in the caller's user scope: a
+		// user access token needs template:create on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, templateUserScopeResource(userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create templates in your user scope", nil)
+			return
+		}
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Cloning into this resource scope is not supported", nil)
+		return
 	}
 
 	// Create new template based on source
@@ -914,22 +1156,11 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Slug:         api.Slugify(req.Name),
 		DisplayName:  source.DisplayName,
 		Description:  source.Description,
-		Harness:      source.Harness,
-		Image:        source.Image,
-		Config:       source.Config,
-		Scope:        req.Scope,
+		Scope:        destScope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending,
-	}
-
-	if clone.Scope == "" {
-		clone.Scope = store.TemplateScopeProject
-	}
-	if clone.Visibility == "" {
-		clone.Visibility = source.Visibility
 	}
 
 	// For user-scoped clones, set the owner from the authenticated user
@@ -940,56 +1171,231 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		}
 	}
 
-	// Generate storage path for the clone
-	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)
+	// Detect a name collision at the destination BEFORE any storage write.
+	// This is a fast path for the common, non-concurrent case: it lets an
+	// ordinary colliding request fail with 409 before touching storage at
+	// all. It is not sufficient on its own — two requests can both pass this
+	// check before either has written a record — so the storage path below
+	// is also made request-unique, and CreateTemplate's own uniqueness
+	// constraint (handled further down) is what actually guarantees exactly
+	// one request wins a given (scope, slug) destination.
+	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeErrorFromErr(w, err, "")
+		return
+	} else if existing != nil {
+		writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
+		return
+	}
+
+	// Generate a storage path for the clone that is unique to this request
+	// (suffixed with the clone's own ID) rather than deterministic from
+	// (scope, scopeID, slug) alone. Two concurrent requests cloning into the
+	// same destination name would otherwise compute the identical path; if
+	// one of them then loses the race below and runs its failure-path
+	// DeletePrefix, it would delete the files the other just copied. A
+	// request-unique path means the failure cleanup below can only ever
+	// remove a subtree this request itself created.
+	//
+	// The clone is always created in the blob layout (ptone/scion#4221):
+	// its path is the row-unique <slug>.<id>, and the commit copies each
+	// file the source references into the clone's own blobs.
+	clone.Layout = store.TemplateLayoutBlobs
+	storagePath := s.templateBlobStoragePath(clone)
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
+		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
-	// Copy files from source to clone location
+	// Create the clone through the commit path, which copies the files and
+	// re-derives Harness, DefaultHarnessConfig and AgentConfig from them
+	// instead of copying the source's derived fields (ptone/scion#4217).
+	var createErr error
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
-		for _, file := range source.Files {
-			srcPath := source.StoragePath + "/" + file.Path
-			dstPath := storagePath + "/" + file.Path
-			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
-				RuntimeError(w, "Failed to copy files: "+err.Error())
-				return
-			}
-		}
-		clone.Files = source.Files
-		clone.ContentHash = source.ContentHash
 		clone.Status = store.TemplateStatusActive
+		createErr = s.commitTemplateFiles(ctx, clone, source.Files, commitOpts{create: true, copyFrom: source})
+	} else {
+		clone.Harness = deriveTemplateIndex(nil, "", clone.Name).Harness
+		createErr = s.store.CreateTemplate(ctx, clone)
 	}
 
-	if err := s.store.CreateTemplate(ctx, clone); err != nil {
+	if err := createErr; err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storagePath)
+			_ = stor.DeletePrefix(ctx, templateBlobPrefix(storagePath))
 		}
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}
-		writeErrorFromErr(w, err, "")
+		writeTemplateCommitError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, clone)
 }
 
-// computeContentHash computes the aggregate content hash for a set of resource
-// files. It is a thin adapter over transfer.ComputeContentHash — the single
-// canonical implementation also used by the broker-side hydrator, the transfer
-// collector, and the hubclient manifest builder. Routing every hub call site
-// through the same implementation guarantees the hub and the broker can never
-// compute divergent hashes for identical content (which would silently break
-// cache lookups). Per the resource-storage refactor (§7.3/§9), transfer owns
-// the canonical hash until a ResourceStore abstraction subsumes it.
-func computeContentHash(files []store.TemplateFile) string {
+// templateScopeResource builds an ad hoc "template" Resource for
+// authorization checks that have a project or global scope to evaluate but
+// no concrete store.Template record (e.g. authorizing a create or clone
+// destination before the new record exists). scope should be
+// store.TemplateScopeProject or store.TemplateScopeGlobal; scopeID is the
+// owning project ID for project scope, and is ignored for global scope.
+//
+// User scope is deliberately not handled here — use
+// templateUserScopeResource, which takes the authenticated UserIdentity
+// directly instead of a bare scopeID string. See that function's doc for
+// why the distinction matters (ptone/scion#2015).
+//
+// ptone/scion#1916: every ad hoc "template" Resource literal must set
+// ScopeKind through this constructor (or templateResource, for a real
+// record, or templateUserScopeResource, for user scope), never by hand —
+// filterHubWideTemplateGrants only narrows the curated hub-member/hub-viewer
+// grant when ScopeKind is populated, so a hand-built literal that forgets it
+// would fall through unfiltered. See
+// TestTemplateResourceLiterals_AllUseCanonicalConstructor.
+func templateScopeResource(scope, scopeID string) Resource {
+	r := Resource{Type: "template", ScopeKind: scope}
+	if scope == store.TemplateScopeProject && scopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = scopeID
+	}
+	return r
+}
+
+// templateUserScopeResource builds the ad hoc "template" Resource for the
+// user-scope authorization check in template create (createTemplateV2), the
+// user-scope counterpart to templateScopeResource.
+//
+// It takes the authenticated UserIdentity directly, never a bare scopeID
+// string (ptone/scion#2015): Resource.OwnerID drives the kernel's
+// "relationship grant: resource owner" check (authz.go), so whatever lands
+// there gets ownership access to that scope. Taking UserIdentity makes
+// sourcing OwnerID from an unvalidated request field a type error rather
+// than a doc-comment violation.
+//
+// filterHubWideTemplateGrants (ptone/scion#1916) narrows the hub-member/
+// hub-viewer system-scope grant to global-scope records only, so without
+// OwnerID set here, a user-scope create would have no candidate binding.
+func templateUserScopeResource(userIdent UserIdentity) Resource {
+	return Resource{Type: "template", ScopeKind: store.TemplateScopeUser, OwnerID: userIdent.ID()}
+}
+
+// authorizeTemplateReadRoute is the shared read gate for every template read
+// surface that must also admit a runtime broker: get, download, and files
+// (template_file_handlers.go). A denial reads as 404, matching authorizeRead.
+//
+// An authenticated broker is scoped by brokerMayReadCatalogResource rather
+// than admitted unconditionally: brokers read templates during agent
+// creation (hydration) over HMAC auth and are not user principals, so the
+// authorization kernel cannot evaluate them, but that is authority to
+// hydrate the projects the broker serves plus the hub-wide catalog, not
+// every project's or user's private template.
+//
+// A global-scope template is likewise allowed outright for an agent
+// identity, ahead of the ordinary authorizeRead/CheckAccess call: the
+// kernel's agent synthetic binding is project-scoped by design (see the
+// comment on Decide's step 5b, authz.go) and deliberately does not carry a
+// hub-wide-catalog exception, because that would leak into every other
+// parentless resource type the kernel evaluates for agents. Applying the
+// exception here instead — the same way catalogListReadBatch
+// (authorized_list.go) applies it to list — keeps list and this per-ID read
+// in agreement without widening what CheckAccess itself grants an agent.
+func (s *Server) authorizeTemplateReadRoute(w http.ResponseWriter, r *http.Request, template *store.Template) bool {
+	ctx := r.Context()
+	if broker := GetBrokerIdentityFromContext(ctx); broker != nil {
+		if s.brokerMayReadCatalogResource(ctx, broker, template.Scope, template.ScopeID) {
+			return true
+		}
+		NotFound(w, "Template")
+		return false
+	}
+	if template.Scope == store.TemplateScopeGlobal {
+		if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+			return true
+		}
+	}
+	return s.authorizeRead(w, r, templateResource(template), "Template")
+}
+
+// computeContentHash computes the content hash a template or harness-config
+// commit records for files. With the hub.content_hash_v2 experiment on it is
+// transfer.ComputeContentHashV2, which covers paths, normalised modes and
+// file hashes (ptone/scion#5658); while it is off (the default) it is
+// transfer.ComputeContentHashV1, which covers file hashes only, so a
+// rename-only or chmod-only re-upload is not visible to the expected-hash
+// check, as before. The experiment is read at every call, so toggling it
+// needs no restart. A nil server (no experiments) records v1.
+//
+// Rows keep the version they were last committed with until their next
+// commit rewrites it (no backfill). The commit compare-and-swap stays a
+// strict equality on the stored value, v1 or v2, so mixed rows are safe in
+// both directions; accepting a v1 value that matches the v1 hash of the
+// stored files would accept a stale commit over a rename-only or chmod-only
+// change, the change v2 exists to detect. Skill versions do not use this
+// hash: see computeSkillContentHash.
+func (s *Server) computeContentHash(files []store.TemplateFile) string {
+	return computeContentHashVersion(files, s != nil && s.experimentEnabled(experiments.ContentHashV2))
+}
+
+// computeContentHashVersion is the content hash of files: v2
+// (transfer.ComputeContentHashV2) when v2 is set, otherwise v1
+// (transfer.ComputeContentHashV1). It is a thin adapter over the canonical
+// transfer implementations, also used by the transfer collector and the
+// hubclient manifest builder, so the hub and its clients never compute
+// divergent hashes for identical content.
+func computeContentHashVersion(files []store.TemplateFile, v2 bool) string {
+	if v2 {
+		return transfer.ComputeContentHashV2(templateFileInfos(files))
+	}
+	return transfer.ComputeContentHashV1(templateFileInfos(files))
+}
+
+// computeSkillContentHash is the content hash of a skill version's files.
+// It stays transfer.ComputeContentHashV1, which ignores paths and modes:
+// published skill versions are immutable and pinned by this value (registry
+// pins, content-addressed version lookup), and brokers verify an installed
+// bundle by recomputing it. It is what skill_versions.content_hash records
+// and what every contentHash field carries; see computeSkillContentHashV2
+// for the hash that also covers paths and modes.
+func computeSkillContentHash(files []store.TemplateFile) string {
+	return transfer.ComputeContentHashV1(templateFileInfos(files))
+}
+
+// computeSkillContentHashV2 is skill content hash v2 (ptone/scion#5935):
+// transfer.ComputeContentHashV2 over a skill version's files, so a rename,
+// an executable-bit change and a content change each change it. It is
+// derived, never stored: a published version's file list is immutable, so
+// the value is stable, and versions published before v2 existed get one
+// too. A file with no recorded mode counts as "0644", the mode the broker
+// installs it with. The hub emits and accepts it only while the
+// hub.skill_content_hash_v2 experiment is on.
+func computeSkillContentHashV2(files []store.TemplateFile) string {
+	return transfer.ComputeContentHashV2(templateFileInfos(files))
+}
+
+// resolvedSkillContentHashes recomputes the v1 and v2 skill content hashes
+// of a resolved skill from its file list (path, per-file hash and mode),
+// the metadata the broker verifies the downloaded files against. ok is
+// false when there are no files or a file has no per-file hash, since the
+// bundle hashes then cannot be recomputed.
+func resolvedSkillContentHashes(files []DownloadURLInfo) (v1, v2 string, ok bool) {
+	if len(files) == 0 {
+		return "", "", false
+	}
+	infos := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		if f.Hash == "" {
+			return "", "", false
+		}
+		infos[i] = transfer.FileInfo{Path: f.Path, Size: f.Size, Hash: f.Hash, Mode: f.Mode}
+	}
+	return transfer.ComputeContentHashV1(infos), transfer.ComputeContentHashV2(infos), true
+}
+
+// templateFileInfos converts manifest entries to transfer.FileInfo.
+func templateFileInfos(files []store.TemplateFile) []transfer.FileInfo {
 	fileInfos := make([]transfer.FileInfo, len(files))
 	for i, f := range files {
 		fileInfos[i] = transfer.FileInfo{
@@ -999,5 +1405,5 @@ func computeContentHash(files []store.TemplateFile) string {
 			Mode: f.Mode,
 		}
 	}
-	return transfer.ComputeContentHash(fileInfos)
+	return fileInfos
 }

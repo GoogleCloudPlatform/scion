@@ -1,19 +1,19 @@
 {
   "channels": {
     "stable": {
-      "version": "",
-      "date": "",
-      "url": ""
+      "version": "v0.3.0",
+      "date": "2026-11-11T14:45:53Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.3.0"
     },
     "preview": {
-      "version": "v0.3.0-preview.2",
-      "date": "2026-09-15T00:00:00Z",
-      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.3.0-preview.2"
+      "version": "v0.4.0-preview.1",
+      "date": "2026-11-11T14:46:47Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.4.0-preview.1"
     },
     "nightly": {
-      "version": "",
-      "date": "",
-      "url": ""
+      "version": "nightly-20261111",
+      "date": "2026-11-11T03:17:38Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261111"
     }
   }
 }

@@ -395,15 +395,28 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
+	// enforceUATConstraints now also requires live project access
+	// (ProjectTargetAdmission, ptone/scion#2092) for project targets, so the
+	// "_allowed" cases below need a real project and a genuine project-scoped
+	// binding for the UAT's principal -- previously the function never
+	// touched the store. "proj-1" must therefore be a real project row, not
+	// just a string the two hub-level/mismatch cases happen to share.
+	tokenProject := tid("proj-1")
+	if err := s.CreateProject(ctx, &store.Project{ID: tokenProject, Name: "Proj 1", Slug: "proj-1"}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	createTestUserWithProjectRole(t, s, uatUser.ID, uatUser.Email, tokenProject, store.ProjectRoleMember)
+
 	authz := NewAuthzService(s, nil)
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: uatUser.ID}
 
 	baseUser := NewAuthenticatedUser(tid("uat-m1"), "uat-m1@test.com", "UAT User", "admin", "api")
 
 	t.Run("hub_resource_denied", func(t *testing.T) {
 		// UAT with a hub scope attempting to access a hub-level resource.
-		scoped := NewScopedUserIdentity(baseUser, "proj-1", []string{"hub:read"})
+		scoped := NewScopedUserIdentity(baseUser, tokenProject, []string{"hub:read"})
 		resource := Resource{Type: "hub", ID: "hub-1"}
-		result := authz.enforceUATConstraints(scoped, resource, "read")
+		result := authz.enforceUATConstraints(ctx, principal, scoped, resource, "read", "hub.read")
 		if result == nil {
 			t.Fatal("expected denial for hub-level resource, got nil")
 		}
@@ -417,9 +430,9 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 
 	t.Run("user_resource_denied", func(t *testing.T) {
 		// UAT with user:invite scope attempting to access a user resource with no project parent.
-		scoped := NewScopedUserIdentity(baseUser, "proj-1", []string{"user:invite"})
+		scoped := NewScopedUserIdentity(baseUser, tokenProject, []string{"user:invite"})
 		resource := Resource{Type: "user", ID: "user-1"}
-		result := authz.enforceUATConstraints(scoped, resource, "invite")
+		result := authz.enforceUATConstraints(ctx, principal, scoped, resource, "invite", "user.invite")
 		if result == nil {
 			t.Fatal("expected denial for user resource without project parent, got nil")
 		}
@@ -433,9 +446,9 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 
 	t.Run("project_child_resource_allowed", func(t *testing.T) {
 		// UAT with agent:create scope for a resource that has a matching project parent.
-		scoped := NewScopedUserIdentity(baseUser, "proj-1", []string{"agent:create"})
-		resource := Resource{Type: "agent", ID: "agent-1", ParentType: "project", ParentID: "proj-1"}
-		result := authz.enforceUATConstraints(scoped, resource, "create")
+		scoped := NewScopedUserIdentity(baseUser, tokenProject, []string{"agent:create"})
+		resource := Resource{Type: "agent", ID: "agent-1", ParentType: "project", ParentID: tokenProject}
+		result := authz.enforceUATConstraints(ctx, principal, scoped, resource, "create", "agent.create")
 		if result != nil {
 			t.Fatalf("expected nil (allowed) for project-child resource, got denial: %s", result.Reason)
 		}
@@ -443,9 +456,9 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 
 	t.Run("project_resource_matching_allowed", func(t *testing.T) {
 		// UAT accessing the project it is scoped to.
-		scoped := NewScopedUserIdentity(baseUser, "proj-1", []string{"project:read"})
-		resource := Resource{Type: "project", ID: "proj-1"}
-		result := authz.enforceUATConstraints(scoped, resource, "read")
+		scoped := NewScopedUserIdentity(baseUser, tokenProject, []string{"project:read"})
+		resource := Resource{Type: "project", ID: tokenProject}
+		result := authz.enforceUATConstraints(ctx, principal, scoped, resource, "read", "project.read")
 		if result != nil {
 			t.Fatalf("expected nil (allowed) for matching project, got denial: %s", result.Reason)
 		}
@@ -453,9 +466,9 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 
 	t.Run("project_resource_mismatch_denied", func(t *testing.T) {
 		// UAT accessing a different project.
-		scoped := NewScopedUserIdentity(baseUser, "proj-1", []string{"project:read"})
+		scoped := NewScopedUserIdentity(baseUser, tokenProject, []string{"project:read"})
 		resource := Resource{Type: "project", ID: "proj-2"}
-		result := authz.enforceUATConstraints(scoped, resource, "read")
+		result := authz.enforceUATConstraints(ctx, principal, scoped, resource, "read", "project.read")
 		if result == nil {
 			t.Fatal("expected denial for mismatched project, got nil")
 		}
@@ -465,17 +478,52 @@ func TestM1_UATDeniedForHubLevelResources(t *testing.T) {
 	})
 }
 
-// TestM2_HubPermissionsNoUATScope verifies that all hub permissions have
-// empty UATScope values (M2 fix). Hub operations should not be accessible
-// via project-scoped UATs.
-func TestM2_HubPermissionsNoUATScope(t *testing.T) {
+// TestHubPermissionSelectors_MatchApprovedSet pins the exact set of hub
+// permissions that carry a token selector, and requires each to be
+// selectable on the hub boundary only. A hub permission gains a selector
+// only by being added here.
+func TestHubPermissionSelectors_MatchApprovedSet(t *testing.T) {
+	approved := map[string]string{
+		"hub.config.read":             "hub_config:read",
+		"hub.config.update":           "hub_config:update",
+		"hub.project_defaults.read":   "hub_project_defaults:read",
+		"hub.project_defaults.update": "hub_project_defaults:update",
+		"hub.messaging.update":        "hub_messaging:update",
+		"hub.experiments.update":      "hub_experiments:update",
+		"hub.lifecycle_hooks.read":    "hub_lifecycle_hooks:read",
+		"hub.lifecycle_hooks.update":  "hub_lifecycle_hooks:update",
+		"hub.settings.update":         "hub_settings:update",
+		"hub.scheduler.read":          "hub_scheduler:read",
+		"hub.health.read":             "hub_health:read",
+		"hub.validate.execute":        "hub_validate:execute",
+		"hub.integrations.read":       "hub_integrations:read",
+		"hub.integrations.update":     "hub_integrations:update",
+		"hub.teams_manifest.read":     "hub_teams_manifest:read",
+		"hub.diagnostics.read":        "hub_diagnostics:read",
+		"hub.metrics.read":            "hub_metrics:read",
+		"hub.github_app.read":         "hub_github_app:read",
+		"hub.github_app.update":       "hub_github_app:update",
+		"hub.allow_list.read":         "hub_allow_list:read",
+		"hub.allow_list.update":       "hub_allow_list:update",
+		"hub.audit.read":              "hub_audit:read",
+	}
+	got := map[string]string{}
 	for _, perm := range permissions.Registry {
-		if perm.Resource != permissions.ResourceHub {
+		if perm.Resource != permissions.ResourceHub || perm.UATScope == "" {
 			continue
 		}
-		if perm.UATScope != "" {
-			t.Errorf("hub permission %s has non-empty UATScope %q; hub permissions must not be accessible via project-scoped UATs",
-				perm.ID, perm.UATScope)
+		got[perm.ID] = perm.UATScope
+		kinds, listed := permissions.SelectorAllowedBoundaries(perm.ID)
+		if !listed || len(kinds) != 1 || kinds[0] != permissions.BoundaryKindHub {
+			t.Errorf("hub permission %s: selector boundaries = %v (listed=%v), want hub only", perm.ID, kinds, listed)
+		}
+	}
+	if len(got) != len(approved) {
+		t.Errorf("hub permissions with a selector = %v, want %v", got, approved)
+	}
+	for id, sel := range approved {
+		if got[id] != sel {
+			t.Errorf("hub permission %s has selector %q, want %q", id, got[id], sel)
 		}
 	}
 }

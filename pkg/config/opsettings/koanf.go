@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 )
@@ -31,6 +32,13 @@ import (
 //
 // See design §3.1 "Two tiers" table for the full rationale.
 var layer0Prefixes = []string{
+	// Server keyring file path (ptone/scion#1530): read once at startup.
+	"server.keyring_file",
+	// Operator override for a world-readable keyring file: restart-bound.
+	"server.keyring_file_allow_world_readable",
+	// TLS-terminating proxy allowlist for the hub-broker transport check:
+	// operator-only and read once at startup.
+	"server.trusted_proxies",
 	// Database
 	"server.database",
 	// Listeners
@@ -51,12 +59,24 @@ var layer0Prefixes = []string{
 	// Secrets/storage
 	"server.secrets",
 	"server.storage",
+	"server.project_storage",
 	"server.workspace_storage",
+	"server.shared_dir_storage",
+	"server.home_storage",
 	// Identity/mode
 	"server.mode",
 	"server.env",
 	"server.hub.hub_id",
 	"server.hub.gcp_project_id",
+	// Hub class (test admin tier gate input). Layer-0 so no DB section can
+	// hold it; the server-config API additionally refuses it in every mode,
+	// including workstation hubs where other Layer-0 keys are writable.
+	"server.hub.class",
+	// Test identity workload issuers (ptone/scion#4240, phase X2): the
+	// startup allowlist of workload subjects that may hold an issuer
+	// delegation. Layer-0 so no DB section can hold it; the server-config
+	// API additionally refuses it in every mode.
+	"server.hub.test_identities",
 	// Logging
 	"server.log_level",
 	"server.log_format",
@@ -67,6 +87,37 @@ var layer0Prefixes = []string{
 	"server.plugins",
 	// Native chat — routes are registered at startup, so toggling it needs a restart.
 	"server.native_chat",
+	// Async agent create (design §3.7) — the reaper's dedicated scheduler
+	// ticker and the clamp on LaunchTimeout are both established at startup.
+	"server.hub.launch_timeout",
+	"server.hub.launch_keepalive_seconds",
+	// Request performance tracing — the middleware and the authorization
+	// store and audit-emitter decorators are installed at startup.
+	"server.hub.perf_trace",
+	// Browser policy report samples — the report handler is built at
+	// startup.
+	"server.hub.csp_report_raw_samples",
+	// Membership-standing sweep report-only mode — the sweep reads it from
+	// ServerConfig, set at startup.
+	"server.hub.membership_sweep_report_only",
+	// Missing-container reconcile grace — read into ServerConfig at startup.
+	"server.hub.missing_agent_grace",
+	// Conduit relay and grant settings — the relay, its internal listener and
+	// peer auth are built at startup.
+	"server.hub.conduit",
+	// Agent port proxy settings — the response header bound is read into
+	// ServerConfig at startup.
+	"server.hub.port_proxy",
+	// Events stream bounds and the declared platform request timeout — the
+	// web server and the conduit relay read them at startup.
+	"server.hub.sse",
+	"server.hub.platform_request_timeout",
+	// Web chat search limits (timeout, hub-wide cap) — read into
+	// ServerConfig at startup (ptone/scion#7586).
+	"server.hub.chat",
+	// Separate relay process settings (scion server --role relay) — read
+	// at startup.
+	"server.relay",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -88,17 +139,26 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"access": {
 		"server.hub.admin_emails":        "admin_emails",
 		"server.auth.user_access_mode":   "user_access_mode",
+		"server.auth.default_user_role":  "default_user_role",
 		"server.auth.authorized_domains": "authorized_domains",
 	},
 	"lifecycle": {
-		"server.hub.auto_suspend_stalled":     "auto_suspend_stalled",
-		"server.hub.stalled_threshold":        "stalled_threshold",
-		"server.hub.soft_delete_retention":    "soft_delete_retention",
-		"server.hub.soft_delete_retain_files": "soft_delete_retain_files",
+		"server.hub.auto_suspend_stalled":          "auto_suspend_stalled",
+		"server.hub.stalled_threshold":             "stalled_threshold",
+		"server.hub.soft_delete_retention":         "soft_delete_retention",
+		"server.hub.soft_delete_retain_files":      "soft_delete_retain_files",
+		"server.hub.start_claim_lease_ttl":         "start_claim_lease_ttl",
+		"server.hub.start_max_duration":            "start_max_duration",
+		"server.hub.start_unconfirmed_hold":        "start_unconfirmed_hold",
+		"server.hub.start_create_unconfirmed_hold": "start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"server.hub.public_url": "public_url",
-		"image_registry":        "image_registry",
+		"server.hub.public_url":                  "public_url",
+		"server.hub.hub_name":                    "hub_name",
+		"server.hub.content_url":                 "content_url",
+		"server.hub.content_url_allow_same_site": "content_url_allow_same_site",
+		"image_registry":                         "image_registry",
+		"server.hub.monitoring_dashboard_url":    "monitoring_dashboard_url",
 	},
 	"github_app": {
 		"server.github_app.app_id":           "app_id",
@@ -110,6 +170,20 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"auto_expose_ports": {
 		"auto_expose_ports.enabled": "enabled",
 	},
+	"quotas": {
+		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
+	},
+	"gcp_iam": {
+		"server.hub.gcp_iam_check_mode":          "gcp_iam_check_mode",
+		"server.hub.gcp_iam_deny_unknown_policy": "gcp_iam_deny_unknown_policy",
+	},
+	"hub_observability": {
+		config.HubMetricsEnabledKey: "metrics_enabled",
+		config.HubTracingEnabledKey: "tracing_enabled",
+	},
+	"agent_secrets": {
+		"agent_secrets.user_scope_only": "user_scope_only",
+	},
 	"project_defaults": {
 		"project_defaults.default_scratchpad": "default_scratchpad",
 	},
@@ -120,6 +194,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.federation.refresh_interval":  "refresh_interval",
 		"server.federation.debounce_interval": "debounce_interval",
 	},
+	"notifications": {
+		"server.notification_channels": "notification_channels",
+	},
 }
 
 // jsonFieldToKoanfPaths maps section name → json field → koanf path for the
@@ -128,17 +205,26 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"access": {
 		"admin_emails":       "server.hub.admin_emails",
 		"user_access_mode":   "server.auth.user_access_mode",
+		"default_user_role":  "server.auth.default_user_role",
 		"authorized_domains": "server.auth.authorized_domains",
 	},
 	"lifecycle": {
-		"auto_suspend_stalled":     "server.hub.auto_suspend_stalled",
-		"stalled_threshold":        "server.hub.stalled_threshold",
-		"soft_delete_retention":    "server.hub.soft_delete_retention",
-		"soft_delete_retain_files": "server.hub.soft_delete_retain_files",
+		"auto_suspend_stalled":          "server.hub.auto_suspend_stalled",
+		"stalled_threshold":             "server.hub.stalled_threshold",
+		"soft_delete_retention":         "server.hub.soft_delete_retention",
+		"soft_delete_retain_files":      "server.hub.soft_delete_retain_files",
+		"start_claim_lease_ttl":         "server.hub.start_claim_lease_ttl",
+		"start_max_duration":            "server.hub.start_max_duration",
+		"start_unconfirmed_hold":        "server.hub.start_unconfirmed_hold",
+		"start_create_unconfirmed_hold": "server.hub.start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"public_url":     "server.hub.public_url",
-		"image_registry": "image_registry",
+		"public_url":                  "server.hub.public_url",
+		"hub_name":                    "server.hub.hub_name",
+		"content_url":                 "server.hub.content_url",
+		"content_url_allow_same_site": "server.hub.content_url_allow_same_site",
+		"image_registry":              "image_registry",
+		"monitoring_dashboard_url":    "server.hub.monitoring_dashboard_url",
 	},
 	"github_app": {
 		"app_id":           "server.github_app.app_id",
@@ -150,6 +236,20 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"auto_expose_ports": {
 		"enabled": "auto_expose_ports.enabled",
 	},
+	"quotas": {
+		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"gcp_iam": {
+		"gcp_iam_check_mode":          "server.hub.gcp_iam_check_mode",
+		"gcp_iam_deny_unknown_policy": "server.hub.gcp_iam_deny_unknown_policy",
+	},
+	"hub_observability": {
+		"metrics_enabled": config.HubMetricsEnabledKey,
+		"tracing_enabled": config.HubTracingEnabledKey,
+	},
+	"agent_secrets": {
+		"user_scope_only": "agent_secrets.user_scope_only",
+	},
 	"project_defaults": {
 		"default_scratchpad": "project_defaults.default_scratchpad",
 	},
@@ -159,6 +259,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"algorithms":        "server.federation.algorithms",
 		"refresh_interval":  "server.federation.refresh_interval",
 		"debounce_interval": "server.federation.debounce_interval",
+	},
+	"notifications": {
+		"notification_channels": "server.notification_channels",
 	},
 }
 
@@ -188,8 +291,6 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 		return extractAgentDefaults(k)
 	case "github_app":
 		return extractGitHubApp(k)
-	case "notifications":
-		return extractNotifications(k)
 	default:
 		return extractMappedSection(k, sectionName)
 	}
@@ -212,7 +313,9 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 	fields := []string{"default_template", "default_harness_config", "default_max_turns",
 		"default_max_model_calls", "default_max_duration", "default_resources",
 		"default_model", "default_thinking_level",
-		"default_max_agent_role", "default_agent_role"}
+		"default_max_agent_role", "default_agent_role",
+		"default_runtime_broker", "default_timezone",
+		"default_gcp_identity_mode", "default_gcp_identity_service_account_id"}
 	for _, f := range fields {
 		if k.Exists(f) {
 			doc[f] = k.Get(f)
@@ -223,14 +326,6 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 
 func extractGitHubApp(k *koanf.Koanf) (json.RawMessage, error) {
 	return extractMappedSection(k, "github_app")
-}
-
-func extractNotifications(k *koanf.Koanf) (json.RawMessage, error) {
-	doc := make(map[string]interface{})
-	if k.Exists("server.notification_channels") {
-		doc["notification_channels"] = k.Get("server.notification_channels")
-	}
-	return json.Marshal(doc)
 }
 
 func extractMappedSection(k *koanf.Koanf, sectionName string) (json.RawMessage, error) {
@@ -287,32 +382,46 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 		return k.Load(confmap.Provider(raw, "."), nil)
 	case "github_app":
 		return loadMappedSection(k, "github_app", raw)
-	case "notifications":
-		flat := make(map[string]interface{})
-		for key, val := range raw {
-			flat["server."+key] = val
-		}
-		return k.Load(confmap.Provider(flat, "."), nil)
 	default:
 		return loadMappedSection(k, sectionName, raw)
 	}
 }
 
+// loadPrefixed loads a section document under prefix as a nested map.
+//
+// The document is not flattened into "." delimited paths: koanf splits such
+// paths on every ".", so a free-form map key that contains a dot (for
+// example the telemetry.resource key "service.namespace", or an event name
+// in telemetry.filter.sampling.rates) would turn into nested maps and no
+// longer decode into its map[string]string field (ptone/scion#4108).
+// Loading the nested map with an empty delimiter keeps each key whole;
+// koanf still indexes every leaf path, so lookups such as
+// "telemetry.cloud.endpoint" work as before.
+//
+// Empty maps are left out, as the flattened load did, so an empty document
+// (or an empty nested object) adds no keys.
 func loadPrefixed(k *koanf.Koanf, prefix string, raw map[string]interface{}) error {
-	flat := make(map[string]interface{})
-	flattenMap(prefix, raw, flat)
-	return k.Load(confmap.Provider(flat, "."), nil)
+	pruned := withoutEmptyMaps(raw)
+	if len(pruned) == 0 {
+		return nil
+	}
+	return k.Load(confmap.Provider(map[string]interface{}{prefix: pruned}, ""), nil)
 }
 
-func flattenMap(prefix string, m map[string]interface{}, out map[string]interface{}) {
+// withoutEmptyMaps returns a copy of m without nested maps that are empty,
+// or that hold only empty maps. Map keys are kept as they are.
+func withoutEmptyMaps(m map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
 	for key, val := range m {
-		fullKey := prefix + "." + key
 		if sub, ok := val.(map[string]interface{}); ok {
-			flattenMap(fullKey, sub, out)
-		} else {
-			out[fullKey] = val
+			if p := withoutEmptyMaps(sub); len(p) > 0 {
+				out[key] = p
+			}
+			continue
 		}
+		out[key] = val
 	}
+	return out
 }
 
 func loadMappedSection(k *koanf.Koanf, sectionName string, raw map[string]interface{}) error {
@@ -451,7 +560,7 @@ type DeprecatedEnvVar struct {
 func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 	var deprecated []DeprecatedEnvVar
 	for _, key := range serverEnvKoanf.Keys() {
-		if !IsLayer1Key(key) {
+		if !IsLayer1Key(key) || envPinnedLayer1Keys[key] {
 			continue
 		}
 		// koanfKeyToEnvSuffix strips the "server." prefix, so the suffix
@@ -478,12 +587,36 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 	return deprecated
 }
 
-// koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form.
-// e.g. "server.hub.admin_emails" → "HUB_ADMINEMAILS"
+// envPinnedLayer1Keys lists the Layer-1 keys for which a SCION_SERVER_*
+// variable is the supported way to pin the value on a node, not a
+// deprecated seed input. server.hub.public_url resolves env first, then the
+// database, then settings.yaml (ptone/scion#3905).
+// server.auth.authorized_domains resolves the same way (ptone/scion#6000):
+// a node that restricts sign-in through SCION_SERVER_* keeps that list
+// whatever is saved. This differs on purpose from the other access keys,
+// where a saved value wins over SCION_SERVER_*.
+var envPinnedLayer1Keys = map[string]bool{
+	"server.hub.public_url":          true,
+	"server.auth.authorized_domains": true,
+}
+
+// IsEnvPinnedLayer1Key reports whether a SCION_SERVER_* variable pins the
+// Layer-1 key on a node (envPinnedLayer1Keys), so the saved value does not
+// apply where the variable is set.
+func IsEnvPinnedLayer1Key(key string) bool {
+	return envPinnedLayer1Keys[key]
+}
+
+// koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form:
+// the canonical name from the env mapping table (config.ServerEnvKey), else
+// the derived spelling, e.g. "server.hub.admin_emails" → "HUB_ADMINEMAILS".
 // The "server." prefix is stripped because it corresponds to the SCION_SERVER_
 // env prefix that was already removed during key mapping. Without stripping,
 // the output would produce double-SERVER var names (SCION_SERVER_SERVER_HUB_...).
 func koanfKeyToEnvSuffix(key string) string {
+	if name, ok := config.ServerEnvKey(key); ok {
+		return strings.TrimPrefix(name, "SCION_SERVER_")
+	}
 	key = strings.TrimPrefix(key, "server.")
 	parts := strings.Split(key, ".")
 	for i, part := range parts {

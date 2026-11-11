@@ -14,18 +14,52 @@ const (
 	Label = "schedule"
 	// FieldID holds the string denoting the id field in the database.
 	FieldID = "id"
+	// FieldInitiatorPrincipalKind holds the string denoting the initiator_principal_kind field in the database.
+	FieldInitiatorPrincipalKind = "initiator_principal_kind"
+	// FieldInitiatorPrincipalID holds the string denoting the initiator_principal_id field in the database.
+	FieldInitiatorPrincipalID = "initiator_principal_id"
+	// FieldInitiatorCredentialKind holds the string denoting the initiator_credential_kind field in the database.
+	FieldInitiatorCredentialKind = "initiator_credential_kind"
+	// FieldInitiatorCredentialID holds the string denoting the initiator_credential_id field in the database.
+	FieldInitiatorCredentialID = "initiator_credential_id"
+	// FieldInitiatorCredentialSnapshot holds the string denoting the initiator_credential_snapshot field in the database.
+	FieldInitiatorCredentialSnapshot = "initiator_credential_snapshot"
+	// FieldAttributionVersion holds the string denoting the attribution_version field in the database.
+	FieldAttributionVersion = "attribution_version"
+	// FieldAuthorizationRevision holds the string denoting the authorization_revision field in the database.
+	FieldAuthorizationRevision = "authorization_revision"
+	// FieldAuthorityCeilingKind holds the string denoting the authority_ceiling_kind field in the database.
+	FieldAuthorityCeilingKind = "authority_ceiling_kind"
+	// FieldAuthorityCeilingVersion holds the string denoting the authority_ceiling_version field in the database.
+	FieldAuthorityCeilingVersion = "authority_ceiling_version"
+	// FieldAuthorityCeilingPermissionIds holds the string denoting the authority_ceiling_permission_ids field in the database.
+	FieldAuthorityCeilingPermissionIds = "authority_ceiling_permission_ids"
+	// FieldAuthorityCeilingBoundaryKind holds the string denoting the authority_ceiling_boundary_kind field in the database.
+	FieldAuthorityCeilingBoundaryKind = "authority_ceiling_boundary_kind"
+	// FieldAuthorityCeilingBoundaryProjectID holds the string denoting the authority_ceiling_boundary_project_id field in the database.
+	FieldAuthorityCeilingBoundaryProjectID = "authority_ceiling_boundary_project_id"
+	// FieldAuthorityCeilingSourceExpiresAt holds the string denoting the authority_ceiling_source_expires_at field in the database.
+	FieldAuthorityCeilingSourceExpiresAt = "authority_ceiling_source_expires_at"
+	// FieldFixtureRootID holds the string denoting the fixture_root_id field in the database.
+	FieldFixtureRootID = "fixture_root_id"
+	// FieldFixtureIssuerID holds the string denoting the fixture_issuer_id field in the database.
+	FieldFixtureIssuerID = "fixture_issuer_id"
 	// FieldProjectID holds the string denoting the project_id field in the database.
 	FieldProjectID = "project_id"
 	// FieldName holds the string denoting the name field in the database.
 	FieldName = "name"
 	// FieldCronExpr holds the string denoting the cron_expr field in the database.
 	FieldCronExpr = "cron_expr"
+	// FieldTimeZone holds the string denoting the time_zone field in the database.
+	FieldTimeZone = "time_zone"
 	// FieldEventType holds the string denoting the event_type field in the database.
 	FieldEventType = "event_type"
 	// FieldPayload holds the string denoting the payload field in the database.
 	FieldPayload = "payload"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldStatusReason holds the string denoting the status_reason field in the database.
+	FieldStatusReason = "status_reason"
 	// FieldNextRunAt holds the string denoting the next_run_at field in the database.
 	FieldNextRunAt = "next_run_at"
 	// FieldLastRunAt holds the string denoting the last_run_at field in the database.
@@ -51,12 +85,29 @@ const (
 // Columns holds all SQL columns for schedule fields.
 var Columns = []string{
 	FieldID,
+	FieldInitiatorPrincipalKind,
+	FieldInitiatorPrincipalID,
+	FieldInitiatorCredentialKind,
+	FieldInitiatorCredentialID,
+	FieldInitiatorCredentialSnapshot,
+	FieldAttributionVersion,
+	FieldAuthorizationRevision,
+	FieldAuthorityCeilingKind,
+	FieldAuthorityCeilingVersion,
+	FieldAuthorityCeilingPermissionIds,
+	FieldAuthorityCeilingBoundaryKind,
+	FieldAuthorityCeilingBoundaryProjectID,
+	FieldAuthorityCeilingSourceExpiresAt,
+	FieldFixtureRootID,
+	FieldFixtureIssuerID,
 	FieldProjectID,
 	FieldName,
 	FieldCronExpr,
+	FieldTimeZone,
 	FieldEventType,
 	FieldPayload,
 	FieldStatus,
+	FieldStatusReason,
 	FieldNextRunAt,
 	FieldLastRunAt,
 	FieldLastRunStatus,
@@ -79,10 +130,20 @@ func ValidColumn(column string) bool {
 }
 
 var (
+	// DefaultAuthorityCeilingKind holds the default value on creation for the "authority_ceiling_kind" field.
+	DefaultAuthorityCeilingKind string
+	// DefaultAuthorityCeilingVersion holds the default value on creation for the "authority_ceiling_version" field.
+	DefaultAuthorityCeilingVersion int32
+	// DefaultAuthorityCeilingBoundaryKind holds the default value on creation for the "authority_ceiling_boundary_kind" field.
+	DefaultAuthorityCeilingBoundaryKind string
+	// DefaultAuthorityCeilingBoundaryProjectID holds the default value on creation for the "authority_ceiling_boundary_project_id" field.
+	DefaultAuthorityCeilingBoundaryProjectID string
 	// NameValidator is a validator for the "name" field. It is called by the builders before save.
 	NameValidator func(string) error
 	// CronExprValidator is a validator for the "cron_expr" field. It is called by the builders before save.
 	CronExprValidator func(string) error
+	// DefaultTimeZone holds the default value on creation for the "time_zone" field.
+	DefaultTimeZone string
 	// EventTypeValidator is a validator for the "event_type" field. It is called by the builders before save.
 	EventTypeValidator func(string) error
 	// DefaultPayload holds the default value on creation for the "payload" field.
@@ -111,6 +172,81 @@ func ByID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldID, opts...).ToFunc()
 }
 
+// ByInitiatorPrincipalKind orders the results by the initiator_principal_kind field.
+func ByInitiatorPrincipalKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalKind, opts...).ToFunc()
+}
+
+// ByInitiatorPrincipalID orders the results by the initiator_principal_id field.
+func ByInitiatorPrincipalID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalID, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialKind orders the results by the initiator_credential_kind field.
+func ByInitiatorCredentialKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialKind, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialID orders the results by the initiator_credential_id field.
+func ByInitiatorCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialID, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialSnapshot orders the results by the initiator_credential_snapshot field.
+func ByInitiatorCredentialSnapshot(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialSnapshot, opts...).ToFunc()
+}
+
+// ByAttributionVersion orders the results by the attribution_version field.
+func ByAttributionVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttributionVersion, opts...).ToFunc()
+}
+
+// ByAuthorizationRevision orders the results by the authorization_revision field.
+func ByAuthorizationRevision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorizationRevision, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingKind orders the results by the authority_ceiling_kind field.
+func ByAuthorityCeilingKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingKind, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingVersion orders the results by the authority_ceiling_version field.
+func ByAuthorityCeilingVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingVersion, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingPermissionIds orders the results by the authority_ceiling_permission_ids field.
+func ByAuthorityCeilingPermissionIds(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingPermissionIds, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingBoundaryKind orders the results by the authority_ceiling_boundary_kind field.
+func ByAuthorityCeilingBoundaryKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingBoundaryKind, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingBoundaryProjectID orders the results by the authority_ceiling_boundary_project_id field.
+func ByAuthorityCeilingBoundaryProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingBoundaryProjectID, opts...).ToFunc()
+}
+
+// ByAuthorityCeilingSourceExpiresAt orders the results by the authority_ceiling_source_expires_at field.
+func ByAuthorityCeilingSourceExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorityCeilingSourceExpiresAt, opts...).ToFunc()
+}
+
+// ByFixtureRootID orders the results by the fixture_root_id field.
+func ByFixtureRootID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureRootID, opts...).ToFunc()
+}
+
+// ByFixtureIssuerID orders the results by the fixture_issuer_id field.
+func ByFixtureIssuerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureIssuerID, opts...).ToFunc()
+}
+
 // ByProjectID orders the results by the project_id field.
 func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldProjectID, opts...).ToFunc()
@@ -126,6 +262,11 @@ func ByCronExpr(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCronExpr, opts...).ToFunc()
 }
 
+// ByTimeZone orders the results by the time_zone field.
+func ByTimeZone(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTimeZone, opts...).ToFunc()
+}
+
 // ByEventType orders the results by the event_type field.
 func ByEventType(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldEventType, opts...).ToFunc()
@@ -139,6 +280,11 @@ func ByPayload(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// ByStatusReason orders the results by the status_reason field.
+func ByStatusReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStatusReason, opts...).ToFunc()
 }
 
 // ByNextRunAt orders the results by the next_run_at field.

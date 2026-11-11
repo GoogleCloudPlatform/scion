@@ -38,6 +38,21 @@ codex/
     .codex/scion_notify.sh     # Notification hook script
 ```
 
+## Hooks
+
+`home/.codex/config.toml` enables codex hooks (`[features] hooks = true`) and
+registers `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, `Stop` and `SubagentStop`. Each one runs `scion_notify.sh`,
+which forwards the payload to `sciontool hook --dialect=codex`, mapped by
+`dialect.yaml`. The legacy `notify` callback (`agent-turn-complete`) is wired
+too.
+
+`SubagentStart`, `PermissionRequest`, `PreCompact`, `PostCompact` and
+`Interrupt` are left unregistered: codex supports them, but the dialect has no
+mapping for them. This was verified against `@openai/codex` 0.162.1. The image
+installs `@openai/codex@latest`, so re-check the list when codex changes its
+hook events.
+
 ## Build the Image
 
 ```sh

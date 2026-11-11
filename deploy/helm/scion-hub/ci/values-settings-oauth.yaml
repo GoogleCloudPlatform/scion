@@ -27,6 +27,12 @@
 # narrower claim is the one that survives and the one the diff should be read
 # against.
 #
+# THE SAME HOLDS IN THE OTHER DIRECTION since the IAP settings landed:
+# values-settings.yaml carries auth.proxy and auth.transport, which this mode
+# does not read and the chart refuses here as inert (the audience) or does not
+# need (transport). So the renders also differ by server.auth.proxy and
+# server.auth.transport - again part of what selecting the mode means.
+#
 # THE FIVE BLOCK-1 KEYS RENDER IN EITHER AUTHENTICATION MODE, and that is what
 # the paired diff is for: the hub ID, the Postgres driver, the database URL, GCS
 # storage with a bucket and a durable session secret are required whichever mode
@@ -37,33 +43,31 @@
 # THE PREFLIGHT AS A WHOLE IS NOT MODE-BLIND, THOUGH, AND THIS FILE USED TO SAY
 # IT WAS. Measured by walking validateHostedHAPreflight gate by gate on the
 # settings.yaml each fixture renders (hack/ha-gates.txt records both arms): this
-# file is refused by a STRICT SUBSET of what values-settings.yaml is refused by.
-# The preflight's IAP gates sit inside `if cfg.Auth.Mode == "proxy"`, so an
-# oauth shape never reaches any of them and stops at the two gates that are
-# mode-independent: server.database.url and the durable session/signing secret.
+# file and values-settings.yaml now stop at the same single gate, the durable
+# session secret, which arrives by environment variable rather than through
+# settings.yaml. They get there differently: the preflight's IAP gates sit inside
+# `if cfg.Auth.Mode == "proxy"`, so this file never reaches them, while
+# values-settings.yaml reaches them and the chart satisfies them.
 #
 # [HISTORY 2026-08-17] THIS SAID THE OPPOSITE: "this file is refused by one gate
 # more than values-settings.yaml. The extra one is server.auth.mode=proxy
-# (cmd/server_foreground.go:980)". It was true when written and 1b3c9418 "fix: do
-# not require IAP for hosted HA preflight" deleted that gate, so oauth went from
-# superset-by-one to subset. TWO THINGS ABOUT THAT CITE ARE WORTH KEEPING. The
-# line number did not rot in the way that announces itself - :980 still resolves,
-# and it is now the storage.provider gate, so a reader who checked it landed on a
-# real line about something else and came away reassured. And "one gate fewer" is
+# ([a line number in validateHostedHAPreflight, cmd/server_foreground.go])". It
+# was true when written and 1b3c9418 "fix: do not require IAP for hosted HA
+# preflight" deleted that gate, so oauth went from superset-by-one to subset.
+# TWO THINGS ABOUT THAT CITE ARE WORTH KEEPING. The line number did not rot in
+# the way that announces itself - it still resolved, to the storage.provider
+# gate, so a reader who checked it landed on a real line about something else
+# and came away reassured (which is why the chart now cites symbols, not lines). And "one gate fewer" is
 # the plausible hand-fix and would be a SECOND false sentence: the difference is
 # the whole IAP family, not one gate.
-
-# SET BECAUSE THIS FIXTURE IS EXACTLY THE SHAPE THE FLAG EXISTS FOR. Postgres
-# alone makes the hub's isHADeployment test true, so without this the chart
-# refuses to render this file at all. The fixture's job is to exercise the
-# rendered settings.yaml, not to install, and the acknowledgement is how it says
-# so. Deleted with the flag when Cloud SQL and ingress/IAP land.
-acknowledgeHAUnlanded: true
 
 hub:
   hubId: ci-settings
   name: CI Settings Hub
   baseUrl: https://ci-settings.example.com
+  # Mirrors values-settings.yaml so the two renders differ only by auth.
+  adminEmails:
+    - ci-admin@example.com
 
 image:
   repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
@@ -107,13 +111,20 @@ auth:
   #
   # WEB, and the client type matters. Credentials under server.oauth.cli or
   # server.oauth.device would render fine and satisfy nothing: the hub keys its
-  # login check by client type (pkg/hub/oauth.go:194) and a browser login reads
-  # the web client only. render-guards asserts that specific non-substitution.
+  # login check by client type (OAuthService.IsProviderConfiguredForClient,
+  # pkg/hub/oauth.go) and a browser login reads the web client only.
+  # render-guards asserts that specific non-substitution.
   oauth:
     web:
       google:
         clientId: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
         clientSecret: ci-oauth-web-google-client-secret-not-a-real-secret
+
+# The GKE shape: Secret Manager, IAM granted outside the chart.
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: probe-project
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

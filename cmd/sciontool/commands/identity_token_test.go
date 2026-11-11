@@ -18,11 +18,8 @@ import (
 )
 
 func TestIdentityTokenCommand_MissingAudience(t *testing.T) {
+	resetRootCmdState(t)
 	scrubScionEnv(t)
-
-	// Reset flags to defaults before each test (cobra retains flag state).
-	identityTokenAudience = ""
-	identityTokenFormat = "token"
 
 	var stderr bytes.Buffer
 	rootCmd.SetErr(&stderr)
@@ -33,10 +30,8 @@ func TestIdentityTokenCommand_MissingAudience(t *testing.T) {
 }
 
 func TestIdentityTokenCommand_InvalidFormat(t *testing.T) {
+	resetRootCmdState(t)
 	scrubScionEnv(t)
-
-	identityTokenAudience = ""
-	identityTokenFormat = "token"
 
 	var stderr bytes.Buffer
 	rootCmd.SetErr(&stderr)
@@ -47,6 +42,7 @@ func TestIdentityTokenCommand_InvalidFormat(t *testing.T) {
 }
 
 func TestIdentityTokenCommand_DefaultFormat(t *testing.T) {
+	resetRootCmdState(t)
 	scrubScionEnv(t)
 	// Redirect token file reads so NewClient() uses the env var, not the real container token.
 	t.Cleanup(hub.SetTokenHome(t.TempDir()))
@@ -77,9 +73,6 @@ func TestIdentityTokenCommand_DefaultFormat(t *testing.T) {
 	t.Setenv("SCION_AUTH_TOKEN", "test-token")
 	t.Setenv("SCION_AGENT_ID", "agent-123")
 
-	identityTokenAudience = ""
-	identityTokenFormat = "token"
-
 	var stdout bytes.Buffer
 	rootCmd.SetOut(&stdout)
 	rootCmd.SetArgs([]string{"identity-token", "--audience=https://vault.example.com"})
@@ -91,6 +84,7 @@ func TestIdentityTokenCommand_DefaultFormat(t *testing.T) {
 }
 
 func TestIdentityTokenCommand_JSONFormat(t *testing.T) {
+	resetRootCmdState(t)
 	scrubScionEnv(t)
 	t.Cleanup(hub.SetTokenHome(t.TempDir()))
 
@@ -111,9 +105,6 @@ func TestIdentityTokenCommand_JSONFormat(t *testing.T) {
 	t.Setenv("SCION_AUTH_TOKEN", "test-token")
 	t.Setenv("SCION_AGENT_ID", "agent-123")
 
-	identityTokenAudience = ""
-	identityTokenFormat = "token"
-
 	var stdout bytes.Buffer
 	rootCmd.SetOut(&stdout)
 	rootCmd.SetArgs([]string{"identity-token", "--audience=https://vault.example.com", "--format=json"})
@@ -129,6 +120,7 @@ func TestIdentityTokenCommand_JSONFormat(t *testing.T) {
 }
 
 func TestIdentityTokenCommand_HubError(t *testing.T) {
+	resetRootCmdState(t)
 	scrubScionEnv(t)
 	t.Cleanup(hub.SetTokenHome(t.TempDir()))
 
@@ -142,9 +134,6 @@ func TestIdentityTokenCommand_HubError(t *testing.T) {
 	t.Setenv("SCION_AUTH_TOKEN", "test-token")
 	t.Setenv("SCION_AGENT_ID", "agent-123")
 
-	identityTokenAudience = ""
-	identityTokenFormat = "token"
-
 	rootCmd.SetArgs([]string{"identity-token", "--audience=https://vault.example.com"})
 	err := rootCmd.Execute()
 	require.Error(t, err)
@@ -152,10 +141,8 @@ func TestIdentityTokenCommand_HubError(t *testing.T) {
 }
 
 func TestIdentityTokenCommand_NoHubConfigured(t *testing.T) {
+	resetRootCmdState(t)
 	scrubScionEnv(t)
-
-	identityTokenAudience = ""
-	identityTokenFormat = "token"
 
 	rootCmd.SetArgs([]string{"identity-token", "--audience=test"})
 	err := rootCmd.Execute()

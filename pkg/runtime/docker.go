@@ -18,17 +18,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math/rand/v2"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"golang.org/x/sync/singleflight"
 )
 
 type DockerRuntime struct {
 	Command string
 	Host    string
+
+	// listGroup collapses concurrent List calls into a single `docker ps`
+	// exec. Every caller (PTY lookup, message delivery, heartbeat) issues
+	// the exact same command regardless of labelFilter — filtering happens
+	// afterward in Go — so there is never a reason to run it twice at once.
+	// Its zero value is ready to use.
+	listGroup singleflight.Group
 }
 
 func NewDockerRuntime() *DockerRuntime {
@@ -49,6 +62,7 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}
+	config.RuntimeName = r.Name()
 
 	args, err := buildCommonRunArgs(config)
 	if err != nil {
@@ -81,20 +95,70 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 
+	newArgs = appendSharedDirGroupArgs(newArgs, config, "docker", true)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller gave up while the daemon may still have been
+			// creating/starting the container. Clean up any partial result
+			// instead of leaking it. See ptone/scion#1886.
+			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
-	return strings.TrimSpace(out), nil
+	// Run returns the whole trimmed output, as before; only the launch
+	// handle is restricted to a well-formed container ID line.
+	id := strings.TrimSpace(out)
+	reportContainerCreated(hooks, config.Name, out)
+	return id, nil
 }
 
-func (r *DockerRuntime) Stop(ctx context.Context, id string) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// defaultContainerStopTimeout is how long docker and podman stop wait after
+// SIGTERM before they kill the container, when the RunRef sets no
+// StopTimeout. The engines default to 10s, the same as sciontool init's
+// default grace period, which would kill init before it could end the child,
+// report the final status to the Hub (up to 5s) and exit. 30s covers init's
+// default 10s grace period and that report when the agent runs no sidecar
+// services. It does not cover a grace period raised with SCION_GRACE_PERIOD
+// or --grace-period, nor the sidecar shutdown, which init bounds by a second
+// grace period.
+const defaultContainerStopTimeout = 30 * time.Second
+
+// stopTimeoutArgs returns the stop timeout flag for docker and podman stop:
+// -t with whole seconds, rounded up. Both engines accept -t.
+func stopTimeoutArgs(ref RunRef) []string {
+	d := ref.StopTimeout
+	if d <= 0 {
+		d = defaultContainerStopTimeout
+	}
+	// Divide first, then round up: d + time.Second - 1 overflows for a d
+	// within a second of the largest Duration.
+	secs := int64(d / time.Second)
+	if d%time.Second > 0 {
+		secs++
+	}
+	return []string{"-t", strconv.FormatInt(secs, 10)}
+}
+
+// Stop stops the container ref.ID. As with Delete, the engine container ID
+// is already unique per run, so ref.RunID needs no further check here; run
+// targeting is enforced by the caller resolving the ID from List.
+func (r *DockerRuntime) Stop(ctx context.Context, ref RunRef) error {
+	args := append([]string{"stop"}, stopTimeoutArgs(ref)...)
+	out, err := runSimpleCommand(ctx, r.Command, append(args, ref.ID)...)
 	if err != nil && out != "" {
 		// Include runtime's stderr output in the error so callers can match
 		// on messages like "not running" or "No such container".
@@ -103,8 +167,11 @@ func (r *DockerRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *DockerRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here; run targeting is
+// enforced by the caller resolving the ID from List.
+func (r *DockerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -116,12 +183,60 @@ type dockerListOutput struct {
 	Labels string `json:"Labels"`
 }
 
+// dockerListFormat renders exactly the fields in dockerListOutput as JSON.
+//
+// Do not replace this with "{{json .}}": that template references every
+// container field, including .Size, which makes the Docker CLI request
+// size=1 from the daemon. Computing sizes walks every container's overlay
+// filesystem (snapshotter.Usage) and fails the whole `docker ps` call when a
+// file disappears mid-walk, which is routine for agent containers with busy
+// /tmp directories. See ptone/scion#1867.
+const dockerListFormat = `{"ID":{{json .ID}},"Names":{{json .Names}},"Status":{{json .Status}},"Image":{{json .Image}},"Labels":{{json .Labels}}}`
+
+// Bounded retry/backoff for `docker ps`. Even with the size-free format
+// (dockerListFormat, see #1867/#1888) `docker ps` can still fail
+// intermittently — a busy daemon, a momentarily locked overlay snapshot,
+// etc. These failures are typically transient, and List has ~20 callers
+// (PTY attach, message delivery, heartbeat) that previously hard-failed on
+// the first error. See #1864.
+const (
+	dockerListMaxAttempts    = 3
+	dockerListInitialBackoff = 150 * time.Millisecond
+	dockerListBackoffMult    = 3.0
+	// dockerListJitter is the +/- fraction applied to each backoff so that
+	// concurrent callers retrying after the same failure don't all land on
+	// the daemon at once.
+	dockerListJitter = 0.2
+	// dockerListGroupTimeout bounds the detached context the singleflight
+	// group's shared exec runs under (see List below). It comfortably covers
+	// dockerListMaxAttempts worth of retries and backoff plus exec time, so a
+	// slow-but-successful `docker ps` isn't cut off before every joined
+	// caller would have given up on their own.
+	dockerListGroupTimeout = 10 * time.Second
+)
+
 func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	args := []string{"ps", "-a", "--no-trunc", "--format", "{{json .}}"}
-	cmd := exec.CommandContext(ctx, r.Command, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("docker ps failed: %w", err)
+	// Use DoChan rather than Do: Do would run the shared exec under
+	// whichever caller's ctx happens to start the call, so that caller
+	// cancelling would abort docker ps for every other caller collapsed into
+	// it. Instead the shared exec runs on its own detached-but-bounded
+	// context, and each caller selects between the shared result and its own
+	// ctx.Done().
+	resultCh := r.listGroup.DoChan("ps", func() (any, error) {
+		groupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dockerListGroupTimeout)
+		defer cancel()
+		return r.execListWithRetry(groupCtx)
+	})
+
+	var out []byte
+	select {
+	case res := <-resultCh:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		out = res.Val.([]byte)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("docker ps failed: %w", ctx.Err())
 	}
 
 	var agents []api.AgentInfo
@@ -144,26 +259,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 		}
 
 		// Filter by labels if requested
-		match := true
-		for k, v := range labelFilter {
-			actual := labels[k]
-			// Fallback for project labels
-			if actual == "" {
-				switch k {
-				case projectcompat.LabelProject:
-					actual = projectcompat.ProjectNameFromLabels(labels)
-				case projectcompat.LabelProjectID:
-					actual = projectcompat.ProjectIDFromLabels(labels)
-				case projectcompat.LabelProjectPath:
-					actual = projectcompat.ProjectPathFromLabels(labels)
-				}
-			}
-
-			if actual != v {
-				match = false
-				break
-			}
-		}
+		match := LabelsMatchFilter(labels, labelFilter)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Docker container name
@@ -173,6 +269,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 			}
 			info := api.AgentInfo{
 				ContainerID:     d.ID,
+				RunID:           labels[api.LabelRunID],
 				Name:            agentName,
 				ContainerStatus: d.Status,
 				Phase:           phaseFromContainerStatus(d.Status),
@@ -182,9 +279,9 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Project:         projectcompat.ProjectNameFromLabels(labels),
-				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
-				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
+				Project:         projectkeys.ProjectNameFromLabels(labels),
+				ProjectID:       projectkeys.ProjectIDFromLabels(labels),
+				ProjectPath:     projectkeys.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
 			}
 			if code, ok := ExitCodeFromContainerStatus(d.Status); ok {
@@ -201,8 +298,47 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 	return agents, nil
 }
 
+// execListWithRetry runs `docker ps` for List, retrying transient failures
+// with jittered backoff. It gives up immediately once ctx is done (including
+// the last attempt reaching the deadline), since a retry cannot outlive its
+// caller's context anyway.
+func (r *DockerRuntime) execListWithRetry(ctx context.Context) ([]byte, error) {
+	args := []string{"ps", "-a", "--no-trunc", "--format", dockerListFormat}
+
+	var lastErr error
+	backoff := dockerListInitialBackoff
+	for attempt := 1; attempt <= dockerListMaxAttempts; attempt++ {
+		cmd := exec.CommandContext(ctx, r.Command, args...)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return out, nil
+		}
+		lastErr = fmt.Errorf("docker ps failed: %w", err)
+
+		if attempt == dockerListMaxAttempts || ctx.Err() != nil {
+			break
+		}
+
+		jitter := 1 + dockerListJitter*(2*rand.Float64()-1)
+		sleep := time.Duration(float64(backoff) * jitter)
+		runtimeLog().Debug("docker ps failed, retrying", "attempt", attempt, "max_attempts", dockerListMaxAttempts, "backoff", sleep, "error", err)
+
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("docker ps failed: %w", ctx.Err())
+		case <-timer.C:
+		}
+
+		backoff = time.Duration(float64(backoff) * dockerListBackoffMult)
+	}
+
+	return nil, lastErr
+}
+
 func (r *DockerRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return runSimpleCommand(ctx, r.Command, "logs", id)
+	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
 func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
@@ -228,7 +364,35 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", "scion",
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", "scion", agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", "scion", agent.ContainerID, "tmux", "attach", "-t", "scion")...)
+}
+
+// dockerExecDetachKeys is the --detach-keys value used for docker exec of a
+// tmux attach. docker cannot turn detach keys off (an empty value means "use
+// the default"), so this moves them to a rarely typed sequence. docker holds
+// back a lone Ctrl-\ until the next key arrives, and the full sequence ends
+// the exec (the tmux session keeps running).
+const dockerExecDetachKeys = "ctrl-\\,ctrl-^"
+
+// ExecDetachKeysArgs returns the --detach-keys flag for an interactive
+// "<runtime> exec -it ... tmux attach", or nil for runtimes that don't take
+// one. By default docker and podman reserve Ctrl-p Ctrl-q for detaching. They
+// hold back every Ctrl-p until the next key arrives, and Ctrl-p is a common
+// history key in agent CLIs. Detaching from an attach session is tmux's job
+// (Ctrl-b d), so podman gets an empty sequence, which disables its detach
+// keys, and docker gets dockerExecDetachKeys, a rarely typed sequence (docker
+// cannot disable them). Matching is on the binary's
+// base name, so other runtimes (and test adapters) get no extra flag.
+func ExecDetachKeysArgs(runtimeCmd string) []string {
+	switch filepath.Base(runtimeCmd) {
+	case "docker":
+		return []string{"--detach-keys=" + dockerExecDetachKeys}
+	case "podman":
+		return []string{"--detach-keys="}
+	default:
+		return nil
+	}
 }
 
 func (r *DockerRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -300,7 +464,22 @@ func (r *DockerRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
-	return runSimpleCommand(ctx, r.Command, args...)
+	out, err := runCombinedCommand(ctx, r.Command, args...)
+	// A container removed after the lookup above must surface as
+	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
+	return out, dockerExecNotFound.classifyExecErr(ctx, err, out, id, r.List)
+}
+
+// ExecWithStdin runs cmd inside the container with stdin piped from the
+// given reader. The -i flag is required for `docker exec` to attach stdin;
+// without it, data written to stdin never reaches the container even though
+// os/exec has a Stdin set on the outer `docker` process. See #1355.
+func (r *DockerRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if agents, err := r.List(ctx, nil); err == nil {
+		id = resolveContainerID(agents, id)
+	}
+	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
 }
 
 // GetWorkspacePath returns the host path to the container's /workspace mount.

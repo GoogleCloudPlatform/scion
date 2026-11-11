@@ -18,146 +18,24 @@ package hub
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
 	"log/slog"
+	"maps"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
-
-// brokerMockDispatcher records dispatched messages for test assertions.
-type brokerMockDispatcher struct {
-	mu       sync.Mutex
-	messages []brokerDispatchedMsg
-}
-
-type brokerDispatchedMsg struct {
-	agentSlug  string
-	msg        string
-	interrupt  bool
-	structured *messages.StructuredMessage
-}
-
-func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, _ bool) error {
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchAgentDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.messages = append(d.messages, brokerDispatchedMsg{
-		agentSlug:  agent.Slug,
-		msg:        message,
-		interrupt:  interrupt,
-		structured: structuredMsg,
-	})
-	return nil
-}
-func (d *brokerMockDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *brokerMockDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	return nil, nil
-}
-func (d *brokerMockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
-}
-func (d *brokerMockDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return "", 0, nil
-}
-func (d *brokerMockDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
-	return nil
-}
-
-func (d *brokerMockDispatcher) getMessages() []brokerDispatchedMsg {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	result := make([]brokerDispatchedMsg, len(d.messages))
-	copy(result, d.messages)
-	return result
-}
-
-func newBrokerTestStore(t *testing.T) store.Store {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-	return s
-}
-
-// setupBrokerTestProject creates a project and a runtime broker, returns the project ID.
-func setupBrokerTestProject(t *testing.T, s store.Store) string {
-	t.Helper()
-	ctx := context.Background()
-
-	// Create a runtime broker for agent FK constraints
-	rb := &store.RuntimeBroker{
-		ID:       tid("broker-1"),
-		Name:     "test-broker",
-		Slug:     "test-broker",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := s.CreateRuntimeBroker(ctx, rb); err != nil {
-		t.Fatalf("failed to create runtime broker: %v", err)
-	}
-
-	project := &store.Project{
-		ID:   api.NewUUID(),
-		Name: "test-project",
-		Slug: "test-project",
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-	return project.ID
-}
-
-// setupBrokerTestAgent creates a running agent and returns it.
-func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase string) *store.Agent {
-	t.Helper()
-	agent := &store.Agent{
-		ID:              api.NewUUID(),
-		Name:            slug,
-		Slug:            slug,
-		ProjectID:       projectID,
-		Phase:           phase,
-		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
-	}
-	if err := s.CreateAgent(context.Background(), agent); err != nil {
-		t.Fatalf("failed to create agent: %v", err)
-	}
-	return agent
-}
 
 func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 	s := newBrokerTestStore(t)
@@ -987,12 +865,8 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1023,13 +897,30 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
 	proxy.webChatStore = wcs
+	// A message log, so the logging branch of the delivery runs too.
+	proxy.messageLog, _ = newCapturingMessageLogger()
+	published, unsubscribe := events.Subscribe("user." + tid("user-bob") + ".message")
+	defer unsubscribe()
+	// The member fan-out gets the same refs as the live event.
+	var fanouts [][]AttachmentRef
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, attachments []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
+		fanouts = append(fanouts, attachments)
+	}
 
 	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "here is the screenshot")
 	msg.SenderID = tid("agent-sending")
 	msg.RecipientID = tid("user-bob")
 	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
+	before := *msg
+	before.Metadata = maps.Clone(msg.Metadata)
 
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	// msg is shared with the bus's other subscribers: delivery leaves it,
+	// its metadata included, unchanged.
+	if !reflect.DeepEqual(*msg, before) {
+		t.Fatalf("delivery changed the shared message:\n got %+v\nwant %+v", *msg, before)
+	}
 
 	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: tid("user-bob")}, store.ListOptions{})
 	if err != nil {
@@ -1045,6 +936,25 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	}
 	if len(linked) != 1 || linked[0].ID != meta.ID {
 		t.Fatalf("expected the attachment to be linked to the delivered message, got %+v", linked)
+	}
+
+	// The live event carries the linked attachment, so an open thread shows
+	// its preview without refetching history (ptone/scion#5504).
+	evts := collectEvents(published)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 published user message event, got %d", len(evts))
+	}
+	var payload UserMessageEvent
+	if err := json.Unmarshal(evts[0].Data, &payload); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	want := []AttachmentRef{{ID: meta.ID, Name: meta.Filename, MimeType: meta.MimeType, Size: meta.Size}}
+	if payload.ID != result.Items[0].ID || !reflect.DeepEqual(payload.Attachments, want) {
+		t.Fatalf("event for message %s carries attachments %+v, want %+v on %s",
+			payload.ID, payload.Attachments, want, result.Items[0].ID)
+	}
+	if len(fanouts) != 1 || !reflect.DeepEqual(fanouts[0], want) {
+		t.Fatalf("member fan-out got attachments %+v, want one call with %+v", fanouts, want)
 	}
 }
 
@@ -1067,7 +977,7 @@ func TestDEF20_NativeTopicUsesTopicConversation(t *testing.T) {
 		t.Fatal("CompositeStore.DB() returned nil")
 	}
 
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("webchat store Init: %v", err)
 	}
@@ -1363,12 +1273,8 @@ func TestDeliverToUser_MentionExcludedFromDMActivity(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1419,5 +1325,107 @@ func TestDeliverToUser_MentionExcludedFromDMActivity(t *testing.T) {
 	dms, _ = wcs.ListDMs(ctx, recipientID)
 	if len(dms) != 1 {
 		t.Fatalf("TypeInstruction: expected 1 DM row for recipient, got %d", len(dms))
+	}
+}
+
+// TestMessageBrokerProxy_SubscribesAgentResumedAfterStart: an agent that is
+// not running when the proxy starts (a hub restart while it was stopped) gets
+// the project subscriptions when it later reports running, so its replies to
+// users are delivered instead of silently dropped.
+func TestMessageBrokerProxy_SubscribesAgentResumedAfterStart(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "resumed-agent", "stopped")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = b.Close() })
+
+	dispatcher := &brokerMockDispatcher{}
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	userTopic := eventbus.TopicAllUserMessages(projectID)
+	agentTopic := eventbus.TopicAgentMessages(projectID, "resumed-agent")
+	subscribed := func(topic string) bool {
+		proxy.mu.Lock()
+		defer proxy.mu.Unlock()
+		return proxy.subscribedTopics[topic]
+	}
+	if subscribed(userTopic) {
+		t.Fatal("user-message topic subscribed before any agent was running")
+	}
+
+	agent.Phase = "running"
+	if err := s.UpdateAgent(context.Background(), agent); err != nil {
+		t.Fatal(err)
+	}
+	events.PublishAgentStatus(context.Background(), agent)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !(subscribed(userTopic) && subscribed(agentTopic)) {
+		if time.Now().After(deadline) {
+			t.Fatalf("after a running status: user topic %v, agent topic %v; want both subscribed",
+				subscribed(userTopic), subscribed(agentTopic))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A stale agent.created for an agent that was deleted (hard, soft, or
+// delete-claimed) must not subscribe its slug (ptone/scion#3056). The
+// control shows a live agent still subscribes on created.
+func TestMessageBrokerProxy_CreatedForDeletedAgentDoesNotSubscribe(t *testing.T) {
+	cases := []struct {
+		name      string
+		prepare   func(t *testing.T, s store.Store, a *store.Agent)
+		subscribe bool
+	}{
+		{"live", func(*testing.T, store.Store, *store.Agent) {}, true},
+		{"hard-deleted", func(t *testing.T, s store.Store, a *store.Agent) {
+			require.NoError(t, s.DeleteAgent(context.Background(), a.ID))
+		}, false},
+		{"soft-deleted", func(t *testing.T, s store.Store, a *store.Agent) {
+			a.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(context.Background(), a))
+		}, false},
+		{"delete-claimed", func(t *testing.T, s store.Store, a *store.Agent) {
+			lease := time.Now().Add(time.Minute)
+			deleting := store.DeletionStateDeleting
+			n, err := s.UpdateAgentDeletion(context.Background(), a.ID,
+				store.DeletionPredicate{States: []string{""}, DeletedAtNull: true},
+				store.DeletionFields{State: &deleting, LeaseAt: &lease})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newBrokerTestStore(t)
+			projectID := setupBrokerTestProject(t, s)
+			slug := "created-" + tc.name
+			agent := setupBrokerTestAgent(t, s, projectID, slug, "created")
+
+			events := NewChannelEventPublisher()
+			defer events.Close()
+			b := eventbus.NewInProcessEventBus(slog.Default())
+			t.Cleanup(func() { _ = b.Close() })
+			proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+			proxy.Start()
+			defer proxy.Stop()
+
+			tc.prepare(t, s, agent)
+			data, err := json.Marshal(AgentCreatedEvent{AgentID: agent.ID, ProjectID: projectID, Name: slug, Slug: slug})
+			require.NoError(t, err)
+			proxy.handleLifecycleEvent(Event{Subject: "project." + projectID + ".agent.created", Data: data})
+
+			proxy.mu.Lock()
+			got := proxy.subscribedTopics[eventbus.TopicAgentMessages(projectID, slug)]
+			proxy.mu.Unlock()
+			assert.Equal(t, tc.subscribe, got)
+		})
 	}
 }

@@ -59,12 +59,12 @@ Access to any resource or operation in Scion must be explicitly authorized by a 
 
 A `RoleBinding` contains the following fields:
 
-* **Role Definition ID**: The UUID of the `RoleDefinition` being granted. Role definitions contain specific permission IDs (e.g., `agent.create`, `project.read`).
+* **Role Definition ID**: The UUID of the `RoleDefinition` being granted. Role definitions contain specific permission IDs (e.g., `agent.create`, `project.read`). The built-in project membership roles are `project-owner`, `project-admin`, `project-member`, and `project-viewer` (`agent.list`, `agent.read`, `project.list`, `project.read`). At startup, any non-system custom role in `project` scope named `project-viewer` is renamed by appending `-custom-` and the first eight characters of its role ID, recording a `builtin_role_name_custom_role_renamed` mutation audit event. See [User Roles](/scion/hosted/ha/permissions/#user-roles) and [Chat posting](/scion/hosted/ha/permissions/#chat-posting).
 * **Principal Type**: The category of principal (`user`, `agent`, or `group`).
 * **Principal ID**: The identifier of the specific principal.
 * **Scope Type**: The scope bounds, either `system` (global permissions) or `project` (project-restricted permissions).
 * **Scope ID**: Empty for `system` scope, or the specific project ID for `project` scope.
-* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active.
+* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active. Outside its window a binding grants nothing, and membership checks (for example who counts as a project member for access and messaging) count only bindings inside their window. The project members list still shows bindings outside their window, so they can be managed. For a user principal, a binding (direct or via group membership) also grants authority only while the user's account is `active`; bindings held by an `invited` user take effect when the user signs in and the account becomes `active`, and bindings held by an `invited`, `suspended`, or removed user grant nothing.
 
 ### Agent Synthetic RoleBindings
 At runtime, agents do not require static RoleBindings to be manually created. Instead, the authorization engine dynamically extracts the agent's JWT claims and scopes and constructs **synthetic project-scoped role bindings** so that agent actions can be evaluated through the unified authorization pipeline.
@@ -94,7 +94,7 @@ The AccessConstraint system relies on several backend subsystems to ensure secur
 * **Canonical Evaluator**: Built into the core AK1 Kernel, the evaluator computes the intersection of active role permissions and monotonic ceilings at wire-speed on every request.
 * **Typed Constraint Model**: A strictly typed and schema-validated structural model. It validates all inputs before persistence, ensuring permission lists only refer to valid, registered permission IDs.
 * **Preview Engine & Provenance/Explain API**: An interactive dry-run service (`POST /api/v1/admin/access-constraint-previews`) that evaluates the effective permissions of a targeted principal. It provides high-fidelity **provenance/explain data** showcasing exactly which positive permissions are restricted by active boundaries, which rules caused the ceiling to apply, and what the final resolved permissions set is.
-* **Transactional Governance & Atomic Audit**: To prevent partial policy writes or split-brain configurations, all updates are fully transaction-bound. The system records atomic, tamper-evident audit logs of all access boundary creations, updates, or deactivations in the global Hub secure audit ledger.
+* **Transactional Governance & Audit History**: To prevent partial policy writes or split-brain configurations, all updates are fully transaction-bound. Creating or updating a boundary writes its history entry in the same transaction as the change; the history is readable at `GET /api/v1/admin/access-constraints/{id}/audit` while the boundary exists, and the newest 1,000 entries are kept. Deleting a boundary deletes its history: the delete emits only a best-effort structured log event and has no persisted audit record.
 * **HTTP API and Error Contract**: Standardized REST endpoints govern AccessConstraints. The API features a strict error contract, validating payloads and returning detailed error diagnostics—such as `422 Unprocessable Entity` with a validation error matrix for invalid scopes or permissions, or `403 Forbidden` for delegation and access-denial scenarios.
 
 ---
@@ -113,11 +113,31 @@ Whenever an API request is made, the Hub's `Decide` endpoint processes the autho
 ```
 
 1. **Authentication**: The caller is authenticated, establishing their principal type, principal ID, group memberships, and credentials (such as token type/scope).
-2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to.
+2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to (for a user principal, only when the user's account is `active`; a federated user with no account record is decided by its bindings alone).
 3. **Union Allowed Permissions**: The union of all permission IDs granted by these bindings forms the positive "allowed permissions" set.
 4. **Load Applicable AccessConstraints**: The engine queries all active, non-disabled AccessConstraints that match the principal (by principal ID, group closure, or `all_principals`) within the targeted scope.
 5. **Intersect Permissions**: The effective permission set is calculated as the intersection of the positive set and the maximum permitted ceilings.
 6. **Verdict**: If the requested permission is present in the final intersection set, access is **Allowed**. If it is missing from the positive set, or excluded by an active AccessConstraint, access is **Denied** (fail-closed).
+
+---
+
+## Adding Permissions (Developer Conventions)
+
+Permission IDs are defined in one registry, `pkg/hub/permissions/registry.go`. Follow these rules when you add a row or change an agent scope bundle:
+
+* **Every row is enforced or reserved.** A row must either record where code checks it (`Enforcement` for a route or handler check, `NonRouteUse` for any other consumer) or set `Reserved` to the reason nothing checks it yet. It cannot do both. To wire up a reserved permission:
+  1. Audit existing custom role definitions for the permission. The hub rejects reserved permissions when a custom role is created, updated, copied or imported, but roles created before the permission was reserved may still carry it. Once you un-reserve the row, those roles grant it.
+  2. Decide whether agent chains with no recorded delegation ceiling may hold it. While a row is reserved, such chains are denied it. If they must stay denied after you un-reserve it, cover it with a ceiling-optional agent scope or add it to `legacyChainExcludedPermissions` explicitly.
+  3. Add the check, clear `Reserved`, and record the check in `Enforcement`.
+
+  Once `Reserved` is cleared, the permission goes back to super-admin automatically, because super-admin's role is built from every registry row that isn't reserved. Adding it to any other role, agent scope bundle or token scope list is a separate, deliberate change.
+* **Nothing grants a reserved permission.** Don't put a reserved permission in any role, agent scope bundle or token scope list. The hub leaves reserved permissions out of manage aliases and out of the scopes it offers when you create a token. The token scope for a reserved permission is still accepted, so existing tokens that carry it keep working. `TestPermissionRegistryRowsEnforcedOrReserved` fails a row that is neither enforced nor reserved, and fails any role, agent scope bundle, manage alias or token scope picker that carries a reserved permission.
+* **Point `Enforcement` at the real check.** If several permissions go through one shared function (for example, the artifact service's `Authorize`), that function alone doesn't show that a given permission is checked. Also name the call site that passes the permission. For artifact rows, `TestArtifactPermissionsConsumedUnlessReserved` requires each non-reserved row to be used in `pkg/artifacts` or `pkg/hub` (through its `pkg/artifacts` constant or its ID as a string), and each reserved row to be unused.
+* **New agent scopes in an existing bundle are ceiling-optional.** If you add a new agent scope to an existing agent role bundle (`ScopesForRole`), list it in `ceilingOptionalRoleScopes`. The exception is a scope already within the authority of the principal that creates the agent. A ceiling-optional scope never decides whether a role fits a creator's ceiling. A mint drops the scope when the source ceiling lacks its permission. This way, a token that fit a role before the scope was added still fits it.
+
+### Last constraint admin protection
+
+The Hub refuses to suspend or delete a user when that would leave a scope with no active user holding `access_constraint.admin`, now or once scheduled constraints activate. The refusal is `409` with code `constraint_admin_lockout`; grant the permission to another user first. Only active users count as constraint admins, so a suspended user never keeps a scope administrable. The same check refuses deleting or downgrading a role binding, and removing a project member or changing their role, when that would leave the scope with no active constraint admin (`409` `constraint_admin_lockout`).
 
 ---
 

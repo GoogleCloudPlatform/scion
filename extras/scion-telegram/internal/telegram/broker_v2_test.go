@@ -19,16 +19,19 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,6 +44,30 @@ type fakeHubClient struct {
 	mu       sync.Mutex
 	projects []ProjectOption
 	agents   map[string][]AgentInfo // projectID → agents
+
+	// userProjects, when non-nil, is returned by ListProjectsForUser keyed
+	// by principal instead of projects.
+	userProjects map[string][]ProjectOption
+	// listAgentsErr, when set, is returned by ListAgents.
+	listAgentsErr error
+	// listUserProjectsErr, when set, is returned by ListProjectsForUser.
+	listUserProjectsErr error
+	// listUserProjectsGate, when set, is waited on by ListProjectsForUser
+	// after recording the call.
+	listUserProjectsGate chan struct{}
+	// listUserProjectsEntered, when set, receives a value each time
+	// ListProjectsForUser is entered.
+	listUserProjectsEntered chan struct{}
+
+	// Calls recorded for assertions: the principal passed on each call.
+	listAgentsCalls       []fakeListAgentsCall
+	listUserProjectsCalls []string
+	listFreshCalls        int
+}
+
+type fakeListAgentsCall struct {
+	ProjectID  string
+	OnBehalfOf string
 }
 
 func newFakeHubClient() *fakeHubClient {
@@ -49,28 +76,60 @@ func newFakeHubClient() *fakeHubClient {
 	}
 }
 
-func (f *fakeHubClient) ListProjects(_ context.Context) ([]ProjectOption, error) {
+func (f *fakeHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
+	f.mu.Lock()
+	f.listUserProjectsCalls = append(f.listUserProjectsCalls, onBehalfOf)
+	gate := f.listUserProjectsGate
+	entered := f.listUserProjectsEntered
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.projects, nil
-}
-
-func (f *fakeHubClient) ListProjectsForUser(_ context.Context, _ string) ([]ProjectOption, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	if f.listUserProjectsErr != nil {
+		return nil, f.listUserProjectsErr
+	}
+	if f.userProjects != nil {
+		return f.userProjects[onBehalfOf], nil
+	}
 	return f.projects, nil
 }
 
 func (f *fakeHubClient) ListProjectsFresh(_ context.Context) ([]ProjectOption, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listFreshCalls++
 	return f.projects, nil
 }
 
-func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]AgentInfo, error) {
+func (f *fakeHubClient) ListAgents(_ context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listAgentsCalls = append(f.listAgentsCalls, fakeListAgentsCall{ProjectID: projectID, OnBehalfOf: onBehalfOf})
+	if f.listAgentsErr != nil {
+		return nil, f.listAgentsErr
+	}
 	return f.agents[projectID], nil
+}
+
+func (f *fakeHubClient) userProjectCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.listUserProjectsCalls...)
+}
+
+func (f *fakeHubClient) agentCalls() []fakeListAgentsCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeListAgentsCall(nil), f.listAgentsCalls...)
 }
 
 func (f *fakeHubClient) HubBaseURL() string {
@@ -88,6 +147,49 @@ type fakeTGServerV2 struct {
 	answeredCallbacks []answerCallbackQueryRequest
 	nextSendMessageID int64
 	webhookURL        string
+	webhookSecret     string
+	// chatMembers maps chatID → userID → member status for getChatMember.
+	chatMembers map[int64]map[int64]string
+	// failChatMember makes getChatMember fail with a server error for
+	// these chats.
+	failChatMember map[int64]bool
+	// chatMemberErrors makes getChatMember fail with a given Telegram error
+	// for these chats.
+	chatMemberErrors map[int64]apiResponse
+	// chatMemberCalls counts getChatMember requests.
+	chatMemberCalls int
+	// chatMemberDelay, when set, delays each getChatMember response;
+	// chatMemberInFlight/chatMemberMaxInFlight track concurrency.
+	chatMemberDelay       time.Duration
+	chatMemberInFlight    int
+	chatMemberMaxInFlight int
+	// failSetWebhook makes setWebhook fail with a Telegram error.
+	failSetWebhook bool
+	// failDeleteWebhook makes deleteWebhook fail with a Telegram error.
+	failDeleteWebhook bool
+	// deleteWebhookCalls and getUpdatesCalls count those requests.
+	deleteWebhookCalls int
+	getUpdatesCalls    int
+}
+
+// chatMemberStats returns the getChatMember call count and peak concurrency.
+func (f *fakeTGServerV2) chatMemberStats() (calls, maxInFlight int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.chatMemberCalls, f.chatMemberMaxInFlight
+}
+
+// setChatMember records a user's status in a chat for getChatMember.
+func (f *fakeTGServerV2) setChatMember(chatID, userID int64, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.chatMembers == nil {
+		f.chatMembers = make(map[int64]map[int64]string)
+	}
+	if f.chatMembers[chatID] == nil {
+		f.chatMembers[chatID] = make(map[int64]string)
+	}
+	f.chatMembers[chatID][userID] = status
 }
 
 func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
@@ -177,6 +279,9 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/getUpdates":
+			f.mu.Lock()
+			f.getUpdatesCalls++
+			f.mu.Unlock()
 			json.NewEncoder(w).Encode(apiResponse{
 				OK:     true,
 				Result: mustJSONRawV2(t, []Update{}),
@@ -189,15 +294,64 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 				return
 			}
 			f.mu.Lock()
-			f.webhookURL = req.URL
+			fail := f.failSetWebhook
+			if !fail {
+				f.webhookURL = req.URL
+				f.webhookSecret = req.SecretToken
+			}
 			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 400, Description: "Bad Request: bad webhook"})
+				return
+			}
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/deleteWebhook":
 			f.mu.Lock()
-			f.webhookURL = ""
+			f.deleteWebhookCalls++
+			fail := f.failDeleteWebhook
+			if !fail {
+				f.webhookURL = ""
+				f.webhookSecret = ""
+			}
 			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
+
+		case "/bottest-token/getChatMember":
+			chatID, _ := strconv.ParseInt(r.URL.Query().Get("chat_id"), 10, 64)
+			userID, _ := strconv.ParseInt(r.URL.Query().Get("user_id"), 10, 64)
+			f.mu.Lock()
+			f.chatMemberCalls++
+			f.chatMemberInFlight++
+			if f.chatMemberInFlight > f.chatMemberMaxInFlight {
+				f.chatMemberMaxInFlight = f.chatMemberInFlight
+			}
+			delay := f.chatMemberDelay
+			fail := f.failChatMember[chatID]
+			apiErr, hasAPIErr := f.chatMemberErrors[chatID]
+			status, ok := f.chatMembers[chatID][userID]
+			f.mu.Unlock()
+			time.Sleep(delay)
+			f.mu.Lock()
+			f.chatMemberInFlight--
+			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
+			if hasAPIErr {
+				json.NewEncoder(w).Encode(apiErr)
+				return
+			}
+			if !ok {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 400, Description: "Bad Request: user not found"})
+				return
+			}
+			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, TGChatMember{Status: status})})
 
 		case "/bottest-token/setMyCommands":
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
@@ -243,6 +397,12 @@ func (f *fakeTGServerV2) getEditedTexts() []editMessageTextRequest {
 	return result
 }
 
+func (f *fakeTGServerV2) getEditedMarkups() []editMessageReplyMarkupRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]editMessageReplyMarkupRequest(nil), f.editedMarkups...)
+}
+
 func (f *fakeTGServerV2) getAnsweredCallbacks() []answerCallbackQueryRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -269,12 +429,11 @@ func newTestBrokerV2(t *testing.T, tgSrv *fakeTGServerV2) *TelegramBrokerV2 {
 	t.Cleanup(func() { b.Close() })
 
 	err := b.Configure(map[string]string{
-		"bot_token":      "test-token",
-		"api_base_url":   tgSrv.srv.URL,
-		"hub_url":        "http://hub.test",
-		"broker_id":      "broker-test",
-		"db_path":        dbPath,
-		"downloads_path": filepath.Join(t.TempDir(), "downloads"),
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"hub_url":      "http://hub.test",
+		"broker_id":    "broker-test",
+		"db_path":      dbPath,
 	})
 	require.NoError(t, err)
 
@@ -286,8 +445,8 @@ func newTestBrokerV2WithHub(t *testing.T, tgSrv *fakeTGServerV2, hub *fakeHubCli
 	t.Helper()
 	b := newTestBrokerV2(t, tgSrv)
 	b.hubClient = hub
-	b.commands = NewCommandHandler(b.store, b.api, hub, b.botInfo.Username, b.log)
-	b.callbacks = NewCallbackHandler(b.store, b.api, hub, b.log)
+	b.gen.commands = NewCommandHandler(b.store, b.api, hub, b.botInfo.Username, b.log)
+	b.gen.callbacks = NewCallbackHandler(b.store, b.api, hub, b.log)
 	return b
 }
 
@@ -318,9 +477,50 @@ func TestV2_Configure(t *testing.T) {
 	assert.NotNil(t, b.botInfo)
 	assert.Equal(t, "test_bot", b.botInfo.Username)
 	assert.NotNil(t, b.store)
-	assert.NotNil(t, b.commands)
-	assert.NotNil(t, b.callbacks)
-	assert.NotNil(t, b.registration)
+	assert.NotNil(t, b.gen.commands)
+	assert.NotNil(t, b.gen.callbacks)
+	assert.NotNil(t, b.gen.registration)
+}
+
+func TestV2_Configure_AgentCacheTTL(t *testing.T) {
+	cases := map[string]struct {
+		value string
+		want  time.Duration
+	}{
+		"default":                   {"", defaultAgentCacheTTL},
+		"within retention":          {"10m", 10 * time.Minute},
+		"at the limit":              {maxAgentCacheTTL.String(), maxAgentCacheTTL},
+		"longer is clamped":         {"2h", maxAgentCacheTTL},
+		"negative uses the default": {"-1m", defaultAgentCacheTTL},
+		"zero disables reuse":       {"0s", 0},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			b := NewV2(slog.Default())
+			defer b.Close()
+			cfg := map[string]string{
+				"bot_token":    "test-token",
+				"api_base_url": tgSrv.srv.URL,
+				"db_path":      filepath.Join(t.TempDir(), "test.db"),
+			}
+			if tc.value != "" {
+				cfg["agent_cache_ttl"] = tc.value
+			}
+			require.NoError(t, b.Configure(cfg))
+			assert.Equal(t, tc.want, b.agentCacheTTL)
+		})
+	}
+}
+
+func TestAgentCacheTTLsFitWithinRetention(t *testing.T) {
+	for name, ttl := range map[string]time.Duration{
+		"default routing TTL": defaultAgentCacheTTL,
+		"max routing TTL":     maxAgentCacheTTL,
+		"notifications TTL":   notificationAgentCacheTTL,
+	} {
+		assert.LessOrEqual(t, 3*ttl, agentCacheRetention, "%s: a fresh entry must outlive its TTL in the store", name)
+	}
 }
 
 func TestV2_Configure_MissingBotToken(t *testing.T) {
@@ -370,10 +570,13 @@ func TestParseTopicComponents(t *testing.T) {
 		wantAgent   string
 	}{
 		{"scion.project.myproj.agent.coder.messages", "myproj", "coder"},
-		{"scion.grove.myproj.agent.coder.messages", "myproj", "coder"},
 		{"scion.project.proj1.broadcast", "proj1", ""},
 		{"scion.project.proj2.agent.reviewer.messages", "proj2", "reviewer"},
 		{"scion.project.proj1.agent.coder.agent.reviewer.messages", "proj1", "reviewer"},
+		// A grove-prefixed topic is not a project topic: the project ID
+		// falls back to the whole topic string, and the agent segment is
+		// still extracted.
+		{"scion.grove.myproj.agent.coder.messages", "scion.grove.myproj.agent.coder.messages", "coder"},
 		{"unknown-topic-format", "unknown-topic-format", ""},
 	}
 
@@ -382,6 +585,24 @@ func TestParseTopicComponents(t *testing.T) {
 			projID, agentSlug := parseTopicComponents(tt.topic)
 			assert.Equal(t, tt.wantProject, projID)
 			assert.Equal(t, tt.wantAgent, agentSlug)
+		})
+	}
+}
+
+func TestNormalizeV1RouteTopic(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"v1 legacy agent route", "scion.grove.proj1.agent.coder.messages", "scion.project.proj1.agent.coder.messages"},
+		{"v1 legacy broadcast route", "scion.grove.proj1.broadcast", "scion.project.proj1.broadcast"},
+		{"already canonical", "scion.project.proj1.agent.coder.messages", "scion.project.proj1.agent.coder.messages"},
+		{"unrelated string", "not-a-topic", "not-a-topic"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizeV1RouteTopic(tt.in))
 		})
 	}
 }
@@ -398,7 +619,7 @@ func TestV2_HandleIncoming_BotEchoFiltering(t *testing.T) {
 	}
 
 	// Message from the bot itself (ID 100 matches test bot).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 100, Username: "test_bot", IsBot: true},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -418,7 +639,7 @@ func TestV2_HandleIncoming_EmptyText(t *testing.T) {
 		atomic.AddInt32(&received, 1)
 	}
 
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -433,7 +654,7 @@ func TestV2_HandleIncoming_DMHelp(t *testing.T) {
 	b := newTestBrokerV2(t, tgSrv)
 
 	// DMs have positive chat IDs. Non-command DMs get a help message.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: 456, Type: "private"},
@@ -454,7 +675,7 @@ func TestV2_HandleIncoming_CommandDispatch(t *testing.T) {
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	// /help command in DM.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: 456, Type: "private"},
@@ -478,7 +699,7 @@ func TestV2_HandleIncoming_UnlinkedGroupIgnored(t *testing.T) {
 	}
 
 	// Group message with bot mention but no group link.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -517,6 +738,7 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -534,7 +756,7 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -579,6 +801,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -592,7 +815,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 		mu.Unlock()
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -629,6 +852,7 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -642,7 +866,7 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 		mu.Unlock()
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -678,7 +902,7 @@ func TestV2_HandleGroupMessage_NoMention(t *testing.T) {
 		atomic.AddInt32(&received, 1)
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -705,6 +929,7 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -725,7 +950,7 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -769,6 +994,7 @@ func TestV2_HandleGroupMessage_SenderIDUsesHubUserID(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -790,7 +1016,7 @@ func TestV2_HandleGroupMessage_SenderIDUsesHubUserID(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -831,6 +1057,7 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -844,7 +1071,7 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -890,6 +1117,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -909,7 +1137,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 
 	// Simulate replying to a bot message from the "reviewer" agent.
 	// No @-mention in the user's reply text — routing should use reply-to fallback.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 99,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -934,6 +1162,78 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 	assert.Equal(t, "agent:reviewer", deliveredMsg.Recipient)
 }
 
+// TestV2_HandleGroupMessage_ReplyToBot_ConcurrentBotInfoRefresh checks
+// that the reply-to routing path reads the bot info under the broker lock
+// while the bot info is replaced concurrently. Run with -race.
+func TestV2_HandleGroupMessage_ReplyToBot_ConcurrentBotInfoRefresh(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
+		RefreshedAt: time.Now(),
+	}))
+	b.InboundHandler = func(string, *messages.StructuredMessage) {}
+
+	b.mu.RLock()
+	bot := *b.botInfo
+	b.mu.RUnlock()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			refreshed := bot
+			b.mu.Lock()
+			b.botInfo = &refreshed
+			b.mu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 20; i++ {
+		b.handleGroupMessage(b.gen, &TGMessage{
+			MessageID: int64(100 + i),
+			From:      &TGUser{ID: 456, Username: "alice"},
+			Chat:      TGChat{ID: -200, Type: "group"},
+			Date:      time.Now().Unix(),
+			Text:      "yes, looks good to me",
+			ReplyToMessage: &TGMessage{
+				MessageID: 50,
+				From:      &TGUser{ID: bot.ID, IsBot: true, Username: bot.Username},
+				Chat:      TGChat{ID: -200, Type: "group"},
+				Text:      "🤖 reviewer\n\nPlease review the PR",
+			},
+		})
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
@@ -954,6 +1254,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -970,7 +1271,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing
 	}
 
 	// Reply to a reviewer message BUT explicitly mention @coder — mention wins.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 99,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1014,6 +1315,7 @@ func TestV2_HandleGroupMessage_ReplyConversationContextFallback(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -1040,7 +1342,7 @@ func TestV2_HandleGroupMessage_ReplyConversationContextFallback(t *testing.T) {
 
 	// Reply to a bot message that has no parseable agent slug (e.g. a system message).
 	// Should fall back to conversation context.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 99,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1085,7 +1387,9 @@ func TestV2_Publish_DirectChatID(t *testing.T) {
 
 func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -1106,7 +1410,7 @@ func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 		Sender:    "agent:coder",
 		Recipient: "user:alice@example.com",
 		Msg:       "reply to alice",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 	}
 
 	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
@@ -1231,7 +1535,7 @@ func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 		Version: messages.Version,
 		Sender:  "agent:coder",
 		Msg:     "reply message",
-		Type:    messages.TypeAssistantReply,
+		Type:    messages.TypeInstruction,
 		Metadata: map[string]string{
 			"telegram_chat_id":    "-200",
 			"telegram_message_id": "42",
@@ -1276,7 +1580,7 @@ func TestV2_HandleCallback_AskUserResponse(t *testing.T) {
 		}
 	}
 
-	b.handleCallbackQuery(ctx, &CallbackQuery{
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
 		ID:   "cb-1",
 		From: &TGUser{ID: 456, Username: "alice"},
 		Message: &TGMessage{
@@ -1310,6 +1614,50 @@ func TestV2_HandleCallback_AskUserResponse(t *testing.T) {
 	assert.True(t, pending.Responded)
 }
 
+// A Commentary button on a settings card sent before the setting was
+// retired must be answered as a no-op, not fail, and the card refreshed.
+func TestV2_HandleCallback_RetiredCommentarySettingIsNoOp(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2WithHub(t, tgSrv, newFakeHubClient())
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -200, ProjectID: "proj-1", LinkedAt: time.Now().UTC(),
+		Active: true, ShowAgentToAgent: true,
+	}))
+
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
+		ID:      "cb-com",
+		From:    &TGUser{ID: 456, Username: "alice"},
+		Message: &TGMessage{MessageID: 51, Chat: TGChat{ID: -200, Type: "group"}},
+		Data:    "settings:commentary:off",
+	})
+
+	callbacks := tgSrv.getAnsweredCallbacks()
+	require.Len(t, callbacks, 1)
+	assert.Equal(t, "cb-com", callbacks[0].CallbackQueryID)
+	assert.Contains(t, callbacks[0].Text, "removed")
+
+	// The card is refreshed in place without the stale Commentary row.
+	tgSrv.mu.Lock()
+	edits := append([]editMessageReplyMarkupRequest(nil), tgSrv.editedMarkups...)
+	tgSrv.mu.Unlock()
+	require.Len(t, edits, 1, "the settings card must be refreshed")
+	assert.Equal(t, int64(-200), edits[0].ChatID)
+	assert.Equal(t, int64(51), edits[0].MessageID)
+	require.NotNil(t, edits[0].ReplyMarkup)
+	require.Len(t, edits[0].ReplyMarkup.InlineKeyboard, 2, "observer and group-notification rows only")
+	for _, row := range edits[0].ReplyMarkup.InlineKeyboard {
+		for _, btn := range row {
+			assert.NotContains(t, btn.CallbackData, "commentary")
+		}
+	}
+
+	link, err := b.store.GetGroupLink(ctx, -200)
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.True(t, link.ShowAgentToAgent, "other settings must be unchanged")
+}
+
 func TestV2_HandleCallback_AskUserWithMapping(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
@@ -1341,7 +1689,7 @@ func TestV2_HandleCallback_AskUserWithMapping(t *testing.T) {
 		}
 	}
 
-	b.handleCallbackQuery(ctx, &CallbackQuery{
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
 		ID:   "cb-2",
 		From: &TGUser{ID: 456, Username: "alice"},
 		Message: &TGMessage{
@@ -1380,7 +1728,7 @@ func TestV2_HandleCallback_ExpiredRequest(t *testing.T) {
 		atomic.AddInt32(&received, 1)
 	}
 
-	b.handleCallbackQuery(ctx, &CallbackQuery{
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
 		ID:   "cb-3",
 		From: &TGUser{ID: 456, Username: "alice"},
 		Message: &TGMessage{
@@ -1402,7 +1750,9 @@ func TestV2_HandleCallback_ExpiredRequest(t *testing.T) {
 
 func TestV2_Publish_StateChange_RoutedToDM(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -1681,7 +2031,7 @@ func TestFormatMessageV2(t *testing.T) {
 			name: "assistant reply",
 			msg: &messages.StructuredMessage{
 				Msg:  "here is the result",
-				Type: messages.TypeAssistantReply,
+				Type: messages.TypeInstruction,
 			},
 			agentSlug: "",
 			contains:  []string{"here is the result"},
@@ -1831,6 +2181,72 @@ func TestV2_Configure_WebhookMode_MissingURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "webhook_url is required")
 }
 
+func TestV2_Configure_WebhookMode_MissingSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config map[string]string
+	}{
+		{"absent", map[string]string{}},
+		{"empty", map[string]string{"webhook_secret": ""}},
+		{"absent standalone HA", map[string]string{"skip_set_webhook": "true"}},
+		{"empty standalone HA", map[string]string{"skip_set_webhook": "true", "webhook_secret": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := map[string]string{
+				"bot_token":      "test-token",
+				"api_base_url":   tgSrv.srv.URL,
+				"db_path":        dbPath,
+				"inbound_mode":   "webhook",
+				"webhook_url":    "https://example.com/telegram/webhook",
+				"webhook_listen": ":0",
+			}
+			for k, v := range tc.config {
+				cfg[k] = v
+			}
+
+			err := b.Configure(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `webhook_secret is required when inbound_mode is "webhook"`)
+			assert.Nil(t, b.webhookServer, "webhook listener must not start without a secret")
+
+			tgSrv.mu.Lock()
+			assert.Empty(t, tgSrv.webhookURL, "setWebhook must not be called without a secret")
+			tgSrv.mu.Unlock()
+		})
+	}
+}
+
+func TestV2_Configure_WebhookMode_StandaloneHAWithSecret(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":        "test-token",
+		"api_base_url":     tgSrv.srv.URL,
+		"db_path":          dbPath,
+		"inbound_mode":     "webhook",
+		"webhook_url":      "https://example.com/telegram/webhook",
+		"webhook_listen":   ":0",
+		"webhook_secret":   "test-secret",
+		"skip_set_webhook": "true",
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, b.webhookServer)
+
+	tgSrv.mu.Lock()
+	assert.Empty(t, tgSrv.webhookURL, "standalone HA mode must not call setWebhook from Configure")
+	tgSrv.mu.Unlock()
+}
+
 func TestV2_Configure_InvalidInboundMode(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -1846,6 +2262,289 @@ func TestV2_Configure_InvalidInboundMode(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid inbound_mode")
+}
+
+// newRejectingTGServer returns a Telegram API stand-in that rejects every
+// call and counts the calls it receives.
+func newRejectingTGServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+// An invalid config fails before any Telegram API call (bot identity lookup,
+// command registration, setWebhook).
+func TestV2_Configure_InvalidConfigMakesNoAPICalls(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{"invalid inbound_mode", map[string]string{"inbound_mode": "push"}, "invalid inbound_mode"},
+		{"webhook without url", map[string]string{
+			"inbound_mode":   "webhook",
+			"webhook_secret": "test-secret",
+		}, "webhook_url is required"},
+		{"webhook without secret", map[string]string{
+			"inbound_mode": "webhook",
+			"webhook_url":  "https://example.com/telegram/webhook",
+		}, "webhook_secret is required"},
+		// Regression guard: agent_cache_ttl was already checked before any
+		// API call on main.
+		{"invalid agent_cache_ttl", map[string]string{"agent_cache_ttl": "soon"}, "invalid agent_cache_ttl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, calls := newRejectingTGServer(t)
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := map[string]string{
+				"bot_token":      "test-token",
+				"api_base_url":   srv.URL,
+				"db_path":        filepath.Join(t.TempDir(), "test.db"),
+				"webhook_listen": ":0",
+			}
+			for k, v := range tc.config {
+				cfg[k] = v
+			}
+
+			err := b.Configure(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Zero(t, calls.Load(), "Configure must not call the Telegram API with an invalid config")
+		})
+	}
+}
+
+// captureOpenedStores records the SQLite stores Configure opens from now
+// until the test ends.
+func captureOpenedStores(t *testing.T) *[]Store {
+	t.Helper()
+	var opened []Store
+	orig := openSQLiteStore
+	openSQLiteStore = func(dbPath string) (Store, error) {
+		s, err := orig(dbPath)
+		if err == nil {
+			opened = append(opened, s)
+		}
+		return s, err
+	}
+	t.Cleanup(func() { openSQLiteStore = orig })
+	return &opened
+}
+
+// reserveFreeAddr returns a 127.0.0.1 address that was free a moment ago.
+func reserveFreeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
+// postWebhookUpdate sends a no-op update to a webhook server and returns the
+// response status.
+func postWebhookUpdate(t *testing.T, addr, secret string) (int, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+webhookPath,
+		strings.NewReader(`{"update_id":1}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(secretTokenHeader, secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// validWebhookConfig returns a webhook-mode config against the fake API.
+func validWebhookConfig(t *testing.T, tgSrv *fakeTGServerV2) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"hub_url":        "http://hub.test",
+		"db_path":        filepath.Join(t.TempDir(), "test.db"),
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": "127.0.0.1:0",
+		"webhook_secret": "test-secret",
+	}
+}
+
+// A reconfigure that fails, after a valid webhook-mode configure, leaves the
+// running configuration in place: the earlier webhook server keeps serving
+// against the store, which stays open, and Telegram's webhook registration
+// is not changed. A store the failed reconfigure opened is closed again.
+func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
+	type env struct {
+		tgSrv                            *fakeTGServerV2
+		rejectingURL, busyAddr, freeAddr string
+	}
+	for _, tc := range []struct {
+		name       string
+		mutate     func(cfg map[string]string, e env)
+		wantErr    string
+		opensStore bool
+		// releasesAddr: the reconfigure bound e.freeAddr and must release it.
+		releasesAddr bool
+	}{
+		{"missing webhook secret", func(cfg map[string]string, _ env) {
+			delete(cfg, "webhook_secret")
+		}, "webhook_secret is required", false, false},
+		{"missing webhook url", func(cfg map[string]string, _ env) {
+			cfg["webhook_url"] = ""
+		}, "webhook_url is required", false, false},
+		{"invalid inbound mode", func(cfg map[string]string, _ env) {
+			cfg["inbound_mode"] = "push"
+		}, "invalid inbound_mode", false, false},
+		{"bot token rejected", func(cfg map[string]string, e env) {
+			cfg["api_base_url"] = e.rejectingURL
+		}, "failed to validate bot token", true, false},
+		{"webhook listen address in use", func(cfg map[string]string, e env) {
+			cfg["webhook_listen"] = e.busyAddr
+		}, "failed to start webhook server", true, false},
+		{"setWebhook rejected", func(cfg map[string]string, e env) {
+			cfg["webhook_listen"] = e.freeAddr
+			e.tgSrv.mu.Lock()
+			e.tgSrv.failSetWebhook = true
+			e.tgSrv.mu.Unlock()
+		}, "failed to set webhook", true, true},
+		{"deleteWebhook rejected on switch to poll", func(cfg map[string]string, e env) {
+			cfg["inbound_mode"] = "poll"
+			e.tgSrv.mu.Lock()
+			e.tgSrv.failDeleteWebhook = true
+			e.tgSrv.mu.Unlock()
+		}, "failed to delete webhook", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			rejecting, _ := newRejectingTGServer(t)
+			busy, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer busy.Close()
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := validWebhookConfig(t, tgSrv)
+			require.NoError(t, b.Configure(cfg))
+			server, store, api := b.webhookServer, b.store, b.api
+			require.NotNil(t, server)
+			// Reserved after the good Configure, so its bind cannot take it.
+			freeAddr := reserveFreeAddr(t)
+
+			bad := make(map[string]string, len(cfg))
+			for k, v := range cfg {
+				bad[k] = v
+			}
+			bad["hub_url"] = "http://other-hub.test"
+			bad["webhook_url"] = "https://example.com/telegram/other-webhook"
+			tc.mutate(bad, env{tgSrv: tgSrv, rejectingURL: rejecting.URL, busyAddr: busy.Addr().String(), freeAddr: freeAddr})
+
+			opened := captureOpenedStores(t)
+			err = b.Configure(bad)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+
+			assert.Same(t, server, b.webhookServer, "the earlier webhook server must stay in place")
+			assert.Same(t, store, b.store, "the store must not be replaced")
+			assert.Same(t, api, b.api, "the API client must not be replaced")
+			assert.Equal(t, "http://hub.test", b.hubURL)
+			assert.Equal(t, "webhook", b.inboundMode)
+
+			tgSrv.mu.Lock()
+			assert.Equal(t, "https://example.com/telegram/webhook", tgSrv.webhookURL,
+				"a failed reconfigure must not change the webhook registration")
+			tgSrv.mu.Unlock()
+
+			link := &GroupLink{ChatID: -300, ProjectID: "proj-1", LinkedAt: time.Now().UTC(), Active: true}
+
+			// The store the webhook handlers use is still open.
+			require.NoError(t, b.store.SaveGroupLink(context.Background(), link))
+
+			// A store the failed reconfigure opened is closed again.
+			if tc.opensStore {
+				require.Len(t, *opened, 1)
+				assert.Error(t, (*opened)[0].SaveGroupLink(context.Background(), link),
+					"a failed reconfigure must close the store it opened")
+			} else {
+				assert.Empty(t, *opened, "an invalid config must not open a store")
+			}
+
+			// A listener the failed reconfigure bound is released again.
+			if tc.releasesAddr {
+				ln, err := net.Listen("tcp", freeAddr)
+				require.NoError(t, err, "a failed reconfigure must release the listener it bound")
+				require.NoError(t, ln.Close())
+			}
+
+			// The earlier webhook server still accepts updates.
+			status, err := postWebhookUpdate(t, server.actualAddr, "test-secret")
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, status)
+		})
+	}
+}
+
+// A reconfigure on the same listen address (the hub configures twice) keeps
+// the running webhook server and applies the new secret.
+func TestV2_Reconfigure_SameListenAddressKeepsServer(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	cfg := validWebhookConfig(t, tgSrv)
+	require.NoError(t, b.Configure(cfg))
+	server := b.webhookServer
+
+	cfg["webhook_secret"] = "rotated-secret"
+	require.NoError(t, b.Configure(cfg))
+	assert.Same(t, server, b.webhookServer)
+
+	status, err := postWebhookUpdate(t, server.actualAddr, "rotated-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status)
+
+	status, err = postWebhookUpdate(t, server.actualAddr, "test-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, status, "the old secret must no longer be accepted")
+}
+
+// A reconfigure on a new listen address serves the new address and stops the
+// old server.
+func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	cfg := validWebhookConfig(t, tgSrv)
+	require.NoError(t, b.Configure(cfg))
+	oldAddr := b.webhookServer.actualAddr
+
+	cfg["webhook_listen"] = reserveFreeAddr(t)
+	require.NoError(t, b.Configure(cfg))
+	newAddr := b.webhookServer.actualAddr
+	assert.NotEqual(t, oldAddr, newAddr)
+
+	status, err := postWebhookUpdate(t, newAddr, "test-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status)
+
+	waitRetired(t, b) // the old server is stopped in the background
+	_, err = postWebhookUpdate(t, oldAddr, "test-secret")
+	assert.Error(t, err, "the old webhook server must be stopped")
 }
 
 func TestV2_Configure_DefaultPollMode(t *testing.T) {
@@ -1880,6 +2579,7 @@ func TestV2_WebhookMode_PollingDoesNotStart(t *testing.T) {
 		"inbound_mode":   "webhook",
 		"webhook_url":    "https://example.com/telegram/webhook",
 		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
 	})
 	require.NoError(t, err)
 
@@ -1925,6 +2625,7 @@ func TestV2_WebhookMode_InboundMessageDelivery(t *testing.T) {
 		LinkedAt:       time.Now().UTC(),
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -1994,6 +2695,7 @@ func TestV2_WebhookMode_Close(t *testing.T) {
 		"inbound_mode":   "webhook",
 		"webhook_url":    "https://example.com/telegram/webhook",
 		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
 	})
 	require.NoError(t, err)
 
@@ -2111,6 +2813,7 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 	hub := newFakeHubClient()
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+	useLegacyAttachmentCheck(t, b)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -2129,16 +2832,11 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
 	}))
-
-	// Clear downloads_path override from the helper so the shared dir path
-	// is exercised. Point HOME to a temp dir so SharedDirHostPath resolves
-	// to a writable location on CI runners.
-	b.downloadsPath = ""
-	t.Setenv("HOME", tmpDir)
 
 	var deliveredMsg *messages.StructuredMessage
 	done := make(chan struct{}, 1)
@@ -2151,7 +2849,7 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 	}
 
 	// Photo-only message (no text, no caption).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2172,8 +2870,7 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 	assert.Contains(t, deliveredMsg.Msg, "📎")
 	assert.Contains(t, deliveredMsg.Msg, "Photo attached")
 	assert.Len(t, deliveredMsg.Attachments, 1)
-	// With a non-empty projectID and no downloadsPath, the attachment
-	// routes through the shared dir infrastructure.
+	// The hub answered "legacy": the attachment is staged in the scratchpad.
 	assert.Contains(t, deliveredMsg.Attachments[0], "/scion-volumes/scratchpad/.attachments/_telegram/")
 }
 
@@ -2182,6 +2879,7 @@ func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
 	hub := newFakeHubClient()
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+	useLegacyAttachmentCheck(t, b)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -2200,6 +2898,7 @@ func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2215,7 +2914,7 @@ func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
 		}
 	}
 
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 43,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2254,7 +2953,7 @@ func TestV2_HandleIncoming_EmptyMessageDropped(t *testing.T) {
 	}
 
 	// No text, no caption, no photo, no document, no audio, no video.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2263,93 +2962,54 @@ func TestV2_HandleIncoming_EmptyMessageDropped(t *testing.T) {
 	assert.Equal(t, int32(0), atomic.LoadInt32(&received))
 }
 
-func TestV2_DownloadTelegramFile_PhotoPicksLargest(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	tmpDir := t.TempDir()
-	slug := filepath.Base(tmpDir)
-
-	// Point project path to temp dir.
-	projectDir := filepath.Join(tmpDir, ".scion", "projects", slug)
-	require.NoError(t, os.MkdirAll(projectDir, 0o755))
-
-	// Patch HOME so /home/scion/.scion/projects/<slug> resolves to temp dir.
-	// Instead, we'll test with the actual slug and just verify the function returns.
-	ctx := context.Background()
-
-	tgMsg := &TGMessage{
+func TestV2_TelegramAttachmentOf_PhotoPicksLargest(t *testing.T) {
+	att, ok := telegramAttachmentOf(&TGMessage{
 		Photo: []PhotoSize{
 			{FileID: "small", FileUniqueID: "u1", Width: 90, Height: 90, FileSize: 100},
 			{FileID: "medium", FileUniqueID: "u2", Width: 320, Height: 240, FileSize: 2000},
 			{FileID: "large", FileUniqueID: "u3", Width: 1280, Height: 960, FileSize: 5000},
 		},
-	}
-
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
-	require.NoError(t, err)
-	// With downloads_path set via the test helper, agentPath uses that dir
-	// rather than the legacy /workspace/downloads/ prefix.
-	assert.Contains(t, agentPath, "photo_u3.jpg")
-	assert.Contains(t, placeholder, "Photo attached")
-	assert.Contains(t, placeholder, "photo_u3.jpg")
+	})
+	require.True(t, ok)
+	assert.Equal(t, "large", att.FileID)
+	assert.Equal(t, int64(5000), att.Size)
+	assert.Equal(t, "photo_u3.jpg", att.Name)
+	assert.Contains(t, att.placeholder(), "Photo attached")
+	assert.Contains(t, att.placeholder(), "photo_u3.jpg")
 }
 
-func TestV2_DownloadTelegramFile_DocumentFallbackName(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	tmpDir := t.TempDir()
-	slug := filepath.Base(tmpDir)
-
-	ctx := context.Background()
-
-	tgMsg := &TGMessage{
-		Document: &TGDocument{
-			FileID:       "doc-xyz",
-			FileUniqueID: "docuniq99",
-			FileName:     "", // empty filename
-			MimeType:     "application/octet-stream",
-			FileSize:     512,
-		},
-	}
-
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
-	require.NoError(t, err)
-	assert.Contains(t, agentPath, "docuniq99")
-	assert.Contains(t, placeholder, "Document attached")
+func TestV2_TelegramAttachmentOf_DocumentFallbackName(t *testing.T) {
+	att, ok := telegramAttachmentOf(&TGMessage{Document: &TGDocument{FileID: "doc-xyz", FileUniqueID: "docuniq99", FileSize: 512}})
+	require.True(t, ok)
+	assert.Equal(t, "docuniq99", att.Name)
+	assert.Equal(t, "Document", att.Kind)
+	assert.Contains(t, att.placeholder(), "Document attached: "+"docuniq99")
 }
 
 func TestV2_DownloadTelegramFile_TooLarge(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
 
-	ctx := context.Background()
-
-	tgMsg := &TGMessage{
+	att, ok := telegramAttachmentOf(&TGMessage{
 		Document: &TGDocument{
 			FileID:       "big-file",
 			FileUniqueID: "bigid",
 			FileName:     "huge.zip",
 			FileSize:     25 * 1024 * 1024, // 25 MB > 20 MB limit
 		},
-	}
+	})
+	require.True(t, ok)
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
+	_, err := downloadTelegramFile(context.Background(), b.api, att, maxTelegramFileSize)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "file too large")
+	assert.ErrorIs(t, err, errAttachmentTooLarge)
 }
 
-func TestV2_DownloadTelegramFile_NoAttachment(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	ctx := context.Background()
-	tgMsg := &TGMessage{Text: "just text"}
-
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no downloadable attachment")
+func TestV2_TelegramAttachmentOf_NoAttachment(t *testing.T) {
+	_, ok := telegramAttachmentOf(&TGMessage{Text: "just text"})
+	assert.False(t, ok)
+	_, ok = telegramAttachmentOf(nil)
+	assert.False(t, ok)
 }
 
 func TestV2_DownloadTelegramFile_DownloadFailure(t *testing.T) {
@@ -2373,134 +3033,53 @@ func TestV2_DownloadTelegramFile_DownloadFailure(t *testing.T) {
 	defer failSrv.Close()
 
 	client := NewAPIClient("test-token", failSrv.URL)
-	b := &TelegramBrokerV2{
-		api: client,
-		log: slog.Default(),
-	}
-
-	ctx := context.Background()
-	tgMsg := &TGMessage{
+	att, ok := telegramAttachmentOf(&TGMessage{
 		Photo: []PhotoSize{
 			{FileID: "file-id", FileUniqueID: "u1", FileSize: 100},
 		},
-	}
+	})
+	require.True(t, ok)
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
+	_, err := downloadTelegramFile(context.Background(), client, att, maxTelegramFileSize)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download file")
 }
 
-func TestV2_DownloadTelegramFile_AudioWithFilename(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	ctx := context.Background()
-	slug := filepath.Base(t.TempDir())
-
-	tgMsg := &TGMessage{
-		Audio: &TGAudio{
-			FileID:       "audio-xyz",
-			FileUniqueID: "audiouniq1",
-			FileName:     "song.mp3",
-			MimeType:     "audio/mpeg",
-			FileSize:     10000,
-			Duration:     180,
-		},
-	}
-
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
-	require.NoError(t, err)
-	assert.Contains(t, agentPath, "song.mp3")
-	assert.Contains(t, placeholder, "Audio attached")
-	assert.Contains(t, placeholder, "song.mp3")
+func TestV2_TelegramAttachmentOf_AudioWithFilename(t *testing.T) {
+	att, ok := telegramAttachmentOf(&TGMessage{Audio: &TGAudio{FileID: "audio-xyz", FileUniqueID: "audiouniq1", FileName: "song.mp3", FileSize: 10000}})
+	require.True(t, ok)
+	assert.Equal(t, "song.mp3", att.Name)
+	assert.Equal(t, "Audio", att.Kind)
+	assert.Contains(t, att.placeholder(), "Audio attached: "+"song.mp3")
 }
 
-func TestV2_DownloadTelegramFile_AudioFallbackName(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
+func TestV2_TelegramAttachmentOf_AudioFallbackName(t *testing.T) {
+	// Audio with a title but no filename uses the title.
+	att, ok := telegramAttachmentOf(&TGMessage{Audio: &TGAudio{FileID: "audio-abc", FileUniqueID: "audiouniq2", Title: "My Song", FileSize: 5000}})
+	require.True(t, ok)
+	assert.Equal(t, "My Song.ogg", att.Name)
+	assert.Contains(t, att.placeholder(), "Audio attached")
 
-	ctx := context.Background()
-	slug := filepath.Base(t.TempDir())
-
-	// Audio with title but no filename — should use title.
-	tgMsg := &TGMessage{
-		Audio: &TGAudio{
-			FileID:       "audio-abc",
-			FileUniqueID: "audiouniq2",
-			Title:        "My Song",
-			FileSize:     5000,
-			Duration:     120,
-		},
-	}
-
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
-	require.NoError(t, err)
-	assert.Contains(t, agentPath, "My Song.ogg")
-	assert.Contains(t, placeholder, "Audio attached")
-
-	// Audio with no filename and no title — should use unique ID fallback.
-	tgMsg2 := &TGMessage{
-		Audio: &TGAudio{
-			FileID:       "audio-def",
-			FileUniqueID: "audiouniq3",
-			FileSize:     3000,
-			Duration:     60,
-		},
-	}
-
-	agentPath2, _, err := b.downloadTelegramFile(ctx, tgMsg2, slug, "")
-	require.NoError(t, err)
-	assert.Contains(t, agentPath2, "audio_audiouniq3.ogg")
+	// Audio with no filename and no title uses the unique ID.
+	att, ok = telegramAttachmentOf(&TGMessage{Audio: &TGAudio{FileID: "audio-def", FileUniqueID: "audiouniq3", FileSize: 3000}})
+	require.True(t, ok)
+	assert.Equal(t, "audio_audiouniq3.ogg", att.Name)
 }
 
-func TestV2_DownloadTelegramFile_Video(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	ctx := context.Background()
-	slug := filepath.Base(t.TempDir())
-
-	tgMsg := &TGMessage{
-		Video: &TGVideo{
-			FileID:       "video-xyz",
-			FileUniqueID: "viduniq1",
-			FileName:     "clip.mp4",
-			MimeType:     "video/mp4",
-			FileSize:     50000,
-			Width:        1920,
-			Height:       1080,
-			Duration:     30,
-		},
-	}
-
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
-	require.NoError(t, err)
-	assert.Contains(t, agentPath, "clip.mp4")
-	assert.Contains(t, placeholder, "Video attached")
-	assert.Contains(t, placeholder, "clip.mp4")
+func TestV2_TelegramAttachmentOf_Video(t *testing.T) {
+	att, ok := telegramAttachmentOf(&TGMessage{Video: &TGVideo{FileID: "video-xyz", FileUniqueID: "viduniq1", FileName: "clip.mp4", FileSize: 50000}})
+	require.True(t, ok)
+	assert.Equal(t, "clip.mp4", att.Name)
+	assert.Equal(t, "Video", att.Kind)
+	assert.Contains(t, att.placeholder(), "Video attached: "+"clip.mp4")
 }
 
-func TestV2_DownloadTelegramFile_VideoFallbackName(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	ctx := context.Background()
-	slug := filepath.Base(t.TempDir())
-
-	tgMsg := &TGMessage{
-		Video: &TGVideo{
-			FileID:       "video-abc",
-			FileUniqueID: "viduniq2",
-			FileSize:     25000,
-			Width:        640,
-			Height:       480,
-			Duration:     10,
-		},
-	}
-
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
-	require.NoError(t, err)
-	assert.Contains(t, agentPath, "video_viduniq2.mp4")
+func TestV2_TelegramAttachmentOf_VideoFallbackName(t *testing.T) {
+	att, ok := telegramAttachmentOf(&TGMessage{Video: &TGVideo{FileID: "video-abc", FileUniqueID: "viduniq2", FileSize: 25000}})
+	require.True(t, ok)
+	assert.Equal(t, "video_viduniq2.mp4", att.Name)
+	assert.Equal(t, "Video", att.Kind)
+	assert.Contains(t, att.placeholder(), "Video attached: "+"video_viduniq2.mp4")
 }
 
 func TestV2_HandleIncoming_StickerSkipped(t *testing.T) {
@@ -2513,7 +3092,7 @@ func TestV2_HandleIncoming_StickerSkipped(t *testing.T) {
 	}
 
 	// Sticker-only message — should be silently dropped (debug log).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 10,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2538,7 +3117,7 @@ func TestV2_HandleIncoming_AnimationSkipped(t *testing.T) {
 	}
 
 	// Animation-only message — should be silently dropped (debug log).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 11,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2559,6 +3138,7 @@ func TestV2_HandleIncoming_AudioMessageDelivered(t *testing.T) {
 	hub := newFakeHubClient()
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+	useLegacyAttachmentCheck(t, b)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -2577,6 +3157,7 @@ func TestV2_HandleIncoming_AudioMessageDelivered(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2592,7 +3173,7 @@ func TestV2_HandleIncoming_AudioMessageDelivered(t *testing.T) {
 		}
 	}
 
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 50,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2620,36 +3201,6 @@ func TestV2_HandleIncoming_AudioMessageDelivered(t *testing.T) {
 	assert.Contains(t, deliveredMsg.Attachments[0], "voice.mp3")
 }
 
-func TestV2_DownloadTelegramFile_ConfiguredDownloadsPath(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	// Set a custom downloads path.
-	customDir := filepath.Join(t.TempDir(), "custom-downloads")
-	b.downloadsPath = customDir
-
-	ctx := context.Background()
-
-	tgMsg := &TGMessage{
-		Document: &TGDocument{
-			FileID:       "doc-custom",
-			FileUniqueID: "docuniqcustom",
-			FileName:     "custom.pdf",
-			MimeType:     "application/pdf",
-			FileSize:     1024,
-		},
-	}
-
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug", "test-project-id")
-	require.NoError(t, err)
-
-	// Verify the file was saved in the custom directory.
-	entries, err := os.ReadDir(customDir)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Contains(t, entries[0].Name(), "custom.pdf")
-}
-
 // --- Code span restoration tests ---
 
 func TestV2_HandleGroupMessage_CodeSpanPreserved(t *testing.T) {
@@ -2673,6 +3224,7 @@ func TestV2_HandleGroupMessage_CodeSpanPreserved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2690,7 +3242,7 @@ func TestV2_HandleGroupMessage_CodeSpanPreserved(t *testing.T) {
 
 	// Simulate: user typed "check the `config` file" in Telegram.
 	// Telegram strips backticks and puts formatting in entities.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2732,6 +3284,7 @@ func TestV2_HandleGroupMessage_MultipleCodeSpans(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2748,7 +3301,7 @@ func TestV2_HandleGroupMessage_MultipleCodeSpans(t *testing.T) {
 	}
 
 	// Simulate: "run foo and bar" where foo and bar were in backticks.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 43,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2791,6 +3344,7 @@ func TestV2_HandleGroupMessage_PreBlockPreserved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2807,7 +3361,7 @@ func TestV2_HandleGroupMessage_PreBlockPreserved(t *testing.T) {
 	}
 
 	// Simulate: user sent a code block (triple backticks) in Telegram.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 44,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2849,6 +3403,7 @@ func TestV2_HandleGroupMessage_PreBlockWithLanguage(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2865,7 +3420,7 @@ func TestV2_HandleGroupMessage_PreBlockWithLanguage(t *testing.T) {
 	}
 
 	// Simulate: user sent ```go\nfmt.Println("hello")\n``` in Telegram.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 45,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2892,6 +3447,7 @@ func TestV2_HandleIncoming_CaptionlessAudioRoutesToDefaultAgent(t *testing.T) {
 	hub := newFakeHubClient()
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+	useLegacyAttachmentCheck(t, b)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -2910,6 +3466,7 @@ func TestV2_HandleIncoming_CaptionlessAudioRoutesToDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2926,7 +3483,7 @@ func TestV2_HandleIncoming_CaptionlessAudioRoutesToDefaultAgent(t *testing.T) {
 	}
 
 	// Audio with NO caption and NO @mention — must route via Fallback 3.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 60,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2957,6 +3514,7 @@ func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
 	hub := newFakeHubClient()
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+	useLegacyAttachmentCheck(t, b)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -2975,6 +3533,7 @@ func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2991,7 +3550,7 @@ func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
 	}
 
 	// Video with NO caption and NO @mention — must route via Fallback 3.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 61,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3020,167 +3579,49 @@ func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
 
 // --- Fix M1: path traversal in Audio.Title ---
 
-func TestV2_DownloadTelegramFile_AudioTitlePathTraversal(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	ctx := context.Background()
-	slug := filepath.Base(t.TempDir())
-
-	tgMsg := &TGMessage{
-		Audio: &TGAudio{
-			FileID:       "audio-evil",
-			FileUniqueID: "audevil",
-			FileSize:     1024,
-			Duration:     5,
-			Title:        "../../etc/passwd",
-		},
-	}
-
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
-	require.NoError(t, err)
-	// The path-traversal components must be stripped — the file should be
-	// named "passwd.ogg" (filepath.Base of "../../etc/passwd.ogg"), not
-	// contain any ".." segments.
-	assert.NotContains(t, agentPath, "..")
-	assert.Contains(t, agentPath, "passwd.ogg")
+func TestV2_TelegramAttachmentOf_AudioTitlePathTraversal(t *testing.T) {
+	att, ok := telegramAttachmentOf(&TGMessage{Audio: &TGAudio{FileID: "audio-evil", FileUniqueID: "audevil", FileSize: 1024, Title: "../../etc/passwd"}})
+	require.True(t, ok)
+	// The path components are stripped: the name is filepath.Base of
+	// "../../etc/passwd.ogg".
+	assert.Equal(t, "passwd.ogg", att.Name)
+	assert.NotContains(t, att.Name, "..")
 }
 
-// --- Fix M2: agentPath reflects custom downloads_path ---
-
-func TestV2_DownloadTelegramFile_ConfiguredDownloadsPathAgentPath(t *testing.T) {
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	// Set a custom downloads path.
-	customDir := filepath.Join(t.TempDir(), "shared-attachments")
-	b.downloadsPath = customDir
-
-	ctx := context.Background()
-
-	tgMsg := &TGMessage{
-		Document: &TGDocument{
-			FileID:       "doc-agent-path",
-			FileUniqueID: "docuniqap",
-			FileName:     "report.pdf",
-			MimeType:     "application/pdf",
-			FileSize:     2048,
-		},
-	}
-
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug", "test-project-id")
-	require.NoError(t, err)
-
-	// agentPath must start with the custom downloads path, NOT /workspace/downloads.
-	assert.True(t, strings.HasPrefix(agentPath, customDir),
-		"agentPath %q should start with custom downloads dir %q", agentPath, customDir)
-	assert.NotContains(t, agentPath, "/workspace/downloads")
-	assert.Contains(t, agentPath, "report.pdf")
-}
-
-func TestV2_DownloadTelegramFile_SharedDirPath(t *testing.T) {
-	// When projectID is non-empty and downloadsPath is empty, the function
-	// should route through the shared dir infrastructure.
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-	b.downloadsPath = "" // clear the downloads_path override from the helper
-
-	// Point HOME to a temp dir so SharedDirHostPath resolves there.
+func TestV2_LegacyStage_SharedDirPath(t *testing.T) {
+	// Staging writes through the shared dir infrastructure, one entry per
+	// message.
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	stubSharedDirSettings(t, &config.VersionedSettings{})
 
-	ctx := context.Background()
-	tgMsg := &TGMessage{
-		Document: &TGDocument{
-			FileID:       "doc-shared-001",
-			FileUniqueID: "docuniqshared1",
-			FileName:     "shared-report.pdf",
-			MimeType:     "application/pdf",
-			FileSize:     1024,
-		},
-	}
-
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
+	staged, err := legacyStage("my-project", "abcd1234-ef56-7890-abcd-ef1234567890", "shared-report.pdf", strings.NewReader("report"))
 	require.NoError(t, err)
+	assert.True(t, staged.created)
+	assert.Regexp(t, `^tg_[0-9]+$`, staged.entry)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_telegram/"+staged.entry+"/shared-report.pdf", staged.agentPath)
 
-	// Agent path should use the shared dir prefix.
-	assert.True(t, strings.HasPrefix(agentPath, "/scion-volumes/scratchpad/.attachments/_telegram/"),
-		"agentPath %q should start with shared dir prefix", agentPath)
-	assert.Contains(t, agentPath, "shared-report.pdf")
-	assert.Contains(t, placeholder, "Document attached")
-
-	// Verify the file was actually written to the host-side shared dir path.
 	expectedHostBase := filepath.Join(fakeHome, ".scion", "project-configs", "my-project__abcd1234", "shared-dirs", "scratchpad", ".attachments", "_telegram")
 	entries, err := os.ReadDir(expectedHostBase)
 	require.NoError(t, err, "shared dir host path should exist")
 	require.Len(t, entries, 1)
-	assert.Contains(t, entries[0].Name(), "shared-report.pdf")
+	require.True(t, entries[0].IsDir())
+	assert.Equal(t, staged.entry, entries[0].Name())
+	assert.FileExists(t, filepath.Join(expectedHostBase, staged.entry, "shared-report.pdf"))
 }
 
-func TestV2_DownloadTelegramFile_EmptyProjectID_LegacyPath(t *testing.T) {
-	// When projectID is empty and downloadsPath is empty, the function should
-	// fall back to the legacy /workspace/downloads/ agent path.
+func TestV2_LegacyStage_EmptyProjectID_Refused(t *testing.T) {
+	// With no project ID there is no scratchpad to store the file in, so
+	// staging is refused and nothing is written anywhere.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
 
-	// Redirect the legacy fallback path to a writable temp dir so this test
-	// works on CI runners where /home/scion does not exist.
-	origRoot := legacyProjectsRoot
-	legacyProjectsRoot = filepath.Join(t.TempDir(), ".scion/projects")
-	t.Cleanup(func() { legacyProjectsRoot = origRoot })
-
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-	b.downloadsPath = "" // clear the downloads_path override from the helper
-
-	ctx := context.Background()
-	slug := filepath.Base(t.TempDir())
-
-	tgMsg := &TGMessage{
-		Document: &TGDocument{
-			FileID:       "doc-legacy-001",
-			FileUniqueID: "docuniqlegacy1",
-			FileName:     "legacy.txt",
-			MimeType:     "text/plain",
-			FileSize:     256,
-		},
-	}
-
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	_, err := legacyStage("some-slug", "", "legacy.txt", strings.NewReader("x"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no project")
+	entries, err := os.ReadDir(fakeHome)
 	require.NoError(t, err)
-
-	// Legacy agent path should be /workspace/downloads/<name>.
-	assert.True(t, strings.HasPrefix(agentPath, "/workspace/downloads/"),
-		"agentPath %q should start with legacy prefix", agentPath)
-	assert.Contains(t, agentPath, "legacy.txt")
-}
-
-func TestV2_DownloadTelegramFile_DownloadsPathOverridesSharedDir(t *testing.T) {
-	// When downloadsPath is set, it takes priority over shared dir even if
-	// projectID is non-empty.
-	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
-
-	customDir := filepath.Join(t.TempDir(), "custom-override")
-	b.downloadsPath = customDir
-
-	ctx := context.Background()
-	tgMsg := &TGMessage{
-		Document: &TGDocument{
-			FileID:       "doc-priority-001",
-			FileUniqueID: "docuniqpriority1",
-			FileName:     "priority.pdf",
-			MimeType:     "application/pdf",
-			FileSize:     512,
-		},
-	}
-
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
-	require.NoError(t, err)
-
-	// Agent path should use the custom downloads path, not shared dir.
-	assert.True(t, strings.HasPrefix(agentPath, customDir),
-		"agentPath %q should start with custom dir %q", agentPath, customDir)
-	assert.NotContains(t, agentPath, "/scion-volumes/scratchpad/")
-	assert.Contains(t, agentPath, "priority.pdf")
+	assert.Empty(t, entries, "nothing is written anywhere")
 }
 
 func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
@@ -3204,6 +3645,7 @@ func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -3220,7 +3662,7 @@ func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
 	}
 
 	// No mention — routes to default agent. Code span should be preserved.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 46,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3260,37 +3702,40 @@ func TestResolveRecipientChats(t *testing.T) {
 		LastMessageAt:  time.Now(),
 	}))
 
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
 	b := &TelegramBrokerV2{
-		log:   slog.New(slog.NewTextHandler(os.Stdout, nil)),
-		store: store,
+		log:       slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		store:     store,
+		hubClient: hub,
 	}
 
 	t.Run("email lookup succeeds", func(t *testing.T) {
-		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 
 	t.Run("display name with recipientID fallback", func(t *testing.T) {
 		// Hub rewrites recipient to display name; email lookup fails,
 		// but recipientID-based fallback finds the correct mapping.
-		chats := b.resolveRecipientChats(ctx, "user:Alice", "scion-uuid-456", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:Alice", "scion-uuid-456", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 
 	t.Run("display name without recipientID returns nil", func(t *testing.T) {
 		// No recipientID provided — fallback cannot execute.
-		chats := b.resolveRecipientChats(ctx, "user:Alice", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:Alice", "", "proj-1", "coder")
 		assert.Nil(t, chats)
 	})
 
 	t.Run("non-user recipient returns nil", func(t *testing.T) {
-		chats := b.resolveRecipientChats(ctx, "agent:coder", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "agent:coder", "", "proj-1", "coder")
 		assert.Nil(t, chats)
 	})
 
 	t.Run("email lookup preferred over recipientID", func(t *testing.T) {
 		// When email lookup succeeds, recipientID is not used.
-		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "scion-uuid-456", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:alice@example.com", "scion-uuid-456", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 }
@@ -3336,18 +3781,82 @@ func TestV2_ResolveAttachmentPath_WorkspacePaths(t *testing.T) {
 			projectID: "proj-1",
 			want:      "/home/scion/.scion/projects/my-project/file.txt",
 		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestV2_ResolveAttachmentPath_UntranslatableIsError covers each workspace
+// path that cannot be translated: each returns an error and no path, and
+// the outbound path skips the attachment without opening any file.
+func TestV2_ResolveAttachmentPath_UntranslatableIsError(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		projectID string
+		slugs     map[string]string
+	}{
 		{
-			name:      "no project slug returns original",
+			name:      "dot-dot climbs out of the workspace",
+			path:      "/workspace/../etc/hosts",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			name:      "other absolute path",
+			path:      "/etc/hosts",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			name:      "no project slug",
 			path:      "/workspace/file.txt",
 			projectID: "unknown-proj",
-			want:      "/workspace/file.txt",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			// A slug that cleans the project directory to the root puts
+			// the joined path outside it.
+			name:      "outside the project directory",
+			path:      "/workspace/file.txt",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "../../../../.."},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
-			assert.Equal(t, tt.want, got)
+			tgSrv := newFakeTGServerV2(t)
+			b := newTestBrokerV2(t, tgSrv)
+			b.projectSlugMap = tt.slugs
+
+			got, err := b.resolveAttachmentPath(context.Background(), nil, tt.path, tt.projectID)
+			require.Error(t, err)
+			assert.Empty(t, got)
+
+			var opened []string
+			orig := openAttachmentFile
+			t.Cleanup(func() { openAttachmentFile = orig })
+			openAttachmentFile = func(name string) (*os.File, error) {
+				opened = append(opened, name)
+				return nil, os.ErrNotExist
+			}
+
+			msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
+			msg.Attachments = []string{tt.path}
+			msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
+			require.NoError(t, b.Publish(context.Background(), "scion.project."+tt.projectID+".agent.coder.messages", msg))
+
+			assert.Empty(t, opened, "no attachment path may be opened")
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1, "the message text is delivered without the attachment")
+			assert.Contains(t, sent[0].Text, "report attached")
 		})
 	}
 }
@@ -3369,6 +3878,7 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 		path      string
 		projectID string
 		wantEnd   string // suffix to match (avoids hardcoding HOME)
+		wantErr   bool   // unresolvable: an error and no path, never the input
 	}{
 		{
 			name:      "scion-volumes path with file",
@@ -3395,30 +3905,89 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 			wantEnd:   "project-configs/my-project__550e8400/shared-dirs/cache/data.bin",
 		},
 		{
-			name:      "no project slug returns original",
+			name:      "no project slug is an error",
 			path:      "/scion-volumes/scratchpad/file.txt",
 			projectID: "unknown-proj",
-			wantEnd:   "/scion-volumes/scratchpad/file.txt",
+			wantErr:   true,
 		},
 		{
 			name:      "path traversal rejected",
 			path:      "/scion-volumes/scratchpad/../../etc/passwd",
 			projectID: "550e8400-e29b-41d4-a716-446655440000",
-			wantEnd:   "/scion-volumes/scratchpad/../../etc/passwd",
+			wantErr:   true,
 		},
 		{
 			name:      "path traversal in shared dir name rejected",
 			path:      "/scion-volumes/../.scion/settings.yaml",
 			projectID: "550e8400-e29b-41d4-a716-446655440000",
-			wantEnd:   "/scion-volumes/../.scion/settings.yaml",
+			wantErr:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			got, err := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
 			assert.True(t, strings.HasSuffix(got, filepath.FromSlash(tt.wantEnd)),
 				"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 		})
+	}
+}
+
+// The retired assistant-reply mirror is discarded even if an older hub still
+// forwards it; the same message as an instruction is the control.
+func TestV2_Publish_DiscardsRetiredAssistantReply(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+	meta := map[string]string{"telegram_chat_id": "-200", "telegram_message_id": "42"}
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "turn text",
+			Type: messages.TypeAssistantReply, Metadata: meta}))
+	assert.Empty(t, tgSrv.getSentMessages(), "assistant-reply must be discarded")
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "deliberate",
+			Type: messages.TypeInstruction, Metadata: meta}))
+	assert.Len(t, tgSrv.getSentMessages(), 1, "control: an instruction is sent")
+}
+
+func TestV2_ImportV1ChatRoutes_ResolvesSlugFromBrokerProjectList(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	b.importV1ChatRoutes(ctx, `{"-789": "scion.project.proj1.agent.coder.messages"}`)
+
+	link, err := b.store.GetGroupLink(ctx, -789)
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "alpha", link.ProjectSlug)
+	assert.Equal(t, 1, hub.listFreshCalls)
+	assert.Empty(t, hub.listUserProjectsCalls, "migration does not act as a user")
+}
+
+func TestV2_ImportV1ChatRoutes_ListsBrokerProjectsOnce(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj1", Slug: "alpha"}, {ID: "proj2", Name: "Beta"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	b.importV1ChatRoutes(ctx, `{"-1": "scion.project.proj1.agent.coder.messages", "-2": "scion.project.proj2.broadcast", "-3": "scion.project.proj1.agent.reviewer.messages"}`)
+
+	assert.Equal(t, 1, hub.listFreshCalls)
+	for chatID, want := range map[int64]string{-1: "alpha", -2: "Beta", -3: "alpha"} {
+		link, err := b.store.GetGroupLink(ctx, chatID)
+		require.NoError(t, err)
+		require.NotNil(t, link)
+		assert.Equal(t, want, link.ProjectSlug)
 	}
 }

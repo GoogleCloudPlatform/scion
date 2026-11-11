@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -79,36 +78,6 @@ type ScheduledEvent struct {
 	ScheduleID string     `json:"scheduleId,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
-	type Alias ScheduledEvent
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(e),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if e.ProjectID == "" && aux.GroveID != "" {
-		e.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (e ScheduledEvent) MarshalJSON() ([]byte, error) {
-	type Alias ScheduledEvent
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(e),
-		GroveID: e.ProjectID,
-	})
-}
-
 // ListScheduledEventsOptions configures scheduled event listing.
 type ListScheduledEventsOptions struct {
 	Status    string
@@ -130,7 +99,7 @@ func (s *scheduledEventService) Create(ctx context.Context, req *CreateScheduled
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ScheduledEvent](resp)
+	return apiclient.DecodeRequired[ScheduledEvent](resp)
 }
 
 // Get retrieves a scheduled event by ID.
@@ -139,7 +108,7 @@ func (s *scheduledEventService) Get(ctx context.Context, id string) (*ScheduledE
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ScheduledEvent](resp)
+	return apiclient.DecodeRequired[ScheduledEvent](resp)
 }
 
 // List returns scheduled events matching the filter criteria.
@@ -159,7 +128,7 @@ func (s *scheduledEventService) List(ctx context.Context, opts *ListScheduledEve
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListScheduledEventsResponse](resp)
+	return apiclient.DecodeRequired[ListScheduledEventsResponse](resp)
 }
 
 // Cancel cancels a pending scheduled event.

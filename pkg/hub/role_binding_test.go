@@ -293,10 +293,10 @@ func TestProjectMembership_KeyedByProjectID(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
-	// Create owner role binding (Phase 1F: createProjectMembersGroup
-	// now also creates this, so it may already exist — use idempotent helper).
+	// Create owner role binding (seedProjectCreatorMembership already
+	// creates this, so it may already exist — use idempotent helper).
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
 
 	// Verify membership via project ID
@@ -441,7 +441,7 @@ func TestAuthz_GroupMembershipWithoutRoleBinding_NoBypass(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Add user to the project members group as owner (legacy path)
 	addProjectMemberWithRole(t, s, project, user.ID, store.GroupMemberRoleOwner)
@@ -952,7 +952,7 @@ func TestBackfill_ProjectMembersGetRoleBindings(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Add a member to the project group
 	member := &store.User{

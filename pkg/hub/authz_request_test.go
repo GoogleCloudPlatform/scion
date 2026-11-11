@@ -145,15 +145,13 @@ func (f *faultyGetUserStore) GetUser(ctx context.Context, id string) (*store.Use
 }
 
 // TestAuthzDecideFailClosedOnStoreErrorForMutatingActions verifies that when
-// checkDelegationCeiling returns a non-nil error, Decide() denies non-read-only
-// actions (ActionDelete, ActionStop, ActionUpdate). This pins the fix for the
-// fail-open gap where only isMintingOperation actions were denied on error,
-// leaving mutating-but-non-minting actions (delete, stop, update) allowed.
+// checkDelegationCeiling returns a non-nil error, Decide() denies every
+// action, reads included: a delegator whose authority cannot be established
+// supplies none.
 //
 // The test injects a genuine store fault (non-ErrNotFound) via a thin store
-// wrapper. The fault hits checkUserHoldsPermission → walkDelegationChain,
-// which returns the error to Decide(). The fix in Decide() uses
-// !isReadOnlyOperation (matching walkDelegationChain) instead of isMintingOperation.
+// wrapper. The fault hits the user delegator lookup in walkDelegationChain,
+// which returns the error to Decide().
 func TestAuthzDecideFailClosedOnStoreErrorForMutatingActions(t *testing.T) {
 	_, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -192,7 +190,7 @@ func TestAuthzDecideFailClosedOnStoreErrorForMutatingActions(t *testing.T) {
 	}{
 		{ActionDelete, Resource{Type: "agent", ID: tid("dc-child-failopen"), ParentType: "project", ParentID: projectID}, false, "ActionDelete must fail closed on store error"},
 		{ActionCreate, Resource{Type: "agent", ID: tid("dc-child-failopen2"), ParentType: "project", ParentID: projectID}, false, "ActionCreate must fail closed on store error"},
-		{ActionRead, Resource{Type: "project", ID: projectID}, true, "project read should remain allowed on store error (read-only)"},
+		{ActionRead, Resource{Type: "project", ID: projectID}, false, "project read must fail closed on store error"},
 	} {
 		t.Run(string(tc.action), func(t *testing.T) {
 			decision := faultyAuthz.CheckAccess(ctx, agent, tc.resource, tc.action)

@@ -20,7 +20,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -32,93 +31,32 @@ import (
 // Test helpers for UAT enforcement tests
 // ---------------------------------------------------------------------------
 
-// uatTestSetup creates a test server with seeded role definitions, a non-admin
-// user, a project, and an authz service. The user has NO role bindings by
-// default — callers add only what each test needs.
-func uatTestSetup(t *testing.T) (authz *AuthzService, s store.Store, userID, projectID string) {
-	t.Helper()
-	_, s = testServer(t)
-	ctx := context.Background()
-
-	seedRoleDefinitions(ctx, s)
-
-	projectID = tid("uat-project-1")
-	project := &store.Project{
-		ID:      projectID,
-		Name:    "UAT Test Project",
-		Slug:    "uat-test-project",
-		OwnerID: tid("project-owner"),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	userID = tid("uat-test-user")
-	user := &store.User{
-		ID:          userID,
-		Email:       "uat-user@test.com",
-		DisplayName: "UAT User",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-
-	authz = NewAuthzService(s, nil)
-	return authz, s, userID, projectID
-}
-
-// grantPermissionViaRoleBinding creates a custom role definition with a single
-// permission and binds it to the user at the given scope. Returns the role
-// binding ID for cleanup if needed.
-func grantPermissionViaRoleBinding(t *testing.T, s store.Store, userID, permissionID, scopeType, scopeID string) string {
-	t.Helper()
-	ctx := context.Background()
-
-	rdName := "test-role-" + permissionID + "-" + userID
-	rd := &store.RoleDefinition{
-		Name:        rdName,
-		Description: "Test role granting " + permissionID,
-		ScopeType:   scopeType,
-		Permissions: []string{permissionID},
-		System:      false,
-	}
-	created, err := s.CreateRoleDefinition(ctx, rd)
-	require.NoError(t, err, "creating role definition for %s", permissionID)
-
-	rb := &store.RoleBinding{
-		RoleDefinitionID: created.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        scopeType,
-		ScopeID:          scopeID,
-		CreatedBy:        "test",
-	}
-	binding, err := s.CreateRoleBinding(ctx, rb)
-	require.NoError(t, err, "creating role binding for %s", permissionID)
-	return binding.ID
-}
-
 // makeScopedIdentity creates a ScopedUserIdentity wrapping a non-admin member user.
-func makeScopedIdentity(userID, projectID string, scopes []string) *ScopedUserIdentity {
+// projectBoundaryEligible reports whether permissionID's allowed boundary
+// kinds include the project boundary.
+func projectBoundaryEligible(permissionID string) bool {
+	kinds, _ := permissions.SelectorAllowedBoundaries(permissionID)
+	for _, k := range kinds {
+		if k == permissions.BoundaryKindProject {
+			return true
+		}
+	}
+	return false
+}
+
+// makeHubScopedIdentity builds a hub-boundary token identity whose ceiling
+// carries exactly the given selectors.
+func makeHubScopedIdentity(t *testing.T, userID string, scopes []string) *ScopedUserIdentity {
+	t.Helper()
+	ceiling, ok := permissions.BuildCeilingFromSelectors(scopes)
+	require.True(t, ok, "selectors must resolve: %v", scopes)
 	base := NewAuthenticatedUser(userID, "uat-user@test.com", "UAT User", store.UserRoleMember, "api")
-	return NewScopedUserIdentity(base, projectID, scopes)
+	return NewScopedUserIdentityWithBoundaryAndDecoration(base, TokenBoundary{Kind: BoundaryKindHub}, scopes, "", ceiling, nil)
 }
 
 // ---------------------------------------------------------------------------
 // Group 1: Scope Match + Role Binding -> Allowed
 // ---------------------------------------------------------------------------
-
-// decideAsUAT builds an AuthzRequest that mirrors how real handlers invoke
-// authz: a ScopedUserIdentity (UAT) with the Permission field set so the
-// role-binding evaluation path fires.
-func decideAsUAT(ctx context.Context, authz *AuthzService, userID, projectID string, scopes []string, resource Resource, action Action, permissionID string) Decision {
-	scoped := makeScopedIdentity(userID, projectID, scopes)
-	return authz.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(scoped),
-		Resource:   resource,
-		Action:     action,
-		Permission: permissionID,
-	})
-}
 
 func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 	authz, s, userID, projectID := uatTestSetup(t)
@@ -150,15 +88,6 @@ func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 			action: ActionRead,
 		},
 		{
-			name:         "group:read scope + user has group.read binding",
-			permissionID: "group.read",
-			uatScope:     "group:read",
-			resource: groupResource(&store.Group{
-				ID: tid("group-1"), ProjectID: projectID,
-			}),
-			action: ActionRead,
-		},
-		{
 			name:         "harness_config:read scope + user has harness_config.read binding",
 			permissionID: "harness_config.read",
 			uatScope:     "harness_config:read",
@@ -177,6 +106,15 @@ func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 			action: ActionCreate,
 		},
 		{
+			name:         "group:read scope + user has group.read binding",
+			permissionID: "group.read",
+			uatScope:     "group:read",
+			resource: groupResource(&store.Group{
+				ID: tid("group-1"), ProjectID: projectID,
+			}),
+			action: ActionRead,
+		},
+		{
 			name:         "gcp_service_account:read scope + user has gcp_service_account.read binding",
 			permissionID: "gcp_service_account.read",
 			uatScope:     "gcp_service_account:read",
@@ -193,6 +131,19 @@ func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 			grantPermissionViaRoleBinding(t, s, userID, tc.permissionID, store.RoleScopeSystem, "")
 
 			decision := decideAsUAT(ctx, authz, userID, projectID, []string{tc.uatScope}, tc.resource, tc.action, tc.permissionID)
+			if !projectBoundaryEligible(tc.permissionID) {
+				// The permission is not eligible for a project token; a
+				// hub token with the same selector and binding is allowed.
+				assert.False(t, decision.Allowed)
+				assert.Equal(t, "permission is not eligible for this token boundary", decision.Reason)
+				hub := makeHubScopedIdentity(t, userID, []string{tc.uatScope})
+				decision = authz.Decide(ctx, AuthzRequest{
+					Principal:  principalContextForIdentity(hub),
+					Resource:   tc.resource,
+					Action:     tc.action,
+					Permission: tc.permissionID,
+				})
+			}
 			assert.True(t, decision.Allowed, "expected allowed when UAT scope (%s) AND role binding (%s) both present; reason: %s",
 				tc.uatScope, tc.permissionID, decision.Reason)
 		})
@@ -430,17 +381,42 @@ func TestUATEnforcement_NoPolicyScopesExist(t *testing.T) {
 		}
 	})
 
-	t.Run("no role UAT scopes", func(t *testing.T) {
-		for scope := range validScopes {
-			assert.NotContains(t, scope, "role:", "ValidUATScopes must not include any role:* entries, found: %s", scope)
-		}
+	// Role definitions and role bindings carry exactly the approved
+	// selectors, and each is selectable on a hub boundary only.
+	t.Run("role UAT scopes are the approved hub-only set", func(t *testing.T) {
+		rcaRequireApprovedHubScopes(t, validScopes, "role:", "role:read", "role:create", "role:update", "role:delete")
 	})
 
-	t.Run("no role_binding UAT scopes", func(t *testing.T) {
-		for scope := range validScopes {
-			assert.NotContains(t, scope, "role_binding:", "ValidUATScopes must not include any role_binding:* entries, found: %s", scope)
-		}
+	t.Run("role_binding UAT scopes are the approved hub-only set", func(t *testing.T) {
+		rcaRequireApprovedHubScopes(t, validScopes, "role_binding:", "role_binding:read", "role_binding:create", "role_binding:delete")
 	})
+}
+
+// rcaRequireApprovedHubScopes requires that the valid scopes with prefix are
+// exactly approved, and that each one's permission is selectable on a hub
+// boundary only.
+func rcaRequireApprovedHubScopes(t *testing.T, validScopes map[string]bool, prefix string, approved ...string) {
+	t.Helper()
+	want := map[string]bool{}
+	for _, a := range approved {
+		want[a] = true
+	}
+	for scope := range validScopes {
+		if strings.HasPrefix(scope, prefix) {
+			assert.True(t, want[scope], "ValidUATScopes includes %s, which is not an approved %s* selector", scope, prefix)
+		}
+	}
+	for _, a := range approved {
+		assert.True(t, validScopes[a], "ValidUATScopes should include %s", a)
+	}
+	for _, p := range permissions.Registry {
+		if !want[p.UATScope] {
+			continue
+		}
+		kinds, listed := permissions.SelectorAllowedBoundaries(p.ID)
+		assert.True(t, listed && len(kinds) == 1 && kinds[0] == permissions.BoundaryKindHub,
+			"%s (%s): selector boundaries = %v (listed=%v), want hub only", p.UATScope, p.ID, kinds, listed)
+	}
 }
 
 func TestUATEnforcement_AgentManageExpansionContents(t *testing.T) {
@@ -577,9 +553,26 @@ func TestUATEnforcement_ExistingScopesRegression(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
-	authz := &AuthzService{}
+	// enforceUATConstraints now also requires live project access
+	// (ProjectTargetAdmission, ptone/scion#2092), so this needs a real
+	// store-backed AuthzService and genuine project membership for its
+	// principal -- previously a bare &AuthzService{} sufficed because the
+	// function never touched the store. The membership binding is
+	// deliberately permission-agnostic (ProjectMembershipEvidence does not
+	// care which permissions a role carries), so every case below continues
+	// to test ONLY the scope/project confinement logic this test is named
+	// for, not project access itself. (group:read and gcp_service_account:read
+	// specifically are exercised for the SEPARATE system-authority-only
+	// behavior covered in TestUATProjectAdmission_SystemAuthorityForExactPermission,
+	// in uat_project_relationship_test.go.)
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
 
-	projectID := "test-project-1"
+	testUserID := tid("test-constraint-user")
+	projectID := tid("test-project-1")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Name: "Test Project 1", Slug: "test-project-1"}))
+	createTestUserWithProjectRole(t, s, testUserID, testUserID+"@test.com", projectID, store.ProjectRoleMember)
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: testUserID}
 
 	// All new resource types with their UAT scopes from D1.
 	newResources := []struct {
@@ -819,14 +812,25 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 
 	for _, tc := range newResources {
 		t.Run(tc.name+"_scope_present_passes", func(t *testing.T) {
-			scoped := makeScopedIdentity("test-constraint-user", projectID, []string{tc.scope})
-			result := authz.enforceUATConstraints(scoped, tc.resource, tc.action)
+			scoped := makeScopedIdentity(testUserID, projectID, []string{tc.scope})
+			permissionID, err := resolveResourcePermission(tc.resource.Type, tc.action)
+			require.NoError(t, err)
+			result := authz.enforceUATConstraints(ctx, principal, scoped, tc.resource, tc.action, permissionID)
+			if !projectBoundaryEligible(permissionID) {
+				// The permission is not eligible for this token boundary.
+				require.NotNil(t, result, "a project token must not use %s", permissionID)
+				assert.False(t, result.Allowed)
+				assert.Equal(t, "permission is not eligible for this token boundary", result.Reason)
+				return
+			}
 			assert.Nil(t, result, "enforceUATConstraints should pass (return nil) when scope %s is present", tc.scope)
 		})
 
 		t.Run(tc.name+"_scope_absent_denies", func(t *testing.T) {
-			scoped := makeScopedIdentity("test-constraint-user", projectID, []string{"unrelated:scope"})
-			result := authz.enforceUATConstraints(scoped, tc.resource, tc.action)
+			scoped := makeScopedIdentity(testUserID, projectID, []string{"unrelated:scope"})
+			permissionID, err := resolveResourcePermission(tc.resource.Type, tc.action)
+			require.NoError(t, err)
+			result := authz.enforceUATConstraints(ctx, principal, scoped, tc.resource, tc.action, permissionID)
 			require.NotNil(t, result, "enforceUATConstraints should deny when scope %s is absent", tc.scope)
 			assert.False(t, result.Allowed)
 			assert.Contains(t, result.Reason, "token does not have scope")
@@ -837,11 +841,17 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 // TestEnforceUATConstraints_BrokerHubLevel verifies that broker resources
 // (which are hub-level / parentless) are denied for UATs.
 func TestEnforceUATConstraints_BrokerHubLevel(t *testing.T) {
+	// A bare AuthzService is safe here (no store lookup needed): a broker
+	// resource has no project parent, so the hub-level branch denies before
+	// the live-project-access check (which would need a real store) is
+	// ever reached.
 	authz := &AuthzService{}
+	ctx := context.Background()
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: "test-constraint-user"}
 
 	scoped := makeScopedIdentity("test-constraint-user", "some-project", []string{"broker:read"})
 	resource := brokerResource(&store.RuntimeBroker{ID: "broker-hub-1"})
-	result := authz.enforceUATConstraints(scoped, resource, ActionRead)
+	result := authz.enforceUATConstraints(ctx, principal, scoped, resource, ActionRead, "broker.read")
 
 	// Broker resources are hub-level (no parent project), so UATs should deny them.
 	require.NotNil(t, result, "broker resources are hub-level; UATs should deny them")
@@ -849,14 +859,57 @@ func TestEnforceUATConstraints_BrokerHubLevel(t *testing.T) {
 	assert.Contains(t, result.Reason, "token not scoped for hub-level resources")
 }
 
+// TestDecide_TypedNilScopedUserIdentityDenied pins that a typed-nil
+// *ScopedUserIdentity reaching Decide (for example from a caller that
+// forwards a *ScopedUserIdentity-typed variable without checking whether
+// ValidateToken returned one) is denied, not a panic. Decide's
+// classification check treats a typed-nil identity as a missing principal
+// and denies before step 1, so the step-1 nil deny in enforceUATConstraints
+// is also exercised directly. A bare AuthzService is safe here: both denies
+// are reached before any store lookup.
+func TestDecide_TypedNilScopedUserIdentityDenied(t *testing.T) {
+	authz := &AuthzService{}
+	ctx := context.Background()
+
+	var scoped *ScopedUserIdentity
+	req := AuthzRequest{
+		Principal: PrincipalContext{Kind: PrincipalKindUser, ID: "test-nil-identity-user", Identity: scoped},
+		Resource:  Resource{Type: "agent", ID: "a1", ParentType: "project", ParentID: "p1"},
+		Action:    ActionRead,
+	}
+
+	var result Decision
+	require.NotPanics(t, func() {
+		result = authz.Decide(ctx, req)
+	}, "a typed-nil *ScopedUserIdentity must be denied, not cause a nil-pointer panic")
+
+	assert.False(t, result.Allowed, "a typed-nil identity must never be treated as unconstrained")
+	assert.Equal(t, "missing principal", result.Reason,
+		"a typed-nil identity must be denied by Decide's classification check")
+
+	var direct *Decision
+	require.NotPanics(t, func() {
+		direct = authz.enforceUATConstraints(ctx, req.Principal, scoped, req.Resource, req.Action, "agent.read")
+	}, "enforceUATConstraints must deny a typed-nil *ScopedUserIdentity, not panic")
+	require.NotNil(t, direct, "a typed-nil identity must be denied by the step-1 UAT gate")
+	assert.False(t, direct.Allowed)
+	assert.Equal(t, "token holder lacks active access to the target project", direct.Reason)
+}
+
 // TestEnforceUATConstraints_UserHubLevel verifies that user resources
 // (which are hub-level / parentless) are denied for UATs.
 func TestEnforceUATConstraints_UserHubLevel(t *testing.T) {
+	// Bare AuthzService is safe here for the same reason as
+	// TestEnforceUATConstraints_BrokerHubLevel: a user resource has no
+	// project parent, so the hub-level branch denies before any store
+	// lookup is needed.
 	authz := &AuthzService{}
+	ctx := context.Background()
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: "test-constraint-user"}
 
 	scoped := makeScopedIdentity("test-constraint-user", "some-project", []string{"user:read"})
 	resource := userResource(&store.User{ID: "user-hub-1"})
-	result := authz.enforceUATConstraints(scoped, resource, ActionRead)
+	result := authz.enforceUATConstraints(ctx, principal, scoped, resource, ActionRead, "user.read")
 
 	require.NotNil(t, result, "user resources are hub-level; UATs should deny them")
 	assert.False(t, result.Allowed)
@@ -867,7 +920,12 @@ func TestEnforceUATConstraints_UserHubLevel(t *testing.T) {
 // gcp_service_account resources (no project parent) are denied for UATs.
 // Project-scoped SAs are covered by TestEnforceUATConstraints_NewResourceTypes.
 func TestEnforceUATConstraints_GCPServiceAccountHubLevel(t *testing.T) {
+	// Bare AuthzService is safe here for the same reason as the broker/user
+	// hub-level tests above: a hub-scoped SA has no project parent, so the
+	// hub-level branch denies before any store lookup is needed.
 	authz := &AuthzService{}
+	ctx := context.Background()
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: "test-constraint-user"}
 
 	// Hub-scoped SA has no ParentType/ParentID — gcpServiceAccountResource only
 	// sets those for ScopeProject.
@@ -877,18 +935,19 @@ func TestEnforceUATConstraints_GCPServiceAccountHubLevel(t *testing.T) {
 	})
 
 	for _, action := range []struct {
-		name   string
-		action Action
-		scope  string
+		name         string
+		action       Action
+		scope        string
+		permissionID string
 	}{
-		{"read", ActionRead, "gcp_service_account:read"},
-		{"list", ActionList, "gcp_service_account:list"},
-		{"verify", ActionVerify, "gcp_service_account:verify"},
-		{"assign", ActionAssign, "gcp_service_account:assign"},
+		{"read", ActionRead, "gcp_service_account:read", "gcp_service_account.read"},
+		{"list", ActionList, "gcp_service_account:list", "gcp_service_account.list"},
+		{"verify", ActionVerify, "gcp_service_account:verify", "gcp_service_account.verify"},
+		{"assign", ActionAssign, "gcp_service_account:assign", "gcp_service_account.assign"},
 	} {
 		t.Run(action.name, func(t *testing.T) {
 			scoped := makeScopedIdentity("test-constraint-user", "some-project", []string{action.scope})
-			result := authz.enforceUATConstraints(scoped, hubSA, action.action)
+			result := authz.enforceUATConstraints(ctx, principal, scoped, hubSA, action.action, action.permissionID)
 
 			require.NotNil(t, result, "hub-scoped gcp_service_account must be denied for UATs (action=%s)", action.name)
 			assert.False(t, result.Allowed)
@@ -924,6 +983,8 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 			"project:clone",
 			// Agent manage alias
 			"agent:manage",
+			// Quota administration scopes (hub boundary only)
+			"quota:read", "quota:create", "quota:update", "quota:delete",
 		}
 		for _, scope := range expectedScopes {
 			assert.True(t, validScopes[scope], "ValidUATScopes should include %s", scope)
@@ -931,8 +992,18 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 	})
 
 	t.Run("excludes authority-escalation scopes", func(t *testing.T) {
-		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "quota:", "hub:"}
+		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "hub:"}
+		// Role definitions and role bindings have only the approved
+		// hub-only selectors (TestUATEnforcement_NoPolicyScopesExist);
+		// policy and hub:* have none.
+		approved := map[string]bool{
+			"role:read": true, "role:create": true, "role:update": true, "role:delete": true,
+			"role_binding:read": true, "role_binding:create": true, "role_binding:delete": true,
+		}
 		for scope := range validScopes {
+			if approved[scope] {
+				continue
+			}
 			for _, prefix := range excludedPrefixes {
 				assert.False(t, strings.HasPrefix(scope, prefix),
 					"ValidUATScopes must not include %s (authority-escalation scope)", scope)

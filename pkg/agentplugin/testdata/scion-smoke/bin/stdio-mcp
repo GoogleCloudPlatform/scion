@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Minimal MCP stdio server for the scion-smoke fixture (stdlib only).
+
+Tool `whereami` reports the process cwd, PLUGIN_ROOT, PLUGIN_DATA, whether
+PLUGIN_DATA is writable, and argv, so a smoke test can check the spec's
+launch rules (default cwd = plugin root, placeholder expansion, data dir).
+"""
+import json
+import os
+import sys
+
+PROTOCOL = "2025-06-18"
+
+
+def whereami():
+    data = os.environ.get("PLUGIN_DATA", "")
+    writable = False
+    if data:
+        try:
+            os.makedirs(data, exist_ok=True)
+            probe = os.path.join(data, ".scion-smoke-probe")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.unlink(probe)
+            writable = True
+        except OSError:
+            writable = False
+    return {
+        "cwd": os.getcwd(),
+        "PLUGIN_ROOT": os.environ.get("PLUGIN_ROOT", ""),
+        "PLUGIN_DATA": data,
+        "data_writable": writable,
+        "argv": sys.argv,
+    }
+
+
+def handle(req):
+    method = req.get("method")
+    if method == "initialize":
+        return {
+            "protocolVersion": req.get("params", {}).get("protocolVersion", PROTOCOL),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "scion-smoke-stdio", "version": "0.1.0"},
+        }
+    if method == "tools/list":
+        return {"tools": [{
+            "name": "whereami",
+            "description": "Report this MCP server's cwd, PLUGIN_ROOT, PLUGIN_DATA, data_writable and argv.",
+            "inputSchema": {"type": "object", "properties": {}},
+        }]}
+    if method == "tools/call":
+        name = req.get("params", {}).get("name")
+        if name != "whereami":
+            raise KeyError(name)
+        return {"content": [{"type": "text", "text": json.dumps(whereami(), sort_keys=True)}]}
+    if method == "ping":
+        return {}
+    raise KeyError(method)
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "id" not in req:
+            continue  # notification
+        try:
+            resp = {"jsonrpc": "2.0", "id": req["id"], "result": handle(req)}
+        except KeyError as exc:
+            resp = {"jsonrpc": "2.0", "id": req["id"],
+                    "error": {"code": -32601, "message": f"unknown: {exc}"}}
+        sys.stdout.write(json.dumps(resp) + "\n")
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

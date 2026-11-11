@@ -17,11 +17,11 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -36,46 +36,6 @@ import (
 //
 // The only audit assertion that means anything is one made against the bytes
 // that leave the process.
-
-// captureAuditLogs redirects the default slog logger into a buffer for the
-// duration of the test. LogAuditLogger writes through the package-level
-// slog.LogAttrs, so this is the seam that sees real output.
-func captureAuditLogs(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	buf := &bytes.Buffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return buf
-}
-
-// auditRecords parses every JSON log line in the buffer.
-func auditRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line is not JSON: %q: %v", line, err)
-		}
-		out = append(out, rec)
-	}
-	return out
-}
-
-// auditRecordWithMsg returns the first record whose "msg" matches, or nil.
-func auditRecordWithMsg(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
-	t.Helper()
-	for _, rec := range auditRecords(t, buf) {
-		if rec["msg"] == msg {
-			return rec
-		}
-	}
-	return nil
-}
 
 // ---------------------------------------------------------------------------
 // Item B: GCPTokenEvent.ServiceAccountID
@@ -193,39 +153,49 @@ func TestGCPTokenEvent_EmptyServiceAccountIDStillEmitsKey(t *testing.T) {
 // gap left by 500efd1a. A rejected broker credential left no trace anywhere
 // while this method was a no-op; that is the single event here most worth
 // having, and it must never be suppressed.
+//
+// P4 slice 1 (T8): auth_failure is a broker/auth_failure envelope. The pin
+// keeps the level (WARN) and the identifying fields, now as envelope
+// leaves; the free-form fail_reason is replaced by the classified
+// failure_code.
 func TestBrokerAuthEvent_FailureIsEmittedAtWarn(t *testing.T) {
-	buf := captureAuditLogs(t)
-	logger := NewLogAuditLogger("[Test]", false)
+	logger, envelopes := newBrokerSlogEnvelopeLogger(t)
 
-	err := logger.LogBrokerAuthEvent(context.Background(), &BrokerAuthEvent{
-		EventType:  BrokerAuthEventAuthFailure,
-		BrokerID:   "broker-1",
-		IPAddress:  "203.0.113.7",
-		Success:    false,
-		FailReason: "signature mismatch",
+	err := logger.LogBrokerAuthEvent(brokerTestCtx(t, context.Background(), "req-failure"), &BrokerAuthEvent{
+		EventType:   BrokerAuthEventAuthFailure,
+		BrokerID:    "broker-1",
+		IPAddress:   "203.0.113.7",
+		Success:     false,
+		FailReason:  "signature mismatch",
+		FailureCode: auditevent.BrokerFailureInvalidSignature,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	rec := auditRecordWithMsg(t, envelopes, auditevent.EventName)
 	if rec == nil {
 		t.Fatal("broker auth failure produced no audit record")
 	}
 	if rec["level"] != "WARN" {
 		t.Errorf("level: got %v, want WARN", rec["level"])
 	}
-	if rec["event_type"] != string(BrokerAuthEventAuthFailure) {
-		t.Errorf("event_type: got %v", rec["event_type"])
+	if rec["family"] != "broker" || rec["action"] != "auth_failure" {
+		t.Errorf("family/action: got %v/%v", rec["family"], rec["action"])
 	}
-	if rec["fail_reason"] != "signature mismatch" {
-		t.Errorf("fail_reason: got %v", rec["fail_reason"])
+	payload, _ := rec["payload"].(map[string]any)
+	if payload["failure_code"] != "invalid_signature" {
+		t.Errorf("failure_code: got %v", payload["failure_code"])
 	}
-	if rec["broker_id"] != "broker-1" {
-		t.Errorf("broker_id: got %v", rec["broker_id"])
+	if strings.Contains(envelopes.String(), "signature mismatch") {
+		t.Error("free-form fail_reason must not reach the envelope")
 	}
-	if rec["ip_address"] != "203.0.113.7" {
-		t.Errorf("ip_address: got %v", rec["ip_address"])
+	resource, _ := rec["resource"].(map[string]any)
+	if resource["id"] != "broker-1" {
+		t.Errorf("resource.id: got %v", resource["id"])
+	}
+	if payload["source_ip"] != "203.0.113.7" {
+		t.Errorf("source_ip: got %v", payload["source_ip"])
 	}
 }
 
@@ -254,12 +224,12 @@ func TestBrokerAuthEvent_SuccessIsDebugLevel(t *testing.T) {
 // TestBrokerAuthEvent_AdminEventsAreInfoLevel: the low-volume administrative
 // events are the ones 500efd1a silenced as collateral. Each changes who can
 // talk to the Hub and belongs in normal operation, not behind a debug flag.
+//
+// P4 slice 1 (T8): register, deregister, join and rotate are broker family
+// envelopes, pinned at INFO in TestBrokerAuthEvent_ConvertedAdminEventsAreInfoLevel;
+// the legacy types keep this pin.
 func TestBrokerAuthEvent_AdminEventsAreInfoLevel(t *testing.T) {
 	for _, et := range []BrokerAuthEventType{
-		BrokerAuthEventRegister,
-		BrokerAuthEventDeregister,
-		BrokerAuthEventJoin,
-		BrokerAuthEventRotate,
 		BrokerAuthEventRevoke,
 		BrokerAuthEventLink,
 		BrokerAuthEventUnlink,
@@ -285,6 +255,40 @@ func TestBrokerAuthEvent_AdminEventsAreInfoLevel(t *testing.T) {
 	}
 }
 
+// TestBrokerAuthEvent_ConvertedAdminEventsAreInfoLevel is the envelope form
+// of the INFO pin for the converted administrative events (P4 slice 1, T8).
+func TestBrokerAuthEvent_ConvertedAdminEventsAreInfoLevel(t *testing.T) {
+	for _, et := range []BrokerAuthEventType{
+		BrokerAuthEventRegister,
+		BrokerAuthEventDeregister,
+		BrokerAuthEventJoin,
+		BrokerAuthEventRotate,
+	} {
+		t.Run(string(et), func(t *testing.T) {
+			logger, envelopes := newBrokerSlogEnvelopeLogger(t)
+
+			_ = logger.LogBrokerAuthEvent(brokerTestCtx(t, context.Background(), "req-admin"), &BrokerAuthEvent{
+				EventType: et,
+				BrokerID:  "broker-1",
+				Success:   true,
+				ActorID:   "user-9",
+				ActorType: "user",
+			})
+
+			rec := auditRecordWithMsg(t, envelopes, auditevent.EventName)
+			if rec == nil {
+				t.Fatalf("%s produced no audit record", et)
+			}
+			if rec["level"] != "INFO" {
+				t.Errorf("level: got %v, want INFO", rec["level"])
+			}
+			if rec["action"] != string(et) {
+				t.Errorf("action: got %v", rec["action"])
+			}
+		})
+	}
+}
+
 // TestBrokerAuthEvent_LinkCarriesProjectID covers the debug-gating defect the
 // no-op was hiding. LogLinkEvent puts projectId in Details, and a link record
 // without it says "broker B was linked" without saying to what.
@@ -294,7 +298,7 @@ func TestBrokerAuthEvent_LinkCarriesProjectID(t *testing.T) {
 	logger := NewLogAuditLogger("[Test]", false)
 
 	LogLinkEvent(context.Background(), logger,
-		"broker-1", "broker-name", "project-42", "user-9", "203.0.113.7")
+		"broker-1", "broker-name", "project-42", "user-9", "203.0.113.7", nil)
 
 	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
 	if rec == nil {
@@ -310,22 +314,25 @@ func TestBrokerAuthEvent_LinkCarriesProjectID(t *testing.T) {
 
 // TestBrokerAuthEvent_ActorIsEmittedAsAPair: an actor id without its type is
 // ambiguous between a user and a broker acting on its own behalf.
+//
+// P4 slice 1 (T8): registration is a broker/register envelope; the actor
+// pair is its principal {kind, id}.
 func TestBrokerAuthEvent_ActorIsEmittedAsAPair(t *testing.T) {
-	buf := captureAuditLogs(t)
-	logger := NewLogAuditLogger("[Test]", false)
+	logger, envelopes := newBrokerSlogEnvelopeLogger(t)
 
-	LogRegistrationEvent(context.Background(), logger,
-		"broker-1", "broker-name", "user-9", "203.0.113.7")
+	LogRegistrationEvent(brokerTestCtx(t, context.Background(), "req-actor"), logger,
+		"broker-1", "broker-name", "user-9", "203.0.113.7", auditevent.BrokerRegisterNew, nil)
 
-	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	rec := auditRecordWithMsg(t, envelopes, auditevent.EventName)
 	if rec == nil {
 		t.Fatal("registration produced no audit record")
 	}
-	if rec["actor_id"] != "user-9" {
-		t.Errorf("actor_id: got %v", rec["actor_id"])
+	principal, _ := rec["principal"].(map[string]any)
+	if principal["id"] != "user-9" {
+		t.Errorf("principal.id: got %v", principal["id"])
 	}
-	if rec["actor_type"] != "user" {
-		t.Errorf("actor_type: got %v", rec["actor_type"])
+	if principal["kind"] != "user" {
+		t.Errorf("principal.kind: got %v", principal["kind"])
 	}
 }
 
@@ -340,24 +347,53 @@ func TestBrokerAuthEvent_NilEventDoesNotPanic(t *testing.T) {
 
 // TestBrokerAuthEvent_FailedAdminActionIsWarn: the level switch keys on success
 // first, so a failed rotate is a warning even though rotate is administrative.
+//
+// P4 slice 1 (T8): rotate is converted, and its catalog entry admits only
+// commit/succeeded. No production site emits a failed rotate, so this
+// input is a bug path: no envelope, and one WARN operational line naming
+// the action and the reason.
 func TestBrokerAuthEvent_FailedAdminActionIsWarn(t *testing.T) {
 	buf := captureAuditLogs(t)
 	logger := NewLogAuditLogger("[Test]", false)
+	sink := auditevent.NewCaptureSink()
+	logger.setBrokerEnvelopeSink(sink)
 
-	_ = logger.LogBrokerAuthEvent(context.Background(), &BrokerAuthEvent{
+	_ = logger.LogBrokerAuthEvent(brokerTestCtx(t, context.Background(), "req-failed-admin"), &BrokerAuthEvent{
 		EventType:  BrokerAuthEventRotate,
 		BrokerID:   "broker-1",
 		Success:    false,
 		FailReason: "store unavailable",
 	})
 
-	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	if n := len(sink.Records()); n != 0 {
+		t.Fatalf("failed rotate produced %d envelopes, want 0", n)
+	}
+	rec := auditRecordWithMsg(t, buf, brokerAuditDroppedMsg)
 	if rec == nil {
-		t.Fatal("failed rotate produced no audit record")
+		t.Fatal("failed rotate produced no warning")
 	}
 	if rec["level"] != "WARN" {
 		t.Errorf("level: got %v, want WARN", rec["level"])
 	}
+	if rec["action"] != "rotate" {
+		t.Errorf("action: got %v", rec["action"])
+	}
+}
+
+// newBrokerSlogEnvelopeLogger returns a LogAuditLogger whose converted
+// broker events go through a real SlogSink to the returned buffer as JSON
+// (so the slog level is observable), with legacy lines captured as usual.
+func newBrokerSlogEnvelopeLogger(t *testing.T) (*LogAuditLogger, *bytes.Buffer) {
+	t.Helper()
+	captureAuditLogs(t)
+	logger := NewLogAuditLogger("[Test]", false)
+	envelopes := &bytes.Buffer{}
+	sink, err := auditevent.NewSlogSink(slog.New(slog.NewJSONHandler(envelopes, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	if err != nil {
+		t.Fatalf("NewSlogSink: %v", err)
+	}
+	logger.setBrokerEnvelopeSink(sink)
+	return logger, envelopes
 }
 
 // ---------------------------------------------------------------------------

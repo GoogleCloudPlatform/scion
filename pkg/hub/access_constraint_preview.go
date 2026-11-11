@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -232,7 +233,7 @@ func (ps *PreviewService) GeneratePreview(ctx context.Context, req PreviewReques
 	page := ps.buildAffectedPage(impactedPrincipals, 0, defaultPreviewPageSize, &completeness)
 
 	// Compute state fingerprint for token binding.
-	stateFingerprint := ps.computeStateFingerprint(ctx, req, now)
+	stateFingerprint := ps.computeConstraintStateFingerprint(ctx, req, now)
 
 	// Generate preview ID and token.
 	previewID := ps.generatePreviewID()
@@ -959,8 +960,13 @@ func (ps *PreviewService) getBasePermissions(
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
 
-	// Load role bindings.
+	// Load role bindings, applying the test-identity grant clamp (this
+	// store handle is not the authorization service's).
 	bindings, err := ps.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	bindings, err = clampTestIdentityBindings(ctx, ps.store, ps.authz, principals, bindings)
 	if err != nil {
 		return nil, err
 	}
@@ -977,12 +983,7 @@ func (ps *PreviewService) getBasePermissions(
 		}
 		// Check activation.
 		cb := &CandidateBinding{BindingID: b.ID}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
+		cb.NotBefore, cb.ExpiresAt = candidateActivationBounds(b)
 		activation := evaluateActivation(cb, now)
 		if !activation.Active {
 			continue
@@ -1289,7 +1290,7 @@ func (ps *PreviewService) assessLockout(
 	proposedStore := ps.hubToStoreConstraint(proposed)
 
 	// Resolve admin users.
-	adminUsers, err := ps.resolveAdminUsers(ctx, scopeType, scopeID)
+	adminUsers, err := ps.resolveAdminUsers(ctx, now, scopeType, scopeID)
 	if err != nil {
 		ps.logger.Warn("lockout check: failed to resolve admin users", "error", err)
 		return LockoutAssessment{
@@ -1390,20 +1391,106 @@ func (ps *PreviewService) assessLockout(
 	}
 }
 
-// resolveAdminUsers finds users with constraint-admin permission at a scope.
-func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scopeID string) ([]adminUserInfo, error) {
-	bindings, err := ps.store.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+// resolveAdminUsers finds users with constraint-admin permission at a
+// scope at now.
+func (ps *PreviewService) resolveAdminUsers(ctx context.Context, now time.Time, scopeType, scopeID string) ([]adminUserInfo, error) {
+	return resolveConstraintAdminUsers(ctx, ps.store, now, scopeType, scopeID)
+}
+
+// resolveConstraintAdminUsers finds the active users with constraint-admin
+// permission at a scope, through direct and group role bindings; a group
+// binding covers the group's effective (transitive) user members. A user
+// counts only when the user row exists with status active: a suspended,
+// invited or missing user holds no effective authority, so counting one
+// would let a lockout check pass with no admin able to act. Only a
+// binding active at now (isBindingActive) admits a user: a binding that
+// is not yet valid or has expired grants no authority. A role
+// definition read error fails the resolution; a binding whose role
+// definition no longer exists grants nothing and is skipped.
+func resolveConstraintAdminUsers(ctx context.Context, st store.Store, now time.Time, scopeType, scopeID string) ([]adminUserInfo, error) {
+	admins, _, err := resolveConstraintAdmins(ctx, st, now, scopeType, scopeID)
+	return admins, err
+}
+
+// resolveConstraintAdmins returns the admins resolveConstraintAdminUsers
+// returns, and the IDs of the other users that would count but hold
+// constraint-admin bindings at the scope only outside their activation
+// window (inactiveOnly).
+func resolveConstraintAdmins(ctx context.Context, st store.Store, now time.Time, scopeType, scopeID string) ([]adminUserInfo, map[string]bool, error) {
+	bindings, err := st.ListRoleBindingsForScope(ctx, scopeType, scopeID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	seen := make(map[string]bool)
+	inactiveOnly := make(map[string]bool)
 	var admins []adminUserInfo
 
-	for _, b := range bindings {
-		rd, err := ps.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+	// This read is unclamped (not through the authorization service), so a
+	// member-tier test identity, which never holds system-scoped authority
+	// beyond member, is excluded explicitly at system scope; an admin-kind
+	// test identity (temporary) and a row of unrecognized kind never count,
+	// at any scope (only positively human rows do: IsHumanKind). A
+	// user-read error fails the resolution, which callers treat as
+	// undetermined (refused).
+	skipUser := func(userID string) (bool, error) {
+		u, found, err := lookupUserForKind(ctx, st, userID)
 		if err != nil {
+			return false, err
+		}
+		if !found || u.Status != store.UserStatusActive {
+			return true, nil
+		}
+		if u.IsTestFixture() {
+			return scopeType == store.RoleScopeSystem, nil
+		}
+		return !u.IsHumanKind(), nil
+	}
+
+	// groupUsers returns the user members of a bound group through
+	// effective (transitive) membership: the users of the group and of
+	// every group nested in it at any depth, each once. It walks the same
+	// group nesting GetEffectiveGroups closes over for a user, so a user
+	// is found from a group exactly when isConstraintAdmin counts that
+	// group among the user's groups. Each group is read once, so a cycle
+	// ends the walk. A read error fails the resolution.
+	groupUsers := func(groupID string) ([]string, error) {
+		var users []string
+		seenUser := make(map[string]bool)
+		visited := map[string]bool{groupID: true}
+		queue := []string{groupID}
+		for len(queue) > 0 {
+			gid := queue[0]
+			queue = queue[1:]
+			members, err := st.GetGroupMembers(ctx, gid)
+			if err != nil {
+				return nil, fmt.Errorf("get members for group %s: %w", gid, err)
+			}
+			for _, m := range members {
+				switch m.MemberType {
+				case store.GroupMemberTypeUser:
+					if !seenUser[m.MemberID] {
+						seenUser[m.MemberID] = true
+						users = append(users, m.MemberID)
+					}
+				case store.GroupMemberTypeGroup:
+					if !visited[m.MemberID] {
+						visited[m.MemberID] = true
+						queue = append(queue, m.MemberID)
+					}
+				}
+			}
+		}
+		return users, nil
+	}
+
+	for _, b := range bindings {
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if errors.Is(err, store.ErrNotFound) {
 			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("get role definition %s: %w", b.RoleDefinitionID, err)
 		}
 		hasAdmin := false
 		for _, p := range rd.Permissions {
@@ -1416,13 +1503,52 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 			continue
 		}
 
+		if !isBindingActive(b, now) {
+			var ids []string
+			switch b.PrincipalType {
+			case "user":
+				ids = append(ids, b.PrincipalID)
+			case "group":
+				members, err := groupUsers(b.PrincipalID)
+				if err != nil {
+					return nil, nil, err
+				}
+				ids = append(ids, members...)
+			}
+			for _, id := range ids {
+				if inactiveOnly[id] {
+					continue
+				}
+				skip, err := skipUser(id)
+				if err != nil {
+					return nil, nil, fmt.Errorf("check admin user %s: %w", id, err)
+				}
+				if skip {
+					continue
+				}
+				// The same group read as for an admitted user, so a
+				// read error fails the resolution on either path.
+				if _, err := st.GetEffectiveGroups(ctx, id); err != nil {
+					return nil, nil, fmt.Errorf("get effective groups for user %s: %w", id, err)
+				}
+				inactiveOnly[id] = true
+			}
+			continue
+		}
+
 		// Resolve to individual users.
 		switch b.PrincipalType {
 		case "user":
 			if !seen[b.PrincipalID] {
-				groups, err := ps.store.GetEffectiveGroups(ctx, b.PrincipalID)
+				if skip, err := skipUser(b.PrincipalID); err != nil {
+					return nil, nil, fmt.Errorf("check admin user %s: %w", b.PrincipalID, err)
+				} else if skip {
+					seen[b.PrincipalID] = true
+					continue
+				}
+				groups, err := st.GetEffectiveGroups(ctx, b.PrincipalID)
 				if err != nil {
-					return nil, fmt.Errorf("get effective groups for user %s: %w", b.PrincipalID, err)
+					return nil, nil, fmt.Errorf("get effective groups for user %s: %w", b.PrincipalID, err)
 				}
 				seen[b.PrincipalID] = true
 				admins = append(admins, adminUserInfo{
@@ -1431,28 +1557,38 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 				})
 			}
 		case "group":
-			// Expand group members.
-			members, err := ps.store.GetGroupMembers(ctx, b.PrincipalID)
+			// Expand the group's effective user members.
+			members, err := groupUsers(b.PrincipalID)
 			if err != nil {
-				return nil, fmt.Errorf("get members for group %s: %w", b.PrincipalID, err)
+				return nil, nil, err
 			}
-			for _, m := range members {
-				if m.MemberType == "user" && !seen[m.MemberID] {
-					groups, err := ps.store.GetEffectiveGroups(ctx, m.MemberID)
-					if err != nil {
-						return nil, fmt.Errorf("get effective groups for user %s: %w", m.MemberID, err)
-					}
-					seen[m.MemberID] = true
-					admins = append(admins, adminUserInfo{
-						userID:   m.MemberID,
-						groupIDs: groups,
-					})
+			for _, id := range members {
+				if seen[id] {
+					continue
 				}
+				if skip, err := skipUser(id); err != nil {
+					return nil, nil, fmt.Errorf("check admin user %s: %w", id, err)
+				} else if skip {
+					seen[id] = true
+					continue
+				}
+				groups, err := st.GetEffectiveGroups(ctx, id)
+				if err != nil {
+					return nil, nil, fmt.Errorf("get effective groups for user %s: %w", id, err)
+				}
+				seen[id] = true
+				admins = append(admins, adminUserInfo{
+					userID:   id,
+					groupIDs: groups,
+				})
 			}
 		}
 	}
 
-	return admins, nil
+	for _, a := range admins {
+		delete(inactiveOnly, a.userID)
+	}
+	return admins, inactiveOnly, nil
 }
 
 // constraintMatchesUser checks if a store constraint matches a user.
@@ -1730,7 +1866,7 @@ func (ps *PreviewService) generateWarnings(
 			warnings = append(warnings, PreviewWarning{
 				Code:     WarningCodeScheduledActivation,
 				Severity: "info",
-				Message:  fmt.Sprintf("constraint will activate at %s", ts.Until.Format(time.RFC3339)),
+				Message:  fmt.Sprintf("constraint will activate at %s", ts.Until.UTC().Format(time.RFC3339)),
 			})
 			break
 		}
@@ -2019,13 +2155,16 @@ func (ps *PreviewService) issueToken(
 // Token validation
 // ---------------------------------------------------------------------------
 
-// ValidateToken validates a preview token for commit.
+// ValidateToken validates a preview token for commit. constraintID is the
+// target constraint of an update or delete (empty for create); a token for
+// an update or delete is accepted only for the constraint it was issued for.
 // Returns nil on success, or a TokenValidationError with a specific code.
 func (ps *PreviewService) ValidateToken(
 	ctx context.Context,
 	token string,
 	actor PrincipalContext,
 	operation string,
+	constraintID string,
 	draft *store.AccessConstraint,
 	objectRevision int64,
 ) error {
@@ -2100,6 +2239,17 @@ func (ps *PreviewService) ValidateToken(
 		}
 	}
 
+	// Check the target constraint: an update or delete token is accepted
+	// only for the constraint it was issued for.
+	if operation == "update" || operation == "delete" {
+		if constraintID == "" || payload.ConstraintID != constraintID {
+			return &TokenValidationError{
+				Code:    ErrCodePreviewConstraintMismatch,
+				Message: "target constraint does not match the preview token",
+			}
+		}
+	}
+
 	// Check draft hash.
 	draftHash := ps.computeDraftHash(draft)
 	if draftHash != payload.DraftHash {
@@ -2125,8 +2275,8 @@ func (ps *PreviewService) ValidateToken(
 		}
 	}
 
-	// Check state fingerprint (related state may have changed).
-	currentFingerprint := ps.computeStateFingerprint(ctx, PreviewRequest{
+	// Check the constraint-state fingerprint (constraints in scope may have changed).
+	currentFingerprint := ps.computeConstraintStateFingerprint(ctx, PreviewRequest{
 		Operation:    operation,
 		Draft:        draft,
 		ConstraintID: payload.ConstraintID,
@@ -2136,7 +2286,7 @@ func (ps *PreviewService) ValidateToken(
 	if currentFingerprint != payload.StateFingerprint {
 		return &TokenValidationError{
 			Code:    ErrCodePreviewStateMismatch,
-			Message: "related state has changed since preview was generated (group membership, role bindings, etc.)",
+			Message: "access constraint state has changed since preview was generated",
 		}
 	}
 
@@ -2155,9 +2305,12 @@ func (ps *PreviewService) ValidateToken(
 // State fingerprint
 // ---------------------------------------------------------------------------
 
-// computeStateFingerprint computes a hash over relevant state timestamps
-// and counts to detect changes since the preview was generated.
-func (ps *PreviewService) computeStateFingerprint(
+// computeConstraintStateFingerprint hashes access-constraint state only: the
+// total constraint count and the (id, revision, updated_at) of every
+// constraint in the draft's scope. It detects constraint changes since the
+// preview was generated. Role bindings, group memberships and principal
+// status are not included.
+func (ps *PreviewService) computeConstraintStateFingerprint(
 	ctx context.Context,
 	req PreviewRequest,
 	now time.Time,

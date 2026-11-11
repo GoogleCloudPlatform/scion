@@ -103,7 +103,7 @@ func TestProductionLifecycleInputRequiredContinuationAndTerminal(t *testing.T) {
 	}()
 	time.Sleep(100 * time.Millisecond)
 	postBrokerMessage(t, procA.URL(), fmt.Sprintf("scion.project.%s.user.admin.messages", project), &messages.StructuredMessage{
-		Sender: "agent:agent-input", Type: messages.TypeAssistantReply, Msg: "continued terminal response",
+		Sender: "agent:agent-input", Type: messages.TypeInstruction, Msg: "continued terminal response",
 		Timestamp: time.Now().UTC().Format(time.RFC3339), Metadata: map[string]string{"msgId": "accepted-continue-final", "a2aTaskId": taskID},
 	})
 	continuedResult := <-continued
@@ -208,7 +208,7 @@ func TestContinuationWaitStartsAfterOwnedTaskCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &Bridge{store: stateStore, log: slog.Default(), config: &Config{}}
-	event, err := b.waitForTaskEvent(ctx, taskID, time.Second, sdkStore)
+	event, err := b.waitForTaskEvent(ctx, taskID, time.Second, waitOptions{sdkStore: sdkStore})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestContinuationCursorOwnershipDenials(t *testing.T) {
 		"missing route": context.Background(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			event, waitErr := b.waitForTaskEvent(deniedCtx, taskID, 100*time.Millisecond, sdkStore)
+			event, waitErr := b.waitForTaskEvent(deniedCtx, taskID, 100*time.Millisecond, waitOptions{sdkStore: sdkStore})
 			if waitErr == nil || event != nil {
 				t.Fatalf("unauthorized cursor read succeeded: event=%+v err=%v", event, waitErr)
 			}

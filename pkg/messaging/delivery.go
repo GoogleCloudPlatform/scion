@@ -36,6 +36,7 @@ type ConversationInfo struct {
 // It replaces the old deliveryMessage struct in pkg/messages/format.go.
 type DeliveryEnvelope struct {
 	Timestamp    string            `json:"timestamp"`
+	MessageID    string            `json:"message_id,omitempty"` // persisted message ID; omitted when there is no stored row
 	Conversation *ConversationInfo `json:"conversation,omitempty"`
 	From         string            `json:"from"`            // PrincipalRef
 	To           []string          `json:"to,omitempty"`    // addressee PrincipalRefs
@@ -45,22 +46,31 @@ type DeliveryEnvelope struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Urgent       bool              `json:"urgent,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
-	ReplyTo      *string           `json:"reply_to,omitempty"`      // msg ID
-	ReplyContext string            `json:"reply_context,omitempty"` // first 32 chars of replied-to message
+	// AttachmentMounts names, for each entry of Attachments that is a path
+	// in a shared dir (for example a scratchpad projection), that shared
+	// dir, keyed by the path: the path is valid only in a container that
+	// mounts it. Entries not listed are in the recipient's own home or
+	// workspace (ptone/scion#5827).
+	AttachmentMounts map[string]string `json:"attachment_mounts,omitempty"`
+	ReplyTo          *string           `json:"reply_to,omitempty"`      // msg ID
+	ReplyContext     string            `json:"reply_context,omitempty"` // first 32 chars of replied-to message
 }
 
 // DeliveryOptions captures transport-level options that are not part of the
 // message envelope itself (per design section 2.8).
 type DeliveryOptions struct {
-	Plain bool // deliver raw text only, no JSON wrapper
-	Raw   bool // keystroke injection — raw text only
+	Plain bool // deliver the message text only, no JSON wrapper
 }
 
 // FormatNewDelivery formats a new-style Message with its Addressees and
 // conversation context into the delivery envelope for an agent.
 // convInfo may be nil when no conversation context is available; the
 // "conversation" key is omitted from the envelope rather than fabricated.
-// If the message has plain/raw delivery options, only the raw msg text is returned.
+// If the message has the plain delivery option, only the msg text is returned.
+//
+// The envelope's "message_id" carries msg.ID, the persisted message row's ID,
+// so a recipient can refer to the exact message it received. When msg.ID is
+// empty (no stored row), the key is omitted rather than fabricated.
 //
 // isMention, when true, sets the envelope's type to "mention" (instead of
 // "message") and forces the "to" field to be present even for a single
@@ -74,12 +84,13 @@ func FormatNewDelivery(
 	isMention bool,
 	isReply bool,
 ) string {
-	if opts.Plain || opts.Raw {
+	if opts.Plain {
 		return msg.Body
 	}
 
 	env := DeliveryEnvelope{
 		Timestamp:    msg.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		MessageID:    msg.ID,
 		Conversation: convInfo,
 		From:         string(msg.From),
 		Type:         typeString(msg.Kind, isMention, isReply),
@@ -106,6 +117,12 @@ func FormatNewDelivery(
 	// Map attachments to plain paths.
 	for _, a := range msg.Attachments {
 		env.Attachments = append(env.Attachments, a.Path)
+		if a.Mount != "" {
+			if env.AttachmentMounts == nil {
+				env.AttachmentMounts = make(map[string]string)
+			}
+			env.AttachmentMounts[a.Path] = a.Mount
+		}
 	}
 
 	// Promote RE-to from metadata to top-level reply_context.

@@ -26,12 +26,22 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import type { Message } from '../../../shared/types.js';
 
 @customElement('scion-chat-interagent-marker')
 export class ScionChatInteragentMarker extends LitElement {
+  /**
+   * Re-renders this marker when the effective display zone changes
+   * (review R2-1).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Number of messages in this group. */
   @property({ type: Number })
   messageCount = 0;
@@ -60,195 +70,217 @@ export class ScionChatInteragentMarker extends LitElement {
   @state()
   private expandedMessage: Message | null = null;
 
-  /** Rendered HTML for the expanded message popover. */
+  /**
+   * Rendered body of the expanded message popover (an `.ia-full-body`
+   * element), or null to show the text as is.
+   */
   @state()
-  private expandedHtml = '';
+  private expandedContent: HTMLElement | null = null;
 
   /** Set of message IDs whose `.ia-body` is truncated by the line clamp. */
   @state()
   private truncatedIds: ReadonlySet<string> = new Set();
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    chatDateDividerStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    :host([hidden]) {
-      display: none;
-    }
+      :host([hidden]) {
+        display: none;
+      }
 
-    /* Collapsed pill — centered compact badge */
-    .marker-pill {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      max-width: 40%;
-      margin-left: auto;
-      margin-right: auto;
-      padding: 0.375rem 1rem;
-      margin-top: 0.25rem;
-      margin-bottom: 0.25rem;
-      background: rgba(148, 163, 184, 0.1);
-      border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
-      border-radius: 9999px;
-      cursor: pointer;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #64748b);
-      transition: background 0.15s;
-      user-select: none;
-      text-align: center;
-    }
+      /* Collapsed pill — centered compact badge */
+      .marker-pill {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        max-width: 40%;
+        margin-left: auto;
+        margin-right: auto;
+        padding: 0.375rem 1rem;
+        margin-top: 0.25rem;
+        margin-bottom: 0.25rem;
+        background: rgba(148, 163, 184, 0.1);
+        border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
+        border-radius: 9999px;
+        cursor: pointer;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        transition: background 0.15s;
+        user-select: none;
+        text-align: center;
+      }
 
-    .marker-pill:hover {
-      background: rgba(148, 163, 184, 0.18);
-    }
+      .marker-pill:hover {
+        background: rgba(148, 163, 184, 0.18);
+      }
 
-    /* Expanded state — bordered container, centered to match collapsed pill */
-    .marker-expanded {
-      max-width: min(70%, 600px); /* match .bubble max-width in chat-message.ts */
-      margin-left: auto; /* centered */
-      margin-right: auto;
-      margin-top: 0.25rem;
-      margin-bottom: 0.25rem;
-      padding: 0.5rem 1rem;
-      background: rgba(148, 163, 184, 0.05);
-      border: 2px solid var(--scion-border, rgba(148, 163, 184, 0.2));
-      border-radius: 0.5rem;
-      cursor: pointer;
-      user-select: none;
-    }
+      /* Expanded state — bordered container, centered to match collapsed pill */
+      .marker-expanded {
+        max-width: min(70%, 600px); /* match .bubble max-width in chat-message.ts */
+        margin-left: auto; /* centered */
+        margin-right: auto;
+        margin-top: 0.25rem;
+        margin-bottom: 0.25rem;
+        padding: 0.5rem 1rem;
+        background: rgba(148, 163, 184, 0.05);
+        border: 2px solid var(--scion-border, rgba(148, 163, 184, 0.2));
+        border-radius: 0.5rem;
+        cursor: pointer;
+        user-select: none;
+      }
 
-    .marker-expanded:hover {
-      background: rgba(148, 163, 184, 0.1);
-    }
+      .marker-expanded:hover {
+        background: rgba(148, 163, 184, 0.1);
+      }
 
-    .ia-msg {
-      display: flex;
-      align-items: baseline;
-      gap: 0.25rem;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #64748b);
-      line-height: 1.4;
-      padding: 0.125rem 0;
-    }
+      .ia-msg {
+        display: block;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        line-height: 1.4;
+        padding: 0.25rem 0;
+      }
 
-    .ia-sender {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      white-space: nowrap;
-    }
+      .ia-msg-header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.25rem;
+        white-space: nowrap;
+      }
 
-    .ia-arrow {
-      color: var(--scion-text-muted, #94a3b8);
-      flex-shrink: 0;
-    }
+      .ia-time {
+        font-size: 0.6875rem;
+        color: var(--scion-text-muted, #94a3b8);
+        margin-right: 0.25rem;
+      }
 
-    .ia-recipient {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      white-space: nowrap;
-    }
+      .ia-sender {
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        white-space: nowrap;
+      }
 
-    .ia-body {
-      color: var(--scion-text-muted, #64748b);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-    }
+      .ia-arrow {
+        color: var(--scion-text-muted, #94a3b8);
+        flex-shrink: 0;
+      }
 
-    /* Expand icon button — shown only on truncated messages */
-    .ia-expand {
-      flex-shrink: 0;
-      margin-left: auto;
-    }
+      .ia-recipient {
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        white-space: nowrap;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
 
-    .ia-expand sl-icon-button::part(base) {
-      padding: 0.125rem;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #94a3b8);
-    }
+      .ia-body {
+        margin-top: 0.125rem;
+        margin-left: 0.5rem;
+        color: var(--scion-text-muted, #64748b);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+      }
 
-    .ia-expand sl-icon-button::part(base):hover {
-      color: var(--scion-primary-600, #2563eb);
-    }
+      /* Expand icon button — shown only on truncated messages */
+      .ia-expand {
+        flex-shrink: 0;
+        margin-left: auto;
+      }
 
-    .ia-cross-project {
-      font-size: 0.6875rem;
-      font-weight: 500;
-      color: var(--sl-color-success-700, #15803d);
-      background: var(--sl-color-success-50, #f0fdf4);
-      padding: 0 0.25rem;
-      border-radius: 0.1875rem;
-      flex-shrink: 0;
-      white-space: nowrap;
-    }
+      .ia-expand sl-icon-button::part(base) {
+        padding: 0.125rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #94a3b8);
+      }
 
-    /* Full message popover dialog */
-    .ia-full-preview::part(panel) {
-      width: 90vw;
-      max-width: 700px;
-    }
+      .ia-expand sl-icon-button::part(base):hover {
+        color: var(--scion-primary-600, #2563eb);
+      }
 
-    .ia-full-preview::part(body) {
-      padding: 1rem;
-    }
+      .ia-cross-project {
+        font-size: 0.6875rem;
+        font-weight: 500;
+        color: var(--sl-color-success-700, #15803d);
+        background: var(--sl-color-success-50, #f0fdf4);
+        padding: 0 0.25rem;
+        border-radius: 0.1875rem;
+        flex-shrink: 0;
+        white-space: nowrap;
+      }
 
-    .ia-full-preview .ia-full-header {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #64748b);
-      margin-bottom: 0.75rem;
-      padding-bottom: 0.5rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
+      /* Full message popover dialog */
+      .ia-full-preview::part(panel) {
+        width: 90vw;
+        max-width: 700px;
+      }
 
-    .ia-full-preview .ia-full-header .ia-sender,
-    .ia-full-preview .ia-full-header .ia-recipient {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
+      .ia-full-preview::part(body) {
+        padding: 1rem;
+      }
 
-    .ia-full-preview .ia-full-body {
-      font-size: var(--chat-fs-lg);
-      line-height: 1.6;
-      color: var(--scion-text, #1e293b);
-      overflow-wrap: break-word;
-    }
+      .ia-full-preview .ia-full-header {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        margin-bottom: 0.75rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
 
-    .ia-full-preview .ia-full-body p {
-      margin: 0 0 0.5em;
-    }
+      .ia-full-preview .ia-full-header .ia-sender,
+      .ia-full-preview .ia-full-header .ia-recipient {
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
 
-    .ia-full-preview .ia-full-body p:last-child {
-      margin-bottom: 0;
-    }
+      .ia-full-preview .ia-full-body {
+        font-size: var(--chat-fs-lg);
+        line-height: 1.6;
+        color: var(--scion-text, #1e293b);
+        overflow-wrap: break-word;
+      }
 
-    .ia-full-preview .ia-full-body pre {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.75rem;
-      overflow-x: auto;
-      margin: 0.5em 0;
-    }
+      .ia-full-preview .ia-full-body p {
+        margin: 0 0 0.5em;
+      }
 
-    .ia-full-preview .ia-full-body code {
-      font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
-      font-size: 0.8125em;
-    }
+      .ia-full-preview .ia-full-body p:last-child {
+        margin-bottom: 0;
+      }
 
-    .ia-full-preview .ia-full-body-plain {
-      white-space: pre-wrap;
-      font-size: var(--chat-fs-lg);
-      line-height: 1.6;
-      color: var(--scion-text, #1e293b);
-    }
-  `;
+      .ia-full-preview .ia-full-body pre {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 0.375rem;
+        padding: 0.75rem;
+        overflow-x: auto;
+        margin: 0.5em 0;
+      }
+
+      .ia-full-preview .ia-full-body code {
+        font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
+        font-size: 0.8125em;
+      }
+
+      .ia-full-preview .ia-full-body-plain {
+        white-space: pre-wrap;
+        font-size: var(--chat-fs-lg);
+        line-height: 1.6;
+        color: var(--scion-text, #1e293b);
+      }
+    `,
+  ];
 
   override updated(changed: Map<string, unknown>): void {
     // React to global expand/collapse toggle changes.
@@ -321,17 +353,22 @@ export class ScionChatInteragentMarker extends LitElement {
   /** Open the full-content popover for a message. */
   private async openMessagePreview(msg: Message, e: Event): Promise<void> {
     e.stopPropagation(); // Don't toggle the marker collapse.
-    // Await markdown rendering first, then set both expandedHtml and
+    // Await markdown rendering first, then set both expandedContent and
     // expandedMessage in the same microtask so Lit batches into one render,
     // avoiding a content flash from plain text to rendered HTML.
-    let htmlContent = '';
+    let content: HTMLElement | null = null;
     try {
       const renderer = await getMarkdownRenderer();
-      htmlContent = renderer.render(msg.msg);
+      const fragment = renderer.renderFragment(msg.msg);
+      if (fragment.hasChildNodes()) {
+        content = document.createElement('div');
+        content.className = 'ia-full-body';
+        content.append(fragment);
+      }
     } catch {
-      htmlContent = '';
+      content = null;
     }
-    this.expandedHtml = htmlContent;
+    this.expandedContent = content;
     this.expandedMessage = msg;
   }
 
@@ -339,13 +376,64 @@ export class ScionChatInteragentMarker extends LitElement {
   private closeMessagePreview(e: Event): void {
     if (e.target === e.currentTarget) {
       this.expandedMessage = null;
-      this.expandedHtml = '';
+      this.expandedContent = null;
     }
   }
 
   /** Toggle expanded state — click anywhere on the pill. */
   private toggle(): void {
     this.expanded = !this.expanded;
+  }
+
+  /** Compact time-only label for the two-line expanded row, e.g. "14:15". */
+  private formatTime(iso: string): string {
+    return formatInstant(iso, 'time');
+  }
+
+  /** Fuller date+time label for the full-content dialog, e.g. "Sep 23, 14:15". */
+  private formatDateTime(iso: string): string {
+    return formatInstant(iso, 'datetime');
+  }
+
+  /** Full instant plus zone label for the `.ia-time` tooltip (review R1-3, AC4). */
+  private formatTimeTitle(iso: string): string {
+    return formatInstantWithZone(iso);
+  }
+
+  /** Render a single expanded inter-agent message row (header + body). */
+  private renderInteragentMessage(m: Message): TemplateResult {
+    return html`
+      <div class="ia-msg">
+        <div class="ia-msg-header">
+          <span class="ia-time" title=${this.formatTimeTitle(m.createdAt)}
+            >${this.formatTime(m.createdAt)}</span
+          >
+          <span class="ia-sender">${this.formatParticipant(m.sender, m.senderProjectId)}</span>
+          <span class="ia-arrow">&rarr;</span>
+          <span class="ia-recipient"
+            >${this.formatParticipant(m.recipient, m.recipientProjectId)}</span
+          >
+          ${this.isCrossProject(m)
+            ? html`<span class="ia-cross-project">
+                <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon>
+                cross-project
+              </span>`
+            : nothing}
+          ${this.truncatedIds.has(m.id)
+            ? html`
+                <span class="ia-expand">
+                  <sl-icon-button
+                    name="arrows-angle-expand"
+                    label="Expand message"
+                    @click=${(e: Event) => this.openMessagePreview(m, e)}
+                  ></sl-icon-button>
+                </span>
+              `
+            : nothing}
+        </div>
+        <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
+      </div>
+    `;
   }
 
   /** Render the full-content dialog for a single message. */
@@ -360,6 +448,9 @@ export class ScionChatInteragentMarker extends LitElement {
         @sl-after-hide=${(e: Event) => this.closeMessagePreview(e)}
       >
         <div class="ia-full-header">
+          <span class="ia-time" title=${this.formatTimeTitle(msg.createdAt)}
+            >${this.formatDateTime(msg.createdAt)}</span
+          >
           <span class="ia-sender">${this.formatParticipant(msg.sender, msg.senderProjectId)}</span>
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"
@@ -371,52 +462,40 @@ export class ScionChatInteragentMarker extends LitElement {
               </span>`
             : nothing}
         </div>
-        ${this.expandedHtml
-          ? html`<div class="ia-full-body" .innerHTML=${this.expandedHtml}></div>`
-          : html`<div class="ia-full-body-plain">${msg.msg}</div>`}
+        ${this.expandedContent ?? html`<div class="ia-full-body-plain">${msg.msg}</div>`}
       </sl-dialog>
     `;
   }
 
   override render() {
     if (this.expanded) {
+      const rows: TemplateResult[] = [];
+      let lastDate = '';
+      let sawFirstDate = false;
+      for (let i = 0; i < this.messages.length; i++) {
+        const m = this.messages[i];
+        const dateStr = formatChatDate(m.createdAt);
+        // A marker now normally holds a single calendar day of messages (the
+        // main timeline splits runs by day before handing them here), and the
+        // main timeline has already rendered the shared separator for that
+        // day directly above the marker — so the first day here must not get
+        // its own. This loop stays defensive: if it's ever given a multi-day
+        // span, later days still fall back to the same separator the main
+        // timeline uses, rather than a bespoke style.
+        if (dateStr) {
+          if (!sawFirstDate) {
+            lastDate = dateStr;
+            sawFirstDate = true;
+          } else if (dateStr !== lastDate) {
+            lastDate = dateStr;
+            rows.push(renderDateDivider(dateStr));
+          }
+        }
+        rows.push(this.renderInteragentMessage(m));
+      }
       return html`
         <sl-tooltip content="Click to collapse">
-          <div class="marker-expanded" @click=${this.toggle}>
-            ${this.messages.length > 0
-              ? this.messages.map(
-                  (m) => html`
-                    <div class="ia-msg">
-                      <span class="ia-sender"
-                        >${this.formatParticipant(m.sender, m.senderProjectId)}</span
-                      >
-                      <span class="ia-arrow">&rarr;</span>
-                      <span class="ia-recipient"
-                        >${this.formatParticipant(m.recipient, m.recipientProjectId)}</span
-                      >
-                      ${this.isCrossProject(m)
-                        ? html`<span class="ia-cross-project">
-                            <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon>
-                            cross-project
-                          </span>`
-                        : nothing}:
-                      <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
-                      ${this.truncatedIds.has(m.id)
-                        ? html`
-                            <span class="ia-expand">
-                              <sl-icon-button
-                                name="arrows-angle-expand"
-                                label="Expand message"
-                                @click=${(e: Event) => this.openMessagePreview(m, e)}
-                              ></sl-icon-button>
-                            </span>
-                          `
-                        : nothing}
-                    </div>
-                  `
-                )
-              : nothing}
-          </div>
+          <div class="marker-expanded" @click=${this.toggle}>${rows}</div>
         </sl-tooltip>
         ${this.renderMessagePreview()}
       `;

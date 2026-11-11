@@ -1,0 +1,34 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (2):
+  git mv hub/a.go hub/sub/a.go
+  git mv hub/a_test.go hub/sub/a_test.go
+
+Renames (0):
+
+Alias entries (1):
+  var   A = sub.A
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (2) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 1. Errors: 2.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/a_test.go:8: moved test file uses func helperB declared in the staying test file b_test.go; the move would separate the test from its helper - move b_test.go too
+  - hub/b_test.go:8: func helperA is declared in the moved test file a_test.go but used by the staying file b_test.go; test-only symbols cannot be aliased - move b_test.go too or keep a_test.go
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/a.go:3: example.com/fx/hub.A is now example.com/fx/hub/sub.A for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces

@@ -1,0 +1,647 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+)
+
+// The port proxy over conduit (design §3.10). TCP happens only on the
+// agent's in-container loopback, at the sciontool end: the hub resolves
+// the agent's live conduit session, opens a grant-checked TCP stream on it
+// and hands that stream to httputil.ReverseProxy as its only connection.
+// Nothing on this path dials the network; the proxy's transport has no
+// dialer of its own.
+
+// conduitProxyHost is the only target host of a conduit TCP stream.
+const conduitProxyHost = "127.0.0.1"
+
+// ErrCodeAgentOffline: the agent has no conduit session and no
+// port-forward tunnel.
+const ErrCodeAgentOffline = "agent_offline"
+
+// errConduitNoRoute: this node has no conduit router (relay not running).
+var errConduitNoRoute = errors.New("conduit: no router on this node")
+
+// conduitPortRequest is the router request for a TCP stream to one of
+// agent's ports over its conduit session (openConduitPort,
+// portViewConduitRoute).
+func conduitPortRequest(agent *store.Agent) router.Request {
+	return router.Request{
+		Op:    router.OpStream,
+		Kind:  registry.PrincipalAgent,
+		ID:    agent.ID,
+		Want:  registry.Want{ProjectID: agent.ProjectID, Capability: grant.StreamKindTCP},
+		Agent: agentIncarnationFacts(agent),
+	}
+}
+
+// openConduitPort opens a TCP stream to 127.0.0.1:port inside the agent
+// over its conduit session, with a grant minted for identity against
+// exactly the resolved session. Errors wrap router.ErrNoSession when the
+// agent has no eligible session.
+func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *store.Agent, port int) (net.Conn, error) {
+	rtr := s.conduitRouter()
+	if rtr == nil {
+		return nil, errConduitNoRoute
+	}
+	if _, isUser := identity.(UserIdentity); isUser && s.conduitAuthz.Load() == nil {
+		// A user stream must be re-checked for its lifetime; without a
+		// running re-check it is not opened.
+		return nil, errConduitNoRoute
+	}
+	params := map[string]string{grant.ParamHost: conduitProxyHost, grant.ParamPort: strconv.Itoa(port)}
+	req := conduitPortRequest(agent)
+	var conn net.Conn
+	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+		renews, canRenew := conduitTargetRenews(res), s.conduitRouteCanRenew(res)
+		// A target without stream renewal is refused (409), never retried
+		// on the port-forward tunnel: the caller answers it with
+		// writeConduitProxyError, not as "no session".
+		if s.conduitTargetUpgradeRequired(ctx, identity, renews, conduitRouteProxy, agent.ID) {
+			return errConduitAgentUpgradeRequired
+		}
+		if s.conduitRenewalPathUnavailable(ctx, identity, renews, canRenew, conduitRouteProxy, agent.ID) {
+			return errConduitStreamRenewalUnavailable
+		}
+		tok, claims, err := s.mintConduitGrant(ctx, conduitGrantRequest{
+			Identity: identity,
+			Agent:    agent,
+			Stream:   grant.StreamHeader{Kind: grant.StreamKindTCP, Params: params},
+			Target: grant.Target{
+				Kind:                grant.TargetKindAgent,
+				ID:                  agent.ID,
+				EndpointIncarnation: res.Want.Incarnation,
+				SessionID:           res.Record.SessionID,
+				ConnectionEpoch:     res.Record.ConnectionEpoch,
+			},
+			Via:          grant.ViaProxy,
+			TargetRenews: renews,
+			CanRenew:     canRenew,
+		})
+		if err != nil {
+			return err
+		}
+		st, bridge, err := s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
+			Kind:   conduitv1.StreamKind_STREAM_KIND_TCP,
+			Params: params,
+			Grant:  tok,
+		})
+		if err != nil {
+			return err
+		}
+		sc := newStreamConn(st, agent.ID, port)
+		sc.route = conduitRouteLogAttrs(res)
+		target := conduitLeafTarget(res, st, bridge)
+		tracked := &conduitUserStream{
+			Kind:      grant.StreamKindTCP,
+			Identity:  identity,
+			AgentID:   agent.ID,
+			ProjectID: agent.ProjectID,
+			Port:      port,
+			SessionID: target.SessionID,
+			StreamID:  target.StreamID,
+			Close:     sc.closeWithCode,
+			Bridge:    bridge,
+		}
+		applyConduitOpenGrant(tracked, tok, claims)
+		tracked.Renew = conduitStreamRenewal(res, st, !tracked.AuthzUntil.IsZero())
+		sc.untrack = s.trackConduitUserStream(tracked)
+		conn = sc
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+// conduitTargetOf returns the stream's ids on the target's own session: on
+// a session this node holds, the session and stream ids; through another
+// relay, the ids the owner relay reported when it accepted the hop
+// (relay.TargetOf). When they are not known it falls back to the resolved
+// session id and st's id.
+func conduitTargetOf(res router.Resolved, st conduit.Stream) relay.TargetStream {
+	if t, ok := relay.TargetOf(res.Session, st); ok {
+		return t
+	}
+	return relay.TargetStream{SessionID: res.Record.SessionID, StreamID: st.ID()}
+}
+
+// conduitProxyTransport returns a transport whose only connection is
+// conn: the first dial returns it, any further dial fails. It has no
+// network dialer, no proxy and no keep-alive, so the proxied request
+// cannot reach anything but the conduit stream.
+//
+// headerTimeout bounds the wait for the upstream response headers once
+// the request is written, the WebSocket handshake (the 101) included.
+// The body is not time-limited: an event stream, a download or an
+// upgraded WebSocket flows for as long as it lasts. On timeout the
+// transport closes conn, which ends the conduit stream on both legs.
+func conduitProxyTransport(conn net.Conn, headerTimeout time.Duration) *http.Transport {
+	var once sync.Once
+	return &http.Transport{
+		Proxy: nil,
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			var c net.Conn
+			once.Do(func() { c = conn })
+			if c == nil {
+				return nil, errors.New("conduit proxy: the stream was already used")
+			}
+			return c, nil
+		},
+		DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("conduit proxy: TLS dial is not allowed")
+		},
+		DisableKeepAlives:     true,
+		DisableCompression:    true,
+		MaxConnsPerHost:       1,
+		ResponseHeaderTimeout: headerTimeout,
+		ExpectContinueTimeout: conduitProxyExpectContinueTimeout,
+	}
+}
+
+// conduitProxyExpectContinueTimeout is how long the proxy waits for a
+// 100 Continue before sending a request body that asked for one.
+const conduitProxyExpectContinueTimeout = time.Second
+
+// portProxyResponseHeaderTimeout is the configured bound on the wait for
+// an agent port's response headers (server.hub.port_proxy, validated at
+// startup; 0 = the 60s default).
+func (s *Server) portProxyResponseHeaderTimeout() time.Duration {
+	if d := s.config.PortProxyResponseHeaderTimeout; d > 0 {
+		return d
+	}
+	return config.PortProxyDefaultResponseHeaderTimeout
+}
+
+// isResponseHeaderTimeout reports whether err is the proxy transport's
+// response header timeout. net/http returns that error unwrapped, so only
+// err itself is checked: a timeout wrapped inside a conduit stream or
+// session error (for example a session that failed on a write deadline
+// or a link read timeout) is a lost upstream, answered with 502 as before.
+// A bare context.DeadlineExceeded (which also reports Timeout) is not it
+// either; it is compared by identity, because the transport's timeout
+// error itself matches errors.Is(err, context.DeadlineExceeded).
+func isResponseHeaderTimeout(err error) bool {
+	ne, ok := err.(net.Error)
+	return ok && ne.Timeout() && err != context.DeadlineExceeded &&
+		!errors.Is(err, conduit.ErrSessionClosed)
+}
+
+// serveConduitProxy proxies r to the agent port over conn (a conduit
+// stream). Requests, responses, WebSocket upgrades and event streams are
+// streamed; there is no body buffer. The wait for the response headers
+// is bounded (portProxyResponseHeaderTimeout; 504 on timeout); once they
+// arrive the exchange lasts as long as the request. Credentials are
+// stripped from the request and the response is sandboxed exactly as on
+// the tunnel path. policy is the surface's: the page view surface
+// (policy.portView) also applies portViewModifyResponse, and each surface
+// logs its own caller string. Every surface removes the front
+// proxy's identity headers (stripFrontProxyIdentityHeaders). It reports
+// whether the agent's app answered: false when the round trip failed and
+// the hub wrote the 502 or 504.
+func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) (answered bool) {
+	start := time.Now()
+	// roundTripFailed is set by the ErrorHandler: the agent's app did not
+	// answer, and the hub wrote a 502 or 504.
+	roundTripFailed := false
+	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
+	target := net.JoinHostPort(conduitProxyHost, strconv.Itoa(port))
+	status := 0
+	headerTimeout := s.portProxyResponseHeaderTimeout()
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Host = target
+			pr.Out.URL.Path = reqPath
+			pr.Out.URL.RawPath = ""
+			pr.Out.URL.RawQuery = r.URL.RawQuery
+			pr.Out.Host = target
+			for k := range pr.Out.Header {
+				if sensitiveHeader(k) {
+					pr.Out.Header.Del(k)
+				}
+			}
+			// The front proxy's identity headers are not passed to the
+			// agent's app.
+			s.stripFrontProxyIdentityHeaders(pr.Out.Header)
+		},
+		Transport:     conduitProxyTransport(conn, headerTimeout),
+		FlushInterval: -1,
+		ModifyResponse: func(resp *http.Response) error {
+			status = resp.StatusCode
+			wrapWebSocketUpstream(resp)
+			for k := range resp.Header {
+				if stripFromProxyResponse(k) {
+					resp.Header.Del(k)
+				}
+			}
+			applyPortProxyResponsePolicy(resp.Header, policy)
+			return nil
+		},
+		// The ErrorHandler runs only before the response is committed (the
+		// round trip failed). A failure after that, while the body streams,
+		// makes ReverseProxy panic with http.ErrAbortHandler: the client
+		// sees a truncated response, never an error body appended to it.
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			roundTripFailed = true
+			setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			if r.Context().Err() == nil && isResponseHeaderTimeout(err) {
+				// The transport closed the stream; the agent end closes
+				// with it.
+				status = http.StatusGatewayTimeout
+				slog.Info("Conduit proxy: the agent port did not answer in time",
+					"agent_id", agent.ID, "port", port,
+					"response_header_timeout", headerTimeout)
+				s.recordPortProxyUpstreamTimeout()
+				writePortProxyTimeout(w, r)
+				return
+			}
+			status = http.StatusBadGateway
+			if r.Context().Err() == nil {
+				slog.Debug("Conduit proxy request failed", "agent_id", agent.ID, "port", port, "error", err)
+			}
+			writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Port proxy failed", nil)
+		},
+	}
+	defer func() { _ = conn.Close() }()
+	// The proxied exchange lives as long as the request: lift the server's
+	// read and write deadlines for this connection, so an event stream or
+	// a WebSocket (which keeps the hijacked connection's deadlines) is not
+	// cut at the server's WriteTimeout.
+	rc := http.NewResponseController(w)
+	if err := errors.Join(rc.SetReadDeadline(time.Time{}), rc.SetWriteDeadline(time.Time{})); err != nil {
+		slog.Debug("Conduit proxy: cannot lift the connection deadlines", "agent_id", agent.ID, "error", err)
+	}
+	// Logged on the way out, so an aborted response is logged too.
+	var route []any
+	if sc, ok := conn.(*streamConn); ok {
+		route = sc.route
+	}
+	defer func() {
+		slog.Debug("Proxy request", append([]any{
+			"agent_id", agent.ID,
+			"port", port,
+			"caller", policy.caller,
+			"surface", policy.surface,
+			"method", r.Method,
+			"path", logging.SubPath(reqPath),
+			"status", status,
+			"transport", "conduit",
+			"duration", time.Since(start),
+		}, route...)...)
+	}()
+	// ReverseProxy adds the upstream response headers to the ones already
+	// on w. Drop the web pages' policy, Permissions-Policy and nosniff
+	// header set further up the handler chain, so the sandbox headers set
+	// in ModifyResponse are the only ones and pages served from an agent's
+	// port keep working as on the tunnel path.
+	for _, k := range portProxyPolicyHeaders {
+		w.Header().Del(k)
+	}
+	rp.ServeHTTP(w, r)
+	return !roundTripFailed
+}
+
+// WebSocket close codes the proxy sends to the client when the upstream
+// side of a proxied WebSocket ends without a close frame of its own.
+const (
+	// wsCloseUpstreamUnreachable: the conduit stream or the session
+	// carrying it was lost (owner hub gone, agent disconnected).
+	wsCloseUpstreamUnreachable = 4504
+	// wsCloseInternalError: this hub ended the stream (a local limit).
+	wsCloseInternalError = 1011
+)
+
+// wrapWebSocketUpstream wraps the body of a 101 WebSocket response (the
+// upstream half of the hijacked exchange) in a wsUpstreamBody.
+func wrapWebSocketUpstream(resp *http.Response) {
+	if resp.StatusCode != http.StatusSwitchingProtocols || !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
+		return
+	}
+	if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
+		resp.Body = &wsUpstreamBody{ReadWriteCloser: rwc}
+	}
+}
+
+// wsUpstreamBody is the upstream side of a proxied WebSocket, read only by
+// ReverseProxy's upstream-to-client copy. It follows the server-to-client
+// frames and, when the upstream ends without having sent a close frame,
+// appends one (wsCloseUpstreamUnreachable, or wsCloseInternalError for a
+// local failure) to what the client receives, so the client sees why the
+// connection ended instead of a bare TCP close (1006). The frame is only
+// added at a frame boundary: an upstream lost mid-frame is cut as is.
+// Writes, Close and CloseWrite pass through; nothing else writes to the
+// client.
+type wsUpstreamBody struct {
+	io.ReadWriteCloser
+	frames wsFrameTracker
+	end    error  // the upstream's terminal read error, once seen
+	tail   []byte // the close frame still to deliver after end
+}
+
+func (b *wsUpstreamBody) Read(p []byte) (int, error) {
+	if b.end == nil {
+		n, err := b.ReadWriteCloser.Read(p)
+		b.frames.feed(p[:n])
+		if err == nil {
+			return n, nil
+		}
+		b.end = err
+		if !b.frames.sawClose && b.frames.atBoundary() {
+			code, reason := wsCloseCodeFor(err)
+			b.tail = wsCloseFrame(code, reason)
+		}
+		if n > 0 {
+			return n, nil
+		}
+	}
+	if len(b.tail) > 0 {
+		n := copy(p, b.tail)
+		b.tail = b.tail[n:]
+		return n, nil
+	}
+	return 0, b.end
+}
+
+// CloseWrite passes a client half-close through to the upstream when it
+// supports one. ReverseProxy's client-to-upstream copy looks for this
+// method on the backend: without it, a client half-close would tear down
+// both directions and drop upstream data still in flight to the client.
+func (b *wsUpstreamBody) CloseWrite() error {
+	if hc, ok := b.ReadWriteCloser.(interface{ CloseWrite() error }); ok {
+		return hc.CloseWrite()
+	}
+	return nil
+}
+
+// wsCloseCodeFor maps the error that ended the upstream to the close code
+// and reason sent to the client. A stream this hub closed because its
+// authorization ended carries its §3.3.1 code and reason through
+// (4401 authz_expired, 4404 target_not_found).
+func wsCloseCodeFor(err error) (uint16, string) {
+	if errors.Is(err, conduit.ErrBufferBudget) {
+		return wsCloseInternalError, "internal_error"
+	}
+	var ce *conduitAuthzCloseError
+	if errors.As(err, &ce) {
+		return uint16(ce.Code), ce.Reason
+	}
+	return wsCloseUpstreamUnreachable, "upstream_unreachable"
+}
+
+// wsCloseFrame is an unmasked (server-to-client) WebSocket close frame.
+// reason must be at most 123 bytes.
+func wsCloseFrame(code uint16, reason string) []byte {
+	f := make([]byte, 0, 4+len(reason))
+	f = append(f, 0x88, byte(2+len(reason)), byte(code>>8), byte(code))
+	return append(f, reason...)
+}
+
+// wsFrameTracker follows WebSocket frame boundaries in a byte stream. It
+// parses frame headers only; payloads are skipped by length.
+type wsFrameTracker struct {
+	hdr       [14]byte // the frame header being read
+	hdrLen    int      // header bytes read so far
+	hdrNeed   int      // header size, known once two bytes are in
+	remaining uint64   // payload bytes left in the current frame
+	sawClose  bool     // a close frame was seen; tracking stops
+}
+
+func (t *wsFrameTracker) feed(p []byte) {
+	for len(p) > 0 && !t.sawClose {
+		if t.remaining > 0 {
+			k := uint64(len(p))
+			if k > t.remaining {
+				k = t.remaining
+			}
+			t.remaining -= k
+			p = p[k:]
+			continue
+		}
+		t.hdr[t.hdrLen] = p[0]
+		t.hdrLen++
+		p = p[1:]
+		if t.hdrLen == 2 {
+			t.hdrNeed = 2
+			switch t.hdr[1] & 0x7f {
+			case 126:
+				t.hdrNeed += 2
+			case 127:
+				t.hdrNeed += 8
+			}
+			if t.hdr[1]&0x80 != 0 {
+				t.hdrNeed += 4
+			}
+		}
+		if t.hdrLen < 2 || t.hdrLen < t.hdrNeed {
+			continue
+		}
+		switch n := t.hdr[1] & 0x7f; n {
+		case 126:
+			t.remaining = uint64(binary.BigEndian.Uint16(t.hdr[2:4]))
+		case 127:
+			t.remaining = binary.BigEndian.Uint64(t.hdr[2:10])
+		default:
+			t.remaining = uint64(n)
+		}
+		t.sawClose = t.hdr[0]&0x0f == 0x8
+		t.hdrLen, t.hdrNeed = 0, 0
+	}
+}
+
+// atBoundary reports whether the stream so far ends on a frame boundary.
+func (t *wsFrameTracker) atBoundary() bool { return t.hdrLen == 0 && t.remaining == 0 }
+
+// writeConduitProxyError maps an openConduitPort failure (other than "no
+// session") to a response.
+func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID string, err error) {
+	var ce *conduit.CloseError
+	var placement *PlacementConflictError
+	switch {
+	case errors.As(err, &placement):
+		// The grant was refused for the agent's saved placement
+		// (mintConduitGrant): its own 409 and code, not an authorization
+		// result.
+		writeError(w, placement.Refusal.Status, placement.Refusal.Code, placement.Refusal.Message, placement.Refusal.Details)
+	case errors.Is(err, errConduitForbidden):
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+	case errors.Is(err, errConduitStreamRenewalUnavailable):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, conduitStreamRenewalUnavailableMessage,
+			map[string]interface{}{"reason": conduitReasonStreamRenewalUnavailable})
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		writeError(w, http.StatusConflict, ErrCodeAgentUpgradeRequired, conduitAgentUpgradeRequiredMessage,
+			map[string]interface{}{"reason": conduitReasonStreamRenewalUnsupported})
+	case errors.Is(err, errConduitGrantInternal):
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
+	case errors.Is(err, errConduitInvalid):
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid port proxy request", nil)
+	case errors.Is(err, router.ErrRegistryUnavailable):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit routing is unavailable", nil)
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held); logged at Warn where it is found.
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
+	case errors.As(err, &ce) && ce.Code == conduit.CloseRelayTimeout:
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Nothing is listening on the agent port", nil)
+	default:
+		if r.Context().Err() == nil {
+			slog.Warn("Conduit proxy: opening the port stream failed", "agent_id", agentID, "error", err)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Port proxy failed", nil)
+	}
+}
+
+// writePortProxyTimeout writes the 504 response for an agent port that
+// did not send its response headers within the bound: the proxy error
+// page for a browser, else the runtime_error JSON error.
+func writePortProxyTimeout(w http.ResponseWriter, r *http.Request) {
+	if isBrowserRequest(r) {
+		writeProxyErrorHTML(w, http.StatusGatewayTimeout, "Gateway Timeout",
+			"The service on the agent port did not answer in time.")
+		return
+	}
+	writeError(w, http.StatusGatewayTimeout, ErrCodeRuntimeError, "The agent port did not answer in time", nil)
+}
+
+// writeAgentOffline writes the 503 agent_offline response: the agent has
+// neither a conduit session nor a port-forward tunnel. Exposed ports are
+// kept; they work again when the agent reconnects.
+func writeAgentOffline(w http.ResponseWriter, r *http.Request) {
+	if isBrowserRequest(r) {
+		writeProxyErrorHTML(w, http.StatusServiceUnavailable, "Agent Offline",
+			"The agent is not connected to the hub right now. Its exposed ports will be reachable again when it reconnects.")
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeAgentOffline, "The agent is not connected to the hub", nil)
+}
+
+// streamConn adapts a conduit stream to net.Conn for the proxy transport.
+// Deadlines are not supported (the transport sets none on plain HTTP
+// connections); the stream ends when it is closed or its session ends.
+type streamConn struct {
+	conduit.Stream
+	local, remote net.Addr
+	// route holds the routing log fields of the stream
+	// (conduitRouteLogAttrs).
+	route []any
+
+	// untrack ends the stream's authorization re-checks (set once, before
+	// the conn is used).
+	untrack func()
+	// authzClose is set when the hub closed the stream because its
+	// authorization ended; reads then fail with it.
+	authzClose atomic.Pointer[conduitAuthzCloseError]
+}
+
+// conduitAuthzCloseError is the read error of a stream the hub closed
+// because its authorization ended (code 4401 or 4404).
+type conduitAuthzCloseError struct {
+	conduit.CloseError
+}
+
+func (e *conduitAuthzCloseError) Unwrap() error { return &e.CloseError }
+
+// closeWithCode closes the stream on both legs because its authorization
+// ended: the target receives StreamClose{code, reason}, and the proxy's
+// reads fail with the same code and reason, so a proxied WebSocket client
+// receives them in its close frame.
+func (c *streamConn) closeWithCode(code uint32, reason string) {
+	c.authzClose.CompareAndSwap(nil, &conduitAuthzCloseError{CloseError: conduit.CloseError{Code: code, Reason: reason}})
+	_ = c.CloseWithCode(code, reason)
+}
+
+// Read reads from the stream; once the hub closed it for authorization,
+// the read error is that close.
+func (c *streamConn) Read(p []byte) (int, error) {
+	n, err := c.Stream.Read(p)
+	if err != nil {
+		if ce := c.authzClose.Load(); ce != nil {
+			return n, ce
+		}
+	}
+	return n, err
+}
+
+// Write writes to the stream; once the hub closed it for authorization,
+// the write error is that close.
+func (c *streamConn) Write(p []byte) (int, error) {
+	n, err := c.Stream.Write(p)
+	if err != nil {
+		if ce := c.authzClose.Load(); ce != nil {
+			return n, ce
+		}
+	}
+	return n, err
+}
+
+// Close ends the stream and its re-checks.
+func (c *streamConn) Close() error {
+	if c.untrack != nil {
+		c.untrack()
+	}
+	return c.Stream.Close()
+}
+
+func newStreamConn(st conduit.Stream, agentID string, port int) *streamConn {
+	return &streamConn{
+		Stream: st,
+		local:  conduitAddr("hub"),
+		remote: conduitAddr("agent:" + agentID + ":" + strconv.Itoa(port)),
+	}
+}
+
+func (c *streamConn) LocalAddr() net.Addr              { return c.local }
+func (c *streamConn) RemoteAddr() net.Addr             { return c.remote }
+func (c *streamConn) SetDeadline(time.Time) error      { return nil }
+func (c *streamConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *streamConn) SetWriteDeadline(time.Time) error { return nil }
+
+// CloseWrite half-closes the stream when it supports it.
+func (c *streamConn) CloseWrite() error {
+	if hc, ok := c.Stream.(interface{ CloseWrite() error }); ok {
+		return hc.CloseWrite()
+	}
+	return nil
+}
+
+type conduitAddr string
+
+func (conduitAddr) Network() string  { return "conduit" }
+func (a conduitAddr) String() string { return string(a) }

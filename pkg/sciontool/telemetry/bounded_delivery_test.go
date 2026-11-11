@@ -312,15 +312,7 @@ func TestGRPCCallerDeadlineReleasesAfterHandlerEnds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("handler did not finish")
 	}
-	deadline := time.After(time.Second)
-	for len(r.decodeSlots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("permit leaked after deadline")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitSlotsDrained(t, r.decodeSlots, "deadline-expired request")
 }
 
 type malformedCodec struct{ encoding.Codec }
@@ -360,8 +352,26 @@ func TestGRPCDecodedMessageSizeBoundary(t *testing.T) {
 			t.Fatalf("size %d: status %v, want %v", size, err, want)
 		}
 	}
-	if len(r.decodeSlots) != 0 {
-		t.Fatalf("size boundary leaked %d slots", len(r.decodeSlots))
+	waitSlotsDrained(t, r.decodeSlots, "size boundary")
+}
+
+// waitSlotsDrained waits up to a second for every decode slot to be
+// released. A rejected gRPC export cannot assert len(slots) == 0 right after
+// the client sees its status: grpc-go's serverStream.RecvMsg writes the
+// failure status to the client itself, before the handler returns and runs
+// its deferred slot release, so the client can observe the error while the
+// slot is still held (ptone/scion#1735). The slot is held through SendMsg
+// on purpose, so the release order in production code must not change.
+func waitSlotsDrained(t *testing.T, slots chan struct{}, what string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for len(slots) != 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("%s leaked %d slots", what, len(slots))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 }
 
@@ -391,15 +401,7 @@ func TestGRPCMalformedOversizeAndUnknownMethodReclaimPermits(t *testing.T) {
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("unknown method status = %v", err)
 	}
-	deadline := time.After(time.Second)
-	for len(r.decodeSlots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("permit leaked after rejected requests")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitSlotsDrained(t, r.decodeSlots, "rejected requests")
 }
 
 func TestGRPCSlowRawBodyHonorsPredecodeCallerDeadline(t *testing.T) {
@@ -765,18 +767,29 @@ func TestTLSSkipVerifyIsDistinctFromPlaintext(t *testing.T) {
 }
 
 func TestCloudDestinationRejectsContradictoryOrIgnoredTLSOptions(t *testing.T) {
+	// Each row asserts the conflict message so it cannot pass on an
+	// unrelated error (for example missing GCP default credentials).
+	const plaintextConflict = "plaintext OTLP transport conflicts"
+	const gcpConflict = "does not support generic OTLP TLS overrides"
 	for _, tc := range []struct {
-		name   string
-		config Config
+		name    string
+		config  Config
+		wantErr string
 	}{
-		{"plaintext plus skip", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, SkipTLSVerify: true}},
-		{"plaintext plus CA", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CAFile: "ca.pem"}},
-		{"GCP plaintext override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", Insecure: true}},
-		{"GCP skip verify override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", SkipTLSVerify: true}},
+		{"plaintext plus skip", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, SkipTLSVerify: true}, plaintextConflict},
+		{"plaintext plus CA", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CAFile: "ca.pem"}, plaintextConflict},
+		{"plaintext plus client certificate", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CertFile: "client.pem", KeyFile: "client-key.pem"}, plaintextConflict},
+		{"GCP client certificate override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", CertFile: "client.pem", KeyFile: "client-key.pem"}, gcpConflict},
+		{"GCP plaintext override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", Insecure: true}, gcpConflict},
+		{"GCP skip verify override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", SkipTLSVerify: true}, gcpConflict},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewCloudExporter(context.Background(), &tc.config); err == nil {
+			_, err := NewCloudExporter(context.Background(), &tc.config)
+			if err == nil {
 				t.Fatal("invalid TLS configuration was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want it to contain %q", err, tc.wantErr)
 			}
 		})
 	}

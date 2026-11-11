@@ -510,8 +510,8 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_SoftDeletedTopic_DoesN
 	if mock.lastConv != nil {
 		t.Error("UpsertConversationByExternalRef must NOT be called for soft-deleted native topic — would mint a shadow conversation")
 	}
-	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
-		t.Errorf("sink must call GetTopicConversationIDIncludingDeleted, called %q", lookup.calledMethod)
+	if lookup.calledMethod != "GetTopicConversationIDIncludingDeletedInProject" {
+		t.Errorf("sink must call GetTopicConversationIDIncludingDeletedInProject, called %q", lookup.calledMethod)
 	}
 }
 

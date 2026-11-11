@@ -48,7 +48,7 @@ For structured logging from shell scripts, you can use `sciontool` directly:
 # Log an info message
 sciontool log info "Starting specialized task..."
 
-# Log a debug message (only visible if SCION_DEBUG=true)
+# Log a debug message (only visible if SCION_LOG_LEVEL=debug)
 sciontool log debug "Internal state: $STATE"
 ```
 

@@ -1,0 +1,12 @@
+server:
+    message_broker:
+        enabled: true
+        types:
+            - a2a-bridge
+    plugins:
+        broker:
+            a2a-bridge:
+                address: localhost:9090
+                config_file: /cfg/a2a.yaml
+                mode: self-managed
+                self_managed: true

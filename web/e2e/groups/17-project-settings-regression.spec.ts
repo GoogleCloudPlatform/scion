@@ -29,12 +29,7 @@ test.describe('Project settings member editor regression (AC18)', () => {
 
   test('project settings page with member editor renders correctly', async ({ page }) => {
     // Find a project to navigate to — use the API to list projects
-    const res = await apiRequest(
-      env.baseURL,
-      env.devToken,
-      'GET',
-      '/api/v1/admin/projects',
-    );
+    const res = await apiRequest(env.baseURL, env.devToken, 'GET', '/api/v1/admin/projects');
 
     if (!res.ok) {
       test.skip(true, 'No projects API available');

@@ -85,10 +85,14 @@ func runCredentialHelper() {
 				// Write the refreshed token and expiry to the file for future use.
 				// Writing the expiry prevents the next credential-helper invocation
 				// (git often calls twice per push) from redundantly refreshing.
-				if writeErr := hub.WriteGitHubTokenFile(tokenPath, newToken); writeErr != nil {
+				// The credential helper runs as the same user that will read
+				// these files, so no ownership change is needed (uid/gid 0
+				// leaves the files owned by the writing process, per
+				// WriteGitHubTokenFile's contract).
+				if writeErr := hub.WriteGitHubTokenFile(tokenPath, newToken, 0, 0); writeErr != nil {
 					log.Error("credential-helper: failed to write token file: %v", writeErr)
 				}
-				if expiryErr := hub.WriteGitHubTokenExpiry(tokenPath, newExpiry); expiryErr != nil {
+				if expiryErr := hub.WriteGitHubTokenExpiry(tokenPath, newExpiry, 0, 0); expiryErr != nil {
 					log.Error("credential-helper: failed to write token expiry file: %v", expiryErr)
 				}
 				_ = os.Setenv("GITHUB_TOKEN", newToken)

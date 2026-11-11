@@ -18,7 +18,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { getE2EEnv, uniqueName, deleteGroupAPI } from './groups-setup.js';
+import { getE2EEnv, uniqueName } from './groups-setup.js';
 
 test.describe('Create happy path (AC2)', () => {
   const env = getE2EEnv();
@@ -49,7 +49,7 @@ test.describe('Create happy path (AC2)', () => {
     const slugInput = dialog.locator('#slug-input');
     // Give a moment for the slug to derive — check the component's value property
     await expect(async () => {
-      const val = await slugInput.evaluate((el: any) => el.value);
+      const val = await slugInput.evaluate((el: HTMLElement & { value: string }) => el.value);
       expect(val).toBeTruthy();
     }).toPass({ timeout: 5_000 });
 

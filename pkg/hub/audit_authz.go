@@ -26,84 +26,106 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // =============================================================================
 // Decision Audit Emitter
 // =============================================================================
 
-// auditWriteTimeout is the maximum time an async audit INSERT may take before
-// the goroutine abandons the attempt and releases its store reference.
+// auditWriteTimeout is the maximum time an async mutation audit INSERT may
+// take before the goroutine abandons the attempt and releases its store
+// reference.
 const auditWriteTimeout = 1 * time.Second
-
-// StoreDecisionAuditEmitter implements DecisionAuditEmitter using the store.
-type StoreDecisionAuditEmitter struct {
-	store  store.Store
-	logger *slog.Logger
-}
-
-// NewStoreDecisionAuditEmitter creates a new store-backed decision audit emitter.
-func NewStoreDecisionAuditEmitter(s store.Store, logger *slog.Logger) *StoreDecisionAuditEmitter {
-	return &StoreDecisionAuditEmitter{store: s, logger: logger}
-}
-
-// EmitDecisionAudit stores a decision audit record asynchronously.
-func (e *StoreDecisionAuditEmitter) EmitDecisionAudit(ctx context.Context, record *store.DecisionAuditRecord) {
-	// Fire-and-forget in a goroutine to avoid blocking the authorization hot path.
-	// Uses a short timeout context to prevent goroutine/memory leaks on shutdown.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				e.logger.Warn("recovered panic in decision audit emit", "panic", r)
-			}
-		}()
-		writeCtx, cancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-		defer cancel()
-		if err := e.store.CreateDecisionAudit(writeCtx, record); err != nil {
-			e.logger.Warn("failed to emit decision audit record", "error", err)
-		}
-	}()
-}
 
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
-	// Sampling: always audit deny decisions; sample allow decisions.
-	if decision.Allowed && a.DecisionAuditSampleRate < 1.0 {
+	// Sampling: always audit deny decisions; sample allow decisions, unless
+	// either always-audit marker is set. AuthzRequest.AlwaysAudit is set by
+	// the caller before evaluation; Decision.AlwaysAudit is set from inside
+	// decide's body by a branch that only learns partway through evaluation
+	// that this decision must not be sampled away (e.g. G's delegated-agent
+	// branch, routed on identity kind after principal/credential
+	// derivation). Either one forces an allow decision to be audited too.
+	alwaysAudit := request.AlwaysAudit || decision.AlwaysAudit
+	if decision.Allowed && !alwaysAudit && a.DecisionAuditSampleRate < 1.0 {
 		if rand.Float64() >= a.DecisionAuditSampleRate {
 			return
 		}
 	}
 
+	record := BuildDecisionAuditRecord(ctx, request, decision)
+	record.Sampled = a.DecisionAuditSampleRate < 1.0
+
+	a.decisionAuditEmitter.EmitDecisionAudit(ctx, record)
+}
+
+// BuildDecisionAuditRecord builds a *store.DecisionAuditRecord from an
+// AuthzRequest/Decision pair, without emitting it or applying sampling. It is
+// exported so non-Decide decision-audit paths (e.g. G's aggregated
+// list-filter record) can produce schema-consistent records through the same
+// field mapping Decide uses, instead of hand-assembling
+// store.DecisionAuditRecord themselves. Sampled defaults to false; callers
+// that go through Decide's sampling policy should set it explicitly, as
+// emitDecisionAudit does.
+func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decision Decision) *store.DecisionAuditRecord {
 	result := "deny"
 	if decision.Allowed {
 		result = "allow"
 	}
 
-	sampled := a.DecisionAuditSampleRate < 1.0
+	// On a decorated Decision, PrincipalID is the principal ID Decide
+	// evaluated, including an empty ID for an identity that derived none.
+	// request.Principal.ID, the caller-supplied AuthzRequest field, is used
+	// only for an undecorated Decision (e.g. a non-Decide caller of this
+	// function that built a Decision by hand).
+	principalID := decision.PrincipalID
+	if !decision.principalDecorated {
+		principalID = request.Principal.ID
+	}
 
 	record := &store.DecisionAuditRecord{
 		Timestamp:      time.Now(),
 		PrincipalKind:  string(decision.PrincipalKind),
-		PrincipalID:    request.Principal.ID,
+		PrincipalID:    principalID,
 		CredentialID:   decision.CredentialID,
 		CredentialType: decision.CredentialKind,
 		ResourceType:   request.Resource.Type,
 		ResourceID:     request.Resource.ID,
 		Permission:     string(request.Action),
+		PermissionID:   decision.PermissionID,
 		Result:         result,
 		Reason:         decision.Reason,
 		MatchedPolicy:  decision.MatchedPolicy,
 		MatchedGrant:   decision.MatchedGrant,
 		PolicyID:       decision.BindingID,
-		Sampled:        sampled,
+		CorrelationID:  logging.RequestIDFromContext(ctx),
+		DeniedBy:       string(decision.DeniedBy),
+
+		ResourceParentType:     request.Resource.ParentType,
+		ResourceParentID:       request.Resource.ParentID,
+		ResourceAncestryLen:    len(request.Resource.Ancestry),
+		ResourceScopeKind:      request.Resource.ScopeKind,
+		ResourceScopeUserIDSet: request.Resource.ScopeUserID != "",
 	}
 
-	// Try to extract route from context
 	if route := routeFromContext(ctx); route != "" {
 		record.Route = route
 	}
 
-	a.decisionAuditEmitter.EmitDecisionAudit(ctx, record)
+	if decoration, ok := CredentialDecorationFromContext(ctx); ok {
+		record.CredentialName = sanitizeForLog(decoration.TokenName, uatMaxNameBytes)
+		record.CredentialBoundaryKind = decoration.Boundary.Kind
+		record.CredentialBoundaryProjectID = decoration.Boundary.ProjectID
+		record.CredentialLabels = boundedLabelsJSON(decoration.Labels)
+	}
+
+	if ec, ok := ExecutorContextFromContext(ctx); ok {
+		record.ExecutorKind = ec.Kind
+		record.ExecutorID = ec.ID
+	}
+
+	return record
 }
 
 // routeContextKey is the context key for the current HTTP route.
@@ -130,21 +152,10 @@ func routeFromContext(ctx context.Context) string {
 // It extracts actor identity from the context and stores the record.
 // Errors are logged but do not fail the request (best-effort).
 func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAuditRecord) {
-	// Extract actor identity from context if not already populated.
-	if record.ActorPrincipalKind == "" || record.ActorPrincipalID == "" {
-		identity := GetIdentityFromContext(ctx)
-		if identity != nil {
-			record.ActorPrincipalKind = identity.Type()
-			record.ActorPrincipalID = identity.ID()
-
-			// Extract credential info
-			credential := GetCredentialContextFromContext(ctx)
-			if credential.Kind != "" {
-				record.ActorCredentialID = credential.ID
-				record.ActorCredentialType = string(credential.Kind)
-			}
-		}
-	}
+	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
+	// §3.3), replacing this function's own copy of the extraction logic.
+	// ApplyActor only fills fields the caller has not already set explicitly.
+	auditActorFromContext(ctx).ApplyActor(record)
 
 	if record.Timestamp.IsZero() {
 		record.Timestamp = time.Now()
@@ -265,11 +276,10 @@ func isKnownPermission(id string) bool {
 // canonicalizeExplainPermission resolves a canonical permission ID from
 // the (resourceType, action) pair supplied by an explain API caller.
 //
-// Production enforcement uses derivePermissionID, which is intentionally left
-// unchanged: its fallback concatenation is safe because route middleware
-// always supplies the correct (Resource, Action) pair from route metadata.
-// The explain API, however, accepts arbitrary client input that may use
-// non-canonical patterns:
+// Production enforcement uses resolveResourcePermission
+// (authz_permission_resolver.go), which resolves only pairs that name exactly
+// one permission and denies every other pair. The explain API accepts
+// arbitrary client input that may use non-canonical patterns:
 //
 //   - resource.type="hub", action="user.read" → canonical "user.read"
 //   - resource.type="hub.user", action="read" → canonical "user.read"
@@ -314,7 +324,7 @@ func canonicalizeExplainPermission(resourceType string, action string) string {
 // handleAuthzExplain handles POST /api/v1/authz/explain.
 func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "Method not allowed", nil)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -322,6 +332,17 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
+		return
+	}
+
+	// Only the credentials the user.self.explain catalog operation
+	// declares are admitted here; an explain for another principal, or a
+	// comparison with another principal (comparePrincipalId), is checked
+	// again against hub.audit.explain below. A user access token explains
+	// through its own ceiling and boundary.
+	token, credentialOK := selfReadCredential(ctx, identity, "user.self.explain")
+	if !credentialOK {
+		refuseSelfReadCredential(w, r, identity, "hub")
 		return
 	}
 
@@ -350,10 +371,20 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 			Principal:  principalContextForIdentity(user),
 			Credential: credentialContextForIdentity(user),
 			Resource:   Resource{Type: "hub", ID: "hub"},
-			Action:     Action("manage"),
+			Action:     ActionRead,
 			Permission: "hub.audit.read",
 		})
 		isSuperAdmin = decision.Allowed
+	}
+
+	// An explain for another principal, or a comparison with another
+	// principal, admits only the credentials the hub.audit.explain catalog
+	// operation declares.
+	if isCrossPrincipal || req.ComparePrincipalID != "" {
+		if _, ok := selfReadCredential(ctx, identity, "hub.audit.explain"); !ok {
+			refuseSelfReadCredential(w, r, identity, "hub")
+			return
+		}
 	}
 
 	// Non-admin cannot explain for a different principal.
@@ -389,19 +420,44 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		resource.ParentType = "project"
 		resource.ParentID = req.Resource.ProjectID
 	}
+	// A skill's authorization depends on its own scope (ScopeKind and, for
+	// user-scoped skills, the owning user), which the request does not
+	// carry. Build it from the stored record the way the read handlers do,
+	// so explain matches real decisions. An unknown ID keeps the bare
+	// resource, which every skill check denies.
+	if resource.Type == "skill" && resource.ID != "" {
+		if sk, err := s.store.GetSkill(ctx, resource.ID); err == nil {
+			resource = skillResource(sk)
+		}
+	}
+
+	// A project-boundary token explains its holder's own access only inside
+	// its boundary project, and only while the holder is a current member
+	// of that project.
+	if !isCrossPrincipal && token != nil && token.Boundary().Kind == BoundaryKindProject {
+		if explainResourceProject(resource) != token.Boundary().ProjectID || !s.tokenBoundaryProjectMember(ctx, token) {
+			writeForbidden(w, "a project token can explain access only inside its boundary project")
+			return
+		}
+	}
 
 	// Handle effective_permissions mode: return full effective permission set
-	// with per-permission provenance.
+	// with per-permission provenance. A token explaining its holder's own
+	// access lists only the permissions the token may use.
 	if req.Mode == "effective_permissions" {
-		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal, isSuperAdmin)
+		var ceilingToken *ScopedUserIdentity
+		if !isCrossPrincipal {
+			ceilingToken = token
+		}
+		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal, isSuperAdmin, ceilingToken)
 		return
 	}
 
 	// Resolve the permission ID for the explain request.
 	// When the client provides an explicit permission, validate it against
 	// the registry. When omitted, canonicalize from resource.type + action
-	// using the explain-specific helper (not derivePermissionID, which is
-	// reserved for production enforcement and intentionally left unchanged).
+	// using the explain-specific helper (not resolveResourcePermission, which
+	// is reserved for production enforcement).
 	permissionID := req.Permission
 	if permissionID != "" {
 		// Explicit permission: validate against the canonical registry.
@@ -448,6 +504,19 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// explainResourceProject returns the project an explain target belongs to:
+// its project parent, or its own ID for a project. A target with no
+// project returns "".
+func explainResourceProject(resource Resource) string {
+	if resource.ParentType == "project" && resource.ParentID != "" {
+		return resource.ParentID
+	}
+	if resource.Type == "project" {
+		return resource.ID
+	}
+	return ""
+}
+
 // handleExplainEffectivePermissions handles the effective_permissions mode
 // of the explain endpoint. It returns the full effective permission set
 // with per-permission provenance showing which grant sourced each permission
@@ -469,6 +538,7 @@ func (s *Server) handleExplainEffectivePermissions(
 	resource Resource,
 	isCrossPrincipal bool,
 	isSuperAdmin bool,
+	ceilingToken *ScopedUserIdentity,
 ) {
 	// C1 fix: ComparePrincipalID reveals another principal's effective
 	// permissions. Require the same hub.audit.read gate used for PrincipalID.
@@ -506,6 +576,9 @@ func (s *Server) handleExplainEffectivePermissions(
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to compute effective permissions", nil)
 		return
+	}
+	if ceilingToken != nil {
+		effectivePerms = filterPermissionsForToken(ceilingToken, effectivePerms)
 	}
 
 	// Build per-permission provenance by running a Decide for each
@@ -760,6 +833,13 @@ func (a *explainAgentIdentity) Scopes() []AgentTokenScope     { return nil }
 func (a *explainAgentIdentity) HasScope(AgentTokenScope) bool { return false }
 func (a *explainAgentIdentity) Ancestry() []string            { return a.ancestry }
 func (a *explainAgentIdentity) TokenID() string               { return "" }
+
+// localAncestryProvenance reports that this ancestry chain was read back
+// from a hub-persisted store.Agent record, not from a JWT.
+func (a *explainAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceStoreAgent
+}
+
 func (a *explainAgentIdentity) OriginUserID() string {
 	if len(a.ancestry) > 0 {
 		return a.ancestry[0]
@@ -785,18 +865,12 @@ func newAgentIdentityFromStore(agent *store.Agent) AgentIdentity {
 func (s *Server) CleanupAuditRecords(ctx context.Context, retentionDays int) error {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
-	decisionCount, err := s.store.DeleteDecisionAuditsBefore(ctx, cutoff)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup decision audit records: %w", err)
-	}
-
 	mutationCount, err := s.store.DeleteMutationAuditsBefore(ctx, cutoff)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup mutation audit records: %w", err)
 	}
 
 	slog.Info("audit records cleaned up",
-		"decision_records_deleted", decisionCount,
 		"mutation_records_deleted", mutationCount,
 		"retention_days", retentionDays,
 		"cutoff", cutoff)

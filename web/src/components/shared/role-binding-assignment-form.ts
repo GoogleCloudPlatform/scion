@@ -365,7 +365,7 @@ export class ScionRoleBindingAssignmentForm extends LitElement {
       </div>
       <div class="form-group">
         <scion-principal-picker
-          .principalType=${this._principalType as 'user' | 'agent' | 'group'}
+          .principalType=${this._principalType}
           ?disabled=${this.disabled}
           @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
             this._principalId = e.detail.principalId;

@@ -20,40 +20,7 @@ import (
 	"time"
 )
 
-// testNow is a fixed time used across all kernel tests for determinism.
-var testNow = time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
-
 // --- Helper builders ---
-
-func makeRole(id, name, scopeType string, perms ...string) *RolePermissions {
-	return NewRolePermissions(id, name, scopeType, perms)
-}
-
-func makeBinding(bindingID, roleDefID, principalType, principalID, scopeType, scopeID string) CandidateBinding {
-	return CandidateBinding{
-		BindingID:        bindingID,
-		RoleDefinitionID: roleDefID,
-		PrincipalType:    principalType,
-		PrincipalID:      principalID,
-		ScopeType:        scopeType,
-		ScopeID:          scopeID,
-	}
-}
-
-func makeTimedBinding(bindingID, roleDefID, principalType, principalID, scopeType, scopeID string, notBefore, expiresAt time.Time) CandidateBinding {
-	cb := makeBinding(bindingID, roleDefID, principalType, principalID, scopeType, scopeID)
-	cb.NotBefore = notBefore
-	cb.ExpiresAt = expiresAt
-	return cb
-}
-
-func closureOf(ids ...string) map[string]struct{} {
-	m := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		m[id] = struct{}{}
-	}
-	return m
-}
 
 func membershipPaths(paths map[string][]string) map[string][]string {
 	return paths
@@ -1242,5 +1209,57 @@ func TestEvaluate_RestrictionProvenanceRecorded(t *testing.T) {
 	}
 	if !rr.Applied {
 		t.Fatal("expected restriction to be applied")
+	}
+}
+
+// A role binding whose role definition reference is empty (a NULL
+// role_definition_id column, e.g. after an ON DELETE SET NULL) must grant
+// nothing: the kernel rejects it as an unknown role definition.
+func TestEvaluate_EmptyRoleDefinitionIDGrantsNothing(t *testing.T) {
+	roles := map[string]*RolePermissions{
+		"r1": makeRole("r1", "admin", ScopeTypeSystem, "agent.create", "agent.read"),
+	}
+	for _, perm := range []string{"agent.create", "agent.read"} {
+		// Positive control: the same binding with a resolvable role allows.
+		ok := Evaluate(KernelRequest{
+			Permission:        perm,
+			PrincipalClosure:  closureOf("user:user1"),
+			Resource:          ResourceContext{ProjectID: "proj-a"},
+			CandidateBindings: []CandidateBinding{makeBinding("b1", "r1", "user", "user1", ScopeTypeSystem, "")},
+			RoleDefinitions:   roles,
+			Now:               testNow,
+		})
+		if !ok.Allowed {
+			t.Fatalf("%s: control binding should allow: %v", perm, ok.Provenance.DenyReasons)
+		}
+
+		d := Evaluate(KernelRequest{
+			Permission:        perm,
+			PrincipalClosure:  closureOf("user:user1"),
+			Resource:          ResourceContext{ProjectID: "proj-a"},
+			CandidateBindings: []CandidateBinding{makeBinding("b1", "", "user", "user1", ScopeTypeSystem, "")},
+			RoleDefinitions:   roles,
+			Now:               testNow,
+		})
+		if d.Allowed {
+			t.Fatalf("%s: binding with empty role definition ID must not allow", perm)
+		}
+		if n := len(d.Provenance.EffectivePermissions); n != 0 {
+			t.Fatalf("%s: expected no effective permissions, got %v", perm, d.Provenance.EffectivePermissions)
+		}
+		if n := len(d.Provenance.GrantingBindings); n != 0 {
+			t.Fatalf("%s: expected no granting bindings, got %d", perm, n)
+		}
+		found := false
+		for _, rc := range d.Provenance.RejectedCandidates {
+			for _, r := range rc.RejectReasons {
+				if r == "unknown role definition: " {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s: expected the binding rejected as an unknown role definition, got %+v", perm, d.Provenance.RejectedCandidates)
+		}
 	}
 }

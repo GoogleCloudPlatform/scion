@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,72 +41,9 @@ import (
 // Mock GCP token generator for tests (no real GCP calls)
 // ---------------------------------------------------------------------------
 
-type mockTokenGenerator struct {
-	mu             sync.Mutex
-	accessToken    string
-	accessTokenErr error
-	email          string
-	calls          int
-}
-
-func (m *mockTokenGenerator) GenerateAccessToken(_ context.Context, _ string, _ []string) (*GCPAccessToken, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls++
-	if m.accessTokenErr != nil {
-		return nil, m.accessTokenErr
-	}
-	return &GCPAccessToken{
-		AccessToken: m.accessToken,
-		ExpiresIn:   3600,
-		TokenType:   "Bearer",
-	}, nil
-}
-
-func (m *mockTokenGenerator) GenerateIDToken(_ context.Context, _ string, _ string) (*GCPIDToken, error) {
-	return &GCPIDToken{Token: "mock-id-token"}, nil
-}
-
-func (m *mockTokenGenerator) VerifyImpersonation(_ context.Context, _ string) error {
-	return nil
-}
-
-func (m *mockTokenGenerator) ServiceAccountEmail() string {
-	return m.email
-}
-
 // ---------------------------------------------------------------------------
 // Audit logger that captures events for inspection
 // ---------------------------------------------------------------------------
-
-type capturingAuditLogger struct {
-	mu     sync.Mutex
-	events []*LifecycleHookExecutionEvent
-	// Embed the real logger so we satisfy the full interface without
-	// implementing every method from scratch.
-	*LogAuditLogger
-}
-
-func newCapturingAuditLogger() *capturingAuditLogger {
-	return &capturingAuditLogger{
-		LogAuditLogger: NewLogAuditLogger("[Test]", true),
-	}
-}
-
-func (l *capturingAuditLogger) LogLifecycleHookExecutionEvent(_ context.Context, event *LifecycleHookExecutionEvent) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.events = append(l.events, event)
-	return nil
-}
-
-func (l *capturingAuditLogger) getEvents() []*LifecycleHookExecutionEvent {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]*LifecycleHookExecutionEvent, len(l.events))
-	copy(out, l.events)
-	return out
-}
 
 // ---------------------------------------------------------------------------
 // Test store setup
@@ -113,7 +51,7 @@ func (l *capturingAuditLogger) getEvents() []*LifecycleHookExecutionEvent {
 
 func executorTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	return s
 }
@@ -181,23 +119,7 @@ func makeTestAgent(projectID string) *store.Agent {
 		Message:     "agent error message",
 		Created:     time.Now(),
 		Updated:     time.Now(),
-		Visibility:  "private",
 	}
-}
-
-// newTestExecutor creates an HTTPExecutor with a test-friendly HTTP client
-// that allows loopback connections (httptest servers bind to 127.0.0.1).
-// The client still blocks ALL redirects, matching production behavior.
-func newTestExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLog AuditLogger, log *slog.Logger) *HTTPExecutor {
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, log)
-	executor.newHTTPClient = func() *http.Client {
-		return &http.Client{
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return fmt.Errorf("redirects are blocked for lifecycle hook requests (SSRF protection)")
-			},
-		}
-	}
-	return executor
 }
 
 // ---------------------------------------------------------------------------
@@ -945,7 +867,7 @@ func TestLifecycleHookExecutor_SSRFBlocksLoopback(t *testing.T) {
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
 	// Use the REAL SSRF-safe client (NOT newTestExecutor) to verify blocking.
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default(), allowAllHookFireAuthorizer{})
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,
@@ -1275,4 +1197,64 @@ type rewritingDialer struct {
 
 func (d *rewritingDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
 	return d.inner.DialContext(ctx, network, d.target)
+}
+
+// TestLifecycleHookExecutor_HaltedCarriesReasonAsData pins that a halted
+// hook gets the exit reason as a JSON-encoded body value (EXIT_REASON) and
+// does not get the agent's free-text message (ptone/scion#4853).
+func TestLifecycleHookExecutor_HaltedCarriesReasonAsData(t *testing.T) {
+	s := executorTestStore(t)
+	projID := seedExecutorProject(t, s, "test-project")
+	saID := seedExecutorSA(t, s, projID, "sa@p.iam.gserviceaccount.com")
+
+	var receivedBody []byte
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	executor := newTestExecutor(s, &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}, newCapturingAuditLogger(), slog.Default())
+	hook := makeTestHook(saID, &store.LifecycleHookAction{
+		Type:                 store.LifecycleHookActionHTTP,
+		Method:               "POST",
+		URL:                  ts.URL + "/halted",
+		Headers:              map[string]string{"Content-Type": "application/json"},
+		Body:                 `{"agent":"${AGENT_ID}","reason":"${EXIT_REASON}","message":"${ERROR_MSG}"}`,
+		AllowedUntrustedVars: []string{"EXIT_REASON", "ERROR_MSG"},
+		TimeoutSeconds:       5,
+	})
+	agent := makeTestAgent(projID)
+	agent.Phase = "halted"
+	agent.ExitReason = "preempted"
+	agent.Message = `free "text" from the agent`
+
+	require.NoError(t, executor.Execute(context.Background(), hook, agent, store.LifecycleHookTriggerHalted))
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(receivedBody, &payload), "the body stays valid JSON: %s", receivedBody)
+	assert.Equal(t, "preempted", payload["reason"], "the reason is a data field")
+	assert.Equal(t, agent.ID, payload["agent"])
+	assert.NotContains(t, string(receivedBody), "free", "a halted hook does not carry the agent's message")
+
+	vars := executor.buildRenderVars(context.Background(), hook, &store.Agent{ID: "a", ExitReason: "bogus\x1b[31m"}, store.LifecycleHookTriggerHalted, "")
+	_, ok := vars["EXIT_REASON"]
+	assert.False(t, ok, "a value outside the known reasons is never passed")
+}
+
+func TestLifecycleHookExecutor_StoppedHookExitReasonVars(t *testing.T) {
+	// The agent-reported "signaled" reason never reaches EXIT_REASON
+	// (ptone/scion#5278); a runtime reason still does.
+	s := executorTestStore(t)
+	executor := newTestExecutor(s, &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}, newCapturingAuditLogger(), slog.Default())
+	hook := makeTestHook("sa", &store.LifecycleHookAction{Type: store.LifecycleHookActionHTTP, Method: "POST", URL: "https://example.com/stopped"})
+
+	vars := executor.buildRenderVars(context.Background(), hook,
+		&store.Agent{ID: "a", Phase: "stopped", ExitReason: "signaled"}, store.LifecycleHookTriggerStopped, "")
+	_, ok := vars["EXIT_REASON"]
+	assert.False(t, ok, "a stopped hook never receives EXIT_REASON=signaled")
+
+	vars = executor.buildRenderVars(context.Background(), hook,
+		&store.Agent{ID: "a", Phase: "stopped", ExitReason: "preempted"}, store.LifecycleHookTriggerStopped, "")
+	assert.Equal(t, "preempted", vars["EXIT_REASON"])
 }

@@ -19,11 +19,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -36,9 +39,11 @@ type deleteTestState struct {
 	home           string
 	projectPath    string
 	preserveBranch bool
-	noHub          bool
 	autoConfirm    bool
 	deleteStopped  bool
+	deleteForce    bool
+	deleteSelf     bool
+	cleanupOnly    bool
 }
 
 func saveDeleteTestState() deleteTestState {
@@ -46,9 +51,11 @@ func saveDeleteTestState() deleteTestState {
 		home:           os.Getenv("HOME"),
 		projectPath:    projectPath,
 		preserveBranch: preserveBranch,
-		noHub:          noHub,
 		autoConfirm:    autoConfirm,
 		deleteStopped:  deleteStopped,
+		deleteForce:    deleteForce,
+		deleteSelf:     deleteSelf,
+		cleanupOnly:    deleteCleanupOnly,
 	}
 }
 
@@ -56,9 +63,11 @@ func (s deleteTestState) restore() {
 	_ = os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
 	preserveBranch = s.preserveBranch
-	noHub = s.noHub
 	autoConfirm = s.autoConfirm
 	deleteStopped = s.deleteStopped
+	deleteForce = s.deleteForce
+	deleteSelf = s.deleteSelf
+	deleteCleanupOnly = s.cleanupOnly
 }
 
 // createAgentDir creates a minimal agent directory at <projectDir>/agents/<name>
@@ -105,52 +114,6 @@ func newDeleteMockHubServer(t *testing.T, projectID string) (*httptest.Server, *
 	return server, &deletedAgents
 }
 
-func TestDeleteAgentLocal_NonExistentAgentReturnsError(t *testing.T) {
-	orig := saveDeleteTestState()
-	defer orig.restore()
-
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	noHub = true
-
-	// Set up project directory without any agent
-	projectDir := filepath.Join(tmpHome, "project", ".scion")
-	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
-	projectPath = projectDir
-
-	err := deleteAgentLocal("does-not-exist")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found")
-}
-
-func TestDeleteAgentLocal_ExistingAgentSucceeds(t *testing.T) {
-	orig := saveDeleteTestState()
-	defer orig.restore()
-
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	noHub = true
-	preserveBranch = true
-
-	// Set up project directory with an agent
-	projectDir := filepath.Join(tmpHome, "project", ".scion")
-	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
-	projectPath = projectDir
-
-	agentDir := createAgentDir(t, projectDir, "real-agent")
-
-	// Verify agent dir exists
-	_, err := os.Stat(agentDir)
-	require.NoError(t, err)
-
-	err = deleteAgentLocal("real-agent")
-	require.NoError(t, err)
-
-	// Agent directory should be cleaned up
-	_, err = os.Stat(agentDir)
-	assert.True(t, os.IsNotExist(err), "agent directory should be deleted")
-}
-
 func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	orig := saveDeleteTestState()
 	defer orig.restore()
@@ -159,7 +122,7 @@ func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true // skip branch operations since there's no real git repo
 
-	projectID := "grove-del-123"
+	projectID := "project-del-123"
 	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -197,6 +160,62 @@ func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "agent directory should be deleted after Hub deletion")
 }
 
+// TestDeleteAgentsViaHub_NoLocalCheckout covers ptone/scion#5083: after a
+// confirmed hub delete in a project with no local checkout here (for
+// example a hub-native project named with --project from another
+// directory), the local cleanup is skipped quietly. There is no
+// local-cleanup warning, no retry advice, and nothing is created at the
+// missing project path.
+func TestDeleteAgentsViaHub_NoLocalCheckout(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+
+	projectID := "project-native-123"
+	server, deletedAgents := newDeleteMockHubServer(t, projectID)
+	defer server.Close()
+
+	missing := filepath.Join(tmpHome, "no-checkout", ".scion")
+	projectPath = missing
+	// As with --global, the hub context's project is the global directory,
+	// which exists; only the agent's local project is missing.
+	globalDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{
+		Client:      client,
+		Endpoint:    server.URL,
+		ProjectID:   projectID,
+		ProjectPath: globalDir,
+	}
+
+	stdout, stderr := captureStdIO(t, func() { err = deleteAgentsViaHub(hubCtx, []string{"remote-agent"}) })
+	require.NoError(t, err)
+	require.Equal(t, []string{"remote-agent"}, *deletedAgents)
+
+	out := stdout + stderr
+	assert.Contains(t, out, "Agent 'remote-agent' deleted via Hub.")
+	assert.NotContains(t, out, "local cleanup failed")
+	assert.NotContains(t, out, "--cleanup-only")
+	assert.NotContains(t, out, "--no-hub")
+	assert.NotContains(t, out, "scion clean")
+	_, statErr := os.Stat(filepath.Dir(missing))
+	assert.True(t, os.IsNotExist(statErr), "no files are created for a project with no local checkout")
+
+	// The post-delete helper reports no error; the shared helper returns
+	// ErrAgentProjectUnresolved for --cleanup-only to report.
+	branchDeleted, err := cleanupAfterConfirmedHubDelete(hubCtx, "remote-agent", true)
+	assert.NoError(t, err)
+	assert.False(t, branchDeleted)
+	_, err = cleanupAfterHubDelete(hubCtx, "remote-agent", true)
+	assert.ErrorIs(t, err, agent.ErrAgentProjectUnresolved)
+}
+
 func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {
 	orig := saveDeleteTestState()
 	defer orig.restore()
@@ -205,7 +224,7 @@ func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-multi-456"
+	projectID := "project-multi-456"
 	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -246,7 +265,7 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-fail-789"
+	projectID := "project-fail-789"
 
 	// Server that returns 404 for all agent deletes
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +315,7 @@ func TestDeleteAgentsViaHub_NoLocalFiles(t *testing.T) {
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-nolocal-101"
+	projectID := "project-nolocal-101"
 	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -331,7 +350,7 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	projectID := "grove-stale-202"
+	projectID := "project-stale-202"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -392,37 +411,6 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	assert.True(t, result.IsInSync(), "stale-local-only result should still be in sync")
 }
 
-func TestDeleteStopped_RequiresGroveContext(t *testing.T) {
-	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID"} {
-		if val, ok := os.LookupEnv(e); ok {
-			_ = os.Unsetenv(e)
-			defer func() { _ = os.Setenv(e, val) }()
-		}
-	}
-
-	orig := saveDeleteTestState()
-	defer orig.restore()
-
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-
-	// Set CWD to a directory without .scion so project resolution fails
-	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	defer func() { _ = os.Chdir(oldWd) }()
-	_ = os.Chdir(tmpDir)
-
-	noHub = true
-	projectPath = ""
-	deleteStopped = true
-
-	// Running delete --stopped outside a project should error
-	err := deleteCmd.RunE(deleteCmd, []string{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not in a scion project")
-}
-
 func TestDeleteStopped_AcceptsGlobalFlag(t *testing.T) {
 	orig := saveDeleteTestState()
 	defer orig.restore()
@@ -447,4 +435,214 @@ func TestDeleteStopped_AcceptsGlobalFlag(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, isGlobal, "should resolve as global project")
 	assert.Equal(t, globalDir, resolvedProject)
+}
+
+// newDeleteQueryRecordingHubServer creates a mock Hub server that records the
+// raw query string of every agent DELETE request, keyed by agent name. It also
+// serves the stopped-agent list used by delete --stopped.
+func newDeleteQueryRecordingHubServer(t *testing.T, projectID string, stopped []string) (*httptest.Server, map[string]url.Values) {
+	t.Helper()
+	queries := map[string]url.Values{}
+	prefix := "/api/v1/projects/" + projectID + "/agents"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == prefix:
+			agents := make([]map[string]interface{}, 0, len(stopped))
+			for _, name := range stopped {
+				agents = append(agents, map[string]interface{}{"id": name, "name": name, "phase": "stopped"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents":     agents,
+				"totalCount": len(agents),
+			})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, prefix+"/"):
+			queries[strings.TrimPrefix(r.URL.Path, prefix+"/")] = r.URL.Query()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return server, queries
+}
+
+func newDeleteForceHubContext(t *testing.T, serverURL, projectID string) *HubContext {
+	t.Helper()
+	client, err := hubclient.New(serverURL)
+	require.NoError(t, err)
+	return &HubContext{Client: client, Endpoint: serverURL, ProjectID: projectID}
+}
+
+func TestDeleteCmd_ForceFlagRegistered(t *testing.T) {
+	f := deleteCmd.Flags().Lookup("force")
+	require.NotNil(t, f, "delete should expose --force")
+	assert.Equal(t, "f", f.Shorthand)
+	assert.Equal(t, "false", f.DefValue)
+	assert.Contains(t, f.Usage, "broker")
+}
+
+func TestDeleteAgentsViaHub_ForceSendsForceQuery(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteForce = true
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-1"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
+	defer server.Close()
+
+	err := deleteAgentsViaHub(newDeleteForceHubContext(t, server.URL, projectID), []string{"agent-a", "agent-b"})
+	require.NoError(t, err)
+
+	require.Len(t, queries, 2, "every named agent should be deleted")
+	for _, name := range []string{"agent-a", "agent-b"} {
+		require.Contains(t, queries, name)
+		assert.Equal(t, "true", queries[name].Get("force"), "force=true should be sent for %s", name)
+	}
+}
+
+func TestDeleteAgentsViaHub_NoForceOmitsForceQuery(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteForce = false
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-2"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
+	defer server.Close()
+
+	err := deleteAgentsViaHub(newDeleteForceHubContext(t, server.URL, projectID), []string{"agent-a"})
+	require.NoError(t, err)
+
+	require.Contains(t, queries, "agent-a")
+	_, present := queries["agent-a"]["force"]
+	assert.False(t, present, "force must be absent when --force is not set")
+}
+
+// TestDeleteCmd_ForceWithStoppedRejected runs the real command tree so that
+// cobra's Args validation is exercised before any hub work. --force with
+// --stopped would be a bulk, permanent delete, so it must be rejected and no
+// delete request may reach the hub.
+func TestDeleteCmd_ForceWithStoppedRejected(t *testing.T) {
+	restoreAllSilenceUsage(t)
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-3"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, []string{"stopped-one", "stopped-two"})
+	defer server.Close()
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_PROJECT_ID", projectID)
+	// Clear SCION_HOST_UID so the root agent-container check does not intercept
+	// the command; otherwise the zero-DELETE assertion is vacuous in containers.
+	t.Setenv("SCION_HOST_UID", "")
+
+	rootCmd.SetArgs([]string{"delete", "--stopped", "--force"})
+	defer func() {
+		rootCmd.SetArgs(nil)
+		for _, name := range []string{"stopped", "force"} {
+			if f := deleteCmd.Flags().Lookup(name); f != nil {
+				f.Changed = false
+			}
+		}
+	}()
+
+	var err error
+	_ = captureStderr(t, func() {
+		err = rootCmd.Execute()
+	})
+	// Check the zero-DELETE invariant first so it is evaluated even when the
+	// error assertion below fails.
+	assert.Empty(t, queries, "no delete request may reach the hub")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--force cannot be combined with --stopped")
+}
+
+func TestDeleteStoppedViaHub_NoForceOmitsForceQuery(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteForce = false
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-4"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, []string{"stopped-one", "stopped-two"})
+	defer server.Close()
+
+	err := deleteStoppedViaHub(newDeleteForceHubContext(t, server.URL, projectID))
+	require.NoError(t, err)
+
+	require.Len(t, queries, 2, "every stopped agent should be deleted")
+	for name, q := range queries {
+		_, present := q["force"]
+		assert.False(t, present, "force must be absent for stopped agent %s", name)
+	}
+}
+
+// TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode drives RunE down the Hub path
+// (hub-connected env) and checks that --force is sent and that the local-mode
+// warning is not printed.
+func TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteStopped = false
+	deleteForce = true
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-5"
+	// projectPath stands in for an explicit --project flag, whose own
+	// project ID wins over SCION_PROJECT_ID (ptone/scion#3123).
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "project-id"), []byte(projectID+"\n"), 0644))
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
+	defer server.Close()
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_PROJECT_ID", projectID)
+
+	var runErr error
+	stderr := captureStderr(t, func() {
+		runErr = deleteCmd.RunE(deleteCmd, []string{"hub-agent"})
+	})
+	require.NoError(t, runErr)
+	assert.Contains(t, stderr, "Using hub:", "delete should take the Hub path")
+	assert.NotContains(t, stderr, "--force has no effect without a Hub")
+	require.Contains(t, queries, "hub-agent")
+	assert.Equal(t, "true", queries["hub-agent"].Get("force"))
 }

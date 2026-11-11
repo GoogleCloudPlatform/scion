@@ -65,7 +65,14 @@ func TestConfigFromEnv_Enabled(t *testing.T) {
 		{"false", false},
 		{"0", false},
 		{"", false},
-		{"yes", false},
+		// Shared util.ParseBoolEnv semantics (ptone/scion#1086): yes/on/t
+		// enable, whitespace is trimmed, garbage falls back to the default.
+		{"yes", true},
+		{"on", true},
+		{"t", true},
+		{" true\n", true},
+		{"off", false},
+		{"garbage", false},
 	}
 
 	for _, tt := range tests {

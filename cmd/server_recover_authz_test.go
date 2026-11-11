@@ -37,7 +37,7 @@ import (
 func newRecoveryTestStore(t *testing.T) *entadapter.CompositeStore {
 	t.Helper()
 	dbName := strings.ReplaceAll(t.Name(), "/", "_")
-	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{})
+	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	s := entadapter.NewCompositeStore(client)
@@ -70,12 +70,6 @@ func createTestConstraint(t *testing.T, ctx context.Context, s *entadapter.Compo
 // Mode restriction tests
 // ---------------------------------------------------------------------------
 
-func TestRecoverAuthz_ModeRestrictions_AssistantDenied(t *testing.T) {
-	// server.recover-authz must be in the assistantDenied map
-	assert.True(t, assistantDenied["server.recover-authz"],
-		"server.recover-authz must be denied in assistant mode")
-}
-
 func TestRecoverAuthz_ModeRestrictions_AgentNotAllowed(t *testing.T) {
 	// server.recover-authz must NOT be in agentAllowed
 	assert.False(t, agentAllowed["server.recover-authz"],
@@ -86,19 +80,10 @@ func TestRecoverAuthz_ModeRestrictions_AgentNotAllowed(t *testing.T) {
 		"server must not be allowed in agent mode")
 }
 
-func TestRecoverAuthz_ModeRestrictions_RemovedInAssistantMode(t *testing.T) {
-	t.Setenv("SCION_CLI_MODE", "assistant")
-	root := buildRecoverAuthzTestTree()
-	applyModeRestrictions(root)
-	remaining := collectCommandNames(root)
-	assert.NotContains(t, remaining, "server.recover-authz",
-		"recover-authz should be removed in assistant mode")
-}
-
 func TestRecoverAuthz_ModeRestrictions_RemovedInAgentMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildRecoverAuthzTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.NotContains(t, remaining, "server.recover-authz",
 		"recover-authz should be removed in agent mode")
@@ -107,7 +92,7 @@ func TestRecoverAuthz_ModeRestrictions_RemovedInAgentMode(t *testing.T) {
 func TestRecoverAuthz_ModeRestrictions_AvailableInHumanMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "human")
 	root := buildRecoverAuthzTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.Contains(t, remaining, "server.recover-authz",
 		"recover-authz should be available in human mode")
@@ -152,7 +137,7 @@ func TestRecoverAuthz_RequiresFlag(t *testing.T) {
 		recoverDisableAll = oldDA
 	}()
 
-	err := runRecoverAuthz(newTestRecoverCmd(), nil)
+	err := recoverAuthzArgs(newTestRecoverCmd(), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "either --disable-constraint")
 }
@@ -167,7 +152,7 @@ func TestRecoverAuthz_MutuallyExclusiveFlags(t *testing.T) {
 		recoverDisableAll = oldDA
 	}()
 
-	err := runRecoverAuthz(newTestRecoverCmd(), nil)
+	err := recoverAuthzArgs(newTestRecoverCmd(), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "mutually exclusive")
 }
@@ -185,7 +170,7 @@ func TestRecoverAuthz_DisableAllRequiresConfirmPhrase(t *testing.T) {
 		recoverConfirmationPhrase = oldCP
 	}()
 
-	err := runRecoverAuthz(newTestRecoverCmd(), nil)
+	err := recoverAuthzArgs(newTestRecoverCmd(), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "requires --confirm")
 }

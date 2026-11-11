@@ -31,7 +31,7 @@ var templatesImportCmd = &cobra.Command{
 	Short: "Import agent definitions as scion templates",
 	Long: `Import agent or sub-agent definitions from Claude Code (.claude/agents/*.md),
 Gemini CLI (.gemini/agents/*.md), or existing scion templates and add them to your
-current grove or global templates.
+current project or global templates.
 
 Source can be:
   - A single .md agent definition file
@@ -45,6 +45,10 @@ For non-scion formats, the harness type (claude/gemini) is auto-detected from fi
 path and content. Use --harness to override detection.
 
 Scion-format templates are copied directly without conversion.
+
+For a GitHub URL the fetch authenticates with the first of these environment
+variables that is set: GH_{OWNER}__{REPO}, GH_{OWNER}, then GITHUB_TOKEN
+(OWNER and REPO uppercased, with "-" and "." as "_").
 
 Examples:
   # Import a single Claude sub-agent definition
@@ -90,7 +94,7 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("Fetching remote source: %s\n", source)
-		cachePath, err := config.FetchRemoteTemplate(context.Background(), source)
+		cachePath, err := config.FetchRemoteTemplate(context.Background(), source, remoteFetchCredential(source))
 		if err != nil {
 			return fmt.Errorf("failed to fetch remote source: %w", err)
 		}
@@ -189,16 +193,17 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Output results
+	status := resultStatus(results)
 	if isJSONOutput() {
-		return outputJSON(ActionResult{
-			Status:  resultStatus(results),
+		return outputJSONResult(ActionResult{
+			Status:  status,
 			Command: "templates import",
 			Message: resultMessage(results, dryRun),
 			Details: map[string]interface{}{
 				"templates": results,
 				"dryRun":    dryRun,
 			},
-		})
+		}, status != "success", "one or more templates failed to import")
 	}
 
 	for _, r := range results {
@@ -212,6 +217,9 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if status != "success" {
+		return fmt.Errorf("one or more templates failed to import")
+	}
 	return nil
 }
 

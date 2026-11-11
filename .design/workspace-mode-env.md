@@ -2,7 +2,9 @@
 
 **Issue:** [ptone/scion#572](https://github.com/ptone/scion/issues/572)  
 **Project slug:** `workspace-mode-env`  
-**Status:** Finalized — all open questions resolved (see §Open Questions for decisions)
+**Status:** Finalized — all open questions resolved (see §Open Questions for decisions)  
+**Update:** Phase 2 landed: `SCION_SHARED_WORKSPACE` was removed with no further
+compatibility period (ptone/scion#575). See the OQ3 update below.
 
 ---
 
@@ -82,6 +84,33 @@ if env["SCION_WORKSPACE_MODE"] == "" {
 | `shared` or `""` | `shared-plain` |
 | `per-agent` | `clone-per-agent` |
 | `worktree-per-agent` | `worktree-per-agent` |
+| `per-agent` on a **non-git** project (hub sends `empty-per-agent` on the wire) | `empty-per-agent` |
+
+**Addendum (#2703, empty-per-agent):** a non-git (hub-managed) project labeled
+`per-agent` gives every agent a private, initially empty, non-git directory.
+The hub resolves (label, git-ness) with `store.ResolveProjectSharingMode` and
+never forwards the bare `per-agent` label for such projects — label-only
+resolution would read it as `clone-per-agent`. Instead the create body's
+`WorkspaceMode`, the start `WorkspaceDispatchSpec`, and the injected
+`SCION_WORKSPACE_MODE` (start and restart) all carry the canonical
+`empty-per-agent`, which `ResolveWorkspaceSharingMode` round-trips.
+`SCION_WORKSPACE_GIT` is never set for this mode. Dispatch is gated on the
+broker capability `emptyPerAgentWorkspace` (412 otherwise).
+
+More generally, the hub sends a workspace-mode value only if the broker's
+label-only resolution of it matches the hub's `Project.SharingMode()`
+(`dispatchWorkspaceMode` in `pkg/hub/project_workspace_mode.go`). A stored
+label that does not fit the project's git-ness is dropped, so the broker sees
+an unlabelled (shared-plain) project, as the hub does. Examples are a legacy
+raw `empty-per-agent` on a git project, or `worktree-per-agent` on a non-git
+project.
+
+Known P1 limitation: the hub's project workspace surfaces still resolve to
+the hub project directory for empty-per-agent projects, although their
+agents never mount it. Those surfaces are the project workspace file API
+(`handleProjectWorkspace`, through `resolveProjectWorkspacePath`) and cache refresh (`handleProjectCacheRefresh`).
+This is deliberately unguarded in P1; the web UI hides the Files tab for this
+mode (P5).
 
 `store.ResolveWorkspaceSharingMode()` (`pkg/store/models.go:225`) already
 implements this mapping and defaults empty/unknown to `shared-plain`.
@@ -348,6 +377,15 @@ Phase 2 (eventual removal of `SCION_SHARED_WORKSPACE`) is tracked in
 implementation phases below include a sciontool update task for the
 compatibility shim.
 
+> **Update (ptone/scion#575):** Phase 2 is done. The broker no longer emits
+> `SCION_SHARED_WORKSPACE`, and `sciontool init` no longer falls back to it:
+> `SCION_WORKSPACE_MODE` + `SCION_WORKSPACE_GIT` are the only inputs, and the
+> legacy var is ignored when set. With no `SCION_WORKSPACE_MODE` (an older
+> broker), the agent is treated as not being in a shared git workspace — the
+> same result the shim gave when neither variable was set. The compatibility
+> shim, deprecation comment and fallback tests described below were removed
+> with it.
+
 ---
 
 ## Implementation Phases
@@ -444,7 +482,7 @@ The QA tester should verify:
    - Agent in a project with no `scion.dev/workspace-mode` label.
    - `SCION_WORKSPACE_MODE` → `shared-plain`.
 
-6. **`SCION_SHARED_WORKSPACE` backward compatibility (OQ3 deprecation):**
+6. **`SCION_SHARED_WORKSPACE` backward compatibility (OQ3 deprecation; superseded — the var was removed in ptone/scion#575):**
    - Existing shared-plain git agents still receive `SCION_SHARED_WORKSPACE=true`
      (emitted unchanged; deprecation period is in effect).
    - `sciontool init` works correctly when only `SCION_SHARED_WORKSPACE` is

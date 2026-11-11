@@ -1,0 +1,445 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/testinfra"
+	"github.com/spf13/cobra"
+)
+
+// Test mode startup gate (ptone/scion#4240, phase TM; the admin levels are
+// the test admin tier of phase A0). See pkg/hub/test_mode.go for the levels
+// and pkg/hub/test_admin_gate.go for the gate conditions (G1-G10).
+
+const (
+	// testModeFlag is --test-mode=<level>:<hub id>.
+	testModeFlag = "test-mode"
+
+	// The flags --test-mode replaced. They stay registered, hidden, only
+	// so that using one refuses startup with hub.ErrTestModeRemovedFlag
+	// naming --test-mode instead of a bare "unknown flag".
+	removedTestIdentitiesFlag           = "enable-test-identities"
+	removedTestAdminIdentitiesFlag      = "enable-test-admin-identities"
+	removedTestSuperAdminIdentitiesFlag = "enable-test-super-admin-identities"
+)
+
+// removedTestFlags lists the replaced flags in a fixed order.
+var removedTestFlags = []string{removedTestIdentitiesFlag, removedTestAdminIdentitiesFlag, removedTestSuperAdminIdentitiesFlag}
+
+var (
+	// testModeValue is the raw --test-mode value.
+	testModeValue string
+	// removedTestFlagValue receives the value of any removed flag; it is
+	// never read.
+	removedTestFlagValue string
+
+	// Recorded from the parsed flags by recordTestModeFlags, before any
+	// config reconciliation, so the gate sees what the operator typed.
+	testModeLevel            hub.TestMode
+	testModeHubID            string
+	productionFlagIsExplicit bool
+)
+
+func registerTestModeFlags(c *cobra.Command) {
+	c.Flags().StringVar(&testModeValue, testModeFlag, "",
+		"Test identity level of a designated test hub: off, member, admin or super-admin, written <level>:<hub id> (the hub id must be this hub's resolved hub id). "+
+			"Every level but off requires an explicitly configured server.hub.hub_id (or SCION_SERVER_HUB_HUBID; set it to the hub's current resolved id, never a new one), server.hub.class: test, a test infrastructure marker for this hub id and no --production; admin also requires a non-workstation hub, no federation and hub-local signing keys. "+
+			"A level whose requirements are not all met, or an unrecognised value, refuses to start; empty means off (do not use in production)")
+	for _, name := range removedTestFlags {
+		c.Flags().StringVar(&removedTestFlagValue, name, "", "Replaced by --"+testModeFlag)
+		// A bare --enable-test-identities still parses, so it reaches the
+		// named refusal.
+		c.Flags().Lookup(name).NoOptDefVal = "true"
+		_ = c.Flags().MarkHidden(name)
+	}
+}
+
+// recordTestModeFlags captures the parsed --test-mode level and binding and
+// whether --production was given explicitly. --production is a deprecated
+// alias that shares --hosted's variable, so only Changed can tell the two
+// spellings apart (G5).
+func recordTestModeFlags(cmd *cobra.Command) (recognized bool) {
+	testModeLevel, testModeHubID, recognized = hub.ParseTestMode(testModeValue)
+	if !cmd.Flags().Changed(testModeFlag) {
+		testModeLevel, testModeHubID, recognized = hub.TestModeOff, "", true
+	}
+	productionFlagIsExplicit = cmd.Flags().Changed("production")
+	return recognized
+}
+
+// testModeRequested reports whether a level other than off was requested.
+func testModeRequested() bool {
+	return testModeLevel != "" && testModeLevel != hub.TestModeOff
+}
+
+// validateTestModeFlagsEarly runs the checks that need only the parsed
+// flags: a removed flag is refused (naming --test-mode), super-admin is
+// refused unless the test-admin policy classification is complete (G3),
+// and an explicit --production with any level but off is refused (G5). It
+// runs before config is loaded, in the daemon parent as well as the
+// foreground process, so a refused flag never reaches a re-exec. A
+// non-empty --test-mode value that is not recognised is refused too (the
+// parser resolves it to off, so nothing would be granted, but the operator
+// asked for something); an empty value is off.
+func validateTestModeFlagsEarly(cmd *cobra.Command) error {
+	for _, name := range removedTestFlags {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			return fmt.Errorf("--%s: %w", name, hub.ErrTestModeRemovedFlag)
+		}
+	}
+	if !recordTestModeFlags(cmd) && testModeValue != "" {
+		return hub.ErrTestModeUnrecognized
+	}
+	if !testModeRequested() {
+		return nil
+	}
+	if testModeLevel == hub.TestModeSuperAdmin {
+		// G3: the super-admin kind needs a complete test-admin policy.
+		if err := testAdminPolicyComplete(); err != nil {
+			return fmt.Errorf("%w: %v", hub.ErrTestSuperAdminRequiresPolicyRegistry, err)
+		}
+	}
+	if productionFlagIsExplicit {
+		return fmt.Errorf("--test-mode=%s: %w", testModeLevel, hub.ErrTestAdminProductionFlag)
+	}
+	return nil
+}
+
+// validateTestModeRequiresHub refuses a test mode level on a process that
+// does not run the hub.
+func validateTestModeRequiresHub(hubEnabled bool) error {
+	if testModeRequested() && !hubEnabled {
+		return fmt.Errorf("--test-mode=%s: %w", testModeLevel, hub.ErrTestAdminRequiresHub)
+	}
+	return nil
+}
+
+// hubIDPinned reports whether the hub id was configured explicitly, in
+// server.hub.hub_id or SCION_SERVER_HUB_HUBID, rather than derived by
+// config.ResolveHubIDFromEnv from K_SERVICE or the hostname (persisted in
+// ~/.scion/hub-id). The resolved hub id is the logical hub's identity: every
+// replica of one hub must share it, which only an explicit value
+// guarantees. The env var is checked directly as well as through the
+// settings overlay, because config.ResolveHubIDFromEnv reads it directly.
+func hubIDPinned(cfg *config.GlobalConfig) bool {
+	return cfg != nil && (!cfg.Hub.IsHubIDUnconfigured() || os.Getenv(config.HubIDEnvVar) != "")
+}
+
+// validateTestModeHubIDPinned refuses any --test-mode level but off when the
+// hub id is derived rather than pinned (G2). runServerStart calls it once
+// config is loaded, right after validateTestModeRequiresHub and before the
+// store is opened (validateTestModeFlagsEarly runs before config load and
+// cannot see the hub id); resolveTestMode and hub.New check the same
+// condition again.
+func validateTestModeHubIDPinned(cfg *config.GlobalConfig) error {
+	if !testModeRequested() || hubIDPinned(cfg) {
+		return nil
+	}
+	if cfg == nil {
+		// No config: refuse without a current id to print.
+		return fmt.Errorf("--test-mode=%s: %w", testModeLevel, hub.ErrTestModeHubIDNotPinned)
+	}
+	return fmt.Errorf("--test-mode=%s: %w (this hub's current resolved hub id is %q)", testModeLevel, hub.ErrTestModeHubIDNotPinned, cfg.Hub.ResolveHubID())
+}
+
+// testModeInputs are the inputs of resolveTestMode.
+type testModeInputs struct {
+	// Level and BindingHubID are the parsed --test-mode value.
+	Level                  hub.TestMode
+	BindingHubID           string
+	ProductionFlagExplicit bool
+
+	HubEnabled    bool
+	HasUserStore  bool
+	ResolvedHubID string
+	HubIDPinned   bool // the resolved hub id is configured, not derived (hubIDPinned)
+	Workstation   bool
+	HubClass      string
+	Federation    config.FederationConfig
+
+	// KeyringSigning: a keyring file supplies the signing keys. It is
+	// decided first; SharedSigningSecret is read only when it is false.
+	KeyringSigning          bool
+	SharedSigningSecret     bool
+	PreconfiguredSigningKey bool
+
+	// ReadMarker reads the test_infra_marker row (G6).
+	ReadMarker func() (*testinfra.Marker, error)
+
+	// PolicyComplete reports whether the test-admin policy classification
+	// is complete (G3, super-admin only). Nil means
+	// hub.TestAdminPolicyComplete.
+	PolicyComplete func() error
+
+	// AdminWebSessions is the value of
+	// server.hub.test_identities.admin_web_sessions: the hub id the admin
+	// web session setting is bound to, or "" (off). Phase WS4.
+	AdminWebSessions string
+
+	// OfflineAdminDelegations is the value of
+	// server.hub.test_identities.offline_admin_delegations: the hub id the
+	// offline hub-admin delegation setting is bound to, or "" (off).
+	OfflineAdminDelegations string
+}
+
+// testAdminPolicyComplete is the G3 check. A variable only so tests can
+// substitute an incomplete classification.
+var testAdminPolicyComplete = hub.TestAdminPolicyComplete
+
+// testModeResolution is what a resolved level sets on hub.ServerConfig.
+type testModeResolution struct {
+	EnableTestIdentities bool
+	TestAdminGate        hub.TestAdminGateConfig
+	TestMode             hub.TestModeConfig
+	TestAdminWebSessions hub.TestAdminWebSessionsConfig
+	// OfflineAdminDelegations is the offline hub-admin delegation setting.
+	OfflineAdminDelegations hub.OfflineAdminDelegationsConfig
+}
+
+// resolveTestMode checks every precondition of the requested level and
+// returns the hub configuration it grants. Every level but off ANDs the
+// member preconditions (G1 hub and user store, G5 no explicit
+// --production, G2 hub id binding and a pinned hub id, G4 hub class, G6
+// marker); admin adds G10 (not a workstation hub), G8 (no federation) and
+// G7 (no shared or pre-configured signing key); super-admin is refused
+// unless the test-admin policy classification is complete (G3). Any unmet
+// precondition refuses startup with a named error (hub.Err*): a level is
+// never lowered. Off returns the zero resolution. hub.New re-checks the
+// result and verifies the actual signing-key sources (G7) before it
+// captures the gate.
+//
+// The admin web session setting (server.hub.test_identities.admin_web_sessions,
+// WS4) refuses startup unless the level is admin or super-admin and its
+// value is the resolved hub id; it is never ignored and never lowers the
+// level. The Helm chart renders only --test-mode=member (G9), so a Helm
+// hub with the setting refuses to start.
+//
+// The offline hub-admin delegation setting
+// (server.hub.test_identities.offline_admin_delegations) follows the same
+// rules: it refuses startup unless the level is admin or super-admin and
+// its value is the resolved hub id.
+func resolveTestMode(in testModeInputs) (testModeResolution, error) {
+	var off testModeResolution
+	level := in.Level
+	if in.AdminWebSessions != "" && !level.IsAdminLevel() {
+		shown := level
+		if shown == "" {
+			shown = hub.TestModeOff
+		}
+		return off, fmt.Errorf("%s with --test-mode=%s: %w", config.TestIdentityAdminWebSessionsKey, shown, hub.ErrTestAdminWebSessionsBelowAdmin)
+	}
+	if in.OfflineAdminDelegations != "" && !level.IsAdminLevel() {
+		shown := level
+		if shown == "" {
+			shown = hub.TestModeOff
+		}
+		return off, fmt.Errorf("%s with --test-mode=%s: %w", config.TestIdentityOfflineAdminDelegationsKey, shown, hub.ErrOfflineAdminDelegationsBelowAdmin)
+	}
+	if level == "" || level == hub.TestModeOff {
+		return off, nil
+	}
+	refuse := func(err error) (testModeResolution, error) {
+		return off, fmt.Errorf("--test-mode=%s: %w", level, err)
+	}
+	switch level {
+	case hub.TestModeMember, hub.TestModeAdmin:
+	case hub.TestModeSuperAdmin:
+		// G3: the super-admin kind is admitted only by a binary whose
+		// test-admin policy classification is complete.
+		complete := in.PolicyComplete
+		if complete == nil {
+			complete = testAdminPolicyComplete
+		}
+		if err := complete(); err != nil {
+			return refuse(fmt.Errorf("%w: %v", hub.ErrTestSuperAdminRequiresPolicyRegistry, err))
+		}
+	default:
+		return refuse(hub.ErrTestModeInconsistent)
+	}
+	// G1: a hub with a user store.
+	if !in.HubEnabled {
+		return refuse(hub.ErrTestAdminRequiresHub)
+	}
+	if !in.HasUserStore {
+		return refuse(hub.ErrTestAdminRequiresUserStore)
+	}
+	// G5: explicit --production (not --hosted).
+	if in.ProductionFlagExplicit {
+		return refuse(hub.ErrTestAdminProductionFlag)
+	}
+	// G2: the binding is this hub's resolved id.
+	if in.BindingHubID == "" || in.ResolvedHubID == "" || in.BindingHubID != in.ResolvedHubID {
+		return refuse(fmt.Errorf("%w: --test-mode hub id %q, resolved hub id %q", hub.ErrTestAdminHubIDMismatch, in.BindingHubID, in.ResolvedHubID))
+	}
+	// G2: the resolved id is pinned (server.hub.hub_id or
+	// SCION_SERVER_HUB_HUBID), so every replica of the hub shares it.
+	if !in.HubIDPinned {
+		return refuse(fmt.Errorf("%w (this hub's current resolved hub id is %q)", hub.ErrTestModeHubIDNotPinned, in.ResolvedHubID))
+	}
+	// G4: a positive, exact hub class.
+	if !config.IsTestHubClass(in.HubClass) {
+		return refuse(fmt.Errorf("%w: %s is %q", hub.ErrTestAdminHubClassNotTest, config.HubClassKey, in.HubClass))
+	}
+	preconditions := append([]string(nil), hub.TestModeMemberPreconditions()...)
+	if level.IsAdminLevel() {
+		// G10: never on a workstation hub.
+		if in.Workstation {
+			return refuse(hub.ErrTestAdminWorkstationHub)
+		}
+		// G8: no federation trust at startup.
+		if in.Federation.Enabled || len(in.Federation.TrustedIssuers) > 0 {
+			return refuse(hub.ErrTestAdminFederationConfigured)
+		}
+		// G7: no keyring, shared or pre-configured signing key. Keyring
+		// mode refuses before the shared secret is looked at.
+		if in.KeyringSigning {
+			return refuse(hub.ErrTestAdminKeyringSigning)
+		}
+		if in.SharedSigningSecret {
+			return refuse(hub.ErrTestAdminSharedSigningSecret)
+		}
+		if in.PreconfiguredSigningKey {
+			return refuse(hub.ErrTestAdminPreconfiguredSigningKey)
+		}
+		preconditions = append(preconditions, hub.TestModeAdminPreconditions()...)
+		if level == hub.TestModeSuperAdmin {
+			preconditions = append(preconditions, hub.TestModePreconditionPolicyComplete)
+		}
+	}
+	// G6: the datastore's own test marker for this hub. Read last: it is
+	// the only check that touches the database.
+	if in.ReadMarker == nil {
+		return refuse(hub.ErrTestAdminMarkerAbsent)
+	}
+	marker, err := in.ReadMarker()
+	if err != nil {
+		if errors.Is(err, testinfra.ErrMarkerAbsent) {
+			return refuse(hub.ErrTestAdminMarkerAbsent)
+		}
+		return refuse(fmt.Errorf("%w: %v", hub.ErrTestAdminMarkerUnreadable, err))
+	}
+	if !config.IsTestHubClass(marker.Class) {
+		return refuse(fmt.Errorf("%w: marker class %q", hub.ErrTestAdminMarkerClassNotTest, marker.Class))
+	}
+	if marker.HubID != in.ResolvedHubID {
+		return refuse(fmt.Errorf("%w: marker hub id %q, resolved hub id %q", hub.ErrTestAdminMarkerHubMismatch, marker.HubID, in.ResolvedHubID))
+	}
+	res := testModeResolution{
+		EnableTestIdentities: true,
+		TestMode: hub.TestModeConfig{
+			Level:          level,
+			Preconditions:  preconditions,
+			HubID:          in.BindingHubID,
+			HubClass:       in.HubClass,
+			MarkerHubID:    marker.HubID,
+			MarkerClass:    marker.Class,
+			ProductionFlag: in.ProductionFlagExplicit,
+		},
+	}
+	if in.AdminWebSessions != "" {
+		// The level is admin or super-admin (checked first). The binding is
+		// this hub's resolved id, as for --test-mode itself (G2).
+		if in.AdminWebSessions != in.ResolvedHubID {
+			return refuse(fmt.Errorf("%w: %s is %q, resolved hub id %q", hub.ErrTestAdminWebSessionsHubIDMismatch,
+				config.TestIdentityAdminWebSessionsKey, in.AdminWebSessions, in.ResolvedHubID))
+		}
+		res.TestAdminWebSessions = hub.TestAdminWebSessionsConfig{HubID: in.AdminWebSessions}
+	}
+	if in.OfflineAdminDelegations != "" {
+		// The level is admin or super-admin (checked first). The binding is
+		// this hub's resolved id (G2).
+		if in.OfflineAdminDelegations != in.ResolvedHubID {
+			return refuse(fmt.Errorf("%w: %s is %q, resolved hub id %q", hub.ErrOfflineAdminDelegationsHubIDMismatch,
+				config.TestIdentityOfflineAdminDelegationsKey, in.OfflineAdminDelegations, in.ResolvedHubID))
+		}
+		res.OfflineAdminDelegations = hub.OfflineAdminDelegationsConfig{HubID: in.OfflineAdminDelegations}
+	}
+	if level.IsAdminLevel() {
+		res.TestAdminGate = hub.TestAdminGateConfig{
+			HubAdmin:        true,
+			SuperAdmin:      level == hub.TestModeSuperAdmin,
+			HubID:           in.ResolvedHubID,
+			HubClass:        in.HubClass,
+			MarkerHubID:     marker.HubID,
+			MarkerClass:     marker.Class,
+			MarkerCreatedAt: marker.CreatedAt,
+		}
+	}
+	return res, nil
+}
+
+// testModeInputsFor assembles the gate inputs at hub construction.
+func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub.ServerConfig, hasStore bool, entClient *ent.Client) testModeInputs {
+	keyringSigning := hubCfg.KeyringConfigured || serverKeyringFromFile() != nil
+	in := testModeInputs{
+		Level:                   testModeLevel,
+		BindingHubID:            testModeHubID,
+		ProductionFlagExplicit:  productionFlagIsExplicit,
+		HubEnabled:              enableHub,
+		HasUserStore:            hasStore,
+		ResolvedHubID:           hubCfg.HubID,
+		HubIDPinned:             hubCfg.HubIDPinned,
+		Workstation:             hubCfg.Workstation,
+		HubClass:                cfg.Hub.HubClass,
+		Federation:              hubCfg.Federation,
+		KeyringSigning:          keyringSigning,
+		PreconfiguredSigningKey: len(hubCfg.UserTokenConfig.SigningKey) > 0 || len(hubCfg.AgentTokenConfig.SigningKey) > 0,
+		AdminWebSessions:        cfg.Hub.TestIdentityAdminWebSessions(),
+		OfflineAdminDelegations: cfg.Hub.TestIdentityOfflineAdminDelegations(),
+		ReadMarker: func() (*testinfra.Marker, error) {
+			if entClient == nil {
+				return nil, testinfra.ErrMarkerAbsent
+			}
+			return testinfra.Read(ctx, entClient)
+		},
+	}
+	if !keyringSigning {
+		in.SharedSigningSecret = testModeSharedSecretSet(hubCfg)
+	}
+	return in
+}
+
+// testModeSharedSecretSet reads whether a shared signing secret is set, for
+// G7 in legacy mode only. A variable so tests can prove the keyring-mode
+// path never reads it.
+var testModeSharedSecretSet = sharedSigningSecretSet
+
+// sharedSigningSecretSet reports whether hubCfg carries a shared signing
+// secret.
+func sharedSigningSecretSet(hubCfg hub.ServerConfig) bool { return hubCfg.SharedSigningSecret != "" }
+
+// webSessionKeySource is the signingKeySource label of the web session
+// cookie key: initWebServer passes resolveSessionSecret() to NewWebServer,
+// which derives the cookie keys from it, or generates a random per-process
+// key when it is empty.
+func webSessionKeySource(sessionSecret string) string {
+	if serverKeyringFromFile() != nil {
+		// Deployment-wide keyring generations (not hub-local, so the test
+		// admin tier's G7 still refuses).
+		return hub.SigningKeySourceKeyring
+	}
+	if sessionSecret == "" {
+		return "generated"
+	}
+	return "shared_secret"
+}

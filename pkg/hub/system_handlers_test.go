@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,26 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	_ "github.com/GoogleCloudPlatform/scion/pkg/store/sqlite" // register the sqlite driver for the hub test binary
 )
-
-// testWorkstationServer creates a test server with workstation mode enabled.
-func testWorkstationServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	cfg.Workstation = true
-	srv, err := New(cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	return srv, s
-}
 
 // doWorkstationRequest performs an authenticated request from a loopback address.
 func doWorkstationRequest(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
@@ -93,6 +74,28 @@ func TestRequireWorkstation_Enabled(t *testing.T) {
 	rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/status", nil)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 when workstation enabled, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The onboarding status must not report image presence it never checks
+// (ptone/scion#4640); the remaining fields keep their JSON names.
+func TestSystemStatus_NoUncheckedImagesPresent(t *testing.T) {
+	srv, _ := testWorkstationServer(t)
+	rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if _, ok := body["imagesPresent"]; ok {
+		t.Errorf("status reports imagesPresent, which is never checked: %s", rec.Body.String())
+	}
+	for _, key := range []string{"initialized", "identitySet", "runtimeOK", "harnessesSeeded", "hasWorkspace", "complete"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("status is missing %q: %s", key, rec.Body.String())
+		}
 	}
 }
 
@@ -194,15 +197,38 @@ func TestSystemInit_EmptyHarnesses(t *testing.T) {
 }
 
 func TestSystemInit_SelectiveHarnessConfig(t *testing.T) {
-	srv, _ := testWorkstationServer(t)
+	srv, s := testWorkstationServer(t)
+	srv.SetStorage(newMockStorage("test-bucket"))
+	ctx := context.Background()
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	globalDir := filepath.Join(tmpHome, ".scion")
 
 	restore := config.OverrideRuntimeDetection(
 		func(string) (string, error) { return "/usr/bin/docker", nil },
 		func(string, []string) error { return nil },
 	)
 	defer restore()
+
+	// workstationStart mirrors a workstation hub start: every bundled
+	// resource is re-materialized on disk (UpdateDefaultTemplates(true)),
+	// then imported by the *FromDir bootstrap.
+	workstationStart := func() {
+		t.Helper()
+		if err := config.MaterializeBundledResources(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		if err := srv.BootstrapTemplatesFromDir(ctx, filepath.Join(globalDir, "templates")); err != nil {
+			t.Fatalf("template bootstrap: %v", err)
+		}
+		if err := srv.BootstrapHarnessConfigsFromDir(ctx, filepath.Join(globalDir, "harness-configs")); err != nil {
+			t.Fatalf("harness config bootstrap: %v", err)
+		}
+	}
+	workstationStart()
+	if _, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, ""); err != nil {
+		t.Fatalf("claude not seeded by startup bootstrap: %v", err)
+	}
 
 	rec := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/system/init", map[string]interface{}{
 		"harnesses": []string{"codex"},
@@ -227,6 +253,34 @@ func TestSystemInit_SelectiveHarnessConfig(t *testing.T) {
 	templateFile := filepath.Join(tmpHome, ".scion", "templates", "default", "scion-agent.yaml")
 	if _, err := os.Stat(templateFile); err != nil {
 		t.Errorf("expected default template scion-agent.yaml to be created: %v", err)
+	}
+
+	// ptone/scion#3544 (D3): unselected built-ins count as deleted. They are
+	// removed from the hub by init and stay absent across restarts, even
+	// though each restart re-materializes them on disk.
+	assertSelection := func(when string) {
+		t.Helper()
+		configs, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Scope: store.HarnessConfigScopeGlobal,
+		}, store.ListOptions{Limit: 200})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, hc := range configs.Items {
+			names = append(names, hc.Name)
+		}
+		if len(names) != 1 || names[0] != "codex" {
+			t.Errorf("%s: global harness configs = %v, want [codex]", when, names)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "default", string(store.TemplateScopeGlobal), ""); err != nil {
+			t.Errorf("%s: default template missing: %v", when, err)
+		}
+	}
+	assertSelection("after init")
+	for i := range 2 {
+		workstationStart()
+		assertSelection(fmt.Sprintf("after restart %d", i))
 	}
 }
 

@@ -1,0 +1,367 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// The broker-scoped reservation views and the broker-quota reconcile read
+// every broker's reservations with one store query (ptone/scion#2314). These
+// tests pin the result set those views had with the former one-query-per-
+// broker loop: only listed brokers count (a reservation whose scope ID is
+// not a listed runtime broker, for example a deleted broker, is not counted;
+// usage-by-limit shows it after the listed rows, flagged scopeUnlisted), and
+// rows are in broker-list order (newest broker first), created_at ascending
+// within a broker.
+
+type brokerScopedFixture struct {
+	def          *store.LimitDefinition
+	olderBroker  *store.RuntimeBroker
+	newerBroker  *store.RuntimeBroker
+	unlistedID   string
+	wantOrder    []string // resource IDs, in the expected response order
+	unlistedRows []string // resource IDs scoped to unlistedID
+}
+
+func seedBrokerScopedFixture(t *testing.T, s store.Store) brokerScopedFixture {
+	t.Helper()
+	ctx := context.Background()
+
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	mkBroker := func(name string, created time.Time) *store.RuntimeBroker {
+		b := &store.RuntimeBroker{
+			ID:      uuid.New().String(),
+			Name:    name,
+			Slug:    uuid.New().String(),
+			Status:  store.BrokerStatusOnline,
+			Created: created,
+			Updated: created,
+		}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+		return b
+	}
+	older := mkBroker("scoped-older-broker", base)
+	newer := mkBroker("scoped-newer-broker", base.Add(time.Minute))
+	unlistedID := uuid.New().String()
+
+	reserve := func(scopeID, resourceID string, offset time.Duration) string {
+		_, err := s.CreateUsageReservation(ctx, &store.UsageReservation{
+			LimitDefinitionID: def.ID,
+			SubjectID:         scopeID,
+			ScopeType:         store.QuotaScopeBroker,
+			ScopeID:           scopeID,
+			ResourceID:        resourceID,
+			Reserved:          1,
+			CreatedAt:         base.Add(offset),
+		})
+		require.NoError(t, err)
+		return resourceID
+	}
+
+	// Inserted out of order on purpose.
+	olderLate := reserve(older.ID, "scoped-older-late", 4*time.Minute)
+	unlisted := reserve(unlistedID, "scoped-unlisted", 1*time.Minute)
+	newerOnly := reserve(newer.ID, "scoped-newer", 3*time.Minute)
+	olderEarly := reserve(older.ID, "scoped-older-early", 2*time.Minute)
+
+	return brokerScopedFixture{
+		def:          def,
+		olderBroker:  older,
+		newerBroker:  newer,
+		unlistedID:   unlistedID,
+		wantOrder:    []string{newerOnly, olderEarly, olderLate},
+		unlistedRows: []string{unlisted},
+	}
+}
+
+func TestGetUsageByLimit_MaxAgentsPerBroker_ListedBrokersOnlyInBrokerOrder(t *testing.T) {
+	srv, s := testServer(t)
+	f := seedBrokerScopedFixture(t, s)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+f.def.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp usageByLimitResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, len(f.wantOrder), resp.TotalActive, "a reservation whose scope ID is not a listed broker is not counted")
+
+	got := make([]string, len(resp.Reservations))
+	var unlisted []string
+	for i, r := range resp.Reservations {
+		got[i] = r.ResourceID
+		if r.ScopeUnlisted {
+			unlisted = append(unlisted, r.ResourceID)
+		}
+	}
+	assert.Equal(t, append(append([]string(nil), f.wantOrder...), f.unlistedRows...), got,
+		"newest broker first, created_at ascending within a broker, then the unlisted rows")
+	assert.Equal(t, f.unlistedRows, unlisted, "only the unlisted rows are flagged scopeUnlisted")
+}
+
+func TestGetUsageSummary_MaxAgentsPerBroker_ListedBrokersOnly(t *testing.T) {
+	srv, s := testServer(t)
+	f := seedBrokerScopedFixture(t, s)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp usageSummaryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var found *usageSummaryEntry
+	for i := range resp.Items {
+		if resp.Items[i].LimitDefinition.ID == f.def.ID {
+			found = &resp.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, len(f.wantOrder), found.ActiveCount, "a reservation whose scope ID is not a listed broker is not counted")
+}
+
+func TestListAndCountBrokerScopedActiveReservations_Agree(t *testing.T) {
+	srv, s := testServer(t)
+	f := seedBrokerScopedFixture(t, s)
+	ctx := context.Background()
+
+	rows, err := srv.listBrokerScopedActiveReservations(ctx, f.def.ID)
+	require.NoError(t, err)
+	n, err := srv.countBrokerScopedActiveReservations(ctx, f.def.ID)
+	require.NoError(t, err)
+	assert.Len(t, rows, len(f.wantOrder))
+	assert.Equal(t, len(rows), n)
+}
+
+// TestBrokerQuota_ReconcileReleasesUnlistedScopeOnlyWhenConfirmedDeleted
+// pins how the reconcile treats an unlisted scope: a reservation scoped to
+// an ID that is not a runtime broker is released only because a point
+// lookup confirms no broker has that ID (the deregistered-scope pass), and a
+// listed broker's reservation for a missing agent is released as before.
+func TestBrokerQuota_ReconcileReleasesUnlistedScopeOnlyWhenConfirmedDeleted(t *testing.T) {
+	srv, s := testServer(t)
+	f := seedBrokerScopedFixture(t, s)
+	ctx := context.Background()
+
+	require.EqualValues(t, 1, brokerReservationCount(t, s, f.unlistedID))
+	require.EqualValues(t, 2, brokerReservationCount(t, s, f.olderBroker.ID))
+
+	srv.ReconcileStaleBrokerQuotaReservations(ctx)
+
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.unlistedID),
+		"a reservation on a scope confirmed deregistered is released")
+	for _, id := range f.unlistedRows {
+		has, err := s.HasActiveReservation(ctx, f.def.ID, id)
+		require.NoError(t, err)
+		assert.False(t, has)
+	}
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.olderBroker.ID),
+		"listed broker's reservations for missing agents are released")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.newerBroker.ID))
+}
+
+// brokerScopedQueryCountingStore counts the reservation queries the
+// broker-scoped views, the usage summary and the reconcile issue, once its
+// switch is armed.
+type brokerScopedQueryCountingStore struct {
+	store.Store
+	fault               *storeFaultSwitch
+	mu                  sync.Mutex
+	byScopeTypeCalls    int
+	countByScopeCalls   int
+	perBrokerListCalls  int
+	perProjectListCalls int
+	ungroupedCountCalls int
+}
+
+func (c *brokerScopedQueryCountingStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
+	if c.fault.Active() {
+		c.mu.Lock()
+		c.byScopeTypeCalls++
+		c.mu.Unlock()
+	}
+	return c.Store.ListActiveReservationsByScopeType(ctx, limitDefinitionID, scopeType)
+}
+
+func (c *brokerScopedQueryCountingStore) CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error) {
+	if c.fault.Active() {
+		c.mu.Lock()
+		c.countByScopeCalls++
+		c.mu.Unlock()
+	}
+	return c.Store.CountActiveReservationsByScope(ctx, limitDefinitionID, scopeType)
+}
+
+func (c *brokerScopedQueryCountingStore) CountActiveReservations(ctx context.Context, limitDefinitionID, subjectID, scopeType, scopeID string) (int64, error) {
+	if c.fault.Active() {
+		c.mu.Lock()
+		c.ungroupedCountCalls++
+		c.mu.Unlock()
+	}
+	return c.Store.CountActiveReservations(ctx, limitDefinitionID, subjectID, scopeType, scopeID)
+}
+
+func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*store.UsageReservation, error) {
+	if c.fault.Active() {
+		c.mu.Lock()
+		switch scopeType {
+		case store.QuotaScopeBroker:
+			c.perBrokerListCalls++
+		case store.QuotaScopeProject:
+			c.perProjectListCalls++
+		}
+		c.mu.Unlock()
+	}
+	return c.Store.ListActiveReservations(ctx, limitDefinitionID, scopeType, scopeID)
+}
+
+func (c *brokerScopedQueryCountingStore) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls, c.perProjectListCalls, c.ungroupedCountCalls = 0, 0, 0, 0, 0
+}
+
+func (c *brokerScopedQueryCountingStore) counts() (byScopeType, countByScope, perBrokerList int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls
+}
+
+// perProjectLists returns the ListActiveReservations calls made at project
+// scope, one per project scope ID.
+func (c *brokerScopedQueryCountingStore) perProjectLists() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.perProjectListCalls
+}
+
+// ungroupedCounts returns the CountActiveReservations calls, which count one
+// subject's reservations in one scope.
+func (c *brokerScopedQueryCountingStore) ungroupedCounts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ungroupedCountCalls
+}
+
+// TestBrokerScopedReservations_OneReservationQueryPerCall pins the query
+// count, not just the result set (ptone/scion#2314): with two listed
+// brokers, usage-by-limit and the reconcile each read reservations with one
+// ListActiveReservationsByScopeType call and no per-broker
+// ListActiveReservations call, and the usage summary uses one aggregate
+// CountActiveReservationsByScope call per scoped limit: one for
+// max_agents_per_broker and one for max_agents_per_project
+// (ptone/scion#6033), and none per broker or per project.
+func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
+	srv, s, counting, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *brokerScopedQueryCountingStore {
+		return &brokerScopedQueryCountingStore{Store: inner, fault: sw}
+	})
+	f := seedBrokerScopedFixture(t, s)
+	ctx := context.Background()
+
+	fault.Arm()
+
+	t.Run("usage by limit", func(t *testing.T) {
+		counting.reset()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+f.def.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		byScopeType, countByScope, perBrokerList := counting.counts()
+		assert.Equal(t, 1, byScopeType)
+		assert.Equal(t, 0, countByScope)
+		assert.Equal(t, 0, perBrokerList)
+	})
+
+	t.Run("list helper", func(t *testing.T) {
+		counting.reset()
+		_, err := srv.listBrokerScopedActiveReservations(ctx, f.def.ID)
+		require.NoError(t, err)
+		byScopeType, _, perBrokerList := counting.counts()
+		assert.Equal(t, 1, byScopeType)
+		assert.Equal(t, 0, perBrokerList)
+	})
+
+	t.Run("usage summary", func(t *testing.T) {
+		counting.reset()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		byScopeType, countByScope, perBrokerList := counting.counts()
+		assert.Equal(t, 0, byScopeType)
+		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
+		assert.Equal(t, 0, perBrokerList)
+		assert.Equal(t, 0, counting.perProjectLists())
+		assert.Equal(t, 0, counting.ungroupedCounts())
+	})
+
+	t.Run("reconcile", func(t *testing.T) {
+		counting.reset()
+		srv.ReconcileStaleBrokerQuotaReservations(ctx)
+		byScopeType, _, perBrokerList := counting.counts()
+		assert.Equal(t, 1, byScopeType)
+		assert.Equal(t, 0, perBrokerList)
+	})
+
+	// Scale guard: the usage summary's query count does not grow with the
+	// number of projects holding project-scope reservations.
+	t.Run("usage summary does not scale with projects", func(t *testing.T) {
+		projectDef, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerProject)
+		require.NoError(t, err)
+		const projects = 3
+		for i := 0; i < projects; i++ {
+			projectID := uuid.New().String()
+			_, err := s.CreateUsageReservation(ctx, &store.UsageReservation{
+				LimitDefinitionID: projectDef.ID,
+				SubjectID:         projectID,
+				ScopeType:         store.QuotaScopeProject,
+				ScopeID:           projectID,
+				ResourceID:        uuid.New().String(),
+				Reserved:          1,
+			})
+			require.NoError(t, err)
+		}
+
+		counting.reset()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		byScopeType, countByScope, perBrokerList := counting.counts()
+		assert.Equal(t, 0, byScopeType)
+		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
+		assert.Equal(t, 0, perBrokerList)
+		assert.Equal(t, 0, counting.perProjectLists(), "no per-project reservation list")
+		assert.Equal(t, 0, counting.ungroupedCounts(), "no per-project reservation count")
+
+		var resp usageSummaryResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		var projectCount = -1
+		for _, item := range resp.Items {
+			if item.LimitDefinition != nil && item.LimitDefinition.Name == store.LimitMaxAgentsPerProject {
+				projectCount = item.ActiveCount
+			}
+		}
+		assert.Equal(t, projects, projectCount, "the summary sums every project's reservations")
+	})
+}

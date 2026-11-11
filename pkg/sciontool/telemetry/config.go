@@ -4,6 +4,9 @@ Copyright 2025 The Scion Authors.
 
 // Package telemetry provides OTLP telemetry collection and forwarding for sciontool.
 // It enables agents to collect and forward traces to Google Cloud backend.
+//
+// Design references in this package (section N, Dn) are to
+// .design/hosted/usage-telemetry.md (ptone/scion#2053).
 package telemetry
 
 import (
@@ -13,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 )
 
@@ -32,6 +36,10 @@ const (
 	EnvSkipTLSVerify = "SCION_OTEL_SKIP_TLS_VERIFY"
 	// EnvCAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	EnvCAFile = "SCION_OTEL_CA_FILE"
+	// EnvCertFile is the path to a PEM-encoded client certificate for OTLP mTLS.
+	EnvCertFile = "SCION_OTEL_CERT_FILE"
+	// EnvKeyFile is the path to the PEM-encoded private key for EnvCertFile.
+	EnvKeyFile = "SCION_OTEL_KEY_FILE"
 	// EnvGRPCPort is the local gRPC receiver port.
 	EnvGRPCPort = "SCION_OTEL_GRPC_PORT"
 	// EnvHTTPPort is the local HTTP receiver port.
@@ -77,6 +85,12 @@ type Config struct {
 	Enabled bool
 	// CloudEnabled controls whether data is forwarded to cloud backend.
 	CloudEnabled bool
+	// CloudEnabledExplicit records that CloudEnabled came from
+	// SCION_TELEMETRY_CLOUD_ENABLED rather than the default. Pipeline.Start
+	// treats a missing cloud destination as a misconfiguration only when
+	// cloud export was asked for explicitly; under the default it just
+	// leaves cloud export off (ptone/scion#7104).
+	CloudEnabledExplicit bool
 	// Endpoint is the cloud OTLP endpoint.
 	Endpoint string
 	// Protocol is the OTLP protocol ("grpc" or "http").
@@ -87,6 +101,11 @@ type Config struct {
 	SkipTLSVerify bool
 	// CAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	CAFile string
+	// CertFile is the path to a PEM-encoded client certificate for OTLP mTLS.
+	// It must be set together with KeyFile.
+	CertFile string
+	// KeyFile is the path to the PEM-encoded private key for CertFile.
+	KeyFile string
 	// GRPCPort is the local gRPC receiver port.
 	GRPCPort int
 	// HTTPPort is the local HTTP receiver port.
@@ -140,13 +159,15 @@ func SetTelemetryTestSandboxed() func() {
 // pipeline) remains available for tests that need it.
 func LoadConfig() *Config {
 	cfg := &Config{
-		Enabled:       parseBoolEnv(EnvEnabled, true),
-		CloudEnabled:  parseBoolEnv(EnvCloudEnabled, true),
+		Enabled:       util.ParseBoolEnv(EnvEnabled, true),
+		CloudEnabled:  util.ParseBoolEnv(EnvCloudEnabled, true),
 		Endpoint:      os.Getenv(EnvEndpoint),
 		Protocol:      getEnvOrDefault(EnvProtocol, DefaultProtocol),
-		Insecure:      parseBoolEnv(EnvInsecure, false),
-		SkipTLSVerify: parseBoolEnv(EnvSkipTLSVerify, false),
+		Insecure:      util.ParseBoolEnv(EnvInsecure, false),
+		SkipTLSVerify: util.ParseBoolEnv(EnvSkipTLSVerify, false),
 		CAFile:        os.Getenv(EnvCAFile),
+		CertFile:      os.Getenv(EnvCertFile),
+		KeyFile:       os.Getenv(EnvKeyFile),
 		GRPCPort:      parseIntEnv(EnvGRPCPort, DefaultGRPCPort),
 		HTTPPort:      parseIntEnv(EnvHTTPPort, DefaultHTTPPort),
 		ProjectID:     os.Getenv(EnvProjectID),
@@ -160,8 +181,14 @@ func LoadConfig() *Config {
 		},
 		GCPCredentialsFile: os.Getenv(EnvGCPCredentials),
 		CloudProvider:      os.Getenv(EnvCloudProvider),
-		MetricsDebug:       parseBoolEnv(EnvMetricsDebug, false),
+		MetricsDebug:       util.ParseBoolEnv(EnvMetricsDebug, false),
 	}
+
+	// Explicit only when the value parses: ParseBoolEnv returns each default
+	// for an unset, empty or misspelt value, so the two calls agree only for a
+	// recognised boolean. Uses only ParseBoolEnv, which the cmd/sciontool
+	// exec-audit allowlist permits on the PID-1 path (no LookupBoolEnv there).
+	cfg.CloudEnabledExplicit = util.ParseBoolEnv(EnvCloudEnabled, true) == util.ParseBoolEnv(EnvCloudEnabled, false)
 
 	// Fallback: if SCION_OTEL_GCP_CREDENTIALS is not set, probe the
 	// well-known path where the broker mounts the telemetry SA key file.
@@ -220,7 +247,7 @@ func LoadConfig() *Config {
 
 // MetricsDebugEnabled returns true when verbose metrics debugging is enabled.
 func MetricsDebugEnabled() bool {
-	return parseBoolEnv(EnvMetricsDebug, false)
+	return util.ParseBoolEnv(EnvMetricsDebug, false)
 }
 
 // IsCloudConfigured returns true if cloud forwarding is properly configured.
@@ -253,21 +280,9 @@ func (c *Config) IsGCP() bool {
 	return c != nil && c.CloudProvider == "gcp"
 }
 
-// parseBoolEnv parses a boolean environment variable with a default value.
-func parseBoolEnv(key string, defaultVal bool) bool {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultVal
-	}
-	val = strings.ToLower(val)
-	switch val {
-	case "true", "1", "yes", "on":
-		return true
-	case "false", "0", "no", "off":
-		return false
-	default:
-		return defaultVal
-	}
+// hasClientCertificate reports whether either OTLP client certificate path is set.
+func (c *Config) hasClientCertificate() bool {
+	return c != nil && (c.CertFile != "" || c.KeyFile != "")
 }
 
 // parseIntEnv parses an integer environment variable with a default value.

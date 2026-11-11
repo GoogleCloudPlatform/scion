@@ -26,8 +26,16 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
+import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 
-import type { PageData, Project, GitHubAppProjectStatus } from '../../shared/types.js';
+import type {
+  PageData,
+  Project,
+  GitHubAppProjectStatus,
+  Capabilities,
+} from '../../shared/types.js';
+import { can } from '../../shared/types.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type GitHubProject = Project;
 
@@ -38,6 +46,13 @@ export class ScionPageGitHubAppSetup extends LitElement {
 
   @state()
   private loading = true;
+
+  /**
+   * Hub-scope project capabilities. The "Get Started" card links to
+   * /projects/new, so it is hidden without hub project.create. Fail-closed.
+   */
+  @state()
+  private hubProjectCapabilities: Capabilities | undefined;
 
   @state()
   private discovering = false;
@@ -57,7 +72,14 @@ export class ScionPageGitHubAppSetup extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
 
-    this.initPage();
+    void this.loadHubProjectCapabilities();
+    void this.initPage();
+  }
+
+  private async loadHubProjectCapabilities(): Promise<void> {
+    const caps = await fetchHubProjectCapabilities();
+    if (!this.isConnected) return;
+    this.hubProjectCapabilities = caps;
   }
 
   private async initPage(): Promise<void> {
@@ -147,11 +169,6 @@ export class ScionPageGitHubAppSetup extends LitElement {
   private async checkAllProjects(): Promise<void> {
     const projectsWithInstallation = this.projects.filter((p) => p.githubInstallationId);
     await Promise.allSettled(projectsWithInstallation.map((p) => this.checkProjectStatus(p)));
-  }
-
-  private navigateTo(path: string): void {
-    window.history.pushState({}, '', path);
-    window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
   private renderStatusBadge(project: GitHubProject) {
@@ -428,15 +445,18 @@ export class ScionPageGitHubAppSetup extends LitElement {
             </div>
           `
         : nothing}
-
-      <div class="actions-card">
-        <h2>Get Started</h2>
-        <p>Create a new project linked to a GitHub repository to start running agents.</p>
-        <sl-button variant="primary" @click=${() => this.navigateTo('/projects/new')}>
-          <sl-icon slot="prefix" name="folder-plus"></sl-icon>
-          Create New Project
-        </sl-button>
-      </div>
+      ${can(this.hubProjectCapabilities, 'create')
+        ? html`
+            <div class="actions-card">
+              <h2>Get Started</h2>
+              <p>Create a new project linked to a GitHub repository to start running agents.</p>
+              <sl-button variant="primary" @click=${() => navigateTo('/projects/new')}>
+                <sl-icon slot="prefix" name="folder-plus"></sl-icon>
+                Create New Project
+              </sl-button>
+            </div>
+          `
+        : nothing}
 
       <div class="projects-card">
         <h2>
@@ -509,7 +529,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
           <sl-button
             size="small"
             variant="default"
-            @click=${() => this.navigateTo(`/projects/${project.id}/settings`)}
+            @click=${() => navigateTo(`/projects/${project.id}/settings`)}
           >
             <sl-icon slot="prefix" name="gear"></sl-icon>
             Settings

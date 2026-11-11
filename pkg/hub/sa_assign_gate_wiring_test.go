@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,59 +72,6 @@ import (
 // "SetSAAssignCheckMode" would be a way to turn enforcement OFF from outside the
 // package, which is a worse thing to have in the tree than a test that reaches
 // into a struct.
-
-// enforceSAAssign switches the agent-assignment surface into enforce mode with
-// the given checker, and wires a token generator.
-//
-// The generator is load-bearing rather than incidental: in enforce mode
-// saAssignCheckerFor SUBSTITUTES the unavailable checker when
-// gcpTokenGenerator is nil (sa_assign_gate.go:173). That substitute also
-// denies — so a test that only asserted "the request was refused" would pass
-// while the scripted checker was never consulted at all, which is the same
-// class of false pass these tests exist to close. With the generator present
-// the configured checker is used, and CallCount can prove it.
-func enforceSAAssign(srv *Server, checker store.CallerPermissionChecker) {
-	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	srv.saAssignCheckMode = SAAssignCheckEnforce
-	srv.saAssignChecker = checker
-}
-
-// enforceHookIdentity is the same for the lifecycle-hook execution-identity
-// surface, which has its own mode and its own checker by design.
-func enforceHookIdentity(srv *Server, checker store.CallerPermissionChecker) {
-	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	srv.hookIdentityCheckMode = SAAssignCheckEnforce
-	srv.hookIdentityChecker = checker
-}
-
-// wiringSA seeds a service account for these tests.
-//
-// ⚠️ CreatedBy is a stranger on purpose. gcpServiceAccountResource maps
-// CreatedBy to Resource.OwnerID and authz short-circuits on resource owner, so
-// seeding the account under the caller would let the request pass the Hub
-// policy layer for the wrong reason — and, worse for a DENY test, would leave
-// the reader unable to tell which layer produced the refusal.
-func wiringSA(t *testing.T, s store.Store, scope, scopeID, email string) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:                 tid("wiring-sa-" + email),
-		Scope:              scope,
-		ScopeID:            scopeID,
-		Email:              email,
-		ProjectID:          tid("gcp-project"),
-		Verified:           true,
-		VerifiedAt:         time.Now(),
-		VerificationStatus: store.GCPVerificationVerified,
-		CreatedBy:          tid("some-other-user"),
-		CreatedAt:          time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
 
 // ---------------------------------------------------------------------------
 // Surface 1: agent create

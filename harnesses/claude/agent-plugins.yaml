@@ -1,0 +1,5 @@
+# Native Agent Plugins install support of this bundle's provision.py: yes,
+# partial or no, with a reason. Kept out of config.yaml so binaries built
+# before Agent Plugins can still validate config.yaml (ptone/scion#5196).
+support: "partial"
+reason: "Installed as a skills-dir plugin with a generated .claude-plugin manifest; stdio servers run through an sh cwd wrapper; servers with placeholder-like text Claude would expand are skipped"

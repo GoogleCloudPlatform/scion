@@ -1,0 +1,22 @@
+{
+  "fields": [
+    "agentMove",
+    "agentMoveRecreate",
+    "asyncLaunch",
+    "asyncStart",
+    "attach",
+    "attachmentDelivery",
+    "changedFields",
+    "clearedFields",
+    "clearedResourceSubfields",
+    "emptyPerAgentWorkspace",
+    "nodeImageRegistry",
+    "reprovision",
+    "reprovisionEmptyPerAgent",
+    "startsInFlight",
+    "sync",
+    "templateTiers",
+    "unlimitedCountLimits",
+    "webPty"
+  ]
+}

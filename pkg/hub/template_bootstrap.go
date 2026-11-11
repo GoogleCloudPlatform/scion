@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -50,6 +52,20 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 		return err
 	}
 
+	// Seeded-built-ins ledger (ptone/scion#3544): a deleted built-in stays
+	// deleted even though UpdateDefaultTemplates re-materializes it on disk.
+	// If the ledger cannot be loaded, fail closed for built-ins only: no
+	// missing built-in is created, but user dirs are still imported and
+	// existing rows still synced. The load error is returned at the end.
+	ledger, loadErr := s.loadBuiltinSeedLedger(ctx)
+	if loadErr != nil {
+		loadErr = fmt.Errorf("template bootstrap: %w", loadErr)
+		s.templateLog.Error("template bootstrap: cannot load built-in seed ledger; not creating missing built-ins this run",
+			"error", loadErr)
+		ledger = newFailClosedBuiltinSeedLedger()
+	}
+	const kind = storage.ResourceKindTemplate
+
 	imported, updated := 0, 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -68,16 +84,31 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			continue
 		}
 
+		builtin := isBuiltinName(kind, slug)
 		if existing == nil {
+			if builtin && ledger.Seen(kind, slug) {
+				s.templateLog.Info("template bootstrap: built-in previously deleted; not re-seeding",
+					"template", name)
+				continue
+			}
 			// New template — import it
 			if err := s.bootstrapSingleTemplate(ctx, name, templatePath, store.TemplateScopeGlobal, ""); err != nil {
 				s.templateLog.Warn("template bootstrap: failed to import template, skipping",
 					"template", name, "error", err)
 				continue
 			}
+			if builtin {
+				ledger.Mark(kind, slug)
+			}
 			imported++
 		} else {
+			// A row exists, so the name counts as seeded even if the
+			// sync below fails (same rule as the hosted path).
+			if builtin {
+				ledger.Mark(kind, slug)
+			}
 			// Existing template — check if local files have changed
+			oldHash := existing.ContentHash
 			changed, err := s.syncExistingTemplate(ctx, existing, templatePath, false)
 			if err != nil {
 				s.templateLog.Warn("template bootstrap: failed to sync template, skipping",
@@ -86,6 +117,8 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			}
 			if changed {
 				updated++
+				warnBootstrapOverwrite(s.templateLog, "template", name, existing.ID, templatePath, oldHash,
+					s.currentTemplateHash(ctx, existing.ID))
 			}
 		}
 	}
@@ -95,7 +128,10 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			"imported", imported, "updated", updated)
 	}
 
-	return nil
+	if loadErr != nil {
+		return loadErr
+	}
+	return s.saveBuiltinSeedLedger(ctx, ledger)
 }
 
 // syncExistingTemplate re-uploads a local template directory into the Hub's
@@ -109,8 +145,9 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 // stored.
 //
 // This now delegates to the shared ResourceStore (§7.3); the template-specific
-// behavior (harness detection, DefaultHarnessConfig backfill, bundled
-// harness-config import) lives in templatePersistence.
+// behavior (the commit through commitTemplateFiles, re-derivation of an
+// unchanged template, bundled harness-config import) lives in
+// templatePersistence.
 func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Template, templatePath string, force bool) (bool, error) {
 	return s.templateStore().Bootstrap(ctx, existing.Name, templatePath, existing.Scope, existing.ScopeID, "", force)
 }
@@ -121,41 +158,6 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath, scope, projectID string) error {
 	_, err := s.templateStore().Bootstrap(ctx, name, templatePath, scope, projectID, "", false)
 	return err
-}
-
-// templateConfigInfo holds the harness type and default harness config name
-// extracted from a template's scion-agent.yaml.
-type templateConfigInfo struct {
-	Harness              string // inferred harness type (claude, gemini, etc.)
-	DefaultHarnessConfig string // actual harness-config name from config (e.g. "claude-web", "adk")
-}
-
-// detectHarnessFromConfig reads a template's config and returns the harness type
-// and the default harness config name. The harness type is inferred from the
-// config name or explicit harness field. The default harness config name preserves
-// the original value from scion-agent.yaml so it can be used for hub resolution.
-func detectHarnessFromConfig(templatePath, templateName string) templateConfigInfo {
-	t := &config.Template{Name: templateName, Path: templatePath}
-	cfg, err := t.LoadConfig()
-	if err == nil && cfg != nil {
-		if cfg.HarnessConfig != "" {
-			return templateConfigInfo{
-				Harness:              inferHarnessFromName(cfg.HarnessConfig),
-				DefaultHarnessConfig: cfg.HarnessConfig,
-			}
-		}
-		if cfg.DefaultHarnessConfig != "" {
-			return templateConfigInfo{
-				Harness:              inferHarnessFromName(cfg.DefaultHarnessConfig),
-				DefaultHarnessConfig: cfg.DefaultHarnessConfig,
-			}
-		}
-		if cfg.Harness != "" {
-			return templateConfigInfo{Harness: cfg.Harness}
-		}
-	}
-
-	return templateConfigInfo{Harness: inferHarnessFromName(templateName)}
 }
 
 // inferHarnessFromName guesses the harness type from a name string.
@@ -178,19 +180,23 @@ func inferHarnessFromName(name string) string {
 // importTemplateHarnessConfigs imports harness-configs bundled inside a
 // template's harness-configs/ subdirectory into the Hub's harness-config store.
 // Configs are scoped to match the template's scope (global or project).
-func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath, scope, scopeID string) {
-	hcDir := filepath.Join(templatePath, "harness-configs")
-	info, err := os.Stat(hcDir)
-	if err != nil || !info.IsDir() {
+//
+// Everything comes from the template's collected directory cd: a
+// subdirectory is imported only if collection recorded files under it (a
+// link, which collection skips, is never followed); harness-configs/ and the
+// subdirectory must be real directories inside cd's root; and its
+// config.yaml (and agent-plugins sidecar) are read through cd's root,
+// verified against the collected entries. Each subdirectory's own bootstrap
+// collects it again and must open its root at that same subdirectory of cd's
+// root (ResourceStore.within).
+func (s *Server) importTemplateHarnessConfigs(ctx context.Context, cd *collectedDir, scope, scopeID string) {
+	const hcPrefix = "harness-configs"
+	names := cd.subdirs(hcPrefix)
+	if len(names) == 0 {
 		return
 	}
 
 	if s.GetStorage() == nil {
-		return
-	}
-
-	entries, err := os.ReadDir(hcDir)
-	if err != nil {
 		return
 	}
 
@@ -199,15 +205,19 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		hcScope = store.HarnessConfigScopeProject
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, name := range names {
+		rel := hcPrefix + "/" + name
+		if err := cd.realSubdir(rel); err != nil {
+			s.templateLog.Warn("template harness-config import: not a directory inside the template, skipping",
+				"config", name, "error", err)
 			continue
 		}
-		name := entry.Name()
-		dirPath := filepath.Join(hcDir, name)
+		dirPath := filepath.Join(cd.dir, filepath.FromSlash(rel))
 		slug := api.Slugify(name)
 
-		hcDirCfg, err := config.LoadHarnessConfigDir(dirPath)
+		hcDirCfg, err := config.LoadHarnessConfigFromFiles(name, dirPath, func(file string) ([]byte, error) {
+			return cd.read(rel + "/" + file)
+		})
 		if err != nil {
 			s.templateLog.Debug("template harness-config import: failed to load config, skipping",
 				"config", name, "error", err)
@@ -219,8 +229,10 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 			continue
 		}
 
+		rs := s.harnessConfigStore(hcDirCfg.Config.Harness)
+		rs.within, rs.withinPath = cd, rel
 		if existing == nil {
-			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDirCfg, hcScope, scopeID); err != nil {
+			if _, err := rs.Bootstrap(ctx, name, dirPath, hcScope, scopeID, "", false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to import, skipping",
 					"config", name, "error", err)
 				continue
@@ -228,7 +240,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 			s.templateLog.Info("template harness-config import: imported config",
 				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
 		} else {
-			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, false); err != nil {
+			if _, err := rs.Bootstrap(ctx, existing.Name, dirPath, existing.Scope, existing.ScopeID, "", false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
 					"config", name, "error", err)
 			}

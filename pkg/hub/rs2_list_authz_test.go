@@ -644,7 +644,7 @@ func TestRS2_ScopedUATListRestriction(t *testing.T) {
 
 	// Create a UAT scoped to projA only.
 	// Use project:read — project-member does not hold project:manage under A2.
-	uatKey := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
+	uatKey := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "project:list"})
 
 	// Make request with UAT.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/projects", nil)
@@ -815,19 +815,3 @@ func exprToString(expr ast.Expr) string {
 // ==========================================================================
 // Helpers
 // ==========================================================================
-
-func extractProjectIDs(projects []ProjectWithCapabilities) []string {
-	ids := make([]string, len(projects))
-	for i, p := range projects {
-		ids[i] = p.ID
-	}
-	return ids
-}
-
-func extractAgentIDs(agents []AgentWithCapabilities) []string {
-	ids := make([]string, len(agents))
-	for i, a := range agents {
-		ids[i] = a.ID
-	}
-	return ids
-}

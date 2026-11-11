@@ -33,8 +33,14 @@ func TestWorktreeEligibleForVersion(t *testing.T) {
 			wantSub: "2.46.0",
 		},
 		{
+			name:    "old minimum now rejected",
+			version: "2.47.2",
+			wantOK:  false,
+			wantSub: "2.47.2",
+		},
+		{
 			name:    "exact minimum",
-			version: "2.47.0",
+			version: "2.48.0",
 			wantOK:  true,
 		},
 		{

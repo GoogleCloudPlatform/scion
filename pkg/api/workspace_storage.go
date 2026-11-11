@@ -1,0 +1,150 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package api
+
+import "strings"
+
+// Workspace storage backends reported in BrokerWorkspaceStorage.Backend.
+const (
+	WorkspaceStorageBackendLocal = "local"
+	WorkspaceStorageBackendNFS   = "nfs"
+)
+
+// BrokerWorkspaceStorage describes where a runtime broker places agent
+// workspaces. Brokers report it at registration and on every heartbeat; the
+// hub uses it to decide whether two brokers share a workspace export (the
+// precondition for moving an agent between brokers without copying its
+// workspace). A nil descriptor means the broker did not report one (an older
+// broker) and is treated as "unknown", never as "local".
+type BrokerWorkspaceStorage struct {
+	// Backend is the configured workspace storage backend: "local" or "nfs".
+	Backend string `json:"backend"`
+	// NFS describes the share agent workspaces are placed on. It is set only
+	// when Backend is "nfs" and the broker's NFS configuration is valid.
+	NFS *BrokerNFSWorkspaceStorage `json:"nfs,omitempty"`
+	// Volume identifies the shared volume the broker places project trees
+	// on, for the cloudrun-volume and gke-shared-volume backends.
+	Volume *BrokerVolumeWorkspaceStorage `json:"volume,omitempty"`
+	// SharedDirs is where the broker places shared dirs when that differs
+	// from Backend (a transitional split of deprecated storage settings):
+	// "local" or "nfs". Empty means with the workspace, on Backend.
+	SharedDirs string `json:"sharedDirs,omitempty"`
+	// Homes is where the broker places agent homes, server.project_storage
+	// homes: "local" or "nfs" (on the share described by NFS). Empty when
+	// the broker predates the field (unknown).
+	Homes string `json:"homes,omitempty"`
+	// Invalid reports that the broker's project storage settings are
+	// unusable: the broker places no agent files and refuses agent starts
+	// until they are fixed. Only Backend is set alongside it.
+	Invalid bool `json:"invalid,omitempty"`
+	// Redacted reports that the hub removed the storage values (the NFS
+	// server, export, subpath root and export identity marker, and the
+	// volume claim and subpath root) because the reader is not a hub
+	// admin. The value fields are then omitted, not empty.
+	Redacted bool `json:"redacted,omitempty"`
+}
+
+// BrokerNFSWorkspaceStorage identifies the NFS export a broker places agent
+// workspaces on. Agent workspaces always live on the first configured share
+// (V1NFSConfig.Shares[0]), so that share alone is described.
+type BrokerNFSWorkspaceStorage struct {
+	// Server is the NFS server host of Shares[0]. It is compared exactly
+	// (case-sensitive, no DNS resolution): brokers sharing an export must
+	// configure the identical server string.
+	Server string `json:"server,omitempty"`
+	// Export is the exported path of Shares[0].
+	Export string `json:"export,omitempty"`
+	// SubPathRoot is the directory under the export that holds per-project
+	// workspace trees (<export>/<subPathRoot>/<projectID>/...).
+	SubPathRoot string `json:"subPathRoot,omitempty"`
+	// Healthy reports whether the broker's last health check of the share
+	// succeeded. It is false until the broker has checked the mount.
+	Healthy bool `json:"healthy"`
+	// ExportID is the UUID in the export identity marker,
+	// <subPathRoot>/.scion-export-id on Shares[0], as the broker read it
+	// through its own mount (creating it when absent). Two brokers see the
+	// same directory tree only when they report the same ExportID; settings
+	// strings alone are not proof. Empty when the broker could not read the
+	// marker (share unhealthy, marker unreadable) or predates the marker.
+	ExportID string `json:"exportId,omitempty"`
+}
+
+// BrokerVolumeWorkspaceStorage identifies a shared volume backend's tree.
+type BrokerVolumeWorkspaceStorage struct {
+	// ClaimName is the PersistentVolumeClaim of the volume
+	// (gke-shared-volume pv_claim_name); empty for cloudrun-volume.
+	ClaimName string `json:"claimName,omitempty"`
+	// SubPathRoot is the directory under the volume holding the
+	// per-project trees.
+	SubPathRoot string `json:"subPathRoot,omitempty"`
+}
+
+// ExportIDMarkerName is the export identity marker's file name, directly
+// under the NFS sub-path root of a broker's workspace share.
+const ExportIDMarkerName = ".scion-export-id"
+
+// Workspace placements reported for an agent (AgentInfo.WorkspacePlacement).
+// The set may grow; a reader must treat any value it does not recognise as
+// "not on the shared export".
+const (
+	// WorkspacePlacementExport: the agent's workspace is on the broker's
+	// shared NFS workspace export.
+	WorkspacePlacementExport = "export"
+	// WorkspacePlacementLocal: the agent's workspace is not on the shared
+	// NFS export (broker-local disk, or a non-NFS workspace backend).
+	WorkspacePlacementLocal = "local"
+)
+
+// SameWorkspaceExport reports whether a and b place agent workspaces on the
+// same NFS export with the same sub-path root, so a workspace written by one
+// broker is visible at the same relative path on the other. Share IDs and
+// local mount roots are broker-local naming and are not compared. Health is
+// not part of identity.
+func SameWorkspaceExport(a, b *BrokerWorkspaceStorage) bool {
+	return sameWorkspaceExport(a, b)
+}
+
+// NormalizeExportPath drops trailing slashes from an export path, keeping
+// "/" itself, as SameWorkspaceExport compares exports.
+func NormalizeExportPath(p string) string { return normalizeExportPath(p) }
+
+func sameWorkspaceExport(a, b *BrokerWorkspaceStorage) bool {
+	if a == nil || b == nil || a.NFS == nil || b.NFS == nil {
+		return false
+	}
+	if a.Backend != WorkspaceStorageBackendNFS || b.Backend != WorkspaceStorageBackendNFS {
+		return false
+	}
+	aExport, bExport := normalizeExportPath(a.NFS.Export), normalizeExportPath(b.NFS.Export)
+	// An empty identity field is malformed, never a match.
+	if a.NFS.Server == "" || b.NFS.Server == "" || aExport == "" || bExport == "" ||
+		a.NFS.SubPathRoot == "" || b.NFS.SubPathRoot == "" {
+		return false
+	}
+	return a.NFS.Server == b.NFS.Server && aExport == bExport &&
+		a.NFS.SubPathRoot == b.NFS.SubPathRoot
+}
+
+// normalizeExportPath drops trailing slashes from an export path, keeping
+// "/" itself; a path of only slashes normalises to "/".
+func normalizeExportPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if t := strings.TrimRight(p, "/"); t != "" {
+		return t
+	}
+	return "/"
+}

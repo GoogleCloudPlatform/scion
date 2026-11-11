@@ -153,7 +153,7 @@ func TestPoolMetricsNotDroppedWhenNotifyDisabled(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dbRec.ObservePoolStats(ctx, dbmetrics.PoolStats{Active: 5, Idle: 3, Waiting: 0, Max: 10})
+	dbRec.ObservePoolStats(ctx, dbmetrics.PoolStore, dbmetrics.PoolStats{Active: 5, Idle: 3, WaitCount: 0, Max: 10})
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -249,5 +249,28 @@ func TestLoggingExporter_DelegatesAggregation(t *testing.T) {
 	got := le.Aggregation(metric.InstrumentKindCounter)
 	if got != nil {
 		t.Errorf("expected nil aggregation, got %v", got)
+	}
+}
+
+// TestNewResource_ServiceName: service.name defaults to scion-hub, and a
+// separate relay process sets scion-relay with WithServiceName.
+func TestNewResource_ServiceName(t *testing.T) {
+	for want, opts := range map[string][]Option{
+		"scion-hub":   {WithInstanceID("i-1")},
+		"scion-relay": {WithServiceName("scion-relay"), WithInstanceID("i-1")},
+	} {
+		res, err := NewResource(context.Background(), opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ""
+		for _, kv := range res.Attributes() {
+			if string(kv.Key) == "service.name" {
+				got = kv.Value.AsString()
+			}
+		}
+		if got != want {
+			t.Errorf("service.name = %q, want %q", got, want)
+		}
 	}
 }

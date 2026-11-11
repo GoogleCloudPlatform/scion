@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -46,31 +45,16 @@ func runHarnessConfigUpdate(cmd *cobra.Command, args []string) error {
 	all, _ := cmd.Flags().GetBool("all")
 
 	if len(args) == 0 && !all {
-		return fmt.Errorf("specify a harness-config name or use --all")
+		return newUsageError("specify a harness-config name or use --all")
 	}
 	if all && urlOverride != "" {
-		return fmt.Errorf("--all and --url cannot be used together")
+		return newUsageError("--all and --url cannot be used together")
 	}
 
-	var gp string
-	if projectPath != "" {
-		resolved, err := config.GetResolvedProjectDir(projectPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve project path %q: %w", projectPath, err)
-		}
-		gp = resolved
-	} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = projectDir
-	}
-
-	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, err := requireHubForUpload(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub is not available, the update command requires a hub connection")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
@@ -91,9 +75,6 @@ func updateSingleHarnessConfig(ctx context.Context, hubCtx *HubContext, name, ur
 	})
 	if err != nil {
 		return fmt.Errorf("failed to search Hub: %w", err)
-	}
-	if resp == nil {
-		return fmt.Errorf("harness-config %q not found on Hub", name)
 	}
 
 	var match *hubclient.HarnessConfig
@@ -123,9 +104,6 @@ func updateSingleHarnessConfig(ctx context.Context, hubCtx *HubContext, name, ur
 	if err != nil {
 		return fmt.Errorf("reimport failed: %w", err)
 	}
-	if result == nil {
-		return fmt.Errorf("reimport returned no result for %q", name)
-	}
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{
@@ -150,9 +128,6 @@ func updateAllHarnessConfigs(ctx context.Context, hubCtx *HubContext) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list harness-configs: %w", err)
-	}
-	if resp == nil {
-		return fmt.Errorf("no harness-configs found")
 	}
 
 	var updated, skipped, failed int

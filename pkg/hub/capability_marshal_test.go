@@ -55,8 +55,9 @@ func TestAgentWithCapabilities_MarshalJSON(t *testing.T) {
 	assert.Equal(t, "harness-1", m["resolvedHarness"])
 	assert.Equal(t, true, m["cloudLogging"])
 
-	// Check legacy fields
-	assert.Equal(t, tid("project-1"), m["groveId"])
+	// No legacy grove-named keys are emitted.
+	_, hasGroveID := m["groveId"]
+	assert.False(t, hasGroveID)
 }
 
 func TestProjectWithCapabilities_MarshalJSON(t *testing.T) {
@@ -89,10 +90,11 @@ func TestProjectWithCapabilities_MarshalJSON(t *testing.T) {
 	assert.Contains(t, m["_capabilities"].(map[string]interface{})["actions"], "write")
 	assert.Equal(t, true, m["cloudLogging"])
 
-	// Check legacy fields
-	assert.Equal(t, "p-1", m["groveId"])
-	assert.Equal(t, "Project 1", m["groveName"])
-	assert.Equal(t, tid("project-1"), m["grove"])
+	// No legacy grove-named keys are emitted.
+	for _, key := range []string{"groveId", "groveName", "grove"} {
+		_, ok := m[key]
+		assert.Falsef(t, ok, "unexpected legacy key %q present", key)
+	}
 }
 
 func TestTemplateWithCapabilities_MarshalJSON(t *testing.T) {
@@ -123,8 +125,9 @@ func TestTemplateWithCapabilities_MarshalJSON(t *testing.T) {
 	assert.NotNil(t, m["_capabilities"])
 	assert.Contains(t, m["_capabilities"].(map[string]interface{})["actions"], "create")
 
-	// Check legacy fields
-	assert.Equal(t, "p-1", m["groveId"])
+	// No legacy grove-named keys are emitted.
+	_, hasGroveID := m["groveId"]
+	assert.False(t, hasGroveID)
 }
 
 func TestGroupWithCapabilities_MarshalJSON(t *testing.T) {
@@ -148,8 +151,11 @@ func TestGroupWithCapabilities_MarshalJSON(t *testing.T) {
 
 	assert.Equal(t, "g-1", m["id"])
 	assert.Equal(t, "p-1", m["projectId"])
-	assert.Equal(t, "p-1", m["groveId"])
 	assert.NotNil(t, m["_capabilities"])
+
+	// No legacy grove-named keys are emitted.
+	_, hasGroveID := m["groveId"]
+	assert.False(t, hasGroveID)
 }
 
 func TestUserWithCapabilities_MarshalJSON(t *testing.T) {
@@ -229,13 +235,13 @@ func TestTemplateWithCapabilities_UnmarshalJSON(t *testing.T) {
 		assert.Equal(t, "p1", tmpl.ProjectID)
 	})
 
-	t.Run("HandleGroveID", func(t *testing.T) {
+	t.Run("IgnoresLegacyGroveID", func(t *testing.T) {
 		data := `{"id":"t1","groveId":"p1"}`
 		var tmpl TemplateWithCapabilities
 		err := json.Unmarshal([]byte(data), &tmpl)
 		require.NoError(t, err)
 		assert.Equal(t, "t1", tmpl.ID)
-		assert.Equal(t, "p1", tmpl.ProjectID)
+		assert.Equal(t, "", tmpl.ProjectID)
 	})
 }
 
@@ -249,21 +255,13 @@ func TestCreateTemplateRequest_UnmarshalJSON(t *testing.T) {
 		assert.Equal(t, "p1", req.ProjectID)
 	})
 
-	t.Run("HandleGroveID", func(t *testing.T) {
+	t.Run("GroveIDNoLongerRecognized", func(t *testing.T) {
 		data := `{"name":"tmpl","scope":"project","groveId":"p1"}`
 		var req CreateTemplateRequest
 		err := json.Unmarshal([]byte(data), &req)
 		require.NoError(t, err)
 		assert.Equal(t, "tmpl", req.Name)
-		assert.Equal(t, "p1", req.ProjectID)
-	})
-
-	t.Run("ProjectIDTakesPrecedence", func(t *testing.T) {
-		data := `{"name":"tmpl","scope":"project","projectId":"p1","groveId":"p2"}`
-		var req CreateTemplateRequest
-		err := json.Unmarshal([]byte(data), &req)
-		require.NoError(t, err)
-		assert.Equal(t, "p1", req.ProjectID)
+		assert.Empty(t, req.ProjectID)
 	})
 }
 
@@ -277,21 +275,13 @@ func TestCloneTemplateRequest_UnmarshalJSON(t *testing.T) {
 		assert.Equal(t, "p1", req.ProjectID)
 	})
 
-	t.Run("HandleGroveID", func(t *testing.T) {
+	t.Run("GroveIDNoLongerRecognized", func(t *testing.T) {
 		data := `{"name":"clone","scope":"project","groveId":"p1"}`
 		var req CloneTemplateRequest
 		err := json.Unmarshal([]byte(data), &req)
 		require.NoError(t, err)
 		assert.Equal(t, "clone", req.Name)
-		assert.Equal(t, "p1", req.ProjectID)
-	})
-
-	t.Run("ProjectIDTakesPrecedence", func(t *testing.T) {
-		data := `{"name":"clone","scope":"project","projectId":"p1","groveId":"p2"}`
-		var req CloneTemplateRequest
-		err := json.Unmarshal([]byte(data), &req)
-		require.NoError(t, err)
-		assert.Equal(t, "p1", req.ProjectID)
+		assert.Empty(t, req.ProjectID)
 	})
 }
 
@@ -305,20 +295,12 @@ func TestCreateNotificationTemplateRequest_UnmarshalJSON(t *testing.T) {
 		assert.Equal(t, "p1", req.ProjectID)
 	})
 
-	t.Run("HandleGroveID", func(t *testing.T) {
+	t.Run("GroveIDNoLongerRecognized", func(t *testing.T) {
 		data := `{"name":"notif","scope":"project","groveId":"p1","triggerActivities":["agent.started"]}`
 		var req createTemplateRequest
 		err := json.Unmarshal([]byte(data), &req)
 		require.NoError(t, err)
 		assert.Equal(t, "notif", req.Name)
-		assert.Equal(t, "p1", req.ProjectID)
-	})
-
-	t.Run("ProjectIDTakesPrecedence", func(t *testing.T) {
-		data := `{"name":"notif","scope":"project","projectId":"p1","groveId":"p2","triggerActivities":["agent.started"]}`
-		var req createTemplateRequest
-		err := json.Unmarshal([]byte(data), &req)
-		require.NoError(t, err)
-		assert.Equal(t, "p1", req.ProjectID)
+		assert.Empty(t, req.ProjectID)
 	})
 }

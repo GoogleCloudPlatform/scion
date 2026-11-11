@@ -115,6 +115,26 @@ func TestResolvedSettings_HubDefaultPresenceSemantics(t *testing.T) {
 			want: ResolvedHubDefaultPresent,
 		},
 		{
+			name: "gcp identity mode present",
+			key:  projectSettingDefaultGCPIdentityMode,
+			doc:  `{"default_gcp_identity_mode": "passthrough"}`,
+			want: ResolvedHubDefaultPresent,
+		},
+		{
+			name: "gcp identity service account present",
+			key:  projectSettingDefaultGCPIdentitySAID,
+			doc:  `{"default_gcp_identity_service_account_id": "sa-1"}`,
+			want: ResolvedHubDefaultPresent,
+		},
+		{
+			// Same ambiguity as the other plain strings: "" is dropped by
+			// omitempty, so a missing mode cannot be reported as absent.
+			name: "gcp identity mode missing is unknown",
+			key:  projectSettingDefaultGCPIdentityMode,
+			doc:  `{}`,
+			want: ResolvedHubDefaultUnknown,
+		},
+		{
 			name: "explicit json null counts as missing",
 			key:  projectSettingDefaultMaxTurns,
 			doc:  `{"default_max_turns": null}`,
@@ -166,6 +186,18 @@ func TestResolvedSettings_HubValueExtraction(t *testing.T) {
 			wantValue: "10Gi",
 		},
 		{
+			name:      "gcp identity mode value extracted",
+			key:       projectSettingDefaultGCPIdentityMode,
+			doc:       `{"default_gcp_identity_mode": "assign"}`,
+			wantValue: "assign",
+		},
+		{
+			name:      "gcp identity service account value extracted",
+			key:       projectSettingDefaultGCPIdentitySAID,
+			doc:       `{"default_gcp_identity_service_account_id": "sa-1"}`,
+			wantValue: "sa-1",
+		},
+		{
 			name:      "missing key returns nil value",
 			key:       projectSettingDefaultMaxTurns,
 			doc:       `{}`,
@@ -212,17 +244,15 @@ func TestResolvedSettings_UnreadableSourceIsUnknownNotAbsent(t *testing.T) {
 	}
 }
 
-// TestResolvedSettings_NoHubCounterpartIsAbsent covers the opposite case:
-// AgentDefaultsSettings has eight fields, enumerated in full, so "there
-// is no hub default for activeProfile" is a measured structural fact and may be
-// reported as absent rather than unknown.
+// TestResolvedSettings_NoHubCounterpartIsAbsent covers the case where a
+// registered project setting genuinely has no hub-level counterpart: "there
+// is no hub default for activeProfile" is a measured structural fact and may
+// be reported as absent rather than unknown.
 func TestResolvedSettings_NoHubCounterpartIsAbsent(t *testing.T) {
 	resp := (&Server{}).resolvedProjectSettings(&store.Project{ID: "p-1"})
 
 	for _, key := range []string{
 		projectSettingActiveProfile,
-		projectSettingDefaultGCPIdentityMode,
-		projectSettingDefaultGCPIdentitySAID,
 	} {
 		assert.Equalf(t, ResolvedHubDefaultAbsent, resp.Settings[key].HubDefault,
 			"%q has no agent_defaults counterpart; that is a measured structural "+
@@ -292,6 +322,30 @@ func TestResolvedSettings_ProjectAnnotationReporting(t *testing.T) {
 	unset := resp.Settings[projectSettingDefaultHarnessConfig]
 	assert.False(t, unset.ProjectSet)
 	assert.Nil(t, unset.ProjectValue, "an unset annotation must be null, not \"\"")
+}
+
+// A stored thinking level outside 1-100 (a stale "0") is not a project
+// value: projectSet is false and projectValue null, as GET /settings omits
+// it, so the page shows the hub default. A valid level is reported as set
+// (ptone/scion#5692).
+func TestResolvedSettings_InvalidStoredThinkingLevelIsUnset(t *testing.T) {
+	for _, val := range []string{"0", "101", "-1", "high", ""} {
+		project := &store.Project{ID: "p-1", Annotations: map[string]string{projectSettingDefaultThinkingLevel: val}}
+		resp := (&Server{}).resolvedProjectSettings(project)
+		entry := resp.Settings[projectSettingDefaultThinkingLevel]
+		assert.False(t, entry.ProjectSet, "stored %q must read as unset", val)
+		assert.Nil(t, entry.ProjectValue, "stored %q must be null", val)
+		assert.Nil(t, resp.Project.DefaultThinkingLevel, "the project member agrees for %q", val)
+	}
+
+	project := &store.Project{ID: "p-1", Annotations: map[string]string{projectSettingDefaultThinkingLevel: "60"}}
+	resp := (&Server{}).resolvedProjectSettings(project)
+	entry := resp.Settings[projectSettingDefaultThinkingLevel]
+	assert.True(t, entry.ProjectSet)
+	require.NotNil(t, entry.ProjectValue)
+	assert.Equal(t, "60", *entry.ProjectValue)
+	require.NotNil(t, resp.Project.DefaultThinkingLevel)
+	assert.Equal(t, 60, *resp.Project.DefaultThinkingLevel)
 }
 
 // TestResolvedSettings_EndpointReturnsNoEffectiveValue asserts on the actual

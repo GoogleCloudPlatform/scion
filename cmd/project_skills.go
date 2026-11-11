@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -123,17 +124,13 @@ func init() {
 // optional project name/slug/UUID argument. When arg is empty, the project is
 // inferred from the current directory's settings.
 func resolveProjectSkillsClient(ctx context.Context, projectArg string) (hubclient.InjectedSkillsService, error) {
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("hub connection required: %w", err)
 	}
-	if hubCtx == nil {
-		return nil, fmt.Errorf("hub is not enabled; configure hub.endpoint to use project skills")
-	}
-
 	var projectID string
 	if projectArg != "" {
-		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg)
+		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg, hubsync.UsesUserAccessToken(hubCtx.CredentialKind))
 		if err != nil {
 			return nil, fmt.Errorf("could not resolve project %q: %w", projectArg, err)
 		}
@@ -222,27 +219,27 @@ func runProjectSkillsList(cmd *cobra.Command, args []string) error {
 func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 	if projectSkillsFromDir != "" {
 		if projectSkillsAs != "" || projectSkillsOptional {
-			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
+			return newUsageError("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
 		}
 		projectArg, skillRef := splitProjectSkillsArgs(args)
 		if skillRef != "" {
-			return fmt.Errorf("cannot combine a skill URI argument with --from-directory; choose one")
+			return newUsageError("cannot combine a skill URI argument with --from-directory; choose one")
 		}
 		return runProjectSkillsFromDirectory(cmd, projectArg, projectSkillsFromDir)
 	}
 
 	if len(args) == 0 {
-		return fmt.Errorf("skill URI or --from-directory is required")
+		return newUsageError("skill URI or --from-directory is required")
 	}
 
 	projectArg, skillURI := splitProjectSkillsArgs(args)
 	if skillURI == "" {
-		return fmt.Errorf("skill URI is required (expected format containing ://), got %q", args[0])
+		return newUsageError("skill URI is required (expected format containing ://), got %q", args[0])
 	}
 
 	normalized, err := api.NormalizeSkillURI(skillURI)
 	if err != nil {
-		return fmt.Errorf("invalid skill URI: %w", err)
+		return newUsageError("invalid skill URI: %w", err)
 	}
 	if normalized != skillURI {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Note: URI transformed → %s\n", normalized)
@@ -283,7 +280,7 @@ func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 func runProjectSkillsRemove(cmd *cobra.Command, args []string) error {
 	projectArg, skillRef := splitProjectSkillsArgs(args)
 	if skillRef == "" {
-		return fmt.Errorf("skill ID or URI is required")
+		return newUsageError("skill ID or URI is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -333,7 +330,7 @@ func resolveInjectedSkillEntryID(ctx context.Context, svc hubclient.InjectedSkil
 	}
 	// Otherwise it must be a UUID; reject anything else to avoid a silent misrouted path segment.
 	if !isUUIDLike(ref) {
-		return "", fmt.Errorf("invalid skill entry ID: %q (expected UUID or skill URI)", ref)
+		return "", newUsageError("invalid skill entry ID: %q (expected UUID or skill URI)", ref)
 	}
 	return ref, nil
 }
@@ -386,18 +383,14 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 
 	// Fix 2: Client-side URL validation.
 	if !looksLikeGitHubDirectoryURL(dirURL) {
-		return fmt.Errorf("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
+		return newUsageError("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
 	}
 
 	// Fix 4: Split nil-error check.
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub is not enabled; configure hub.endpoint to use project skills")
-	}
-
 	// Resolve project ID for auth token forwarding.
 	// Fix 3: Use separate context for discover phase (30s).
 	parentCtx := cmd.Context()
@@ -409,7 +402,7 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 
 	var projectID string
 	if projectArg != "" {
-		proj, err := resolveProjectByNameOrID(discoverCtx, hubCtx.Client, projectArg)
+		proj, err := resolveProjectByNameOrID(discoverCtx, hubCtx.Client, projectArg, hubsync.UsesUserAccessToken(hubCtx.CredentialKind))
 		if err != nil {
 			return fmt.Errorf("could not resolve project %q: %w", projectArg, err)
 		}
@@ -445,11 +438,11 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 
 	// TTY: prompt unless --yes/--non-interactive.
 	if isInteractiveTerminal() && !autoConfirm {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
 		var answer string
 		_, _ = fmt.Fscanln(cmd.InOrStdin(), &answer)
 		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Aborted.")
 			return nil
 		}
 	}

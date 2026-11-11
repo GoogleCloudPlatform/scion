@@ -26,7 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
-import { isChatNotificationStatus } from '../../client/chat-notifications.js';
+import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import {
   canShowPushNotification,
   enablePushWithPermission,
@@ -36,6 +36,147 @@ import {
   type PushPermissionState,
 } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
+import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
+import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
+import { visibleInterval } from '../../client/visible-interval.js';
+
+/**
+ * A scheduled dispatch blocked by an agent row in phase error. The row's
+ * agentId is the errored agent, so "View agent" leads to the delete that
+ * unblocks the schedule.
+ */
+export const SCHEDULE_BLOCKED_STATUS = 'SCHEDULE_BLOCKED';
+
+/**
+ * A review of one of the user's artifacts was finalized by another principal
+ * allowed to review it (ptone/scion#6853). The row's `excerpt` is the start of the
+ * reviewer's summary note, attributed by `message`; its artifact comes from
+ * `resourceId` and `projectId` only.
+ */
+export const ARTIFACT_REVIEW_SUMMARY_KIND = 'artifact_review_summary';
+export const ARTIFACT_REVIEW_SUBMITTED_STATUS = 'ARTIFACT_REVIEW_SUBMITTED';
+
+/**
+ * An agent saved a user secret for the user; it waits for the user's
+ * approval in Profile > Secrets. The row carries text only, never a value.
+ */
+export const SECRET_PENDING_KIND = 'secret_pending';
+export const SECRET_PENDING_STATUS = 'SECRET_PENDING';
+
+/** The path where the user decides on pending secrets. */
+const PROFILE_SECRETS_PATH = '/profile/secrets';
+
+/** The Profile > Secrets path for a pending secret row, or null for any other row. */
+export function pendingSecretLink(n: Notification): string | null {
+  return n.kind === SECRET_PENDING_KIND || n.status === SECRET_PENDING_STATUS
+    ? PROFILE_SECRETS_PATH
+    : null;
+}
+
+/**
+ * Statuses of the chat rows the hub used to write into the bell (mentions
+ * and DMs). It writes none now, but rows made before that can remain.
+ */
+const RETIRED_CHAT_STATUSES: ReadonlySet<string> = new Set(['MENTION', 'DM_RECEIVED']);
+
+/** The nil UUID some older notification rows carry in place of an agent. */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+/** Whether a notification row names an agent the "View agent" link can open. */
+function hasAgentLink(agentId: string | undefined): boolean {
+  return !!agentId && agentId !== NIL_UUID;
+}
+
+/** A lowercase canonical UUID, as the hub writes ids. */
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Line breaks the excerpt shows as a space. */
+const EXCERPT_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]+/g;
+/** Control and format characters, removed from the excerpt. */
+const EXCERPT_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * The excerpt of a review summary row, or '' for any other row: no other
+ * kind shows one. The hub already cleans it; line breaks become spaces,
+ * control and format characters are removed and runs of spaces collapse
+ * here again, so a row from anywhere else still shows as one line of plain
+ * text.
+ */
+export function reviewSummaryExcerpt(n: Notification): string {
+  if (n.kind !== ARTIFACT_REVIEW_SUMMARY_KIND || typeof n.excerpt !== 'string') return '';
+  return n.excerpt
+    .replace(EXCERPT_BREAKS, ' ')
+    .replace(EXCERPT_UNSAFE, '')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * The artifact page path of a review summary row, built from its project and
+ * resource fields alone (both canonical UUIDs, the project not the nil
+ * UUID), or null. The message and excerpt are never read. It is the path
+ * artifactPagePath (client/artifacts.ts) builds, written out here so the
+ * tray does not load the artifacts client. An artifact not homed in a
+ * project (the hub writes the nil UUID) deliberately gets no link; the CLI
+ * still prints its scion://artifact/ reference.
+ */
+export function reviewSummaryLink(n: Notification): string | null {
+  if (n.kind !== ARTIFACT_REVIEW_SUMMARY_KIND || n.resourceType !== 'artifact') return null;
+  const artifactId = n.resourceId ?? '';
+  const projectId = n.projectId ?? '';
+  if (
+    !CANONICAL_UUID.test(artifactId) ||
+    !CANONICAL_UUID.test(projectId) ||
+    projectId === NIL_UUID
+  ) {
+    return null;
+  }
+  return `/projects/${projectId}/artifacts/${artifactId}`;
+}
+
+/**
+ * The notification a `notification-created` event carries in full, or null.
+ *
+ * The user-scoped `user.{id}.notification` subject delivers the row itself
+ * (UserNotificationEvent): every field the tray renders (id, status,
+ * message, createdAt, agentId). The bare `notification.created` path, and
+ * anything malformed, yields null and is fetched instead.
+ *
+ * The payload has no `acknowledged` field: a notification that was just
+ * created is unacknowledged by definition, so a missing field passes and
+ * only an explicit `true` is rejected. A payload addressed to another user
+ * (`subscriberId`) is rejected too, as a second gate behind the subject.
+ */
+export function notificationFromEvent(data: unknown, userId: string | null): Notification | null {
+  if (!userId || !data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const str = (v: unknown): v is string => typeof v === 'string';
+  if (!str(d.id) || !d.id || !str(d.status) || !d.status || !str(d.message)) return null;
+  if (!str(d.createdAt) || Number.isNaN(Date.parse(d.createdAt))) return null;
+  if (!str(d.agentId)) return null;
+  if (d.acknowledged !== undefined && d.acknowledged !== false) return null;
+  if (d.subscriberId !== undefined && d.subscriberId !== userId) return null;
+  const optional: Partial<Notification> = {};
+  if (str(d.kind)) optional.kind = d.kind;
+  if (str(d.resourceType)) optional.resourceType = d.resourceType;
+  if (str(d.resourceId)) optional.resourceId = d.resourceId;
+  if (str(d.excerpt)) optional.excerpt = d.excerpt;
+  return {
+    ...optional,
+    id: d.id,
+    subscriptionId: str(d.subscriptionId) ? d.subscriptionId : '',
+    agentId: d.agentId,
+    projectId: str(d.projectId) ? d.projectId : '',
+    subscriberType: 'user',
+    subscriberId: userId,
+    status: d.status,
+    message: d.message,
+    dispatched: false,
+    acknowledged: false,
+    createdAt: d.createdAt,
+  };
+}
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
 
@@ -51,7 +192,10 @@ export class ScionNotificationTray extends LitElement {
   @state() private pushEnabled = false;
   @state() private pushPermission: PushPermissionState = 'default';
 
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Stops the fallback poll; paused while the tab is hidden. */
+  private stopPollTimer: (() => void) | null = null;
+  /** The user id loading was started for; null when nothing is running. */
+  private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
   private boundOnPushPreference = (): void => this.syncPushState();
@@ -61,6 +205,35 @@ export class ScionNotificationTray extends LitElement {
 
   /** Suppresses browser push for the initial fetch so existing notifications don't fire. */
   private initialFetchDone = false;
+
+  /** The user id that the list, seenIds and initialFetchDone belong to. */
+  private stateUserId: string | null = null;
+
+  /** Counts list requests sent; each request knows its own number. */
+  private fetchSeq = 0;
+
+  /**
+   * The number of the newest list request whose response was applied. A
+   * response to an older request, landing after it, is stale and ignored.
+   */
+  private appliedSeq = 0;
+
+  /**
+   * Rows an event added, with the fetchSeq when it was added. A list request
+   * sent at or before that number may have been answered before the row
+   * existed, so its response must not drop the row.
+   */
+  private upsertedAtSeq = new Map<string, number>();
+
+  /**
+   * Fetches for events that carry no usable notification: the first of a
+   * burst fetches at once, the rest collapse into one trailing fetch.
+   */
+  private eventFetch: CoalescedRefresh = coalescedRefresh(() => this.fetchNotifications(), {
+    waitMs: 500,
+    maxWaitMs: 3000,
+    leading: true,
+  });
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -72,34 +245,97 @@ export class ScionNotificationTray extends LitElement {
     // Keep in step with the profile settings page, which writes the same
     // preference. Two toggles disagreeing about one setting is worse than one.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
-    if (this.user) {
-      void this.fetchNotifications();
-      this.startPolling();
-      this.listenForNotifications();
-    }
+    this.syncUser();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForNotifications();
+    // A reconnect starts afresh, as a first mount does.
+    this.activeUserId = null;
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    // Clear the previous user's state before this render, so no render pairs
+    // the new user with the previous user's list.
+    if (changed.has('user')) this.resetOnUserChange();
+    if (changed.has('notifications')) this.announceCount();
+  }
+
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('user')) {
-      if (this.user) {
-        void this.fetchNotifications();
-        this.startPolling();
-        this.listenForNotifications();
-      } else {
-        this.stopPolling();
-        this.stopListeningForNotifications();
-        this.notifications = [];
-      }
-    }
+    if (changed.has('user')) this.syncUser();
     this.detectTruncation();
+  }
+
+  /**
+   * Starts or stops loading for the signed-in user.
+   *
+   * Keyed on the user id, not the object: connectedCallback and the first
+   * updated() both see the same user on mount, and the header can hand over a
+   * new object for the same user (an auth refresh). Neither is a reason to
+   * fetch again or to restart polling.
+   */
+  private syncUser(): void {
+    const id = this.user?.id ?? null;
+    if (id) {
+      if (id === this.activeUserId) return;
+      // Loading stops on disconnect and restarts in connectedCallback.
+      if (!this.isConnected) return;
+      this.activeUserId = id;
+      void this.fetchNotifications();
+      this.startPolling();
+      this.listenForNotifications();
+    } else {
+      this.activeUserId = null;
+      this.stopPolling();
+      this.stopListeningForNotifications();
+      this.notifications = [];
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-user state
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resets per-user state when the signed-in user id changes, so the next
+   * user's first fetch behaves like a first load: it shows only that user's
+   * notifications, suppresses push for the ones that already exist, and does
+   * not treat the previous user's notifications as seen.
+   */
+  private resetOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.stateUserId) return;
+    this.stateUserId = id;
+    this.notifications = [];
+    this.seenIds = new Set();
+    this.upsertedAtSeq.clear();
+    this.initialFetchDone = false;
+    // The next user's first fetch answers any event the previous user's
+    // coalescer held, and their first event fetches at once.
+    this.eventFetch.cancel();
+  }
+
+  /**
+   * Tells the header how many items the list now holds. Called for every
+   * change to the list, including a clear on a user change or sign-out; a
+   * dropped response for a previous user changes nothing, so it announces
+   * nothing.
+   */
+  private announceCount(): void {
+    dispatchTrayCount(this, 'notifications', this.notifications.length);
+  }
+
+  /**
+   * Whether a response to a request started while requestUserId was signed in
+   * may be applied. A response for a previous user, or one that arrives after
+   * sign-out, is dropped.
+   */
+  private isForCurrentUser(requestUserId: string | null): boolean {
+    return requestUserId !== null && requestUserId === (this.user?.id ?? null);
   }
 
   // ---------------------------------------------------------------------------
@@ -110,11 +346,12 @@ export class ScionNotificationTray extends LitElement {
     this.pushPermission = pushPermission();
     // Permission can be revoked in site settings long after the opt-in was
     // stored, so the toggle reflects both halves rather than the flag alone.
-    this.pushEnabled = canShowPushNotification();
+    this.pushEnabled = canShowPushNotification('agent');
   }
 
   /**
-   * Turns desktop notifications on or off.
+   * Turns desktop notifications for agent events on or off. Chat message
+   * alerts have their own toggle in profile settings.
    *
    * This is the only path that asks the browser for permission, and it is
    * reachable from chat because the tray is in the chat header. Permission is
@@ -123,9 +360,9 @@ export class ScionNotificationTray extends LitElement {
    */
   private async handlePushToggle(): Promise<void> {
     if (this.pushEnabled) {
-      setPushOptIn(false);
+      setPushOptIn('agent', false);
     } else {
-      await enablePushWithPermission();
+      await enablePushWithPermission('agent');
     }
     this.syncPushState();
   }
@@ -146,14 +383,12 @@ export class ScionNotificationTray extends LitElement {
 
   private startPolling(): void {
     this.stopPolling();
-    this.pollTimer = setInterval(() => void this.fetchNotifications(), POLL_INTERVAL_MS);
+    this.stopPollTimer = visibleInterval(() => void this.fetchNotifications(), POLL_INTERVAL_MS);
   }
 
   private stopPolling(): void {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    this.stopPollTimer?.();
+    this.stopPollTimer = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -166,12 +401,39 @@ export class ScionNotificationTray extends LitElement {
 
   private stopListeningForNotifications(): void {
     stateManager.removeEventListener('notification-created', this.boundOnNotification);
+    this.eventFetch.cancel();
   }
 
-  private onNotificationEvent(): void {
+  private onNotificationEvent(e: Event): void {
     // The stateManager fires notification-created when a notification SSE
-    // event arrives. Re-fetch to get the full notification objects.
-    void this.fetchNotifications();
+    // event arrives. A user-scoped event carries the whole row: show it
+    // without a request. Anything else is fetched, coalesced. Before the
+    // first fetch has finished there is no list to add to (and no seen set
+    // to tell a new row by), so that fetch is joined by fetching as well.
+    const detail = (e as CustomEvent<{ data?: unknown } | undefined>).detail;
+    const n = this.initialFetchDone
+      ? notificationFromEvent(detail?.data, this.user?.id ?? null)
+      : null;
+    if (n) {
+      this.upsertNotification(n);
+      return;
+    }
+    this.eventFetch.schedule(e.timeStamp > 0 ? e.timeStamp : undefined);
+  }
+
+  /** Adds a notification delivered by an event, or replaces its row. */
+  private upsertNotification(n: Notification): void {
+    // Chat rows no longer belong in the bell (see fetchNotifications).
+    if (RETIRED_CHAT_STATUSES.has(n.status)) return;
+    if (!this.seenIds.has(n.id)) {
+      this.dispatchBrowserNotification(n);
+      this.seenIds.add(n.id);
+    }
+    this.upsertedAtSeq.set(n.id, this.fetchSeq);
+    // The list is newest first, as the endpoint returns it.
+    const at = this.notifications.findIndex((x) => x.id === n.id);
+    this.notifications =
+      at < 0 ? [n, ...this.notifications] : this.notifications.map((x, i) => (i === at ? n : x));
   }
 
   // ---------------------------------------------------------------------------
@@ -179,11 +441,19 @@ export class ScionNotificationTray extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async fetchNotifications(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
+    const seq = ++this.fetchSeq;
     try {
       const res = await apiFetch('/api/v1/notifications?acknowledged=false');
       if (!res.ok) return;
       const data = (await res.json()) as Notification[] | null;
-      const incoming = data ?? [];
+      if (!this.isForCurrentUser(requestUserId)) return;
+      // A newer request's answer is already shown: this one is older.
+      if (seq < this.appliedSeq) return;
+      this.appliedSeq = seq;
+      // Older chat rows can still be unacknowledged; chat no longer belongs
+      // in the bell, so they are neither listed, counted nor popped.
+      const incoming = (data ?? []).filter((n) => !RETIRED_CHAT_STATUSES.has(n.status));
 
       // Detect new notifications (IDs not previously seen) and dispatch
       // browser push for them — but only after the first fetch so we don't
@@ -196,10 +466,21 @@ export class ScionNotificationTray extends LitElement {
         }
       }
 
+      // Rows an event added after this request was sent are newer than its
+      // answer: keep them (they are already seen). Older ones are answered.
+      const incomingIds = new Set(incoming.map((n) => n.id));
+      const kept = this.notifications.filter(
+        (n) => !incomingIds.has(n.id) && (this.upsertedAtSeq.get(n.id) ?? -1) >= seq
+      );
+      for (const [id, at] of this.upsertedAtSeq) {
+        if (at < seq) this.upsertedAtSeq.delete(id);
+      }
+      const next = [...kept, ...incoming];
+
       // Update seen set to current snapshot
-      this.seenIds = new Set(incoming.map((n) => n.id));
+      this.seenIds = new Set(next.map((n) => n.id));
       this.initialFetchDone = true;
-      this.notifications = incoming;
+      this.notifications = next;
     } catch {
       // Silently ignore network errors during polling
     }
@@ -210,20 +491,15 @@ export class ScionNotificationTray extends LitElement {
    * and the browser has granted permission.
    */
   private dispatchBrowserNotification(n: Notification): void {
-    // Chat mentions and DMs are dispatched by chat-notifications.ts straight
-    // off the SSE event, with a conversation tag and a click target this
-    // component cannot build — the notification row has no conversation
-    // column. Firing here too would show every mention twice, because the
-    // same event that produces the popup also triggers the re-fetch below.
-    if (isChatNotificationStatus(n.status)) return;
-
-    if (!canShowPushNotification()) {
+    if (!canShowPushNotification('agent')) {
       return;
     }
 
     const title = this.browserNotificationTitle(n.status);
+    // The Notification API shows the body as plain text.
+    const excerpt = reviewSummaryExcerpt(n);
     new window.Notification(title, {
-      body: n.message,
+      body: excerpt ? `${n.message}\n\u201c${excerpt}\u201d` : n.message,
       tag: n.id, // deduplicate if the same notification is seen again
       icon: '/scion-notification-icon.png',
     });
@@ -234,27 +510,39 @@ export class ScionNotificationTray extends LitElement {
       case 'COMPLETED':
         return 'Agent Completed';
       case 'WAITING_FOR_INPUT':
-        return 'Agent Needs Input';
+        return 'Agent Waiting on Parent';
       case 'LIMITS_EXCEEDED':
         return 'Agent Limits Exceeded';
+      case SCHEDULE_BLOCKED_STATUS:
+        return 'Schedule Blocked';
+      case ARTIFACT_REVIEW_SUBMITTED_STATUS:
+        return 'Review Submitted';
+      case SECRET_PENDING_STATUS:
+        return 'Secret Awaiting Approval';
       default:
         return 'Scion Notification';
     }
   }
 
   private async ackOne(id: string): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch(`/api/v1/notifications/${id}/ack`, { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = this.notifications.filter((n) => n.id !== id);
+      this.upsertedAtSeq.delete(id);
     } catch {
       // Ignore
     }
   }
 
   private async ackAll(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch('/api/v1/notifications/ack-all', { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = [];
+      this.upsertedAtSeq.clear();
     } catch {
       // Ignore
     }
@@ -298,6 +586,10 @@ export class ScionNotificationTray extends LitElement {
         return 'exclamation-circle-fill';
       case 'LIMITS_EXCEEDED':
         return 'x-circle-fill';
+      case SCHEDULE_BLOCKED_STATUS:
+        return 'calendar-x';
+      case SECRET_PENDING_STATUS:
+        return 'shield-lock';
       default:
         return 'info-circle-fill';
     }
@@ -308,8 +600,10 @@ export class ScionNotificationTray extends LitElement {
       case 'COMPLETED':
         return 'status-success';
       case 'WAITING_FOR_INPUT':
+      case SECRET_PENDING_STATUS:
         return 'status-warning';
       case 'LIMITS_EXCEEDED':
+      case SCHEDULE_BLOCKED_STATUS:
         return 'status-danger';
       default:
         return 'status-info';
@@ -317,15 +611,11 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private relativeTime(iso: string): string {
-    const diff = Date.now() - new Date(iso).getTime();
-    const seconds = Math.floor(diff / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(iso).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(iso, { style: 'narrow' });
   }
 
   // ---------------------------------------------------------------------------
@@ -514,6 +804,18 @@ export class ScionNotificationTray extends LitElement {
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
+    }
+
+    .notif-excerpt {
+      margin-top: 0.25rem;
+      padding-left: 0.5rem;
+      border-left: 2px solid var(--scion-border, #e2e8f0);
+      font-size: 0.75rem;
+      line-height: 1.4;
+      font-style: italic;
+      color: var(--scion-text-muted, #64748b);
+      word-break: break-word;
+      white-space: normal;
     }
 
     .truncation-badge {
@@ -716,14 +1018,13 @@ export class ScionNotificationTray extends LitElement {
         <div class="panel-footer">
           ${this.renderPushToggle()}
           <a
-            href="/projects"
+            href="/profile/settings"
             class="manage-link"
             @click=${(e: Event): void => {
               e.preventDefault();
               this.open = false;
               document.removeEventListener('click', this.boundOnClickOutside, true);
-              window.history.pushState({}, '', '/projects');
-              window.dispatchEvent(new PopStateEvent('popstate'));
+              navigateTo('/profile/settings');
             }}
             >Manage subscriptions</a
           >
@@ -733,9 +1034,10 @@ export class ScionNotificationTray extends LitElement {
   }
 
   /**
-   * The master desktop-notification toggle. Lives in the tray because the tray
-   * is the one notification surface present on every page, chat included —
-   * the profile settings page is not reachable without leaving a conversation.
+   * The agent-event desktop-notification toggle. Lives in the tray because
+   * the tray is the one notification surface present on every page, chat
+   * included — the profile settings page is not reachable without leaving a
+   * conversation. It mirrors the profile page's agent event alerts toggle.
    */
   private renderPushToggle() {
     if (this.pushPermission === 'unsupported') return nothing;
@@ -747,10 +1049,10 @@ export class ScionNotificationTray extends LitElement {
     // the next render admitted the button was blocked all along.
     const blocked = this.pushPermission === 'denied';
     const label = blocked
-      ? 'Desktop notifications blocked'
+      ? 'Agent alerts blocked'
       : this.pushEnabled
-        ? 'Desktop notifications on'
-        : 'Desktop notifications off';
+        ? 'Agent alerts on'
+        : 'Agent alerts off';
 
     return html`
       <button
@@ -768,6 +1070,12 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private renderItem(n: Notification) {
+    // The excerpt is another principal's text: it is bound as a text node,
+    // in its own element under the message that attributes it, never as
+    // markup, and the link beside it comes from the resource fields.
+    const excerpt = reviewSummaryExcerpt(n);
+    const artifactLink = reviewSummaryLink(n);
+    const secretsLink = pendingSecretLink(n);
     return html`
       <div class="notif-item">
         <div class="notif-icon ${this.statusClass(n.status)}">
@@ -778,12 +1086,28 @@ export class ScionNotificationTray extends LitElement {
           <sl-tooltip content=${n.message} hoist>
             <span class="truncation-badge" style="display:none">...</span>
           </sl-tooltip>
+          ${excerpt ? html`<div class="notif-excerpt">“${excerpt}”</div>` : nothing}
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
-            ${isChatNotificationStatus(n.status)
-              ? // Chat rows carry the nil agent UUID, so "View agent" would
-                // link to /agents/00000000-... and 404. Until the row records
-                // its conversation there is nowhere honest to send the click.
+            ${artifactLink
+              ? html`<a
+                  href=${artifactLink}
+                  @click=${(e: Event): void => this.navigateToPath(e, artifactLink)}
+                >
+                  View artifact
+                </a>`
+              : nothing}
+            ${secretsLink
+              ? html`<a
+                  href=${secretsLink}
+                  @click=${(e: Event): void => this.navigateToPath(e, secretsLink)}
+                >
+                  Review secrets
+                </a>`
+              : nothing}
+            ${!hasAgentLink(n.agentId)
+              ? // Older rows can carry no agent (the nil UUID); a link would
+                // 404, so offer none.
                 nothing
               : html`<a
                   href="/agents/${n.agentId}"
@@ -810,11 +1134,14 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private navigateToAgent(e: Event, agentId: string): void {
+    this.navigateToPath(e, `/agents/${agentId}`);
+  }
+
+  private navigateToPath(e: Event, path: string): void {
     e.preventDefault();
     this.open = false;
     document.removeEventListener('click', this.boundOnClickOutside, true);
-    window.history.pushState({}, '', `/agents/${agentId}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateTo(path);
   }
 }
 

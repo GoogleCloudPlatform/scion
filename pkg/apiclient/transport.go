@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,11 +53,20 @@ func WithHTTPClient(c *http.Client) TransportOption {
 // WithTimeout sets the default request timeout.
 func WithTimeout(d time.Duration) TransportOption {
 	return func(t *Transport) {
+		if t.HTTPClient == nil {
+			t.HTTPClient = &http.Client{}
+		}
 		t.HTTPClient.Timeout = d
 	}
 }
 
-// WithRetry configures automatic retry behavior.
+// WithRetry configures automatic retry behavior for Do: up to maxRetries
+// further attempts after a transport error or a 5xx response, waiting wait
+// between attempts. Retries are off by default (MaxRetries 0); negative
+// values also disable retries, without skipping the initial request. A retry
+// replays the whole request, body included, so only enable this for
+// transports whose Do callers are idempotent; DoNoRetry is never retried.
+// Pinning non-idempotent callers is tracked in ptone/scion#2955.
 func WithRetry(maxRetries int, wait time.Duration) TransportOption {
 	return func(t *Transport) {
 		t.MaxRetries = maxRetries
@@ -97,28 +107,83 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 	return t
 }
 
+// requestTimeoutKey is the context key of WithRequestTimeout.
+type requestTimeoutKey struct{}
+
+// WithRequestTimeout returns a copy of ctx under which a Transport sends its
+// requests with client timeout d instead of its HTTPClient's Timeout. It
+// is for the few calls that can legitimately outlast the usual timeout,
+// such as a synchronous agent create; other requests keep theirs. A d of
+// zero or less leaves the usual timeout in place.
+func WithRequestTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, requestTimeoutKey{}, d)
+}
+
+// requestTimeoutFrom returns the client timeout WithRequestTimeout set on
+// ctx, if any (a positive duration). Do and DoNoRetry each send with their
+// own copy of the client and apply it to that copy, so the Transport's
+// HTTPClient is never changed.
+func requestTimeoutFrom(ctx context.Context) (time.Duration, bool) {
+	d, ok := ctx.Value(requestTimeoutKey{}).(time.Duration)
+	return d, ok && d > 0
+}
+
 // Do executes an HTTP request with configured behaviors.
 // Handles retries, timeout, and wraps errors.
+//
+// With MaxRetries > 0 (WithRetry), a transport error or a 5xx response is
+// retried. Each retry re-sends the full request body, rewound from
+// req.GetBody (which http.NewRequest populates for *bytes.Reader,
+// *bytes.Buffer and *strings.Reader bodies). A request whose body cannot be
+// rewound (non-empty Body, nil GetBody) is sent exactly once: its first
+// response is returned as-is, and its first transport error is returned
+// wrapped as "request failed: %w".
+// Canceling ctx interrupts the wait between attempts and returns ctx.Err().
+//
+// A retry replays the request, so Do must only be used with retries enabled
+// for idempotent operations. Non-idempotent operations should use DoNoRetry
+// (or a *NoRetry helper such as PostNoRetry) instead.
 func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
-	// Set User-Agent
-	if t.UserAgent != "" {
-		req.Header.Set("User-Agent", t.UserAgent)
-	}
-
-	// Apply authentication
-	if t.Auth != nil {
-		if err := t.Auth.ApplyAuth(req); err != nil {
-			return nil, fmt.Errorf("failed to apply auth: %w", err)
-		}
+	if err := t.prepare(req); err != nil {
+		return nil, err
 	}
 
 	// Execute with retries
 	var resp *http.Response
 	var err error
 
-	attempts := t.MaxRetries + 1
-	for i := 0; i < attempts; i++ {
-		resp, err = t.HTTPClient.Do(req.WithContext(ctx))
+	client := t.hubScopedClient()
+	if d, ok := requestTimeoutFrom(ctx); ok {
+		client.Timeout = d
+	}
+	canRewind := bodyRewindable(req)
+	for i := 0; ; i++ {
+		if i > 0 {
+			timer := time.NewTimer(t.RetryWait)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+			timer.Stop()
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+
+		attempt := req.WithContext(ctx)
+		if i > 0 && req.GetBody != nil {
+			// The previous attempt drained (and the client closed) the body;
+			// hand this attempt a fresh copy. attempt is a shallow copy, so
+			// the caller's req is left untouched.
+			body, gerr := req.GetBody()
+			if gerr != nil {
+				return nil, fmt.Errorf("request failed: rewinding body for retry: %w", gerr)
+			}
+			attempt.Body = body
+		}
+
+		resp, err = client.Do(attempt)
+		retry := i < t.MaxRetries && canRewind
 		if err != nil {
 			// Check if context was cancelled
 			if ctx.Err() != nil {
@@ -126,17 +191,15 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 			}
 
 			// Retry on network errors
-			if i < t.MaxRetries {
-				time.Sleep(t.RetryWait)
+			if retry {
 				continue
 			}
-			return nil, fmt.Errorf("request failed: %w", err)
+			return nil, fmt.Errorf("request failed: %w", redactURLError(err))
 		}
 
 		// Retry on 5xx errors
-		if resp.StatusCode >= 500 && i < t.MaxRetries {
+		if resp.StatusCode >= 500 && retry {
 			_ = resp.Body.Close()
-			time.Sleep(t.RetryWait)
 			continue
 		}
 
@@ -146,48 +209,336 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	return resp, nil
 }
 
+// hubScopedClient returns the client Do sends with: a shallow copy of
+// HTTPClient (sharing its RoundTripper and connection pool) whose redirect
+// policy applies the hub origin rule. A redirect hop to another origin than
+// BaseURL's has the credential headers and the X-Scion-* headers removed,
+// then HTTPClient.CheckRedirect (or the 10-hop limit) applies; same-origin
+// hops are unchanged. When HTTPClient.Transport is a HubOnlyRoundTripper
+// (transportauth.Wrap), such a hop is also sent below that layer, so the
+// transport credential is not added to it again. The first request of each
+// attempt is sent exactly as before.
+func (t *Transport) hubScopedClient() *http.Client {
+	base := t.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	hub := parseOrigin(t.BaseURL)
+	c := *base
+	c.CheckRedirect = hubRedirectPolicy(hub, base.CheckRedirect)
+	if _, ok := base.Transport.(HubOnlyRoundTripper); ok {
+		c.Transport = &redirectHopRoundTripper{
+			base:  base.Transport,
+			other: withoutHubOnlyLayers(base.Transport),
+			hub:   hub,
+		}
+	}
+	return &c
+}
+
+// hubRedirectPolicy returns a CheckRedirect function that removes the
+// cross-origin headers from a hop to another origin than hub, then defers to
+// baseCheck, or to the net/http default limit of 10 hops when baseCheck is
+// nil.
+func hubRedirectPolicy(hub origin, baseCheck func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if !sameOrigin(req.URL, hub) {
+			dropCrossOriginHeaders(req.Header)
+		}
+		if baseCheck != nil {
+			return baseCheck(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		return nil
+	}
+}
+
+// dropCrossOriginHeaders removes crossOriginDroppedHeaders and every header
+// named with crossOriginDroppedPrefix from h.
+func dropCrossOriginHeaders(h http.Header) {
+	for _, name := range crossOriginDroppedHeaders {
+		h.Del(name)
+	}
+	for name := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), crossOriginDroppedPrefix) {
+			delete(h, name)
+		}
+	}
+}
+
+// redirectHopRoundTripper sends a redirect hop (a request with Response set)
+// to another origin than hub through other, the transport below the
+// hub-only layers; every other request goes through base.
+type redirectHopRoundTripper struct {
+	base  http.RoundTripper
+	other http.RoundTripper
+	hub   origin
+}
+
+func (rt *redirectHopRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Response != nil && !sameOrigin(req.URL, rt.hub) {
+		other := rt.other
+		if other == nil {
+			other = http.DefaultTransport
+		}
+		return other.RoundTrip(req)
+	}
+	return rt.base.RoundTrip(req)
+}
+
+// bodyRewindable reports whether req can be re-sent with its full body: it
+// has no body at all, or its body can be recreated through GetBody.
+func bodyRewindable(req *http.Request) bool {
+	return req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+}
+
+// prepare applies the headers and authentication every send path (Do and
+// DoNoRetry) needs before handing req to an *http.Client.
+func (t *Transport) prepare(req *http.Request) error {
+	if req == nil {
+		return errors.New("apiclient: nil request")
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	if t.UserAgent != "" {
+		req.Header.Set("User-Agent", t.UserAgent)
+	}
+	if t.Auth != nil {
+		if err := t.Auth.ApplyAuth(req); err != nil {
+			// The HTTP client will not receive req, so it cannot close the body.
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return fmt.Errorf("failed to apply auth: %w", err)
+		}
+	}
+	return nil
+}
+
+// DoNoRetry sends req once at this layer: no MaxRetries (even on a Transport
+// built with WithRetry) and no HTTP redirect following — a 3xx is returned
+// to the caller unchanged. Use this instead of Do for a non-idempotent
+// operation (e.g. agent keys injection) where any replay is unsafe.
+//
+// This governs this package's own behavior only: net/http can still retry
+// internally in the narrow cases where it can prove nothing was written
+// (a dead reused HTTP/1 connection, HTTP/2 REFUSED_STREAM/post-GOAWAY) —
+// those never reach the server, so they don't reopen a double-injection risk.
+func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if err := t.prepare(req); err != nil {
+		return nil, err
+	}
+
+	base := t.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	// Shallow-copy the *http.Client so the underlying RoundTripper (and its
+	// connection pool) is shared with Do, but this one call's redirect policy
+	// is not: CheckRedirect is overridden to stop following at the first hop,
+	// regardless of whatever policy (including Go's default) the shared
+	// client would otherwise apply.
+	once := *base
+	once.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	if d, ok := requestTimeoutFrom(ctx); ok {
+		once.Timeout = d
+	}
+
+	resp, err := once.Do(req.WithContext(ctx))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("request failed: %w", redactURLError(err))
+	}
+	return resp, nil
+}
+
 // AuthenticatedHTTPClient returns an *http.Client that applies this transport's
-// authentication to every request. This is useful for code paths that need a
-// raw *http.Client (e.g. the transfer client for signed URL uploads/downloads)
-// but still need to authenticate with the hub when signed URLs are HTTP proxy
-// URLs rather than GCS signed URLs or file:// URLs.
+// authentication to requests sent to the hub's own origin (the scheme, host
+// and port of BaseURL). This is useful for code paths that need a raw
+// *http.Client (e.g. the transfer client for signed URL uploads/downloads)
+// and still need to authenticate with the hub when signed URLs are HTTP proxy
+// URLs on the hub rather than storage signed URLs or file:// URLs.
+//
+// Requests to any other origin, such as a storage host's signed URL, are sent
+// without the Authenticator's headers. When the outermost layer of
+// HTTPClient.Transport is a HubOnlyRoundTripper (transportauth.Wrap), those
+// requests also skip that layer, so its transport credential goes only to the
+// hub as well; a hub-only layer below another wrapper is not detected.
+//
+// Redirects follow HTTPClient.CheckRedirect when it is set, and otherwise the
+// net/http default limit of 10 hops. Before either, a hop to another origin
+// has its Authorization, Proxy-Authorization, X-Serverless-Authorization and
+// X-Scion-* headers removed; same-origin hops keep the credential. The base
+// client's cookie jar, timeout and other settings are preserved.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
 		base = http.DefaultClient
 	}
-	return &http.Client{
-		Timeout: base.Timeout,
-		Transport: &authRoundTripper{
-			base: base.Transport,
-			auth: t.Auth,
-			ua:   t.UserAgent,
-		},
+	hub := parseOrigin(t.BaseURL)
+	baseCheck := base.CheckRedirect
+	client := *base
+	client.Transport = &authRoundTripper{
+		base:  base.Transport,
+		other: withoutHubOnlyLayers(base.Transport),
+		auth:  t.Auth,
+		ua:    t.UserAgent,
+		hub:   hub,
 	}
+	client.CheckRedirect = hubRedirectPolicy(hub, baseCheck)
+	return &client
 }
 
-// authRoundTripper is an http.RoundTripper that applies authentication headers.
+// HubOnlyRoundTripper is implemented by a RoundTripper layer that adds a
+// credential meant only for the hub, such as transportauth.Wrap.
+// AuthenticatedHTTPClient sends requests for other origins to HubOnlyBase,
+// the transport below that layer.
+type HubOnlyRoundTripper interface {
+	http.RoundTripper
+	HubOnlyBase() http.RoundTripper
+}
+
+// maxHubOnlyLayers bounds the unwrapping in withoutHubOnlyLayers.
+const maxHubOnlyLayers = 8
+
+// withoutHubOnlyLayers returns rt with its outermost HubOnlyRoundTripper
+// layers removed (nil stays nil, meaning http.DefaultTransport).
+func withoutHubOnlyLayers(rt http.RoundTripper) http.RoundTripper {
+	for i := 0; i < maxHubOnlyLayers; i++ {
+		l, ok := rt.(HubOnlyRoundTripper)
+		if !ok {
+			return rt
+		}
+		rt = l.HubOnlyBase()
+	}
+	return rt
+}
+
+// crossOriginDroppedHeaders are removed from a redirect hop to another
+// origin: the headers that carry the hub or transport credential.
+var crossOriginDroppedHeaders = []string{"Authorization", "Proxy-Authorization", "X-Serverless-Authorization"}
+
+// crossOriginDroppedPrefix names the client's own request headers (the
+// X-Scion-* agent, broker and HMAC headers), which are removed from a
+// redirect hop to another origin as well.
+const crossOriginDroppedPrefix = "X-Scion-"
+
+// maxRedirects matches the hop limit of net/http's default redirect policy.
+const maxRedirects = 10
+
+// origin is the scheme, host and effective port of a URL.
+type origin struct {
+	scheme string
+	host   string
+	port   string
+}
+
+// parseOrigin returns the origin of rawURL, or the zero origin, which
+// sameOrigin never matches, when rawURL has no http or https scheme or no
+// host.
+func parseOrigin(rawURL string) origin {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return origin{}
+	}
+	o, _ := originOf(u)
+	return o
+}
+
+// originOf returns the origin of u, with the host lower-cased (url.Parse
+// already lower-cases the scheme) and the default port (80 for http, 443 for
+// https) filled in when u has none.
+func originOf(u *url.URL) (o origin, ok bool) {
+	if u == nil {
+		return origin{}, false
+	}
+	o.scheme = u.Scheme
+	o.host = strings.ToLower(u.Hostname())
+	o.port = u.Port()
+	if o.port == "" {
+		switch o.scheme {
+		case "http":
+			o.port = "80"
+		case "https":
+			o.port = "443"
+		}
+	}
+	if (o.scheme != "http" && o.scheme != "https") || o.host == "" {
+		return origin{}, false
+	}
+	return o, true
+}
+
+// sameOrigin reports whether u has the origin want.
+func sameOrigin(u *url.URL, want origin) bool {
+	got, ok := originOf(u)
+	return ok && got == want
+}
+
+// authRoundTripper is an http.RoundTripper that applies authentication headers
+// to requests for the hub origin and sends them through base; requests for
+// any other origin go through other (base without its hub-only layers),
+// without authentication. A nil base or other means http.DefaultTransport.
 type authRoundTripper struct {
-	base http.RoundTripper
-	auth Authenticator
-	ua   string
+	base  http.RoundTripper
+	other http.RoundTripper
+	auth  Authenticator
+	ua    string
+	// hub is the only origin that receives auth. It is the zero origin,
+	// which matches no request, when the BaseURL has no usable origin.
+	hub origin
 }
 
 func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, errors.New("apiclient: nil request")
+	}
+	// Headers are set on a clone so the caller's request is never changed.
+	// Redirect hops do not depend on this: net/http copies their headers
+	// from the initial request before the first send.
 	clone := req.Clone(req.Context())
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
 	if rt.ua != "" && clone.Header.Get("User-Agent") == "" {
 		clone.Header.Set("User-Agent", rt.ua)
 	}
-	if rt.auth != nil {
-		if err := rt.auth.ApplyAuth(clone); err != nil {
-			return nil, fmt.Errorf("failed to apply auth: %w", err)
-		}
-	}
 	base := rt.base
+	if sameOrigin(clone.URL, rt.hub) {
+		if rt.auth != nil {
+			if err := rt.auth.ApplyAuth(clone); err != nil {
+				// The base transport will not receive this request to close its body.
+				if clone.Body != nil {
+					_ = clone.Body.Close()
+				}
+				return nil, fmt.Errorf("failed to apply auth: %w", err)
+			}
+		}
+	} else {
+		base = rt.other
+	}
 	if base == nil {
 		base = http.DefaultTransport
 	}
 	return base.RoundTrip(clone)
+}
+
+// CloseIdleConnections forwards cleanup to the wrapped transport when supported.
+func (rt *authRoundTripper) CloseIdleConnections() {
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if closer, ok := base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 // buildURL joins the base URL with a path and optional query parameters.
@@ -208,7 +559,7 @@ func (t *Transport) Get(ctx context.Context, path string, headers http.Header) (
 func (t *Transport) GetWithQuery(ctx context.Context, path string, query url.Values, headers http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.buildURL(path, query), nil)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	for k, v := range headers {
@@ -221,6 +572,14 @@ func (t *Transport) GetWithQuery(ctx context.Context, path string, query url.Val
 // Post performs an HTTP POST request with JSON body.
 func (t *Transport) Post(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	return t.doJSON(ctx, http.MethodPost, path, body, headers)
+}
+
+// PostNoRetry performs an HTTP POST request with a JSON body via DoNoRetry:
+// exactly one attempt, no retry on network error or 5xx, no redirect
+// following. See DoNoRetry's doc comment for which callers need this instead
+// of Post.
+func (t *Transport) PostNoRetry(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSONVia(ctx, t.DoNoRetry, http.MethodPost, path, body, headers)
 }
 
 // Put performs an HTTP PUT request with JSON body.
@@ -237,7 +596,7 @@ func (t *Transport) Patch(ctx context.Context, path string, body interface{}, he
 func (t *Transport) Delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, t.buildURL(path, nil), nil)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	for k, v := range headers {
@@ -247,8 +606,22 @@ func (t *Transport) Delete(ctx context.Context, path string, headers http.Header
 	return t.Do(ctx, req)
 }
 
+// DeleteJSON performs an HTTP DELETE request with a JSON body, for
+// endpoints whose delete takes parameters in the body (for example a
+// compare-and-set revision).
+func (t *Transport) DeleteJSON(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSON(ctx, http.MethodDelete, path, body, headers)
+}
+
 // doJSON performs an HTTP request with a JSON body.
 func (t *Transport) doJSON(ctx context.Context, method, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSONVia(ctx, t.Do, method, path, body, headers)
+}
+
+// doJSONVia builds a JSON request exactly as doJSON does, then hands it to
+// send instead of always using Do — the one difference between Post and
+// PostNoRetry (and any future *NoRetry sibling).
+func (t *Transport) doJSONVia(ctx context.Context, send func(context.Context, *http.Request) (*http.Response, error), method, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
@@ -260,7 +633,7 @@ func (t *Transport) doJSON(ctx context.Context, method, path string, body interf
 
 	req, err := http.NewRequestWithContext(ctx, method, t.buildURL(path, nil), bodyReader)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	if body != nil {
@@ -271,25 +644,49 @@ func (t *Transport) doJSON(ctx context.Context, method, path string, body interf
 		req.Header[k] = v
 	}
 
-	return t.Do(ctx, req)
+	return send(ctx, req)
 }
 
 // DecodeResponse reads and decodes a JSON response body.
-// If the response indicates an error (status >= 400), it returns an APIError.
+// A non-2xx response returns an APIError.
+// A 204 No Content returns (nil, nil).
 func DecodeResponse[T any](resp *http.Response) (*T, error) {
+	return decode[T](resp, false)
+}
+
+// ErrNoContent is returned by DecodeRequired when a successful response has
+// no body to decode.
+var ErrNoContent = errors.New("server returned no content")
+
+// DecodeRequired is like DecodeResponse, for endpoints that must return a
+// body. A 204 No Content or an empty 2xx body returns an error wrapping
+// ErrNoContent instead of a nil result, so callers never see (nil, nil).
+func DecodeRequired[T any](resp *http.Response) (*T, error) {
+	return decode[T](resp, true)
+}
+
+// decode implements DecodeResponse and DecodeRequired. When required is
+// false, a 204 returns (nil, nil) and an empty body is a decode error; when
+// it is true, both return an error wrapping ErrNoContent.
+func decode[T any](resp *http.Response, required bool) (*T, error) {
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, ParseErrorResponse(resp)
 	}
 
-	// Handle 204 No Content
 	if resp.StatusCode == http.StatusNoContent {
+		if required {
+			return nil, fmt.Errorf("%w (status: %d)", ErrNoContent, resp.StatusCode)
+		}
 		return nil, nil
 	}
 
 	var result T
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if required && errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("%w (status: %d)", ErrNoContent, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
@@ -299,9 +696,14 @@ func DecodeResponse[T any](resp *http.Response) (*T, error) {
 // CheckResponse checks if a response indicates an error.
 // Returns nil on success (2xx status codes), otherwise returns an APIError.
 func CheckResponse(resp *http.Response) error {
-	defer func() { _ = resp.Body.Close() }()
+	if resp == nil {
+		return errors.New("apiclient: nil response")
+	}
+	if resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ParseErrorResponse(resp)
 	}
 

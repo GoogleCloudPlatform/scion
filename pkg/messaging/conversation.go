@@ -37,15 +37,21 @@ type ConversationUpserter interface {
 // into ResolveOrCreateThreadConversation, it enables the function to resolve
 // native topic threads via the existing dual-write link instead of minting
 // a shadow conversation row.
+//
+// Both lookups are scoped to a project: a topic of another project answers
+// store.ErrNotFound, exactly like a topic that does not exist.
 type TopicConversationLookup interface {
-	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
-	// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
-	// webchat topic regardless of its deletion state.
+	// GetTopicConversationIDInProject returns the conversation_id of a live
+	// webchat topic of projectID.
+	GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error)
+	// GetTopicConversationIDIncludingDeletedInProject returns the
+	// conversation_id for a webchat topic of projectID regardless of its
+	// deletion state.
 	//
 	// Soft-deletion is not declassification. A tombstoned native topic is still
 	// a native topic for the purpose of "should I mint." Deletion hides a topic
 	// from users; it must not make the mint guard forget the topic was ours.
-	GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error)
+	GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error)
 }
 
 // ConversationReader is the minimal interface for read-only conversation
@@ -151,24 +157,17 @@ func ResolveOrCreateDMConversation(
 	// Race note: concurrent ResolveOrCreateDMConversation calls may both
 	// attempt EnsureParticipant. This is benign: EnsureParticipant is
 	// idempotent and race-safe (unique constraint violations are mapped to nil).
-	for _, pp := range []struct{ kind, id string }{
-		{senderKind, senderID},
-		{recipientKind, recipientID},
-	} {
-		ensureErr := pe.EnsureParticipant(ctx, &store.ConversationParticipant{
-			ConversationID: result.ID,
-			PrincipalKind:  pp.kind,
-			PrincipalID:    pp.id,
-			Role:           "member",
-		})
-		if ensureErr != nil {
-			log.Warn("participant registration failed (listing gap, not access)",
-				"conversation_id", result.ID,
-				"principal_kind", pp.kind,
-				"principal_id", pp.id,
-				"error", ensureErr)
-		}
-	}
+	//
+	// O4 (A25.7): the actual ensure-both-even-on-failure loop and its WARN
+	// wording are owned by ensureConversationParticipants (derive_key.go) —
+	// the same helper ResolveOrCreateConversationByKey uses — so there is a
+	// single place that implements this G2 exception. The two principals are
+	// parsed back out of the DB-returned result.ExternalRef rather than
+	// passed positionally; for a real upsert this is always the canonical
+	// key built from senderKind/senderID/recipientKind/recipientID above; it
+	// only differs in this function's own unit tests that stub a
+	// non-canonical mock ExternalRef unrelated to participant registration.
+	ensureConversationParticipants(ctx, pe, log, result.ID, result.ExternalRef)
 
 	return &ConversationResult{
 		ConversationID: result.ID,
@@ -177,6 +176,29 @@ func ResolveOrCreateDMConversation(
 		Surface:        result.Surface,
 		DisplayName:    result.DisplayName,
 	}, nil
+}
+
+// DMReadExternalRef returns the "native" surface external ref that
+// ResolveDMConversationForRead looks up for a DM between the two
+// participants. ok is false when no lookup should happen — an empty
+// participant ID or inputs that do not form a valid DM key — in which case
+// the DM has no conversation to read. Callers resolving many DMs at once
+// use it to build the refs for one batched lookup with the same outcome as
+// calling ResolveDMConversationForRead per DM.
+func DMReadExternalRef(log *slog.Logger, idAKind, idA, idBKind, idB string) (extRef string, ok bool) {
+	if idA == "" || idB == "" {
+		return "", false
+	}
+
+	extRef, err := messages.DMConversationKey(idAKind, idA, idBKind, idB)
+	if err != nil {
+		log.Debug("read-switch: invalid DM key inputs, skipping lookup",
+			"id_a_kind", idAKind, "id_a", idA,
+			"id_b_kind", idBKind, "id_b", idB,
+			"error", err)
+		return "", false
+	}
+	return extRef, true
 }
 
 // ResolveDMConversationForRead looks up a DM conversation without creating it.
@@ -193,16 +215,8 @@ func ResolveDMConversationForRead(
 	log *slog.Logger,
 	idAKind, idA, idBKind, idB string,
 ) (*ConversationResult, error) {
-	if idA == "" || idB == "" {
-		return nil, nil
-	}
-
-	extRef, err := messages.DMConversationKey(idAKind, idA, idBKind, idB)
-	if err != nil {
-		log.Debug("read-switch: invalid DM key inputs, skipping lookup",
-			"id_a_kind", idAKind, "id_a", idA,
-			"id_b_kind", idBKind, "id_b", idB,
-			"error", err)
+	extRef, ok := DMReadExternalRef(log, idAKind, idA, idBKind, idB)
+	if !ok {
 		return nil, nil
 	}
 
@@ -283,13 +297,17 @@ func ResolveOrCreateThreadConversation(
 	if cfg.surface != "" {
 		keyOpts = append(keyOpts, WithSurface(cfg.surface))
 	}
+	if cfg.participants != nil {
+		keyOpts = append(keyOpts, WithParticipants(cfg.participants))
+	}
 	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID, keyOpts...)
 }
 
 // threadConversationConfig holds optional parameters for ResolveOrCreateThreadConversation.
 type threadConversationConfig struct {
-	topicLookup TopicConversationLookup
-	surface     string // override for the conversation surface; empty keeps the default ("native")
+	topicLookup  TopicConversationLookup
+	surface      string // override for the conversation surface; empty keeps the default ("native")
+	participants ParticipantEnsurer
 }
 
 // ThreadConversationOption is a functional option for ResolveOrCreateThreadConversation.
@@ -301,6 +319,18 @@ type ThreadConversationOption func(*threadConversationConfig)
 func WithTopicLookup(tl TopicConversationLookup) ThreadConversationOption {
 	return func(c *threadConversationConfig) {
 		c.topicLookup = tl
+	}
+}
+
+// WithThreadParticipants forwards a ParticipantEnsurer to the shared
+// ResolveOrCreateConversationByKey sink (A25.6 F1/F3). threadID may carry a
+// "dm:" prefix (DeriveConversationKey case 1), in which case the resolved
+// conversation is kind=="direct" and both principals in the key get
+// registered as participants. For an ordinary (non-dm:) thread key this is a
+// no-op: the sink only registers participants for kind=="direct".
+func WithThreadParticipants(pe ParticipantEnsurer) ThreadConversationOption {
+	return func(c *threadConversationConfig) {
+		c.participants = pe
 	}
 }
 
@@ -522,8 +552,9 @@ func ResolveThreadConversationForRead(
 	if cfg.topicLookup != nil && kind == "group" && strings.HasPrefix(extRef, "thread:") {
 		parts := strings.SplitN(extRef, ":", 3)
 		if len(parts) == 3 {
+			// The topic is looked up within the key's project (parts[1]).
 			topicThreadID := parts[2]
-			convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeleted(ctx, topicThreadID)
+			convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeletedInProject(ctx, parts[1], topicThreadID)
 			if lookupErr == nil && convID != "" {
 				log.Debug("read-switch: conversation resolved via topic lookup (DEF-100)",
 					"external_ref", extRef, "conversation_id", convID)

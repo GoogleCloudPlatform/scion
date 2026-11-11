@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -47,17 +48,18 @@ type AgentService interface {
 	// Delete removes an agent.
 	Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error
 
-	// Start starts a stopped agent.
-	Start(ctx context.Context, agentID string) error
+	// Start starts a stopped agent. It sends no request body, so it never
+	// asks for a force-resume; see agentService.Start.
+	Start(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Stop stops a running agent.
-	Stop(ctx context.Context, agentID string) error
+	Stop(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Suspend pauses a running agent, preserving state for later resume.
-	Suspend(ctx context.Context, agentID string) error
+	Suspend(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Restart restarts an agent.
-	Restart(ctx context.Context, agentID string) error
+	Restart(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// ResetAuth injects a fresh token into a running agent without restarting.
 	ResetAuth(ctx context.Context, agentID string) error
@@ -71,7 +73,19 @@ type AgentService interface {
 	// SendStructuredMessage sends a structured message to an agent.
 	// If notify is true, the sender subscribes to status notifications for the target agent.
 	// If wake is true, a suspended agent will be resumed before delivering the message.
+	//
+	// It delegates to SendStructuredMessageWithOptions with no explicit
+	// mentions; callers that need to pass mentions should call that method
+	// directly.
 	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error)
+
+	// SendStructuredMessageWithOptions sends a structured message to an
+	// agent, same as SendStructuredMessage, plus an explicit list of agent
+	// slugs to mention: the server unions Mentions with body-extracted
+	// @mentions, deduplicates, excludes the sender and the primary
+	// recipient, and fans out a TypeMention to each. Callers on these send
+	// paths do not fan mentions out client-side; the server does it.
+	SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts SendMessageOptions) (*MessageResponse, error)
 
 	// BroadcastMessage broadcasts a structured message to all running agents in the project.
 	// Uses the Hub's broadcast endpoint which routes through the message broker (if available)
@@ -90,9 +104,11 @@ type AgentService interface {
 	// GetLogs retrieves agent logs.
 	GetLogs(ctx context.Context, agentID string, opts *GetLogsOptions) (string, error)
 
-	// SendOutboundMessage sends a message from an agent to a human inbox.
-	// Used when agents need to communicate with users (e.g., asking questions).
-	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error
+	// SendOutboundMessage sends a message from an agent via the outbound
+	// endpoint and returns the server-assigned message identity and delivery
+	// status. The SDK adds no retry or fallback routing; send budget, policy,
+	// and capabilities are server-enforced.
+	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error)
 
 	// GetCloudLogs retrieves structured log entries from Cloud Logging.
 	GetCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions) (*CloudLogsResponse, error)
@@ -104,6 +120,30 @@ type AgentService interface {
 
 	// SetMessageMode changes the messaging mode for an agent.
 	SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error)
+
+	// Reincarnate requests a `scion reincarnate` migration for an agent:
+	// re-resolve its configuration against the current template/harness-config
+	// catalog and start a new generation with the given handoff as its first
+	// task. With req.DryRun, returns the resolved plan and changes nothing.
+	Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error)
+
+	// SendKeys delivers literal terminal input to an agent's tmux session via
+	// the dedicated agent-keys operation (.design/agent-keys-contract.md),
+	// POSTing to {id}/keys — never to /message, and never as a Raw
+	// StructuredMessage. It never creates a conversation message, never uses
+	// message-mode authorization, and is never retried: the request is sent
+	// exactly once regardless of how the client was constructed (including
+	// WithRetry), and an HTTP redirect is never followed and re-sent. A
+	// network-level failure (no response received at all) is returned
+	// unchanged — the caller cannot know whether the broker executed the
+	// keys, and must not infer success or failure from this call having
+	// failed to connect. A response the Hub did send is decoded and
+	// returned as *apiclient.APIError on any non-2xx status, preserving the
+	// outcome code (Code) and, where the contract says one exists for that
+	// outcome, the operation ID (Details["operation_id"]) — see contract
+	// §2.4a/§2.5. SendKeys performs no client-side retry, fallback, or
+	// downgrade to messaging of any kind.
+	SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error)
 }
 
 // agentService is the implementation of AgentService.
@@ -114,14 +154,14 @@ type agentService struct {
 
 func (s *agentService) agentPath(agentID string) string {
 	if s.projectID != "" {
-		return "/api/v1/projects/" + s.projectID + "/agents/" + agentID
+		return "/api/v1/projects/" + url.PathEscape(s.projectID) + "/agents/" + url.PathEscape(agentID)
 	}
-	return "/api/v1/agents/" + agentID
+	return "/api/v1/agents/" + url.PathEscape(agentID)
 }
 
 func (s *agentService) agentsPath() string {
 	if s.projectID != "" {
-		return "/api/v1/projects/" + s.projectID + "/agents"
+		return "/api/v1/projects/" + url.PathEscape(s.projectID) + "/agents"
 	}
 	return "/api/v1/agents"
 }
@@ -133,7 +173,36 @@ type ListAgentsOptions struct {
 	RuntimeBrokerID string            // Filter by runtime broker
 	Labels          map[string]string // Label selector
 	IncludeDeleted  bool              // Include soft-deleted agents
-	Page            apiclient.PageOptions
+
+	// OwnerID, when set, restricts results to agents owned by this principal
+	// ID. Always combined with every other option using AND (ptone/scion#2146).
+	OwnerID string
+
+	// AncestorID, when set, restricts results to agents whose Ancestry chain
+	// contains this principal ID (transitive descendants of AncestorID).
+	AncestorID string
+
+	// HarnessConfig, when set, restricts results to agents whose resolved
+	// harness-config name equals this value.
+	HarnessConfig string
+
+	// IDs, when non-empty, restricts results to agents whose ID is in this
+	// set. Used for relationship queries (e.g. CLI --ancestors) that resolve
+	// a specific set of candidate IDs client-side and ask the Hub to narrow
+	// them to the caller's authorized, currently-existing agents.
+	IDs []string
+
+	// LineageRootID, when set, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry contains it — the root agent plus
+	// all its descendants. Used by CLI --lineage.
+	LineageRootID string
+
+	// IncludeAuthority asks the Hub to include each agent's authority
+	// state (include=authority). It costs the Hub a delegation chain walk
+	// per listed agent.
+	IncludeAuthority bool
+
+	Page apiclient.PageOptions
 }
 
 // ListAgentsResponse is the response from listing agents.
@@ -153,10 +222,14 @@ type StopAllResult struct {
 
 // StopAllResponse is the response from the stop-all endpoint.
 type StopAllResponse struct {
-	Stopped int             `json:"stopped"`
-	Failed  int             `json:"failed"`
-	Total   int             `json:"total"`
-	Results []StopAllResult `json:"results"`
+	Stopped int `json:"stopped"`
+	Failed  int `json:"failed"`
+	// StopRecorded counts agents whose start was in flight: the stop intent
+	// is recorded but the start is not interrupted (result status
+	// "stop_recorded").
+	StopRecorded int             `json:"stopRecorded,omitempty"`
+	Total        int             `json:"total"`
+	Results      []StopAllResult `json:"results"`
 }
 
 // CreateAgentRequest is the request body for creating an agent.
@@ -193,6 +266,12 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// NoAuth disables auth credential propagation into the agent container
+	// (CLI --no-auth). Honoured by the Hub on the create path only; an
+	// existing agent that is resumed/restarted in place does not re-read it
+	// (ptone/scion#1855).
+	NoAuth bool `json:"noAuth,omitempty"`
+
 	// MessageMode specifies the initial message mode for the agent.
 	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
@@ -202,6 +281,18 @@ type CreateAgentRequest struct {
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.
 	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+
+	// AcceptAsyncLaunch opts in to a non-blocking launch. A Hub that has
+	// async launch enabled may then answer as soon as the broker accepts the
+	// create, with the agent in a pre-running phase and an active Launch;
+	// the client follows the launch with GET agent. A Hub that does not
+	// support or enable it ignores the field and answers synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+
+	// ExpectedRuntimeTargetID optionally guards a create against placement
+	// on a different runtime target than the caller showed
+	// (.design/flat-runtime-brokers-contract.md section 9).
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 }
 
 // GCPIdentityConfig specifies GCP identity configuration for agent creation.
@@ -216,36 +307,6 @@ type GCPIdentityConfig struct {
 	// ServiceAccountID is the Scion resource ID of the service account to assign.
 	// Required when MetadataMode is "assign", must be empty otherwise.
 	ServiceAccountID string `json:"service_account_id,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateAgentRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateAgentRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // CreateAgentResponse is the response from creating an agent.
@@ -300,6 +361,76 @@ type UpdateAgentRequest struct {
 	Annotations  map[string]string `json:"annotations,omitempty"`
 	TaskSummary  string            `json:"taskSummary,omitempty"`
 	StateVersion int64             `json:"stateVersion"` // Required for optimistic locking
+
+	// Config edits the agent's inline config. The hub applies only the
+	// keys the request names, and every api.ScionConfig key is omitempty,
+	// so only non-empty values are sent: this field cannot clear a key.
+	// The response's disposition says when each edit takes effect (applied
+	// now, held until the next start, or held until a reincarnation).
+	Config *api.ScionConfig `json:"config,omitempty"`
+	// GCPIdentity changes the agent's GCP identity. The hub accepts it only
+	// for an agent that has not started yet (created phase).
+	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+	// AgentRole is reserved for held role edits. A hub with held edits on
+	// refuses it (409): the role changes by reincarnating the agent.
+	AgentRole *string `json:"agentRole,omitempty"`
+	// ExplicitTimezone pins (an IANA zone name) or unpins ("") the agent's
+	// container timezone; nil leaves it unchanged. Applies at the next
+	// start, in any phase.
+	ExplicitTimezone *string `json:"explicitTimezone,omitempty"`
+	// Task is the task the agent gets at its next fresh start (a resume
+	// does not send it). It is sent as config.task: Update copies it there,
+	// and refuses a request that sets both Task and Config.Task.
+	Task string `json:"-"`
+}
+
+// MarshalJSON encodes r with Config reduced to its set keys: a key whose
+// value encodes as null (api.ScionConfig.Detached has no omitempty) is left
+// out, so the hub never reads it as an edit of that key.
+func (r UpdateAgentRequest) MarshalJSON() ([]byte, error) {
+	type alias UpdateAgentRequest
+	var cfg json.RawMessage
+	if r.Config != nil {
+		b, err := json.Marshal(r.Config)
+		if err != nil {
+			return nil, err
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(b, &keys); err != nil {
+			return nil, err
+		}
+		for k, v := range keys {
+			if string(v) == "null" {
+				delete(keys, k)
+			}
+		}
+		if cfg, err = json.Marshal(keys); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(struct {
+		alias
+		Config json.RawMessage `json:"config,omitempty"`
+	}{alias: alias(r), Config: cfg})
+}
+
+// wireBody returns the body Update sends for r: r itself, or a copy whose
+// Config carries Task as config.task.
+func (r *UpdateAgentRequest) wireBody() (*UpdateAgentRequest, error) {
+	if r == nil || r.Task == "" {
+		return r, nil
+	}
+	if r.Config != nil && r.Config.Task != "" {
+		return nil, fmt.Errorf("update agent: set Task or Config.Task, not both")
+	}
+	body := *r
+	cfg := api.ScionConfig{}
+	if r.Config != nil {
+		cfg = *r.Config
+	}
+	cfg.Task = r.Task
+	body.Config = &cfg
+	return &body, nil
 }
 
 // DeleteAgentOptions configures agent deletion.
@@ -327,7 +458,6 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 	if opts != nil {
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Phase != "" {
 			query.Set("phase", opts.Phase)
@@ -340,6 +470,24 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		}
 		for k, v := range opts.Labels {
 			query.Add("label", fmt.Sprintf("%s=%s", k, v))
+		}
+		if opts.OwnerID != "" {
+			query.Set("ownerId", opts.OwnerID)
+		}
+		if opts.AncestorID != "" {
+			query.Set("ancestorId", opts.AncestorID)
+		}
+		if opts.HarnessConfig != "" {
+			query.Set("harnessConfig", opts.HarnessConfig)
+		}
+		for _, id := range opts.IDs {
+			query.Add("id", id)
+		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
+		}
+		if opts.IncludeAuthority {
+			query.Set("include", "authority")
 		}
 		opts.Page.ToQuery(query)
 	}
@@ -356,7 +504,7 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		ServerTime time.Time `json:"serverTime"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +525,7 @@ func (s *agentService) Get(ctx context.Context, agentID string) (*Agent, error) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // Create creates a new agent.
@@ -386,7 +534,7 @@ func (s *agentService) Create(ctx context.Context, req *CreateAgentRequest) (*Cr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateAgentResponse](resp)
+	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
 // SubmitEnv submits gathered environment variables for an agent after a 202 env-gather response.
@@ -395,80 +543,181 @@ func (s *agentService) SubmitEnv(ctx context.Context, agentID string, req *Submi
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateAgentResponse](resp)
+	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
-// Update updates an agent's metadata.
+// Update updates an agent's metadata and config.
 func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAgentRequest) (*Agent, error) {
-	resp, err := s.c.patch(ctx, s.agentPath(agentID), req, nil)
+	body, err := req.wireBody()
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	resp, err := s.c.patch(ctx, s.agentPath(agentID), body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // Delete removes an agent.
 func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error {
-	path := s.agentPath(agentID)
-	if opts != nil {
-		query := url.Values{}
-		// Server defaults deleteFiles/removeBranch to true, so only send
-		// the parameter when the caller explicitly wants to preserve them.
-		if !opts.DeleteFiles {
-			query.Set("deleteFiles", "false")
-		}
-		if !opts.RemoveBranch {
-			query.Set("removeBranch", "false")
-		}
-		if opts.Force {
-			query.Set("force", "true")
-		}
-		if len(query) > 0 {
-			path += "?" + query.Encode()
-		}
-	}
-
-	resp, err := s.c.delete(ctx, path, nil)
+	resp, err := s.c.delete(ctx, s.deletePath(agentID, opts), nil)
 	if err != nil {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
 }
 
-// Start starts a stopped agent.
-func (s *agentService) Start(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/start", nil, nil)
-	if err != nil {
-		return err
+// deletePath builds the DELETE URL, with the query parameters for opts.
+func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) string {
+	return withDeleteAgentQuery(s.agentPath(agentID), opts)
+}
+
+// withDeleteAgentQuery appends the DELETE query parameters for opts to path.
+// It is shared by the agent-scoped and project-scoped delete calls so both
+// encode the options identically. A nil opts sends no parameters, leaving the
+// server defaults in place.
+func withDeleteAgentQuery(path string, opts *DeleteAgentOptions) string {
+	if opts == nil {
+		return path
 	}
-	return apiclient.CheckResponse(resp)
+	query := url.Values{}
+	// Server defaults deleteFiles/removeBranch to true, so only send
+	// the parameter when the caller explicitly wants to preserve them.
+	if !opts.DeleteFiles {
+		query.Set("deleteFiles", "false")
+	}
+	if !opts.RemoveBranch {
+		query.Set("removeBranch", "false")
+	}
+	if opts.Force {
+		query.Set("force", "true")
+	}
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+	return path
+}
+
+// Start starts a stopped agent via the hub's /start lifecycle action. It
+// sends no request body.
+//
+// The hub's /start route also accepts an optional {"forceResume":true} body
+// (hub.AgentLifecycleStartRequest), which resumes the interrupted harness
+// session of an agent in phase=error. The client deliberately does not expose
+// it here: the scion CLI reaches force-resume through the create path
+// instead (`scion resume --force` sends CreateAgentRequest with Resume and
+// ForceResume set), which also covers an agent that is not yet provisioned
+// or no longer exists on the hub. No caller needs force-resume on Start
+// (ptone/scion#2864).
+func (s *agentService) Start(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "start")
 }
 
 // Stop stops a running agent.
-func (s *agentService) Stop(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/stop", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+func (s *agentService) Stop(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "stop")
 }
 
 // Suspend pauses a running agent, preserving state for later resume.
-func (s *agentService) Suspend(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/suspend", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+func (s *agentService) Suspend(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "suspend")
 }
 
 // Restart restarts an agent.
-func (s *agentService) Restart(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/restart", nil, nil)
+func (s *agentService) Restart(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "restart")
+}
+
+// LifecycleResponse is the result of a start, stop, suspend or restart.
+type LifecycleResponse struct {
+	// Agent is the agent as the hub left it, when the hub returned it.
+	Agent *Agent
+	// Warnings are messages the hub raised while applying the action.
+	Warnings []string
+	// Queued is true when the hub accepted the action but has not applied
+	// it yet (HTTP 202), for example a stop for an agent whose broker is
+	// offline, which runs when the broker reconnects.
+	Queued bool
+}
+
+// lifecycle posts a lifecycle action and decodes the hub's response. The
+// body is the agent plus an optional warnings list; a body that cannot be
+// decoded is ignored, since the action itself succeeded.
+func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, action, nil)
+}
+
+// lifecycleWithBody is lifecycle with a request body; a nil reqBody posts
+// none.
+func (s *agentService) lifecycleWithBody(ctx context.Context, agentID, action string, reqBody interface{}) (*LifecycleResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, reqBody, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+	out := &LifecycleResponse{Queued: resp.StatusCode == http.StatusAccepted}
+	var body struct {
+		Agent
+		Warnings []string `json:"warnings,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
+		out.Warnings = body.Warnings
+		if body.ID != "" {
+			agent := body.Agent
+			out.Agent = &agent
+		}
+	}
+	return out, nil
+}
+
+// LifecycleStartOptions is the optional body of a start or restart.
+type LifecycleStartOptions struct {
+	// AcceptAsyncLaunch opts in to a non-blocking start or restart. A Hub
+	// that has async start enabled may then answer as soon as the broker
+	// accepts the start, with the agent in a pre-running phase and an
+	// active Launch; the client follows the launch with WaitForLaunch. A
+	// Hub that does not support or enable it ignores the field and answers
+	// synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+}
+
+// LifecycleOptionsStarter starts or restarts an agent with options. It is a
+// separate interface so AgentService implementations outside this package
+// are not affected; the client's agent service implements it.
+type LifecycleOptionsStarter interface {
+	// StartWithOptions is Start with a request body. Zero options post no
+	// body, exactly like Start. It never asks for a force-resume.
+	StartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error)
+	// RestartWithOptions is Restart with a request body. Zero options post
+	// no body, exactly like Restart.
+	RestartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error)
+}
+
+var _ LifecycleOptionsStarter = (*agentService)(nil)
+
+// StartWithOptions starts a stopped agent with options; see
+// LifecycleOptionsStarter.
+func (s *agentService) StartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, "start", lifecycleStartBody(opts))
+}
+
+// RestartWithOptions restarts an agent with options; see
+// LifecycleOptionsStarter.
+func (s *agentService) RestartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, "restart", lifecycleStartBody(opts))
+}
+
+// lifecycleStartBody returns the body for opts: nil (no body) for zero
+// options, so a plain start or restart is unchanged on the wire.
+func lifecycleStartBody(opts LifecycleStartOptions) interface{} {
+	if opts == (LifecycleStartOptions{}) {
+		return nil
+	}
+	return opts
 }
 
 // ResetAuth injects a fresh token into a running agent without restarting.
@@ -480,13 +729,142 @@ func (s *agentService) ResetAuth(ctx context.Context, agentID string) error {
 	return apiclient.CheckResponse(resp)
 }
 
+// ScopeReissuer re-issues an agent's role scopes from its delegator's
+// current authority (hub super-admin only). It is a separate interface so
+// AgentService implementations outside this package are not affected;
+// the client's agent service implements it.
+type ScopeReissuer interface {
+	ReissueScopes(ctx context.Context, agentID string, dryRun bool) (*ScopeReissueResult, error)
+}
+
+// ScopeReissueWithheld is one candidate scope left out of the re-issued set.
+type ScopeReissueWithheld struct {
+	Scope string `json:"scope"`
+	Cause string `json:"cause"`
+}
+
+// ScopeReissueCeilingSource names where the re-issued ceiling came from.
+type ScopeReissueCeilingSource struct {
+	DelegatorKind        string `json:"delegator_kind"`
+	DelegatorID          string `json:"delegator_id"`
+	SourceCredentialKind string `json:"source_credential_kind"`
+	SourceCredentialID   string `json:"source_credential_id,omitempty"`
+	CeilingKind          string `json:"ceiling_kind"`
+}
+
+// ScopeReissueResult is the hub's answer to a scope re-issue.
+type ScopeReissueResult struct {
+	OpID               string                    `json:"op_id"`
+	AgentID            string                    `json:"agent_id"`
+	DryRun             bool                      `json:"dry_run"`
+	Noop               bool                      `json:"noop"`
+	Added              []string                  `json:"added"`
+	Removed            []string                  `json:"removed"`
+	Kept               []string                  `json:"kept"`
+	Withheld           []ScopeReissueWithheld    `json:"withheld"`
+	RoleBefore         string                    `json:"role_before"`
+	RoleAfter          string                    `json:"role_after"`
+	CeilingSource      ScopeReissueCeilingSource `json:"ceiling_source"`
+	EdgeReplaced       string                    `json:"edge_replaced,omitempty"`
+	EdgeNew            string                    `json:"edge_new,omitempty"`
+	CredentialsRevoked int                       `json:"credentials_revoked"`
+	Dispatched         bool                      `json:"dispatched"`
+	DispatchError      string                    `json:"dispatch_error,omitempty"`
+	// ReloadUnconfirmed is set when the new credential was delivered but
+	// the running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
+	Message           string `json:"message"`
+}
+
+// ReissueScopes posts {"reissue_scopes": true, "dry_run": dryRun} to the
+// agent's reset-auth route. It is not retried: a request that may have
+// committed is re-run by the operator, where it is a no-op.
+func (s *agentService) ReissueScopes(ctx context.Context, agentID string, dryRun bool) (*ScopeReissueResult, error) {
+	body := map[string]bool{"reissue_scopes": true, "dry_run": dryRun}
+	resp, err := s.c.postNoRetry(ctx, s.agentPath(agentID)+"/reset-auth", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScopeReissueResult](resp)
+}
+
+// BulkScopeReissuer runs the hub-wide scope re-issue (hub super-admin
+// only). Dry run unless apply is true. The client's agent service
+// implements it.
+type BulkScopeReissuer interface {
+	ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error)
+}
+
+// ScopeReissueBulkAgent is one agent's outcome in a bulk re-issue.
+type ScopeReissueBulkAgent struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	ProjectID     string   `json:"project_id"`
+	Depth         int      `json:"depth"`
+	Outcome       string   `json:"outcome"`
+	Cause         string   `json:"cause,omitempty"`
+	Added         []string `json:"added,omitempty"`
+	Removed       []string `json:"removed,omitempty"`
+	RoleBefore    string   `json:"role_before,omitempty"`
+	RoleAfter     string   `json:"role_after,omitempty"`
+	OpID          string   `json:"op_id,omitempty"`
+	DispatchError string   `json:"dispatch_error,omitempty"`
+	// ReloadUnconfirmed is set on a "changed" agent whose new credential
+	// was delivered but whose running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
+}
+
+// ScopeReissueBulkRef names an agent in a bulk result list.
+type ScopeReissueBulkRef struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Cause string `json:"cause,omitempty"`
+}
+
+// ScopeReissueBulkResult is the hub's answer to a bulk re-issue.
+type ScopeReissueBulkResult struct {
+	BatchOpID  string                  `json:"batch_op_id"`
+	DryRun     bool                    `json:"dry_run"`
+	Total      int                     `json:"total"`
+	Succeeded  []ScopeReissueBulkRef   `json:"succeeded"`
+	Noop       []ScopeReissueBulkRef   `json:"noop"`
+	Refused    []ScopeReissueBulkRef   `json:"refused"`
+	PushFailed []ScopeReissueBulkRef   `json:"push_failed"`
+	Agents     []ScopeReissueBulkAgent `json:"agents"`
+	// DepthUnresolved lists agents whose delegation edge could not be read
+	// when ordering the run.
+	DepthUnresolved []string `json:"depth_unresolved"`
+	// BatchAuditRecorded is false when the hub could not write the batch
+	// audit row.
+	BatchAuditRecorded bool `json:"batch_audit_recorded"`
+}
+
+// ReissueScopesAll posts the bulk re-issue to the admin reset-auth-all
+// route. It is not retried. The run can take much longer than the client's
+// default request timeout, so this one call waits until ctx's deadline
+// instead (callers must set one).
+func (s *agentService) ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error) {
+	body := map[string]bool{"reissue_scopes": true, "dry_run": !apply}
+	tr := *s.c.transport
+	if deadline, ok := ctx.Deadline(); ok && tr.HTTPClient != nil {
+		hc := *tr.HTTPClient
+		hc.Timeout = time.Until(deadline)
+		tr.HTTPClient = &hc
+	}
+	resp, err := tr.PostNoRetry(ctx, "/api/v1/admin/agents/reset-auth-all", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScopeReissueBulkResult](resp)
+}
+
 // StopAll stops all running agents in scope.
 func (s *agentService) StopAll(ctx context.Context) (*StopAllResponse, error) {
 	resp, err := s.c.post(ctx, s.agentsPath()+"/stop-all", nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[StopAllResponse](resp)
+	return apiclient.DecodeRequired[StopAllResponse](resp)
 }
 
 // Restore restores a soft-deleted agent.
@@ -495,7 +873,7 @@ func (s *agentService) Restore(ctx context.Context, agentID string) (*Agent, err
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // SendMessage sends a message to an agent.
@@ -520,31 +898,148 @@ type MessageResponse struct {
 	Status     string `json:"status"`
 	Agent      string `json:"agent"`
 	AgentPhase string `json:"agent_phase"`
+	// Deferred is set when Status is "deferred": the recipient is
+	// mid-`scion reincarnate` (design agent-reincarnate §3.7). The message
+	// was saved to conversation history but not dispatched.
+	Deferred string `json:"deferred,omitempty"`
+	// ConversationID is the conversation the message was recorded in, so
+	// the sender can reply into it. Empty on hubs that predate this field,
+	// or when the message was not recorded in a conversation.
+	ConversationID string `json:"conversation_id,omitempty"`
+	// MentionResults reports the outcome of server-side @mention fan-out,
+	// one entry per resolved mention name. Empty when the message had no
+	// mentions, or on hubs that predate this field.
+	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
+
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+}
+
+// AttachmentWarning names one attachment the hub could not record on a sent
+// message, for example because the file was staged on a different broker
+// than the hub and so does not exist on the hub host.
+type AttachmentWarning struct {
+	// Path is the attachment path as sent.
+	Path string `json:"path"`
+	// Reason is the hub's short explanation.
+	Reason string `json:"reason"`
+}
+
+// SendMessageOptions holds the optional parameters for
+// SendStructuredMessageWithOptions.
+type SendMessageOptions struct {
+	// Interrupt the harness before sending.
+	Interrupt bool
+	// Notify subscribes the sender to status notifications for the target agent.
+	Notify bool
+	// Wake resumes a suspended target agent before delivering the message.
+	Wake bool
+	// Mentions lists agent slugs to receive mention notifications, in
+	// addition to any @mentions the server extracts from the body. The
+	// primary recipient and the sender are excluded automatically.
+	Mentions []string
+	// AttachmentIDs names attachments the sender uploaded
+	// (AttachmentUploader.UploadAttachments), by id (ptone/scion#4596).
+	AttachmentIDs []string
 }
 
 // SendStructuredMessage sends a structured message to an agent.
 // If notify is true, the sender subscribes to status notifications for the target agent.
 // If wake is true, a suspended agent will be resumed before delivering the message.
 func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error) {
+	return s.SendStructuredMessageWithOptions(ctx, agentID, msg, SendMessageOptions{
+		Interrupt: interrupt,
+		Notify:    notify,
+		Wake:      wake,
+	})
+}
+
+// SendStructuredMessageWithOptions sends a structured message to an agent
+// with an explicit mentions list. See AgentService.SendStructuredMessageWithOptions.
+func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts SendMessageOptions) (*MessageResponse, error) {
 	body := struct {
 		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 		Interrupt         bool                        `json:"interrupt,omitempty"`
 		Notify            bool                        `json:"notify,omitempty"`
 		Wake              bool                        `json:"wake,omitempty"`
+		Mentions          []string                    `json:"mentions,omitempty"`
+		AttachmentIDs     []string                    `json:"attachment_ids,omitempty"`
 	}{
 		StructuredMessage: msg,
-		Interrupt:         interrupt,
-		Notify:            notify,
-		Wake:              wake,
+		Interrupt:         opts.Interrupt,
+		Notify:            opts.Notify,
+		Wake:              opts.Wake,
+		Mentions:          opts.Mentions,
+		AttachmentIDs:     opts.AttachmentIDs,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[MessageResponse](resp)
+	return apiclient.DecodeRequired[MessageResponse](resp)
 }
 
-// OutboundMessageRequest is the request body for sending an agent-to-human outbound message.
+// SendKeys implements AgentService.SendKeys. See that method's doc comment
+// for the no-replay and error-fidelity guarantees; agentPath already honors
+// project scoping, so the same call reaches either public route shape
+// (.design/agent-keys-contract.md §2.1) depending on whether this service was
+// obtained from Client.Agents() or Client.ProjectAgents(projectID).
+func (s *agentService) SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error) {
+	resp, err := s.c.postNoRetry(ctx, s.agentPath(agentID)+"/keys", agentkeys.Request{Keys: keys}, nil)
+	if err != nil {
+		// No response was received at all (connection refused/reset, DNS
+		// failure, context deadline, ...): honest uncertainty, not a 503/502
+		// to reclassify. The caller must not infer either outcome from this.
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+
+	// Contract §2.4: the ONLY success shape is HTTP 200 with
+	// Response.Status == agentkeys.StatusDispatched. Nothing else — a 204,
+	// a 2xx the server never defines, or an unfollowed 3xx — may be reported
+	// as success: each is either a response this contract never promises
+	// (so treating it as success would be a guess, not a decision) or a
+	// response DoNoRetry's "do not follow the redirect" contract leaves
+	// unresolved. Either way the caller must receive "unknown", never
+	// "dispatched" and never a nil *Response with a nil error.
+	if resp.StatusCode != http.StatusOK {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    fmt.Sprintf("unexpected keys response status %d (only 200 means dispatched)", resp.StatusCode),
+		}
+	}
+
+	var result agentkeys.Response
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    "could not decode keys response body",
+		}
+	}
+	if result.Status != agentkeys.StatusDispatched {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    fmt.Sprintf("unexpected keys response status %q (not %q)", result.Status, agentkeys.StatusDispatched),
+		}
+	}
+	return &result, nil
+}
+
+// OutboundMessageRequest is the request body for sending an outbound message
+// from an agent. The recipient may be a human user or another agent; the hub
+// determines the delivery path from the addressing fields.
 type OutboundMessageRequest struct {
 	Recipient       string            `json:"recipient,omitempty"`
 	RecipientID     string            `json:"recipient_id,omitempty"`
@@ -557,15 +1052,100 @@ type OutboundMessageRequest struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	ConversationID  string            `json:"conversation_id,omitempty"`
 	ConversationRef string            `json:"conversation_ref,omitempty"`
+	// Wake requests that a suspended target agent be resumed before
+	// delivering the message. Ignored for non-agent recipients.
+	Wake bool `json:"wake,omitempty"`
+	// AttachmentIDs names attachments the sending agent uploaded, by id
+	// (ptone/scion#4596). Attachments keeps meaning staged paths.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	// Choices makes the message a choice prompt: the decisions as the JSON
+	// array scion message --choices takes. The hub validates them (the
+	// web.chat_choices experiment); Msg is then the optional intro.
+	Choices json.RawMessage `json:"choices,omitempty"`
+	// ChoicesUpdate lets Choices replace decisions whose keys exist.
+	ChoicesUpdate bool `json:"choices_update,omitempty"`
 }
 
-// SendOutboundMessage sends a message from an agent to a human inbox.
-func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error {
+// ChoiceDecisionResult is one decision of a sent choice prompt.
+type ChoiceDecisionResult struct {
+	Key      string                  `json:"key"`
+	Version  int                     `json:"version"`
+	Ref      string                  `json:"ref"`
+	RowID    string                  `json:"row_id,omitempty"`
+	Replaced *ChoiceReplacedDecision `json:"replaced"`
+}
+
+// ChoiceReplacedDecision is the version a choice prompt replaced.
+// For a decided version, Answer is the effective answer's label and
+// AnsweredBy who gave it (the name, else the email).
+type ChoiceReplacedDecision struct {
+	Version    int    `json:"version"`
+	Status     string `json:"status"`
+	Answer     string `json:"answer,omitempty"`
+	AnsweredBy string `json:"answered_by,omitempty"`
+}
+
+// OutboundMessageResult is the parsed response from a successful outbound
+// message send. It carries the server-assigned message identity and delivery
+// status so callers can correlate the message or detect ambiguous delivery.
+//
+// All fields are populated by the server on every 2xx response; omitempty is
+// intentionally absent because the contract guarantees non-empty values on
+// success. A nil result (with a non-nil error) indicates a non-2xx response.
+type OutboundMessageResult struct {
+	// MessageID is the server-assigned UUID for the persisted message.
+	MessageID string `json:"message_id"`
+	// Status is the delivery status reported by the hub (e.g. "sent").
+	Status string `json:"status"`
+	// Recipient is the wire-format recipient (e.g. "user:alice" or "agent:builder").
+	Recipient string `json:"recipient"`
+	// RecipientID is the recipient's UUID.
+	RecipientID string `json:"recipient_id"`
+	// Deferred is set only when Status == "deferred".
+	Deferred string `json:"deferred,omitempty"`
+	// ConversationID is the conversation the message was recorded in. It is
+	// empty on hubs that predate this field, or when the message was not
+	// recorded in a conversation.
+	ConversationID string `json:"conversation_id,omitempty"`
+	// MentionResults reports the outcome of server-side @mention fan-out,
+	// one entry per resolved mention name. Empty when the message had no
+	// mentions, or on hubs that predate this field.
+	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// DefaultAgentResult reports the delivery of a group post to the
+	// conversation's default agent. Set only for a group post that
+	// @mentioned no agent, in a conversation with a default agent.
+	DefaultAgentResult *messages.MentionResult `json:"default_agent_result,omitempty"`
+	// WokenAgents lists the agents a group post reached, through
+	// @mentions or the conversation's default agent.
+	WokenAgents []string `json:"woken_agents,omitempty"`
+	// NoAgentWoken is true when a group post reached no agent. Always
+	// false for other sends, and on hubs that predate this field.
+	NoAgentWoken bool `json:"no_agent_woken,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
+
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+
+	// Decisions lists the decisions of a choice prompt, one per decision
+	// sent; empty for any other message.
+	Decisions []ChoiceDecisionResult `json:"decisions,omitempty"`
+}
+
+// SendOutboundMessage sends a message from an agent via the outbound endpoint.
+// Returns the server-assigned message identity and delivery status, or a
+// structured error on failure. The SDK adds no retry or fallback routing;
+// send budget, policy, and capabilities are server-enforced.
+func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error) {
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/outbound-message", msg, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	// No body is valid here: the CLI prints a minimal confirmation on a 204.
+	return apiclient.DecodeResponse[OutboundMessageResult](resp)
 }
 
 // BroadcastResponse is the parsed response from a broadcast message delivery.
@@ -575,6 +1155,9 @@ type BroadcastResponse struct {
 	Targeted         int            `json:"targeted"`
 	Skipped          int            `json:"skipped"`
 	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
+	// Starting counts targeted agents that are still initializing; the
+	// message is held until their harness is ready. Included in Targeted.
+	Starting int `json:"starting,omitempty"`
 }
 
 // BroadcastMessage broadcasts a structured message to all running agents in the project.
@@ -589,10 +1172,11 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 		StructuredMessage: msg,
 		Interrupt:         interrupt,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/projects/"+s.projectID+"/broadcast", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+url.PathEscape(s.projectID)+"/broadcast", body, nil)
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: the CLI reports "Broadcast accepted." on a 204.
 	return apiclient.DecodeResponse[BroadcastResponse](resp)
 }
 
@@ -609,7 +1193,7 @@ func (s *agentService) Exec(ctx context.Context, agentID string, command []strin
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ExecResponse](resp)
+	return apiclient.DecodeRequired[ExecResponse](resp)
 }
 
 // GetLogs retrieves agent logs.
@@ -633,7 +1217,7 @@ func (s *agentService) GetLogs(ctx context.Context, agentID string, opts *GetLog
 		Logs string `json:"logs"`
 	}
 
-	result, err := apiclient.DecodeResponse[logsResponse](resp)
+	result, err := apiclient.DecodeRequired[logsResponse](resp)
 	if err != nil {
 		return "", err
 	}
@@ -701,7 +1285,7 @@ func (s *agentService) GetCloudLogs(ctx context.Context, agentID string, opts *G
 		return nil, err
 	}
 
-	return apiclient.DecodeResponse[CloudLogsResponse](resp)
+	return apiclient.DecodeRequired[CloudLogsResponse](resp)
 }
 
 // StreamCloudLogs opens an SSE connection for streaming cloud log entries.
@@ -781,5 +1365,146 @@ func (s *agentService) SetMessageMode(ctx context.Context, agentID string, req *
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SetMessageModeResponse](resp)
+	return apiclient.DecodeRequired[SetMessageModeResponse](resp)
+}
+
+// Reincarnate requests a `scion reincarnate` migration for an agent (design
+// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.2).
+func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/reincarnate", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ReincarnateAgentResponse](resp)
+}
+
+// ReincarnateAgentRequest is the request body for Reincarnate. Besides
+// Handoff and DryRun it carries the patch fields of ptone/scion#3302. A hub
+// that predates them ignores ServiceAccount, Role and ThinkingLevel and
+// rejects the others with a 400; ReincarnationPlan.Patched tells a client
+// whether the hub applied them.
+type ReincarnateAgentRequest struct {
+	Handoff string `json:"handoff,omitempty"`
+	DryRun  bool   `json:"dryRun,omitempty"`
+	// TargetBroker (a broker ID, name or slug) asks to move the agent to
+	// that broker, which must mount the same NFS export as its current one.
+	TargetBroker string `json:"targetBroker,omitempty"`
+	// ForceMove, with TargetBroker, allows a move whose workspace cannot
+	// travel through a shared NFS export: the workspace is recreated on the
+	// target and the agent's local state is given up. A hub that predates
+	// it ignores it; MoveVerdict.TransferMode tells a client the hub knows it.
+	ForceMove bool `json:"forceMove,omitempty"`
+
+	// Patch fields: each changes the next generation's setting, and later
+	// reincarnations keep it. Empty (nil for ThinkingLevel) is unchanged.
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Image          string `json:"image,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ThinkingLevel  *int   `json:"thinkingLevel,omitempty"`
+	HarnessAuth    string `json:"harnessAuth,omitempty"`
+
+	// Overrides not yet supported by the hub.
+	HarnessConfig  string            `json:"harnessConfig,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TemplateHash   string            `json:"templateHash,omitempty"`
+	ResetOverrides bool              `json:"resetOverrides,omitempty"`
+	Rollback       bool              `json:"rollback,omitempty"`
+}
+
+// ReincarnateAgentResponse is the response body for Reincarnate: 202 for a
+// persisted (pending) reincarnation, or 200 for a dry run.
+type ReincarnateAgentResponse struct {
+	AgentID    string            `json:"agentId"`
+	Generation int               `json:"generation"`
+	State      string            `json:"state"`
+	Plan       ReincarnationPlan `json:"plan"`
+	// SourceBrokerID and TargetBrokerID are set when the request named a
+	// target broker; they are equal for a plain reincarnation.
+	SourceBrokerID string `json:"sourceBrokerId,omitempty"`
+	TargetBrokerID string `json:"targetBrokerId,omitempty"`
+	// MoveVerdict is the move eligibility verdict of a dry-run move.
+	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace: "export" or "recreate" (a forced move). Empty for a plain
+	// reincarnation and from a hub that predates forced moves.
+	TransferMode string `json:"transferMode,omitempty"`
+}
+
+// MoveVerdict is the hub's eligibility verdict for moving an agent to
+// another broker. A refused request carries it in the error details under
+// "verdict". Checks lists every check in evaluation order, each passed,
+// failed, not_evaluated or (for a forced move) waived; treat any other
+// value as not passed.
+type MoveVerdict struct {
+	Eligible     bool          `json:"eligible"`
+	SourceBroker MoveBrokerRef `json:"sourceBroker"`
+	TargetBroker MoveBrokerRef `json:"targetBroker"`
+	Profile      string        `json:"profile,omitempty"`
+	RuntimeType  string        `json:"runtimeType,omitempty"`
+	Checks       []MoveCheck   `json:"checks"`
+	// TransferMode is how the workspace reaches the target of an eligible
+	// move: "export" (carried through a shared NFS export) or "recreate"
+	// (provisioned fresh; local state is lost). A hub that predates
+	// --force never sets it.
+	TransferMode string `json:"transferMode,omitempty"`
+	// Consequences lists what an eligible move keeps, carries, recreates
+	// and loses.
+	Consequences []MoveConsequence `json:"consequences,omitempty"`
+}
+
+// MoveConsequence is one item a move keeps, carries, recreates or loses.
+type MoveConsequence struct {
+	Kind string `json:"kind"` // kept | carried | recreated | lost
+	Item string `json:"item"` // stable key, e.g. "identity", "workspace"
+	Text string `json:"text"`
+}
+
+// MoveBrokerRef identifies a broker in a MoveVerdict.
+type MoveBrokerRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// MoveCheck is one move eligibility check result.
+type MoveCheck struct {
+	Name    string `json:"name"`
+	Result  string `json:"result"`
+	Message string `json:"message,omitempty"`
+}
+
+// FieldChange describes an old→new change to a single scalar field on the
+// reincarnation plan.
+type FieldChange struct {
+	Old string `json:"old,omitempty"`
+	New string `json:"new,omitempty"`
+}
+
+// KeyDiff describes an old→new change to a set of map keys (e.g. env var
+// names), by name only — never by value.
+type KeyDiff struct {
+	Added   []string `json:"added,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Changed []string `json:"changed,omitempty"`
+}
+
+// ReincarnationPlan is the old→new diff returned by both a dry run and a real
+// reincarnate request.
+type ReincarnationPlan struct {
+	Template   FieldChange `json:"template"`
+	Image      FieldChange `json:"image"`
+	HarnessCfg FieldChange `json:"harnessConfig"`
+	Model      FieldChange `json:"model"`
+	EnvKeys    KeyDiff     `json:"envKeys"`
+	Branch     string      `json:"branch"`
+	Warnings   []string    `json:"warnings,omitempty"`
+
+	// Patched lists the patch fields the hub applied, in display order.
+	Patched []string `json:"patched,omitempty"`
+	// Old and new values of patch fields not otherwise on the plan, set
+	// only when patched.
+	Role           *FieldChange `json:"role,omitempty"`
+	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
+	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
+	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
 }

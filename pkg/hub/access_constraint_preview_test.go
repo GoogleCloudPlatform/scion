@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -30,34 +29,6 @@ import (
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-// previewTestSetup creates a PreviewService backed by an in-memory SQLite store
-// with standard test data: a super-admin user, roles, and permissions.
-func previewTestSetup(t *testing.T) (*PreviewService, *AuthzService, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	authz := srv.authzService
-	logger := slog.Default()
-	key := []byte("test-preview-hmac-key-32-bytes!!")
-	ps := NewPreviewServiceWithKey(s, authz, logger, key)
-	ps.nowFunc = func() time.Time { return time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC) }
-	return ps, authz, s
-}
-
-// pvSeedUser creates a user in the store (preview-test-scoped helper).
-func pvSeedUser(t *testing.T, s store.Store, name string) string {
-	t.Helper()
-	id := tid(name)
-	err := s.CreateUser(context.Background(), &store.User{
-		ID:          id,
-		Email:       name + "@test.com",
-		DisplayName: name,
-		Role:        "member",
-		Status:      "active",
-	})
-	require.NoError(t, err)
-	return id
-}
 
 // pvSeedAgent creates an agent in the store (preview-test-scoped helper).
 func pvSeedAgent(t *testing.T, s store.Store, name, projectID string) string {
@@ -75,47 +46,6 @@ func pvSeedAgent(t *testing.T, s store.Store, name, projectID string) string {
 	return id
 }
 
-// pvSeedGroup creates a group in the store (preview-test-scoped helper).
-func pvSeedGroup(t *testing.T, s store.Store, name string) string {
-	t.Helper()
-	id := tid(name)
-	err := s.CreateGroup(context.Background(), &store.Group{
-		ID:        id,
-		Name:      name,
-		Slug:      name,
-		GroupType: store.GroupTypeExplicit,
-	})
-	require.NoError(t, err)
-	return id
-}
-
-// pvSeedGroupMember adds a member to a group (preview-test-scoped helper).
-func pvSeedGroupMember(t *testing.T, s store.Store, groupID, memberType, memberID string) {
-	t.Helper()
-	err := s.AddGroupMember(context.Background(), &store.GroupMember{
-		GroupID:    groupID,
-		MemberType: memberType,
-		MemberID:   memberID,
-		Role:       "member",
-		AddedBy:    "test",
-	})
-	require.NoError(t, err)
-}
-
-// pvSeedRoleBinding creates a role binding (preview-test-scoped helper).
-func pvSeedRoleBinding(t *testing.T, s store.Store, roleDefID, principalType, principalID, scopeType, scopeID string) {
-	t.Helper()
-	_, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
-		RoleDefinitionID: roleDefID,
-		PrincipalType:    principalType,
-		PrincipalID:      principalID,
-		ScopeType:        scopeType,
-		ScopeID:          scopeID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
 // pvSeedConstraint creates a constraint in the store (preview-test-scoped helper).
 func pvSeedConstraint(t *testing.T, s store.Store, c *store.AccessConstraint) *store.AccessConstraint {
 	t.Helper()
@@ -123,30 +53,6 @@ func pvSeedConstraint(t *testing.T, s store.Store, c *store.AccessConstraint) *s
 	require.NoError(t, err)
 	return result
 }
-
-// pvSeedProject creates a project in the store (preview-test-scoped helper).
-func pvSeedProject(t *testing.T, s store.Store, name string) string {
-	t.Helper()
-	id := tid(name)
-	err := s.CreateProject(context.Background(), &store.Project{
-		ID:   id,
-		Name: name,
-		Slug: name,
-	})
-	require.NoError(t, err)
-	return id
-}
-
-// pvTestActor returns a PrincipalContext for testing.
-func pvTestActor(userID string) PrincipalContext {
-	return PrincipalContext{
-		Kind: PrincipalKindUser,
-		ID:   userID,
-	}
-}
-
-// pvStrPtr returns a pointer to a string (preview-test-scoped helper).
-func pvStrPtr(s string) *string { return &s }
 
 // pvTimePtr returns a pointer to a time (preview-test-scoped helper).
 func pvTimePtr(t time.Time) *time.Time { return &t }
@@ -1121,11 +1027,11 @@ func TestPreview_TokenReplayRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	// First use: should succeed.
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", draft, 0)
 	require.NoError(t, err)
 
 	// Second use: should fail (replay).
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", draft, 0)
 	require.Error(t, err)
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -1168,7 +1074,7 @@ func TestPreview_TokenExpiryRejected(t *testing.T) {
 		return time.Date(2026, 8, 15, 12, 10, 0, 0, time.UTC) // 10 min later
 	}
 
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", draft, 0)
 	require.Error(t, err)
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -1210,7 +1116,7 @@ func TestPreview_TokenActorSwapRejected(t *testing.T) {
 
 	// Try to use with a different actor.
 	otherActor := pvTestActor(otherAdminID)
-	err = ps.ValidateToken(ctx, result.PreviewToken, otherActor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, otherActor, "create", "", draft, 0)
 	require.Error(t, err)
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -1259,7 +1165,7 @@ func TestPreview_TokenDraftModifiedRejected(t *testing.T) {
 		Purpose:              "draft mod test",
 	}
 
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", modifiedDraft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", modifiedDraft, 0)
 	require.Error(t, err)
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -1298,7 +1204,7 @@ func TestPreview_TokenOperationMismatchRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	// Try to use with a different operation.
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "update", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "update", "", draft, 0)
 	require.Error(t, err)
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -1402,6 +1308,60 @@ func TestPreview_LockoutAssessment_DeleteIsSafe(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Lockout.Safe)
 	assert.True(t, *result.Lockout.Safe, "delete always safe for lockout")
+}
+
+// A suspended admin does not count as remaining in the preview lockout
+// assessment: only active admins are counted.
+func TestPreview_LockoutAssessment_SuspendedAdminNotCounted(t *testing.T) {
+	ps, _, s := previewTestSetup(t)
+	ctx := context.Background()
+
+	// Project scope keeps the dev user's system-scoped super-admin
+	// binding out of the count.
+	projectID := pvSeedProject(t, s, "lockout-susp-project")
+	adminA := pvSeedUser(t, s, "lockout-susp-admin-a")
+	adminB := pvSeedUser(t, s, "lockout-susp-admin-b")
+	adminRD := createTestRoleDefinition(t, s, "constraint-admin-lockout-susp", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminA, store.RoleScopeProject, projectID)
+	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminB, store.RoleScopeProject, projectID)
+
+	// The draft takes access_constraint.admin away from admin A only.
+	draft := &store.AccessConstraint{
+		Name:                 "lockout-susp-constraint",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(adminA),
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              projectID,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "lockout suspended admin test",
+	}
+	preview := func() LockoutAssessment {
+		t.Helper()
+		result, err := ps.GeneratePreview(ctx, PreviewRequest{
+			Operation: "create",
+			Draft:     draft,
+			Actor:     pvTestActor(adminA),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.Lockout.Safe)
+		require.NotNil(t, result.Lockout.RemainingActiveDirectAdmins)
+		return result.Lockout
+	}
+
+	lo := preview()
+	assert.True(t, *lo.Safe, "admin B remains")
+	assert.Equal(t, 1, *lo.RemainingActiveDirectAdmins)
+
+	u, err := s.GetUser(ctx, adminB)
+	require.NoError(t, err)
+	u.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, u))
+
+	lo = preview()
+	assert.False(t, *lo.Safe, "a suspended admin does not count as remaining")
+	assert.Equal(t, 0, *lo.RemainingActiveDirectAdmins)
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,14 +1635,14 @@ func TestPreview_TokenSignatureValidation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Tamper with the token.
-	err = ps.ValidateToken(ctx, result.PreviewToken+"tampered", actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken+"tampered", actor, "create", "", draft, 0)
 	require.Error(t, err)
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
 	assert.Equal(t, ErrCodePreviewTokenInvalid, tokenErr.Code)
 
 	// Malformed token.
-	err = ps.ValidateToken(ctx, "not-a-valid-token", actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, "not-a-valid-token", actor, "create", "", draft, 0)
 	require.Error(t, err)
 	require.ErrorAs(t, err, &tokenErr)
 	assert.Equal(t, ErrCodePreviewTokenInvalid, tokenErr.Code)
@@ -1734,7 +1694,7 @@ func TestPreview_EndToEnd_CreateAndCommit(t *testing.T) {
 	assert.True(t, result.ExpiresAt.After(result.GeneratedAt))
 
 	// Step 2: Validate token for commit.
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", draft, 0)
 	require.NoError(t, err, "token should be valid for commit")
 }
 
@@ -1785,7 +1745,7 @@ func TestPreview_EndToEnd_UpdateAndCommit(t *testing.T) {
 	assert.Equal(t, ClassificationTighten, result.Classification)
 
 	// Validate token.
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "update", draft, existing.Revision)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "update", existing.ID, draft, existing.Revision)
 	require.NoError(t, err)
 }
 
@@ -1823,8 +1783,78 @@ func TestPreview_EndToEnd_DeleteAndCommit(t *testing.T) {
 	assert.Equal(t, ClassificationRelax, result.Classification)
 
 	// Validate token with nil draft (delete).
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "delete", nil, existing.Revision)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "delete", existing.ID, nil, existing.Revision)
 	require.NoError(t, err)
+}
+
+// TestPreview_TokenBoundToItsConstraint pins that an update or delete
+// preview token is accepted only for the constraint it was issued for: a
+// token issued for constraint A is refused for constraint B (same revision,
+// same content), and the same token still validates for A.
+func TestPreview_TokenBoundToItsConstraint(t *testing.T) {
+	for _, op := range []string{"update", "delete"} {
+		t.Run(op, func(t *testing.T) {
+			ps, _, s := previewTestSetup(t)
+			ctx := context.Background()
+
+			userID := pvSeedUser(t, s, "cid-bind-user-"+op)
+			adminID := pvSeedUser(t, s, "cid-bind-admin-"+op)
+
+			rd := createTestRoleDefinition(t, s, "test-role-cid-bind-"+op, store.RoleScopeSystem, []string{"agent.read", "agent.create"})
+			pvSeedRoleBinding(t, s, rd.ID, "user", userID, store.RoleScopeSystem, "")
+
+			adminRD := createTestRoleDefinition(t, s, "constraint-admin-cid-bind-"+op, store.RoleScopeSystem, []string{PermissionConstraintAdmin, "agent.read", "agent.create"})
+			pvSeedRoleBinding(t, s, adminRD.ID, "user", adminID, store.RoleScopeSystem, "")
+
+			seed := func(name string) *store.AccessConstraint {
+				return pvSeedConstraint(t, s, &store.AccessConstraint{
+					Name:                 name,
+					SubjectKind:          store.ConstraintSubjectPrincipal,
+					SubjectPrincipalType: pvStrPtr("user"),
+					SubjectPrincipalID:   pvStrPtr(userID),
+					ScopeType:            store.RoleScopeSystem,
+					MaximumPermissions:   []string{"agent.read", "agent.create"},
+					Purpose:              "token binding",
+				})
+			}
+			a := seed("cid-bind-a-" + op)
+			b := seed("cid-bind-b-" + op)
+			require.Equal(t, a.Revision, b.Revision, "only the constraint ID may differ")
+
+			var draft *store.AccessConstraint
+			if op == "update" {
+				draft = &store.AccessConstraint{
+					Name:                 "cid-bind-updated-" + op,
+					SubjectKind:          store.ConstraintSubjectPrincipal,
+					SubjectPrincipalType: pvStrPtr("user"),
+					SubjectPrincipalID:   pvStrPtr(userID),
+					ScopeType:            store.RoleScopeSystem,
+					MaximumPermissions:   []string{"agent.read"},
+					Purpose:              "token binding",
+				}
+			}
+
+			actor := pvTestActor(adminID)
+			result, err := ps.GeneratePreview(ctx, PreviewRequest{
+				Operation:    op,
+				Draft:        draft,
+				ConstraintID: a.ID,
+				BaseRevision: a.Revision,
+				Actor:        actor,
+			})
+			require.NoError(t, err)
+
+			for _, target := range []string{b.ID, ""} {
+				err = ps.ValidateToken(ctx, result.PreviewToken, actor, op, target, draft, a.Revision)
+				var tokenErr *TokenValidationError
+				require.ErrorAs(t, err, &tokenErr, "token for A must be refused for target %q", target)
+				assert.Equal(t, ErrCodePreviewConstraintMismatch, tokenErr.Code)
+			}
+
+			err = ps.ValidateToken(ctx, result.PreviewToken, actor, op, a.ID, draft, a.Revision)
+			require.NoError(t, err, "token must still validate for its own constraint")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2137,7 +2167,7 @@ func TestPreview_TokenRevisionMismatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// Validate with different revision (simulating concurrent update).
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "update", draft, existing.Revision+1)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "update", existing.ID, draft, existing.Revision+1)
 	require.Error(t, err)
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -2382,7 +2412,7 @@ func TestPreview_TokenValidFor5Minutes(t *testing.T) {
 	ps.nowFunc = func() time.Time {
 		return result.GeneratedAt.Add(4*time.Minute + 59*time.Second)
 	}
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", draft, 0)
 	require.NoError(t, err, "token should still be valid at 4m59s")
 }
 
@@ -2614,7 +2644,7 @@ func TestPreview_ProjectScopedDeleteTokenValidation(t *testing.T) {
 
 	// Token validation for project-scoped delete must succeed (R1 fix: uses
 	// constraint ID, not preview ID, for state fingerprint).
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "delete", nil, existing.Revision)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "delete", existing.ID, nil, existing.Revision)
 	require.NoError(t, err, "project-scoped delete token validation must succeed")
 }
 
@@ -2652,7 +2682,7 @@ func TestPreview_IncompleteTokenRejectedAtCommit(t *testing.T) {
 	assert.NotNil(t, result.CommitBlocked, "incomplete preview should have CommitBlocked set")
 
 	// Even though a token was issued, ValidateToken must reject it server-side.
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", draft, 0)
 	require.Error(t, err, "incomplete preview token must be rejected at validation")
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -2701,7 +2731,7 @@ func TestPreview_NonceNotConsumedOnBindingFailure(t *testing.T) {
 	// Attempt to use the token with the wrong actor — this should fail on
 	// actor binding check WITHOUT consuming the nonce (R3 fix).
 	wrongActor := pvTestActor(otherAdminID)
-	err = ps.ValidateToken(ctx, result.PreviewToken, wrongActor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, wrongActor, "create", "", draft, 0)
 	require.Error(t, err, "wrong actor should be rejected")
 	var tokenErr *TokenValidationError
 	require.ErrorAs(t, err, &tokenErr)
@@ -2709,7 +2739,7 @@ func TestPreview_NonceNotConsumedOnBindingFailure(t *testing.T) {
 
 	// The legitimate actor should still be able to use the token — the nonce
 	// was NOT consumed by the failed attempt.
-	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", draft, 0)
+	err = ps.ValidateToken(ctx, result.PreviewToken, actor, "create", "", draft, 0)
 	require.NoError(t, err, "legitimate actor must still be able to use token after failed attempt by attacker")
 }
 

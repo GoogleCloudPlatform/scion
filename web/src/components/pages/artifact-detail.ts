@@ -1,0 +1,3302 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Artifact page (experiment hub.artifacts)
+ *
+ * Shows an artifact's title, owner and versions, and renders the entry of
+ * the version shown: markdown in a sandboxed preview frame
+ * (<scion-artifact-markdown-frame>), text read-only in <scion-code-editor>,
+ * raster images with <img>, and HTML bundles in a sandboxed frame served
+ * under a short-lived view capability. Other types are offered as a
+ * download. Tabs list the version's files and the artifact's versions;
+ * Edit publishes a changed entry as a new version and Upload new version
+ * publishes new files. Review opens a markdown entry with a CriticMarkup
+ * toolbar and saves the marked-up copy as a version of kind review; while
+ * the current version is a review the page shows it as pending, and a
+ * review's preview can show its marks, the text with every mark rejected
+ * (Clean) or accepted (Accepted). Edit, Review and Upload new version are
+ * shown only when the hub reports canPublish; for a caller with canReview
+ * (a review grant, ptone/scion#4538) only Review is shown. Share is shown
+ * for canManage. Retention… (the Retention and access dialog: expiry,
+ * revoke links, remove grants) is shown for canShare without canManage (a
+ * steward), and Delete… for canRetire (ptone/scion#4535). With the
+ * experiment web.artifact_manage_access on (ptone/scion#7107), one Manage
+ * access button, shown for canShare, replaces Share and Retention…; it
+ * opens the Share dialog in manage mode, with each section decided from
+ * the same flags. Move… and Delete… are unchanged. An artifact whose owner
+ * was deleted has the Owner deleted badge and its owner struck through;
+ * the meta row shows when it expires.
+ * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
+ */
+
+import { LitElement, html, css, nothing } from 'lit';
+import type { PropertyValues, TemplateResult } from 'lit';
+import { customElement, property, query, state } from 'lit/decorators.js';
+
+import type { PageData } from '../../shared/types.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
+import { dispatchPageTitle } from '../../client/page-title.js';
+import { navigateTo, stripBasePath } from '../../client/navigation.js';
+import {
+  ARTIFACT_MANAGE_ACCESS_FLAG,
+  ARTIFACT_REVIEW_EDITOR_FLAG,
+  ARTIFACTS_OPEN_REVIEW_CHECK_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
+import { formatInstant, formatRelative } from '../../utils/time.js';
+import { ReviewHeartbeat } from '../../client/review-heartbeat.js';
+import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, copyWithToast, showCopyFailedToast } from '../../utils/clipboard.js';
+import {
+  ARTIFACTS_FLAG,
+  MAX_INLINE_TEXT_BYTES,
+  artifactArchiveUrl,
+  artifactFileUrl,
+  artifactOriginOf,
+  artifactPagePath,
+  baseName,
+  discardReasonText,
+  formatBytes,
+  isInlineType,
+  isRemoteFile,
+  listGrants,
+  listVersions,
+  mintView,
+  parseArtifactPagePath,
+  PublishError,
+  publishErrorMessage,
+  publishFiles,
+  rendererFor,
+  ReviewOpenError,
+} from '../../client/artifacts.js';
+import type {
+  Artifact,
+  ArtifactFile,
+  ArtifactOrigin,
+  ArtifactResponse,
+  ArtifactRenderer,
+  ArtifactVersion,
+  DiscardedVersion,
+  PendingPublish,
+  PublishFile,
+  ReviewOpenEntry,
+  ViewResponse,
+} from '../../client/artifacts.js';
+import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
+import { getLanguageFromPath } from '../shared/code-editor.js';
+import type { ScionCodeEditor } from '../shared/code-editor.js';
+import type { CriticView } from '../shared/artifact-markdown-frame.js';
+import {
+  countCritic,
+  criticToolBlocked,
+  criticToolEdit,
+  onlyMarksChanged,
+  projectCritic,
+} from '../../utils/critic.js';
+import type { CriticCounts, CriticTool } from '../../utils/critic.js';
+import '../shared/artifact-markdown-frame.js';
+import {
+  renderUntrustedViewFrame,
+  untrustedViewFrameStyles,
+} from '../shared/untrusted-view-frame.js';
+import '../shared/detail-header.js';
+import '../shared/artifact-publish-dialog.js';
+import '../shared/artifact-move-dialog.js';
+import '../shared/artifact-share-dialog.js';
+import { capabilitiesFrom, showManageAccess } from '../shared/artifact-access-sections.js';
+import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
+import '../shared/artifact-delete-dialog.js';
+import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
+import '../shared/code-editor.js';
+import './not-found.js';
+import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import { countTopLevelBlocks } from '../../utils/markdown-blocks.js';
+import type {
+  ReviewChangeDetail,
+  ReviewEditorElement,
+} from '../artifact-review/review-editor-loader.js';
+
+type Tab = 'preview' | 'files' | 'history';
+
+/** How often a return to the tab may re-read the version list (ptone/scion#6851). */
+const VERSIONS_RECHECK_MS = 30_000;
+
+/** A version kind as the page shows it (ptone/scion#6852). */
+export function versionKindLabel(kind: string): string {
+  if (kind === 'publish') return 'Publish';
+  if (kind === 'review') return 'Review';
+  if (kind === 'attachment') return 'Attachment';
+  return kind;
+}
+
+/**
+ * text with CRLF and lone CR line endings as LF: the form the editor works
+ * in (its selection offsets count one character per line break), and the
+ * one the hub compares reviews in.
+ */
+function lfText(text: string | null): string {
+  return (text ?? '').replace(/\r\n?/g, '\n');
+}
+
+/**
+ * Describes a review's marks for the banner: comments, suggestions and
+ * highlights, leaving out the kinds it has none of ("2 comments and 3
+ * suggestions", "1 highlight"), or "marks" when it has none.
+ */
+export function describeMarks(c: CriticCounts): string {
+  const parts = (
+    [
+      [c.comments, 'comment'],
+      [c.suggestions, 'suggestion'],
+      [c.highlights, 'highlight'],
+    ] as const
+  )
+    .filter(([n]) => n > 0)
+    .map(([n, word]) => `${n} ${word}${n === 1 ? '' : 's'}`);
+  if (parts.length === 0) return 'marks';
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+/** Viewports at least this wide show comment notes in a margin. */
+export const WIDE_NOTES_QUERY = '(min-width: 1100px)';
+
+/**
+ * Viewports at least this wide show comment notes in a margin in Review
+ * mode, where the preview takes half the page.
+ */
+export const WIDE_REVIEW_NOTES_QUERY = '(min-width: 1400px)';
+
+/** Where the graphical review page remembers the chosen view. */
+export const REVIEW_VIEW_KEY = 'scion:artifact-review-view';
+
+/** How long a refusal hint stays up without a new edit. */
+export const REVIEW_HINT_MS = 8000;
+
+/**
+ * Markdown over either of these (UTF-8 bytes, top-level blocks) opens
+ * Review in the Source view, with a notice: the graphical view takes a
+ * while to open for such documents. The reviewer can still switch to it,
+ * after a confirmation.
+ */
+export const LARGE_REVIEW_BYTES = 200_000;
+export const LARGE_REVIEW_BLOCKS = 4_000;
+
+/**
+ * Markdown over either of these is too large for the graphical view: it
+ * is not offered, since opening it could use more memory than the page
+ * has.
+ */
+export const MAX_GRAPHICAL_BYTES = 500_000;
+export const MAX_GRAPHICAL_BLOCKS = 10_000;
+
+/** How a document's size bears on the graphical review page. */
+export type ReviewSize = 'normal' | 'large' | 'too-large';
+
+/** The views of the graphical review page. */
+export type ReviewView = 'graphical' | 'source';
+
+/** Hints of the graphical review page (editor refusals and notices). */
+export type ReviewHint =
+  | 'format'
+  | 'code'
+  | 'image'
+  | 'list-table'
+  | 'break'
+  | 'paste-multi'
+  | 'earlier'
+  | 'moved'
+  | 'source-own'
+  | 'composing'
+  | 'code-run'
+  | 'generic'
+  | 'load-failed'
+  | 'large'
+  | 'too-large';
+
+/** Text of each hint: a bold first sentence and a second one. */
+export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string }> = {
+  format: {
+    title: "Formatting can't be suggested here.",
+    body: 'Use the Source view to change bold, italic, headings or lists.',
+  },
+  code: { title: "Code blocks can't take suggestions.", body: 'Edit code in the Source view.' },
+  image: {
+    title: 'Images can be added by publishing a new version.',
+    body: 'A review can only use images already in this version.',
+  },
+  'list-table': {
+    title: "List and table structure can't be changed in a suggestion.",
+    body: 'You can edit the text in them; use the Source view to add, remove or move items, rows or columns.',
+  },
+  break: {
+    title: "Paragraph breaks can't be suggested here yet.",
+    body: 'Use the Source view to split or join paragraphs.',
+  },
+  'paste-multi': {
+    title: "Pasting several paragraphs isn't supported here yet.",
+    body: 'Paste one paragraph at a time, or use the Source view.',
+  },
+  earlier: {
+    title: 'This suggestion is from an earlier review.',
+    body: 'You can comment on it.',
+  },
+  moved: {
+    title: 'This edit would move an earlier comment.',
+    body: 'Edit around it, or use the Source view.',
+  },
+  'source-own': {
+    title:
+      "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
+    body: 'You can still change them there.',
+  },
+  composing: {
+    title: "Finish the text you're typing first.",
+    body: 'Then save or switch views again.',
+  },
+  'code-run': {
+    title: 'That edit would change code that continues on the lines next to it.',
+    body: 'Use the Source view to change backticks here.',
+  },
+  generic: {
+    title: "That change can't be recorded as a suggestion.",
+    body: 'Use the Source view.',
+  },
+  'load-failed': {
+    title: 'The graphical view could not be loaded.',
+    body: 'It opened in the Source view.',
+  },
+  large: {
+    title: 'This document is large, so it opened in the Source view.',
+    body: '',
+  },
+  'too-large': {
+    title: 'This document is too large for the graphical view.',
+    body: '',
+  },
+};
+
+/** The confirmation before the graphical view opens a large document. */
+export const LARGE_REVIEW_CONFIRM =
+  'Opening the graphical view may take a few seconds for a document this size. Continue?';
+
+/** The view toggle's tooltip when the graphical view is not offered. */
+export const TOO_LARGE_TOOLTIP = 'Too large for the graphical view.';
+
+/** The view toggle's tooltip while the document's size is being checked. */
+export const SIZING_TOOLTIP = 'Checking the document size...';
+
+/**
+ * The size class of text for the graphical review page. Bytes are exact;
+ * blocks are counted by the app's Markdown lexer, which is close to the
+ * editor's own count but not always equal (approximate by design), and only
+ * for text within MAX_GRAPHICAL_BYTES. A count that fails counts as large:
+ * the Source view opens, and the reviewer can still switch.
+ */
+export async function reviewSize(
+  text: string,
+  countBlocks: (md: string) => Promise<number> = countTopLevelBlocks
+): Promise<ReviewSize> {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > MAX_GRAPHICAL_BYTES) return 'too-large';
+  let blocks: number;
+  try {
+    blocks = await countBlocks(text);
+  } catch {
+    return 'large';
+  }
+  if (blocks > MAX_GRAPHICAL_BLOCKS) return 'too-large';
+  return bytes > LARGE_REVIEW_BYTES || blocks > LARGE_REVIEW_BLOCKS ? 'large' : 'normal';
+}
+
+/** The view a reviewer last chose; graphical unless they chose source. */
+export function storedReviewView(): ReviewView {
+  try {
+    return window.localStorage.getItem(REVIEW_VIEW_KEY) === 'source' ? 'source' : 'graphical';
+  } catch {
+    return 'graphical';
+  }
+}
+
+function storeReviewView(v: ReviewView): void {
+  try {
+    window.localStorage.setItem(REVIEW_VIEW_KEY, v);
+  } catch {
+    // Storage unavailable: the choice lasts for this page only.
+  }
+}
+
+/** How long the Review preview waits after typing before it re-renders. */
+export const REVIEW_PREVIEW_DELAY_MS = 250;
+
+/** Longest delay setTimeout honours. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * The most extra version pages loadVersions reads in one go while the
+ * pages hold only discarded versions.
+ */
+const MAX_EXTRA_VERSION_PAGES = 5;
+
+@customElement('scion-page-artifact-detail')
+export class ScionPageArtifactDetail extends LitElement {
+  @property({ type: Object })
+  pageData: PageData | null = null;
+
+  @state() private projectId = '';
+  @state() private artifactId = '';
+  /** Version in the URL; 0 shows the current version. */
+  @state() private seq = 0;
+  /** Where the page was opened from (ptone/scion#6847); see artifactOriginOf. */
+  private origin: ArtifactOrigin = 'project';
+  /** A Refresh is reloading the page in place (ptone/scion#6851). */
+  @state() private refreshing = false;
+  /**
+   * The newest version seq the page has seen (ptone/scion#6851): the one
+   * page property every source feeds through noteSeq (an artifact load, a
+   * version list; the review heartbeat of ptone/scion#6849 later), so the
+   * page shows one answer to "is there a newer version".
+   */
+  @state() private newestSeqSeen = 0;
+  @state() private loading = true;
+  @state() private notFound = false;
+  @state() private error: string | null = null;
+  @state() private data: ArtifactResponse | null = null;
+  @state() private entry: ArtifactFile | null = null;
+  @state() private text: string | null = null;
+  /** Owner and publisher display names by "kind:id"; missing while unknown. */
+  @state() private names = new Map<string, string>();
+  @state() private copied = false;
+  @state() private tab: Tab = 'preview';
+  @state() private versions: ArtifactVersion[] = [];
+  /** Discarded versions listed beside versions (ptone/scion#4577). */
+  @state() private discarded: DiscardedVersion[] = [];
+  /** Discarded-version groups shown expanded, by their newest seq. */
+  @state() private expandedGaps = new Set<number>();
+  @state() private versionsNext = 0;
+  /** A loadVersions call is reading pages; Load more waits for it. */
+  @state() private versionsLoading = false;
+  /** The load generation of the loadVersions call in flight. */
+  private versionsLoadingGen = -1;
+  @state() private versionsError: string | null = null;
+  @state() private view: ViewResponse | null = null;
+  @state() private viewError: string | null = null;
+  @state() private viewExpired = false;
+  private viewTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Generations of the page load and of the view mint. An answer that
+   * arrives after a newer load or mint started is dropped, so a slow
+   * earlier request cannot overwrite a newer result.
+   */
+  private loadGen = 0;
+  private viewGen = 0;
+  @state() private editing = false;
+  @state() private editText = '';
+  @state() private editNote = '';
+  @state() private editBusy = false;
+  @state() private editError: string | null = null;
+  /**
+   * The open reviews an edit publish was refused over (409 review_open,
+   * ptone/scion#6849); while set, the Wait / Publish anyway dialog is open.
+   */
+  @state() private reviewOpen: { reviews: ReviewOpenEntry[]; truncated: boolean } | null = null;
+  /** The heartbeat of the open review, while Review mode is open. */
+  private heartbeat: ReviewHeartbeat | null = null;
+  @state() private publishOpen = false;
+  @state() private shareOpen = false;
+  /** The Move dialog is open (ptone/scion#4583). */
+  @state() private moveOpen = false;
+  /** The Retention and access dialog is open. */
+  @state() private retentionOpen = false;
+  /** The Manage access dialog is open (experiment web.artifact_manage_access). */
+  @state() private accessOpen = false;
+  /** The Delete artifact confirmation is open. */
+  @state() private deleteOpen = false;
+  /**
+   * The hub's cross-project sharing setting, from the grants response (read
+   * only for a caller who manages the artifact). The hub refuses every move
+   * while it is off, so Move… is offered only while it is on.
+   */
+  @state() private crossProjectSharing = false;
+  /** The version a failed Edit publish left pending; the next attempt resumes it. */
+  private editPending: PendingPublish | null = null;
+  @state() private reviewing = false;
+  /**
+   * Whether the current review opened in the graphical review page. Set
+   * when the review starts, so the page keeps its layout (and Save keeps
+   * taking the editor's text) even if the experiment changes mid-review.
+   */
+  @state() private reviewGraphical = false;
+  @state() private reviewText = '';
+  @state() private reviewNote = '';
+  @state() private reviewBusy = false;
+  @state() private reviewError: string | null = null;
+  /** How a review's marks are shown in its preview. */
+  @state() private criticView: Exclude<CriticView, 'off'> = 'marks';
+  private reviewPending: PendingPublish | null = null;
+  /** Review text shown in the live preview, updated after typing pauses. */
+  @state() private reviewPreview = '';
+  private previewTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Why the last toolbar action did not apply; cleared by the next edit. */
+  @state() private reviewHint: string | null = null;
+  /** The viewport is wide enough for comment notes in a margin. */
+  @state() private wideViewport = false;
+  /** The viewport is wide enough for margin notes in the split Review pane. */
+  @state() private wideReviewViewport = false;
+  private wideQuery: MediaQueryList | null = null;
+  private wideReviewQuery: MediaQueryList | null = null;
+  private onWideChange = (e: MediaQueryListEvent): void => {
+    this.wideViewport = e.matches;
+  };
+  private onWideReviewChange = (e: MediaQueryListEvent): void => {
+    this.wideReviewViewport = e.matches;
+  };
+  /**
+   * The reviewer's text of a review the hub discarded as stale, shown
+   * read-only so marks can be copied into a review of the current version.
+   */
+  @state() private discardedReview: string | null = null;
+  /** Why Review mode was left (shown on the page after it closes). */
+  @state() private reviewNotice: string | null = null;
+
+  @query('.untrusted') private untrustedFrame?: HTMLElement;
+  @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
+  @query('scion-review-editor') private graphicalEditor?: ReviewEditorElement;
+  @query('.g-sticky') private stickyBlock?: HTMLElement;
+  /**
+   * Height of the sticky review toolbar and hint strip, measured as they
+   * wrap and grow, so the editor scrolls the caret clear of them.
+   */
+  @state() private stickyInset = 0;
+  private stickyObserver: ResizeObserver | null = null;
+  private stickyObserved: HTMLElement | null = null;
+  /** The view of the graphical review page (experiment web.artifact_review_editor). */
+  @state() private reviewView: ReviewView = 'graphical';
+  /** The editor chunk: not requested, loading, loaded, or failed. */
+  @state() private editorLoad: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
+  /** The size class of the text under review; null while it is worked out. */
+  @state() private reviewSize: ReviewSize | null = null;
+  /** The reviewer confirmed opening this large document in the graphical view. */
+  private largeConfirmed = false;
+  /** Counts reviews started, so a size worked out for an earlier one is dropped. */
+  private reviewRuns = 0;
+  /** A choice of the graphical view is being sized or confirmed (one at a time). */
+  @state() private choosingGraphical = false;
+  /** Counts choices of the graphical view, so a stale one cannot release a newer one. */
+  private choiceToken = 0;
+  /** The too-large size came from the block count (the bytes are within the ceiling). */
+  private tooLargeByBlocks = false;
+  /** The hint shown under the toolbar of the graphical review page. */
+  @state() private graphicalHint: ReviewHint | null = null;
+  private hintTimer: ReturnType<typeof setTimeout> | null = null;
+  private preloaded = false;
+
+  static override styles = [
+    untrustedViewFrameStyles,
+    ownerDeletedStyles,
+    css`
+      :host {
+        display: block;
+        padding: 1.5rem;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 1.25rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .meta code,
+      .ref code {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+      }
+      .ref {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+      .version-info .v-state.current {
+        color: var(--sl-color-success-700);
+      }
+      .menu-note {
+        display: block;
+        font-size: 0.75rem;
+        color: var(--sl-color-neutral-500);
+        max-width: 22rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .entry-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .entry-bar .buttons {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .image-frame {
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        padding: 1rem;
+        background: var(--scion-surface, #ffffff);
+        text-align: center;
+      }
+      .image-frame img {
+        max-width: 100%;
+        height: auto;
+      }
+      .notice {
+        margin-bottom: 0.75rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.875rem;
+      }
+      th {
+        text-align: left;
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--sl-color-neutral-600);
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+      td {
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        vertical-align: middle;
+      }
+      td.muted,
+      .muted {
+        color: var(--sl-color-neutral-600);
+      }
+      td.actions-cell {
+        text-align: right;
+        white-space: nowrap;
+      }
+      .file-path {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        word-break: break-all;
+      }
+      .summary {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin: 0.5rem 0;
+      }
+      .files-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+      .archive {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .single-version {
+        text-align: center;
+        padding: 1.5rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .single-version .buttons {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
+        margin-top: 0.5rem;
+      }
+      .more {
+        text-align: center;
+        margin-top: 0.75rem;
+      }
+      .edit-bar {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin-bottom: 0.5rem;
+      }
+      .edit-footer {
+        display: flex;
+        gap: 0.5rem;
+        align-items: flex-end;
+        margin-top: 0.75rem;
+      }
+      .edit-footer sl-input {
+        flex: 1;
+      }
+      sl-tab-group {
+        margin-bottom: 0.5rem;
+      }
+      .review-banner::part(base) {
+        align-items: center;
+      }
+      .review-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        padding: 0.5rem 0;
+      }
+      .review-toolbar .counts {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin-left: 0.25rem;
+      }
+      .review-toolbar .spacer {
+        flex: 1;
+      }
+      .review-toolbar .label {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .review-panes {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 0.75rem;
+        align-items: start;
+      }
+      @media (max-width: 900px) {
+        .review-panes {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .discarded-review {
+        margin-bottom: 0.75rem;
+      }
+      .discarded-review pre {
+        max-height: 12rem;
+        overflow: auto;
+        white-space: pre-wrap;
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+        margin: 0 0 0.5rem;
+      }
+      .review-toolbar .hint {
+        color: var(--sl-color-warning-700, #b45309);
+      }
+      sl-badge.kind-review::part(base) {
+        background: #ede9fe;
+        color: #6d28d9;
+        border-color: #ddd6fe;
+      }
+      sl-badge.kind-publish::part(base) {
+        background: #e0f2fe;
+        color: #075985;
+        border-color: #bae6fd;
+      }
+      .history-note {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin: 0.5rem 0;
+      }
+      .help-panel {
+        max-width: 24rem;
+        padding: 0.75rem 1rem;
+        font-size: 0.8125rem;
+        line-height: 1.5;
+        background: var(--sl-panel-background-color, #fff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        box-shadow: var(--sl-shadow-medium);
+      }
+      .help-panel code {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+        word-break: break-all;
+      }
+      sl-alert {
+        margin-bottom: 0.75rem;
+      }
+      /* Graphical review page (experiment web.artifact_review_editor). */
+      sl-badge.reviewing::part(base) {
+        background: var(--sl-color-violet-100, #ede9fe);
+        color: var(--sl-color-violet-700, #6d28d9);
+        border-color: var(--sl-color-violet-200, #ddd6fe);
+      }
+      .graphical-review {
+        margin-bottom: 0.25rem;
+      }
+      /* The review tools and the hint under them stay in view while the
+         document scrolls under them, at every width. The z-index lifts them
+         over the document only: Shoelace's dialogs, drawers, popups and
+         tooltips stack far above. */
+      /* Sticky offsets count from inside the scroll container's padding
+         (the app shell's .content: 1.5rem, 1rem at 640px and below), so
+         the block rises by that padding to meet the top edge and the text
+         does not show above it. */
+      .g-sticky {
+        position: sticky;
+        top: -1.5rem;
+        z-index: 2;
+        background: var(--scion-bg, #f8fafc);
+      }
+      .g-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.45rem 0.6rem;
+        background: var(--scion-surface, #fff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 0.45rem 0.45rem 0 0;
+      }
+      .g-toolbar .sep {
+        width: 1px;
+        align-self: stretch;
+        background: var(--scion-border, #e2e8f0);
+      }
+      .g-toolbar .spacer {
+        flex: 1;
+      }
+      .g-toolbar .hint {
+        font-size: 0.8125rem;
+        color: var(--sl-color-warning-700, #b45309);
+      }
+      .g-toolbar .narrow {
+        display: none;
+      }
+      .g-toolbar sl-switch {
+        font-size: 0.8125rem;
+      }
+      .view-toggle::part(form-control-label) {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+      }
+      .hint-strip {
+        display: flex;
+        gap: 0.6rem;
+        align-items: flex-start;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-top: 3px solid var(--sl-color-neutral-500, #64748b);
+        border-radius: 0.35rem;
+        margin: 0.45rem 0.6rem;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8125rem;
+        background: var(--scion-surface, #fff);
+        color: var(--scion-text, #334155);
+      }
+      .hint-strip.warning {
+        border-top-color: var(--sl-color-warning-600, #d97706);
+      }
+      .hint-strip .hint-icon {
+        font-size: 1.05rem;
+        margin-top: 0.1rem;
+        color: var(--sl-color-neutral-500, #64748b);
+      }
+      .hint-strip .hint-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .hint-actions {
+        margin-top: 0.3rem;
+      }
+      .g-work {
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-top: none;
+        border-radius: 0 0 0.45rem 0.45rem;
+        background: var(--scion-surface, #fff);
+        min-height: 20rem;
+      }
+      .g-work scion-code-editor {
+        display: block;
+      }
+      .skeleton {
+        padding: 1.2rem 2rem;
+      }
+      .skeleton div {
+        height: 0.8rem;
+        border-radius: 0.3rem;
+        background: var(--scion-border, #e2e8f0);
+        margin-bottom: 0.7rem;
+      }
+      .help-panel p {
+        margin: 0 0 0.5rem;
+      }
+      .help-panel .help-sub {
+        font-size: 0.6875rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--sl-color-neutral-600);
+        margin-top: 0.5rem;
+      }
+      .help-panel table {
+        border-collapse: collapse;
+        margin: 0.2rem 0;
+      }
+      .help-panel td {
+        padding: 0.1rem 0.75rem 0.1rem 0;
+      }
+      .help-panel kbd {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.6875rem;
+        border: 1px solid var(--scion-border, #cbd5e1);
+        border-bottom-width: 2px;
+        border-radius: 0.25rem;
+        padding: 0 0.3rem;
+      }
+      @media (max-width: 640px) {
+        .g-sticky {
+          top: -1rem;
+        }
+        .g-toolbar {
+          gap: 0.3rem;
+          padding: 0.4rem;
+        }
+        /* Visually hidden, still the buttons' accessible names. */
+        .g-toolbar .lbl {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip: rect(0 0 0 0);
+          white-space: nowrap;
+        }
+        .g-toolbar .narrow {
+          display: inline;
+        }
+      }
+      /* Comment is the only way to comment by touch: a tap target of at
+         least 44px on phones and touch screens. */
+      @media (max-width: 640px), (pointer: coarse) {
+        .g-toolbar sl-button.comment {
+          --sl-input-height-small: 2.75rem;
+        }
+      }
+      .download-state,
+      .error-state,
+      .loading-state {
+        text-align: center;
+        padding: 3rem;
+        color: var(--sl-color-neutral-500);
+      }
+      .error-state sl-icon {
+        font-size: 2rem;
+        color: var(--sl-color-danger-500);
+        margin-bottom: 0.5rem;
+      }
+    `,
+  ];
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // Comment notes go in a margin when the viewport is at least 1100px
+    // wide, under their reference otherwise (approved mock).
+    if (typeof window.matchMedia === 'function') {
+      this.wideQuery = window.matchMedia(WIDE_NOTES_QUERY);
+      this.wideViewport = this.wideQuery.matches;
+      this.wideQuery.addEventListener?.('change', this.onWideChange);
+      this.wideReviewQuery = window.matchMedia(WIDE_REVIEW_NOTES_QUERY);
+      this.wideReviewViewport = this.wideReviewQuery.matches;
+      this.wideReviewQuery.addEventListener?.('change', this.onWideReviewChange);
+    }
+    const pagePath = this.pageData?.path || window.location.pathname + window.location.search;
+    this.origin = artifactOriginOf(pagePath);
+    const parsed = parseArtifactPagePath(pagePath);
+    if (parsed) {
+      this.projectId = parsed.projectId;
+      this.artifactId = parsed.id;
+      this.seq = parsed.seq;
+    }
+    if (!isFeatureEnabled(ARTIFACTS_FLAG) || !this.artifactId) {
+      this.loading = false;
+      this.notFound = true;
+      return;
+    }
+    document.addEventListener('visibilitychange', this.onVisibility);
+    this.versionsCheckedAt = Date.now();
+    void this.load();
+  }
+
+  private get versionPath(): string {
+    const id = `/api/v1/artifacts/${encodeURIComponent(this.artifactId)}`;
+    return this.seq > 0 ? `${id}/versions/${this.seq}` : id;
+  }
+
+  private async load(): Promise<void> {
+    const gen = ++this.loadGen;
+    this.viewGen++;
+    this.loading = true;
+    this.error = null;
+    this.notFound = false;
+    this.text = null;
+    this.view = null;
+    this.viewError = null;
+    this.viewExpired = false;
+    this.crossProjectSharing = false;
+    if (this.viewTimer) clearTimeout(this.viewTimer);
+    this.viewTimer = null;
+    try {
+      const res = await apiFetch(this.versionPath);
+      if (gen !== this.loadGen) return;
+      if (res.status === 404) {
+        this.notFound = true;
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as ArtifactResponse;
+      if (gen !== this.loadGen) return;
+      this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
+      dispatchPageTitle(this, data.artifact.title, 'Artifacts');
+      const version = data.version;
+      this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
+      this.resolveNames();
+      void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
+      const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
+      if ((kind === 'markdown' || kind === 'text') && this.entry) {
+        if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
+          await this.loadText(this.entry, gen);
+        }
+      }
+      if (kind === 'html' && version && gen === this.loadGen) {
+        void this.loadView(version.seq);
+      }
+      if (gen === this.loadGen && this.graphicalReview && this.canReview && !this.preloaded) {
+        this.preloaded = true;
+        preloadReviewEditor();
+      }
+    } catch (err) {
+      if (gen !== this.loadGen) return;
+      console.error('Failed to load artifact:', err);
+      this.error = err instanceof Error ? err.message : 'Failed to load artifact';
+    } finally {
+      if (gen === this.loadGen) this.loading = false;
+    }
+  }
+
+  /** Reloads the artifact and its versions in place (ptone/scion#6851). */
+  private refresh = (): void => {
+    if (this.refreshing || this.editing || this.reviewing || this.publishOpen) return;
+    this.refreshing = true;
+    this.versionsCheckedAt = Date.now();
+    void this.refreshInPlace().finally(() => {
+      this.refreshing = false;
+    });
+  };
+
+  /**
+   * Refresh's reload (ptone/scion#6851): the page stays on screen. The
+   * artifact and, for a text entry, its text are read first and applied
+   * together, so the version shown and its text never come from different
+   * loads. The result is dropped when an edit, a review or an upload started
+   * while it ran (their buttons are disabled meanwhile), or a newer load
+   * began. A
+   * failure is reported in a toast; the page keeps what it showed.
+   */
+  private async refreshInPlace(): Promise<void> {
+    const gen = ++this.loadGen;
+    // Dropped once anything that publishes from the shown version started.
+    const stale = (): boolean =>
+      gen !== this.loadGen || this.editing || this.reviewing || this.publishOpen;
+    try {
+      const res = await apiFetch(this.versionPath);
+      if (stale()) return;
+      if (res.status === 404) {
+        this.notFound = true;
+        return;
+      }
+      if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      const data = (await res.json()) as ArtifactResponse;
+      if (stale()) return;
+      const version = data.version;
+      const entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
+      const kind = entry ? rendererFor(entry.mediaType) : 'download';
+      let text: string | null = null;
+      const inline = entry !== null && entry.size <= MAX_INLINE_TEXT_BYTES;
+      if ((kind === 'markdown' || kind === 'text') && inline) {
+        const r = await apiFetch(artifactFileUrl(this.artifactId, version!.seq, entry.path, true));
+        if (!r.ok) throw new Error(await extractApiError(r, `HTTP ${r.status}`));
+        text = await r.text();
+        if (stale()) return;
+      }
+      // Apply the version, its entry and its text together.
+      this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
+      dispatchPageTitle(this, data.artifact.title, 'Artifacts');
+      this.entry = entry;
+      this.text = text;
+      this.resolveNames();
+      void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
+      if (kind === 'html' && version) {
+        void this.loadView(version.seq);
+      } else {
+        this.viewGen++;
+        if (this.viewTimer) clearTimeout(this.viewTimer);
+        this.viewTimer = null;
+        this.view = null;
+        this.viewError = null;
+        this.viewExpired = false;
+      }
+    } catch (err) {
+      if (gen !== this.loadGen) return;
+      console.error('Failed to refresh artifact:', err);
+      const message = err instanceof Error ? err.message : 'Failed to refresh';
+      showToast(`Could not refresh: ${message}`, 'danger');
+    }
+  }
+
+  /** When the version list was last read by a Refresh or a return to the tab. */
+  private versionsCheckedAt = 0;
+
+  /**
+   * A return to the tab re-reads the version list (at most every 30 s), so
+   * a version published meanwhile shows in the list and the Review pending
+   * badge (ptone/scion#6851) without reloading the page. Nothing is re-read
+   * while editing or reviewing.
+   */
+  private onVisibility = (): void => {
+    if (document.visibilityState !== 'visible' || !this.data || this.loading) return;
+    if (this.editing || this.reviewing || this.refreshing) return;
+    if (Date.now() - this.versionsCheckedAt < VERSIONS_RECHECK_MS) return;
+    this.versionsCheckedAt = Date.now();
+    void this.loadVersions(0, this.loadGen);
+  };
+
+  private async loadText(file: ArtifactFile, gen: number): Promise<void> {
+    const seq = this.data?.version?.seq ?? 0;
+    const res = await apiFetch(artifactFileUrl(this.artifactId, seq, file.path, true));
+    if (!res.ok) {
+      throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+    }
+    const text = await res.text();
+    if (gen === this.loadGen) this.text = text;
+  }
+
+  private async loadView(seq: number): Promise<void> {
+    const gen = ++this.viewGen;
+    if (this.viewTimer) clearTimeout(this.viewTimer);
+    this.viewTimer = null;
+    try {
+      const view = await mintView(this.artifactId, seq);
+      if (gen !== this.viewGen) return;
+      this.view = view;
+      this.viewExpired = false;
+      this.viewError = null;
+      // The view URL stops working when it expires: say so then, and mint a
+      // new one only when the reader asks, so a page in use is not reloaded.
+      const left = Date.parse(view.expiresAt) - Date.now();
+      // setTimeout fires at once for delays over 2^31-1 ms; views last far
+      // less than that, so a longer delay is simply not scheduled.
+      if (Number.isFinite(left) && left <= MAX_TIMER_MS) {
+        this.viewTimer = setTimeout(
+          () => {
+            this.viewExpired = true;
+          },
+          Math.max(0, left)
+        );
+      }
+    } catch (err) {
+      if (gen !== this.viewGen) return;
+      this.viewError = err instanceof Error ? err.message : 'Could not open the view';
+    }
+  }
+
+  override disconnectedCallback(): void {
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    super.disconnectedCallback();
+    this.heartbeat?.stop();
+    this.heartbeat = null;
+    if (this.viewTimer) clearTimeout(this.viewTimer);
+    this.viewTimer = null;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = null;
+    this.clearHint();
+    this.wideQuery?.removeEventListener?.('change', this.onWideChange);
+    this.wideQuery = null;
+    this.wideReviewQuery?.removeEventListener?.('change', this.onWideReviewChange);
+    this.wideReviewQuery = null;
+    this.stickyObserver?.disconnect();
+    this.stickyObserver = null;
+    this.stickyObserved = null;
+  }
+
+  override updated(changed: PropertyValues<this>): void {
+    super.updated(changed);
+    this.observeSticky();
+    // reviewing and artifactId are private state, so they are not keys of
+    // PropertyValues<this>. A new artifactId moves a running heartbeat.
+    const c = changed as PropertyValues;
+    if (c.has('reviewing') || c.has('artifactId')) this.syncHeartbeat();
+  }
+
+  /**
+   * Starts the review heartbeat when Review mode opens and stops it (ending
+   * the session on the hub) when it closes, whichever way it closes: Save,
+   * Cancel, a reload, or leaving the page. Only while the open-review
+   * check is on (ptone/scion#6849); the hub decides the check itself.
+   */
+  private syncHeartbeat(): void {
+    const want =
+      this.reviewing && isFeatureEnabled(ARTIFACTS_OPEN_REVIEW_CHECK_FLAG) && !!this.artifactId;
+    // A heartbeat for another artifact (the page was reused for a new one
+    // while reviewing) ends its session before a new one starts.
+    if (this.heartbeat && this.heartbeat.artifactId !== this.artifactId) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
+    if (want && !this.heartbeat) {
+      this.heartbeat = new ReviewHeartbeat({
+        artifactId: this.artifactId,
+        state: () => ({ base: this.data?.version?.seq ?? 0, text: this.reviewText }),
+      });
+      this.heartbeat.start();
+    } else if (!want && this.heartbeat) {
+      this.heartbeat.stop();
+      this.heartbeat = null;
+    }
+  }
+
+  /** Measures the sticky review block whenever a new one renders. */
+  private observeSticky(): void {
+    const block = this.stickyBlock ?? null;
+    if (block === this.stickyObserved) return;
+    this.stickyObserver?.disconnect();
+    this.stickyObserved = block;
+    if (!block || typeof ResizeObserver === 'undefined') return;
+    this.stickyObserver ??= new ResizeObserver((entries) => {
+      const last = entries[entries.length - 1];
+      if (last) this.stickyInset = last.target.getBoundingClientRect().height;
+    });
+    this.stickyObserver.observe(block);
+  }
+
+  private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
+    // One call at a time per load: a Load more while pages are still being
+    // read would fetch and append the same pages twice.
+    if (this.versionsLoading && this.versionsLoadingGen === gen) return;
+    this.versionsLoading = true;
+    this.versionsLoadingGen = gen;
+    try {
+      // A page walks ready and discarded versions together, so after a long
+      // run of discarded versions it can hold no ready one. Keep reading
+      // (a few pages at most) until one arrives, so the version picker and
+      // the review state see a ready version.
+      let next = before;
+      for (let extra = 0; ; extra++) {
+        const page = await listVersions(this.artifactId, next);
+        if (gen !== this.loadGen) return;
+        this.versions = next > 0 ? [...this.versions, ...page.versions] : page.versions;
+        for (const x of page.versions) if (x.state === 'ready') this.noteSeq(x.seq);
+        const discarded = page.discarded ?? [];
+        this.discarded = next > 0 ? [...this.discarded, ...discarded] : discarded;
+        this.versionsNext = page.nextBefore ?? 0;
+        if (
+          page.versions.length > 0 ||
+          this.versionsNext <= 0 ||
+          extra >= MAX_EXTRA_VERSION_PAGES
+        ) {
+          break;
+        }
+        next = this.versionsNext;
+      }
+      this.resolveNames();
+      this.versionsError = null;
+    } catch (err) {
+      if (gen !== this.loadGen) return;
+      this.versionsError = err instanceof Error ? err.message : 'Could not load versions';
+    } finally {
+      if (this.versionsLoadingGen === gen) this.versionsLoading = false;
+    }
+  }
+
+  /** Looks up the names of the owner and of the versions' publishers. */
+  private resolveNames(): void {
+    const refs: [string, string][] = [];
+    const a = this.data?.artifact;
+    if (a) refs.push([a.ownerKind, a.ownerRef]);
+    for (const v of this.versions) {
+      if (v.createdByKind && v.createdByRef) refs.push([v.createdByKind, v.createdByRef]);
+    }
+    const me = this.pageData?.user?.id;
+    for (const [kind, ref] of refs) {
+      const key = `${kind}:${ref}`;
+      if (this.names.has(key) || (kind === 'user' && ref === me)) continue;
+      void principalName(kind, ref).then((name) => {
+        if (name && this.isConnected && !this.names.has(key)) {
+          this.names = new Map(this.names).set(key, name);
+        }
+      });
+    }
+  }
+
+  /** How a principal is shown: "You", "<name> (agent)", a name, or a short id. */
+  private label(kind: string, ref: string): string {
+    return principalLabel(
+      kind,
+      ref,
+      this.names.get(`${kind}:${ref}`) ?? '',
+      this.pageData?.user?.id
+    );
+  }
+
+  private async copyRef(): Promise<void> {
+    const ref = this.data?.artifact.ref;
+    if (!ref) return;
+    if (await copyToClipboard(ref)) {
+      this.copied = true;
+      setTimeout(() => (this.copied = false), 1500);
+    } else {
+      // Clipboard unavailable; the ref stays visible on the page.
+      showCopyFailedToast();
+    }
+  }
+
+  private get homeProject(): string {
+    return this.data?.artifact.scopeRef || this.projectId;
+  }
+
+  private goToVersion(seq: number): void {
+    const current = this.data?.artifact.currentSeq ?? 0;
+    navigateTo(
+      artifactPagePath(
+        { id: this.artifactId, scopeRef: this.homeProject },
+        seq === current ? 0 : seq,
+        this.origin
+      )
+    );
+  }
+
+  /** The version shown is the current one, so a new version can build on it. */
+  private get showsCurrent(): boolean {
+    const v = this.data?.version;
+    return !!v && v.seq === this.data!.artifact.currentSeq;
+  }
+
+  /**
+   * The caller may publish new versions (GET's canPublish, the hub's own
+   * write decision). Edit, Review and Upload new version all publish a
+   * version, so all are hidden without it.
+   */
+  private get canPublish(): boolean {
+    return !!this.data?.canPublish;
+  }
+
+  /**
+   * The caller may publish reviews only (GET's canReview: a review grant,
+   * ptone/scion#4538). It is offered Review, and not Edit or Upload new
+   * version.
+   */
+  private get canReviewOnly(): boolean {
+    return !this.canPublish && !!this.data?.canReview;
+  }
+
+  /** The entry of the current version is text the page can edit in place. */
+  private get entryEditable(): boolean {
+    const f = this.entry;
+    if (!f || !this.showsCurrent || this.text === null) return false;
+    const kind = rendererFor(f.mediaType);
+    return (kind === 'markdown' || kind === 'text') && f.size <= MAX_INLINE_TEXT_BYTES;
+  }
+
+  /** A deleted owner: the name struck through, and the "(agent)" tag outside it (mock S1, S3). */
+  private goneOwner(kind: string, ref: string): TemplateResult {
+    const name = this.names.get(`${kind}:${ref}`) || shortId(ref);
+    return html`<span class="owner-gone">${name}</span>${kind === 'agent' ? ' (agent)' : ''}`;
+  }
+
+  /** Delete… is offered exactly when the hub reports canRetire. */
+  private get canRetire(): boolean {
+    return this.data?.canRetire === true;
+  }
+
+  /**
+   * Retention… is offered to a caller who may change the expiry, revoke
+   * links and remove grants but is not offered Share: canShare without
+   * canManage (a steward).
+   */
+  private get canRetention(): boolean {
+    return !!this.data?.canShare && !this.data?.canManage;
+  }
+
+  /**
+   * One Manage access button and dialog replace Share and Retention…
+   * (experiment web.artifact_manage_access, ptone/scion#7107).
+   */
+  private get manageAccess(): boolean {
+    return isFeatureEnabled(ARTIFACT_MANAGE_ACCESS_FLAG);
+  }
+
+  /** The capability flags the Manage access dialog reads. */
+  private get accessCaps(): AccessCapabilities {
+    return capabilitiesFrom(this.data);
+  }
+
+  /**
+   * Where the back link goes, and where a delete returns to: the Artifacts
+   * list when the page was opened from it (ptone/scion#6847) or the home
+   * project was deleted, the home project otherwise.
+   */
+  private get backTarget(): { href: string; label: string } {
+    return this.data?.scopeDeleted || this.origin === 'artifacts'
+      ? { href: '/artifacts', label: 'Artifacts' }
+      : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
+  }
+
+  /** After a delete: say so, and go back to where the artifact was listed (mock S8). */
+  private onDeleted(deleted: Artifact): void {
+    this.deleteOpen = false;
+    const target = this.backTarget.href;
+    showToast(`Deleted “${deleted.title}”.`, 'success');
+    navigateTo(target);
+  }
+
+  /** How many versions the artifact has, when every page of them is loaded. */
+  private get knownVersionCount(): number | null {
+    if (this.versionsNext !== 0 || this.versionsError || this.versions.length === 0) return null;
+    return this.versions.length;
+  }
+
+  private get canEdit(): boolean {
+    return this.canPublish && this.entryEditable;
+  }
+
+  /**
+   * Review is offered for a markdown entry of the current version, to a
+   * caller that may publish or may review only.
+   */
+  private get canReview(): boolean {
+    return (
+      (this.canPublish || this.canReviewOnly) &&
+      this.entryEditable &&
+      !!this.entry &&
+      rendererFor(this.entry.mediaType) === 'markdown'
+    );
+  }
+
+  /**
+   * The newest version the page has seen (newestSeqSeen): the artifact's
+   * current one, or a newer one a version list or another source reported
+   * (ptone/scion#6851).
+   */
+  private get latestSeq(): number {
+    return Math.max(this.newestSeqSeen, this.data?.artifact.currentSeq ?? 0);
+  }
+
+  /** Notes a version seq the page has seen to exist (see newestSeqSeen). */
+  noteSeq(seq: number): void {
+    if (seq > this.newestSeqSeen) this.newestSeqSeen = seq;
+  }
+
+  /** The artifact's newest version seen is a review (whichever version is shown). */
+  private get currentIsReview(): boolean {
+    const v = this.data?.version;
+    if (!this.data || !v) return false;
+    const seq = this.latestSeq;
+    if (v.seq === seq) return v.kind === 'review';
+    return this.versions.find((x) => x.seq === seq)?.kind === 'review';
+  }
+
+  /** The version shown is a review. */
+  private get isReview(): boolean {
+    return this.data?.version?.kind === 'review';
+  }
+
+  /** The current version is a review the owner has not answered yet. */
+  private get reviewPendingNow(): boolean {
+    return this.isReview && this.showsCurrent && this.data!.version!.seq === this.latestSeq;
+  }
+
+  /**
+   * The text a review must keep outside its marks: the shown version's
+   * entry, with its own marks rejected when it is itself a review.
+   */
+  private get reviewBaseline(): string {
+    const text = this.text ?? '';
+    return this.isReview ? projectCritic(text, 'clean') : text;
+  }
+
+  private startReview = (): void => {
+    this.reviewText = lfText(this.text);
+    this.reviewPreview = this.reviewText;
+    this.reviewHint = null;
+    this.reviewNotice = null;
+    this.discardedReview = null;
+    this.reviewNote = '';
+    this.reviewError = null;
+    this.criticView = 'marks';
+    this.reviewing = true;
+    this.reviewGraphical = this.graphicalReview;
+    if (this.reviewGraphical) {
+      this.clearHint();
+      this.reviewView = storedReviewView();
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      this.releaseChoice();
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
+    }
+  };
+
+  /**
+   * Works out the size class of the text under review, then opens the
+   * remembered view: a large document opens in the Source view with a
+   * notice, and a too large one cannot use the graphical view. The view
+   * this picks is not stored, so the reviewer's own choice stays for other
+   * documents.
+   */
+  private async sizeReview(text: string, run: number): Promise<void> {
+    const size = await reviewSize(text);
+    if (run !== this.reviewRuns || !this.reviewing) return;
+    this.setReviewSize(size, text);
+    if (size === 'too-large') {
+      this.reviewView = 'source';
+      this.showHint('too-large');
+    } else if (size === 'large' && this.reviewView === 'graphical') {
+      this.reviewView = 'source';
+      this.showHint('large');
+    }
+    if (this.reviewView === 'graphical') void this.ensureEditor();
+  }
+
+  /**
+   * A view chosen with the toggle. The graphical view is sized by the text
+   * as it is now (Source view edits can make it larger): a large document
+   * opens after a confirmation (once per review), and a too large one does
+   * not open at all.
+   */
+  private chooseReviewView(next: ReviewView): void {
+    if (next !== 'graphical') {
+      this.setReviewView(next);
+      return;
+    }
+    // Not while the text is still being sized (a review starting or
+    // restarting), and one choice at a time: another click while one is
+    // sized or confirmed does nothing (no second confirmation).
+    if (this.reviewSize === null || this.choosingGraphical) return;
+    const token = ++this.choiceToken;
+    this.choosingGraphical = true;
+    void this.chooseGraphical().finally(() => {
+      if (token === this.choiceToken) this.choosingGraphical = false;
+    });
+  }
+
+  /** Ends any choice of the graphical view still pending (Cancel, a new or restarted review). */
+  private releaseChoice(): void {
+    this.choiceToken++;
+    this.choosingGraphical = false;
+  }
+
+  /** Records the size class of text, and whether a too-large one came from its blocks. */
+  private setReviewSize(size: ReviewSize, text: string): void {
+    this.reviewSize = size;
+    this.tooLargeByBlocks =
+      size === 'too-large' && new TextEncoder().encode(text).length <= MAX_GRAPHICAL_BYTES;
+  }
+
+  /** chooseReviewView('graphical'), sized by the current text. */
+  private async chooseGraphical(): Promise<void> {
+    const run = this.reviewRuns;
+    for (;;) {
+      const text = this.reviewText;
+      // Bytes first, without waiting: over the ceiling nothing else matters.
+      if (new TextEncoder().encode(text).length > MAX_GRAPHICAL_BYTES) {
+        this.setReviewSize('too-large', text);
+        this.showHint('too-large');
+        return;
+      }
+      const size = await reviewSize(text);
+      if (run !== this.reviewRuns || !this.reviewing) return;
+      // Edited while it was being sized: size the text as it is now.
+      if (this.reviewText !== text) continue;
+      this.setReviewSize(size, text);
+      if (size === 'too-large') {
+        this.showHint('too-large');
+        return;
+      }
+      if (size === 'large' && !this.largeConfirmed) {
+        const ok = await showConfirm(LARGE_REVIEW_CONFIRM, {
+          title: 'Large document',
+          confirmText: 'Open graphical view',
+          variant: 'primary',
+        });
+        if (!ok || run !== this.reviewRuns || !this.reviewing) return;
+        // Edited while the question was open: size it again.
+        if (this.reviewText !== text) continue;
+        this.largeConfirmed = true;
+      }
+      this.setReviewView('graphical');
+      return;
+    }
+  }
+
+  /**
+   * After a pause in typing in the Source view: the toggle follows the
+   * byte ceiling (disabled over it). Bytes only, so typing in a large
+   * document does not wait for a block count; blocks are counted when the
+   * graphical view is chosen. A too-large size that came from the block
+   * count is kept until the blocks are counted again, here: the toggle is
+   * disabled, so this is the only place that can find the text smaller.
+   * The view and the hints are left as they are.
+   */
+  private refreshReviewSize(text: string): void {
+    const bytes = new TextEncoder().encode(text).length;
+    if (bytes > MAX_GRAPHICAL_BYTES) {
+      this.setReviewSize('too-large', text);
+    } else if (this.reviewSize === 'too-large' && this.tooLargeByBlocks) {
+      const run = this.reviewRuns;
+      void reviewSize(text).then((size) => {
+        if (run !== this.reviewRuns || !this.reviewing || this.reviewText !== text) return;
+        this.setReviewSize(size, text);
+      });
+    } else if (this.reviewSize === 'too-large') {
+      this.setReviewSize(bytes > LARGE_REVIEW_BYTES ? 'large' : 'normal', text);
+    }
+  }
+
+  /** The graphical review page is on (experiment web.artifact_review_editor). */
+  private get graphicalReview(): boolean {
+    return isFeatureEnabled(ARTIFACT_REVIEW_EDITOR_FLAG);
+  }
+
+  /** Loads the editor chunk; on failure, falls back to the source view. */
+  private async ensureEditor(): Promise<void> {
+    if (this.editorLoad === 'ready') return;
+    this.editorLoad = 'loading';
+    try {
+      await loadReviewEditor();
+      this.editorLoad = 'ready';
+    } catch (err) {
+      console.error('Failed to load the review editor:', err);
+      this.editorFailed();
+    }
+  }
+
+  private editorFailed(): void {
+    this.editorLoad = 'failed';
+    this.reviewView = 'source';
+    this.showHint('load-failed');
+  }
+
+  private showHint(hint: ReviewHint): void {
+    this.clearHint();
+    this.graphicalHint = hint;
+    this.hintTimer = setTimeout(() => {
+      this.hintTimer = null;
+      this.graphicalHint = null;
+    }, REVIEW_HINT_MS);
+  }
+
+  private clearHint(): void {
+    if (this.hintTimer) clearTimeout(this.hintTimer);
+    this.hintTimer = null;
+    this.graphicalHint = null;
+  }
+
+  /**
+   * Takes the graphical editor's current text into reviewText. Returns
+   * false (and shows the hint) when the editor cannot write its document,
+   * so the caller stops and leaves the older text unused.
+   */
+  private takeGraphicalText(): boolean {
+    const ed = this.graphicalEditor;
+    if (!ed) return true;
+    const t = ed.flush();
+    if (t === null) {
+      // While an input method composition runs, its text is not written yet.
+      this.showHint(ed.isComposing() ? 'composing' : 'generic');
+      return false;
+    }
+    this.reviewText = t;
+    return true;
+  }
+
+  /** Switches between the graphical and source views, remembering the choice. */
+  private setReviewView(next: ReviewView): void {
+    if (next === this.reviewView) return;
+    // Own suggestions are the reviewer's only until the text returns from
+    // the Source view, where it is opened again (every mark then earlier).
+    let ownMarks = false;
+    if (next === 'source') {
+      ownMarks = this.graphicalEditor?.hasOwnMarks() ?? false;
+      if (!this.takeGraphicalText()) return;
+    } else {
+      void this.ensureEditor();
+    }
+    if (this.graphicalHint !== 'load-failed' || next === 'graphical') this.clearHint();
+    this.reviewView = next;
+    storeReviewView(next);
+    if (ownMarks) this.showHint('source-own');
+  }
+
+  /** Ctrl+Alt+M (and Cmd+Alt+M) comments in the source view too. */
+  private onReviewKeydown = (e: KeyboardEvent): void => {
+    if (this.reviewView !== 'source') return;
+    if (!(e.ctrlKey || e.metaKey) || !e.altKey || e.code !== 'KeyM') return;
+    e.preventDefault();
+    this.applyTool('comment');
+  };
+
+  private applyTool(tool: CriticTool): void {
+    const editor = this.reviewEditor;
+    const sel = editor?.getSelection();
+    if (!editor || !sel) return;
+    // Selection offsets are into the editor's content: check against it.
+    const blocked = criticToolBlocked(tool, sel, editor.getContent());
+    if (blocked) {
+      this.reviewHint = blocked;
+      return;
+    }
+    const edit = criticToolEdit(tool, sel);
+    if (!edit) return;
+    editor.replaceRange(edit.from, edit.to, edit.insert, edit.selectFrom, edit.selectTo);
+  }
+
+  private async saveReview(): Promise<void> {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) return;
+    if (this.reviewGraphical && this.reviewView === 'graphical' && !this.takeGraphicalText())
+      return;
+    this.reviewBusy = true;
+    this.reviewError = null;
+    try {
+      const files: PublishFile[] = v.files
+        .filter((x) => !isRemoteFile(x))
+        .map((x) =>
+          x.path === f.path
+            ? { path: x.path, data: new Blob([this.reviewText], { type: f.mediaType }) }
+            : { path: x.path, size: x.size, sha256: x.sha256 }
+        );
+      await publishFiles({
+        artifactId: this.artifactId,
+        kind: 'review',
+        base: v.seq,
+        entry: v.entryPath,
+        note: this.reviewNote.trim() || undefined,
+        files,
+        resume: this.reviewPending,
+      });
+      this.reviewPending = null;
+      this.reviewing = false;
+      this.showCurrentVersion();
+    } catch (err) {
+      this.reviewError = publishErrorMessage(err);
+      this.reviewPending = err instanceof PublishError ? err.pending : null;
+      if (err instanceof PublishError && err.code === 'stale_review') {
+        // The review was discarded. Restart it from the current version's
+        // text (keeping the old buffer would let a save drop marks that
+        // others added meanwhile); the discarded text stays readable.
+        this.reviewPending = null;
+        void this.reloadForReview(this.reviewText);
+      }
+    } finally {
+      this.reviewBusy = false;
+    }
+  }
+
+  /**
+   * Reloads the artifact after a stale review and restarts Review mode on
+   * the current version, keeping discarded (the reviewer's text) read-only.
+   * When the current version cannot be reviewed here, Review mode closes
+   * with a notice.
+   */
+  private async reloadForReview(discarded: string): Promise<void> {
+    this.seq = 0;
+    this.versions = [];
+    this.discarded = [];
+    this.expandedGaps = new Set();
+    this.versionsNext = 0;
+    this.clearPreviewTimer();
+    // A size or confirmation still pending is for the text being
+    // discarded: drop it, and keep the graphical editor hidden until the
+    // reloaded text is sized.
+    if (this.reviewGraphical) {
+      this.reviewRuns++;
+      this.reviewSize = null;
+      this.releaseChoice();
+    }
+    await this.load();
+    if (!this.reviewing) return;
+    // discarded is the buffer of the review just refused. After a second
+    // stale review it replaces the first: it holds the reviewer's latest
+    // work, which already started from the text of the earlier one.
+    // A failed reload leaves no text, so canReview is false then too.
+    if (!this.canReview) {
+      this.reviewing = false;
+      this.reviewNotice = this.staleReviewNotice();
+      this.discardedReview = discarded;
+      return;
+    }
+    this.reviewText = lfText(this.text);
+    this.reviewPreview = this.reviewText;
+    this.discardedReview = discarded;
+    // The review restarted on the current version: the heartbeat follows.
+    this.heartbeat?.rebase();
+    // The current version may be larger: size it as a new review does.
+    if (this.reviewGraphical) {
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
+    }
+  }
+
+  /**
+   * The notice when Review mode closes after a stale review because the
+   * reloaded current version cannot be reviewed here: it could not be
+   * loaded, the caller may no longer publish versions, or it is not a
+   * markdown entry the page can review.
+   */
+  private staleReviewNotice(): string {
+    if (this.error || this.notFound) {
+      return 'Your review was not saved and the current version could not be loaded; your text is below.';
+    }
+    if (!this.canPublish && !this.canReviewOnly) {
+      return 'Your review was not saved: you can no longer publish versions of this artifact. Your text is below.';
+    }
+    return 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
+  }
+
+  private clearPreviewTimer(): void {
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = null;
+  }
+
+  /** Leaves Review mode without saving. */
+  private cancelReview = (): void => {
+    this.clearPreviewTimer();
+    this.releaseChoice();
+    this.reviewing = false;
+    this.discardedReview = null;
+  };
+
+  private async copyDiscarded(): Promise<void> {
+    if (this.discardedReview === null) return;
+    // On failure the text stays visible and selectable.
+    await copyWithToast(this.discardedReview);
+  }
+
+  /** Records an edit of the review text; the preview follows after a pause. */
+  private onReviewInput(text: string): void {
+    this.reviewText = text;
+    this.reviewHint = null;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = setTimeout(() => {
+      this.previewTimer = null;
+      this.reviewPreview = this.reviewText;
+      if (this.reviewGraphical) this.refreshReviewSize(this.reviewText);
+    }, REVIEW_PREVIEW_DELAY_MS);
+  }
+
+  /** The version a review shown on the page was made against, when known. */
+  private get reviewedSeq(): number | null {
+    const v = this.data?.version;
+    if (!v || v.kind !== 'review') return null;
+    return this.versions.find((x) => x.seq < v.seq)?.seq ?? null;
+  }
+
+  /** The margin note of a preview in view mode, for the version reviewed as base. */
+  private criticSideNote(base: number | null): string {
+    if (this.criticView !== 'clean' || base === null) return '';
+    return `Clean: all marks rejected. Matches the version under review (v${base}).`;
+  }
+
+  private startEdit = (): void => {
+    this.editText = this.text ?? '';
+    this.editNote = '';
+    this.editError = null;
+    this.editing = true;
+  };
+
+  private async publishEdit(force = false): Promise<void> {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) return;
+    this.editBusy = true;
+    this.editError = null;
+    this.reviewOpen = null;
+    try {
+      const files: PublishFile[] = v.files
+        .filter((x) => !isRemoteFile(x))
+        .map((x) =>
+          x.path === f.path
+            ? { path: x.path, data: new Blob([this.editText], { type: f.mediaType }) }
+            : { path: x.path, size: x.size, sha256: x.sha256 }
+        );
+      const res = await publishFiles({
+        artifactId: this.artifactId,
+        entry: v.entryPath,
+        note: this.editNote.trim() || undefined,
+        files,
+        resume: this.editPending,
+        force,
+      });
+      this.editPending = null;
+      for (const w of res.warnings ?? []) showToast(w, 'warning');
+      this.showCurrentVersion();
+    } catch (err) {
+      if (err instanceof ReviewOpenError) {
+        // Nothing was created: ask whether to wait or publish anyway. The
+        // edit stays in the editor while the dialog is open.
+        this.reviewOpen = { reviews: err.reviews, truncated: err.truncated };
+        return;
+      }
+      this.editError = publishErrorMessage(err);
+      if (err instanceof PublishError) this.editPending = err.pending;
+    } finally {
+      this.editBusy = false;
+    }
+  }
+
+  private onPublished = (): void => {
+    this.publishOpen = false;
+    this.showCurrentVersion();
+  };
+
+  /**
+   * Shows the artifact's current version after a publish. The router does
+   * nothing when the target is the page already shown, so in that case the
+   * page reloads itself.
+   */
+  private showCurrentVersion(): void {
+    const target = artifactPagePath(
+      { id: this.artifactId, scopeRef: this.homeProject },
+      0,
+      this.origin
+    );
+    this.editing = false;
+    this.reviewing = false;
+    if (stripBasePath(window.location.pathname) + window.location.search !== target) {
+      navigateTo(target);
+      return;
+    }
+    this.seq = 0;
+    this.tab = 'preview';
+    this.versions = [];
+    this.discarded = [];
+    this.expandedGaps = new Set();
+    this.versionsNext = 0;
+    void this.load();
+  }
+
+  override render(): TemplateResult | typeof nothing {
+    if (this.loading) {
+      return html`<div class="loading-state"><sl-spinner></sl-spinner></div>`;
+    }
+    if (this.notFound) {
+      return html`${this.renderReviewNotice()}<scion-page-404></scion-page-404>`;
+    }
+    if (this.error) {
+      return html`
+        ${this.renderReviewNotice()}
+        <div class="error-state">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <p>${this.error}</p>
+          <sl-button size="small" @click=${(): void => void this.load()}>Retry</sl-button>
+        </div>
+      `;
+    }
+    if (!this.data) return nothing;
+    return html`
+      ${this.renderHeader()}
+      ${this.editing
+        ? this.renderEditor()
+        : this.reviewing
+          ? this.reviewGraphical
+            ? this.renderGraphicalReview()
+            : this.renderReview()
+          : html`${this.renderReviewNotice()}${this.renderReviewBanner()}${this.renderTabs()}`}
+      <scion-artifact-publish-dialog
+        .artifactId=${this.artifactId}
+        ?open=${this.publishOpen}
+        @artifact-published=${this.onPublished}
+        @artifact-publish-closed=${(): void => {
+          this.publishOpen = false;
+        }}
+      ></scion-artifact-publish-dialog>
+      ${this.manageAccess && showManageAccess(this.accessCaps)
+        ? html`<scion-artifact-share-dialog
+            class="access-dialog"
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${'manage'}
+            .capabilities=${this.accessCaps}
+            ?open=${this.accessOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.accessOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
+      ${!this.manageAccess && this.data?.canManage
+        ? html`<scion-artifact-share-dialog
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${'share'}
+            ?open=${this.shareOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.shareOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
+      ${!this.manageAccess && this.canRetention
+        ? html`<scion-artifact-share-dialog
+            class="retention-dialog"
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${'retention'}
+            .shareAuthority=${this.data.shareAuthority ?? ''}
+            ?open=${this.retentionOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.retentionOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
+      ${this.canRetire
+        ? html`<scion-artifact-delete-dialog
+            .artifact=${this.data.artifact}
+            ?open=${this.deleteOpen}
+            ?countsAvailable=${!!this.data.canShare}
+            .versionCount=${this.knownVersionCount}
+            @artifact-deleted=${(e: CustomEvent<Artifact>): void => this.onDeleted(e.detail)}
+            @artifact-delete-closed=${(): void => {
+              this.deleteOpen = false;
+            }}
+          ></scion-artifact-delete-dialog>`
+        : nothing}
+      ${this.data?.canManage
+        ? html`<scion-artifact-move-dialog
+            .artifact=${this.data.artifact}
+            ?open=${this.moveOpen}
+            ?homeDeleted=${this.data.scopeDeleted === true}
+            @artifact-moved=${(e: CustomEvent<Artifact>): void => this.onMoved(e.detail)}
+            @artifact-move-closed=${(): void => {
+              this.moveOpen = false;
+            }}
+          ></scion-artifact-move-dialog>`
+        : nothing}
+    `;
+  }
+
+  /** Reads whether cross-project sharing is on; any failure leaves it off. */
+  private async loadCrossProjectSharing(gen: number): Promise<void> {
+    try {
+      const { crossProjectSharing } = await listGrants(this.artifactId);
+      if (gen === this.loadGen) this.crossProjectSharing = crossProjectSharing;
+    } catch {
+      // Move… stays hidden; the Share dialog reports its own load errors.
+    }
+  }
+
+  /** After a move the artifact lives under its new home project: open it there. */
+  private onMoved(moved: Artifact): void {
+    this.moveOpen = false;
+    navigateTo(artifactPagePath(moved, 0, this.origin));
+  }
+
+  private versionLabel(v: ArtifactVersion | undefined): string {
+    if (!v) return 'none';
+    return v.seq === this.latestSeq ? `v${v.seq} (current)` : `v${v.seq}`;
+  }
+
+  /** "Review by Alice", or the kind alone when the author is not known (ptone/scion#6852). */
+  private kindAndAuthor(v: ArtifactVersion): string {
+    const by = this.createdBy(v);
+    return by ? `${versionKindLabel(v.kind)} by ${by}` : versionKindLabel(v.kind);
+  }
+
+  /**
+   * The shown version's facts in the header (ptone/scion#6852): its number,
+   * whether it is the current version, its kind and author, and its date.
+   */
+  private renderVersionInfo(v: ArtifactVersion): TemplateResult {
+    const latest = this.latestSeq;
+    const state = v.seq === latest ? 'current' : `older, current is v${latest}`;
+    return html`<span class="version-info">
+      Version: <strong class="v-seq">v${v.seq}</strong> ·
+      <span class=${v.seq === latest ? 'v-state current' : 'v-state older'}>${state}</span> ·
+      <span class="v-kind">${this.kindAndAuthor(v)}</span> ·
+      <span class="v-date">${formatInstant(v.createdAt)}</span>
+    </span>`;
+  }
+
+  private renderVersionMenu(): TemplateResult {
+    const v = this.data!.version;
+    return html`
+      <sl-dropdown>
+        <sl-button slot="trigger" size="small" caret> Version ${this.versionLabel(v)} </sl-button>
+        <sl-menu
+          @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void =>
+            this.goToVersion(Number(e.detail.item.value))}
+        >
+          ${this.versionsError
+            ? html`<sl-menu-item disabled>${this.versionsError}</sl-menu-item>`
+            : this.versions.map(
+                (x) => html`
+                  <sl-menu-item value=${String(x.seq)} ?checked=${x.seq === v?.seq} type="checkbox">
+                    ${this.versionLabel(x)} · ${this.kindAndAuthor(x)} ·
+                    ${formatInstant(x.createdAt)}
+                    ${x.note ? html`<span class="menu-note">${x.note}</span>` : nothing}
+                  </sl-menu-item>
+                `
+              )}
+        </sl-menu>
+      </sl-dropdown>
+    `;
+  }
+
+  private renderHeader(): TemplateResult {
+    const { artifact: a, version: v } = this.data!;
+    const owner = this.label(a.ownerKind, a.ownerRef);
+    const f = this.entry;
+    const ownFiles = v ? v.files.filter((x) => !isRemoteFile(x)) : [];
+    // Every action needs a version, edit rights or (for Share) the right
+    // to manage the artifact; all are hidden while editing or reviewing.
+    const accessActions = this.manageAccess
+      ? showManageAccess(this.accessCaps)
+      : !!this.data?.canManage || this.canRetention;
+    const hasActions =
+      !this.editing &&
+      !this.reviewing &&
+      (!!v || this.canEdit || this.canReview || accessActions || this.canRetire);
+    // A deleted home project has no page: go back to the artifacts list
+    // instead (ptone/scion#4588).
+    const back = this.backTarget;
+    return html`
+      <scion-detail-header heading=${a.title}>
+        <scion-back-link slot="back" href=${back.href}>${back.label}</scion-back-link>
+        <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
+        ${this.currentIsReview
+          ? html`<sl-badge variant="warning" pill>
+              <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
+            </sl-badge>`
+          : nothing}
+        ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
+        ${this.reviewing && this.reviewGraphical
+          ? html`<sl-badge class="reviewing" pill>
+              <sl-icon name="chat-text"></sl-icon>&nbsp;Reviewing
+            </sl-badge>`
+          : nothing}
+        <div slot="meta" class="meta">
+          <span>Owner: ${a.ownerDeleted ? this.goneOwner(a.ownerKind, a.ownerRef) : owner}</span>
+          ${v ? this.renderVersionInfo(v) : nothing}
+          ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
+          <span>Updated: ${formatInstant(a.updatedAt)}</span>
+          <span class="expires"
+            ><sl-icon name="clock"></sl-icon> Expires:
+            ${a.expiresAt ? formatInstant(a.expiresAt) : 'Never'}</span
+          >
+          <span class="ref">
+            <code>${v ? v.ref : a.ref}</code>
+            <sl-tooltip content=${this.copied ? 'Copied' : 'Copy reference'}>
+              <sl-icon-button
+                name="clipboard"
+                label="Copy reference"
+                @click=${(): void => void this.copyRef()}
+              ></sl-icon-button>
+            </sl-tooltip>
+          </span>
+        </div>
+        ${hasActions
+          ? html`
+              <div slot="actions" class="header-actions">
+                <sl-tooltip content="Reload the artifact and its versions">
+                  <sl-button
+                    size="small"
+                    class="refresh"
+                    ?loading=${this.refreshing}
+                    @click=${this.refresh}
+                  >
+                    <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                    Refresh
+                  </sl-button>
+                </sl-tooltip>
+                ${v ? this.renderVersionMenu() : nothing}
+                ${this.canEdit
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startEdit}
+                    >
+                      <sl-icon slot="prefix" name="pencil"></sl-icon>
+                      Edit
+                    </sl-button>`
+                  : nothing}
+                ${this.canReview
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startReview}
+                    >
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      Review
+                    </sl-button>`
+                  : nothing}
+                ${this.manageAccess && showManageAccess(this.accessCaps)
+                  ? html`<sl-button
+                      size="small"
+                      class="manage-access"
+                      @click=${(): void => {
+                        this.accessOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+                      Manage access
+                    </sl-button>`
+                  : nothing}
+                ${this.manageAccess
+                  ? nothing
+                  : this.data!.canManage
+                    ? html`<sl-button
+                        size="small"
+                        @click=${(): void => {
+                          this.shareOpen = true;
+                        }}
+                      >
+                        <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                        Share
+                      </sl-button>`
+                    : nothing}
+                ${!this.manageAccess && this.canRetention
+                  ? html`<sl-button
+                      size="small"
+                      class="retention"
+                      @click=${(): void => {
+                        this.retentionOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="clock"></sl-icon>
+                      Retention…
+                    </sl-button>`
+                  : nothing}
+                ${this.data!.canManage && this.crossProjectSharing
+                  ? html`<sl-button
+                      size="small"
+                      @click=${(): void => {
+                        this.moveOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="folder-symlink"></sl-icon>
+                      Move…
+                    </sl-button>`
+                  : nothing}
+                ${this.canRetire
+                  ? html`<sl-button
+                      size="small"
+                      class="delete"
+                      variant="danger"
+                      outline
+                      @click=${(): void => {
+                        this.deleteOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="trash"></sl-icon>
+                      Delete…
+                    </sl-button>`
+                  : nothing}
+                ${v && f && ownFiles.length === 1
+                  ? html`<sl-button
+                      size="small"
+                      href=${artifactFileUrl(this.artifactId, v.seq, f.path)}
+                      download=${baseName(f.path)}
+                    >
+                      <sl-icon slot="prefix" name="download"></sl-icon>
+                      Download
+                    </sl-button>`
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
+    `;
+  }
+
+  private renderTabs(): TemplateResult {
+    return html`
+      <sl-tab-group
+        @sl-tab-show=${(e: CustomEvent<{ name: string }>): void => {
+          this.tab = e.detail.name as Tab;
+        }}
+      >
+        <sl-tab slot="nav" panel="preview" ?active=${this.tab === 'preview'}>Preview</sl-tab>
+        <sl-tab slot="nav" panel="files" ?active=${this.tab === 'files'}>Files</sl-tab>
+        <sl-tab slot="nav" panel="history" ?active=${this.tab === 'history'}>History</sl-tab>
+        <sl-tab-panel name="preview">${this.renderEntry()}</sl-tab-panel>
+        <sl-tab-panel name="files">${this.renderFiles()}</sl-tab-panel>
+        <sl-tab-panel name="history">${this.renderHistory()}</sl-tab-panel>
+      </sl-tab-group>
+    `;
+  }
+
+  private entryAction(f: ArtifactFile, seq: number): TemplateResult {
+    const href = artifactFileUrl(this.artifactId, seq, f.path);
+    // Inline types open in a new tab (on an object-storage hub the
+    // redirect is cross-origin, so download= would be ignored anyway);
+    // attachment types download under their base name.
+    return isInlineType(f.mediaType)
+      ? html`<sl-button size="small" href=${href} target="_blank" rel="noopener noreferrer">
+          <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+          Open raw
+        </sl-button>`
+      : html`<sl-button size="small" href=${href} download=${baseName(f.path)}>
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download
+        </sl-button>`;
+  }
+
+  private renderEntry(): TemplateResult {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) {
+      return html`<div class="download-state">This artifact has no published content.</div>`;
+    }
+    const kind: ArtifactRenderer = rendererFor(f.mediaType);
+    if (kind === 'html') {
+      return this.renderHtmlView(v, f);
+    }
+    const href = artifactFileUrl(this.artifactId, v.seq, f.path);
+    const inline = isInlineType(f.mediaType);
+    const showMarks = this.isReview && (kind === 'markdown' || kind === 'text');
+    const bar = html`
+      <div class="entry-bar">
+        <span
+          >${f.path} ·
+          ${formatBytes(f.size)}${this.isReview
+            ? this.reviewedSeq !== null
+              ? ` · review of v${this.reviewedSeq}`
+              : ' · review'
+            : ''}</span
+        >
+        <span class="buttons">
+          ${showMarks ? this.renderCriticToggle() : nothing} ${this.entryAction(f, v.seq)}
+        </span>
+      </div>
+    `;
+    if (kind === 'image') {
+      return html`${bar}
+        <div class="image-frame"><img src=${href} alt=${this.data!.artifact.title} /></div>`;
+    }
+    if ((kind === 'markdown' || kind === 'text') && this.text !== null) {
+      return kind === 'markdown'
+        ? html`${bar}<scion-artifact-markdown-frame
+              .content=${this.text}
+              .artifactId=${this.artifactId}
+              .seq=${v.seq}
+              .entryPath=${f.path}
+              .files=${v.files}
+              .critic=${showMarks ? this.criticView : 'off'}
+              .marginNotes=${this.wideViewport}
+              .noteAuthor=${showMarks ? this.createdBy(v) : ''}
+              .sideNote=${showMarks ? this.criticSideNote(this.reviewedSeq) : ''}
+            ></scion-artifact-markdown-frame>`
+        : html`${bar}<scion-code-editor
+              .content=${showMarks && this.criticView !== 'marks'
+                ? projectCritic(this.text, this.criticView)
+                : this.text}
+              .language=${getLanguageFromPath(f.path)}
+              readonly
+            ></scion-code-editor>`;
+    }
+    const tooLarge = (kind === 'markdown' || kind === 'text') && f.size > MAX_INLINE_TEXT_BYTES;
+    return html`${bar}
+      <div class="download-state">
+        <sl-icon name="file-earmark-text" style="font-size: 2rem;"></sl-icon>
+        <p>
+          ${tooLarge
+            ? `This file is too large to show here (${formatBytes(f.size)}). Use ${inline ? 'Open raw' : 'Download'} to open it.`
+            : 'This file type is not shown in the browser. Use Download to open it.'}
+        </p>
+      </div>`;
+  }
+
+  private fullScreen = (): void => {
+    void this.untrustedFrame?.requestFullscreen?.();
+  };
+
+  private renderHtmlView(v: ArtifactVersion, f: ArtifactFile): TemplateResult {
+    const count = v.files.filter((x) => !isRemoteFile(x)).length;
+    const owner = this.label(this.data!.artifact.ownerKind, this.data!.artifact.ownerRef);
+    if (this.viewError) {
+      return html`<div class="error-state">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        <p>${this.viewError}</p>
+        <sl-button size="small" @click=${(): void => void this.loadView(v.seq)}>Retry</sl-button>
+      </div>`;
+    }
+    if (!this.view) {
+      return html`<div class="loading-state"><sl-spinner></sl-spinner></div>`;
+    }
+    return html`
+      ${this.view.remoteImages
+        ? html`<sl-alert class="notice" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Remote images are not loaded in HTML artifacts; include them in the bundle.
+          </sl-alert>`
+        : nothing}
+      ${this.viewExpired
+        ? html`<sl-alert class="notice expired" variant="neutral" open>
+            <sl-icon slot="icon" name="clock-history"></sl-icon>
+            This view has expired.
+            <sl-button size="small" @click=${(): void => void this.loadView(v.seq)}
+              >Reload view</sl-button
+            >
+          </sl-alert>`
+        : nothing}
+      <div class="entry-bar">
+        <span>${f.path} · ${count === 1 ? '1 file' : `bundle of ${count} files`}</span>
+        ${this.viewExpired
+          ? nothing
+          : html`<span class="buttons">
+              <sl-button size="small" @click=${this.fullScreen}>
+                <sl-icon slot="prefix" name="arrows-fullscreen"></sl-icon>
+                Full screen
+              </sl-button>
+              <sl-button
+                size="small"
+                href=${this.view.url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+                Open in new tab
+              </sl-button>
+            </span>`}
+      </div>
+      ${renderUntrustedViewFrame({ url: this.view.url, title: this.data!.artifact.title, owner })}
+    `;
+  }
+
+  private renderFiles(): TemplateResult {
+    const v = this.data?.version;
+    if (!v) return html`<div class="download-state">This artifact has no published content.</div>`;
+    const own = v.files.filter((x) => !isRemoteFile(x));
+    const remote = v.files.filter(isRemoteFile);
+    const fetched = remote.filter((x) => x.fetchStatus === 'ok').length;
+    const total = own.reduce((n, x) => n + x.size, 0);
+    return html`
+      <div class="files-header">
+        <div class="summary">
+          ${own.length} ${own.length === 1 ? 'file' : 'files'} · ${formatBytes(total)} · version
+          ${v.seq}
+          ${remote.length > 0
+            ? html` · remote images fetched when published: ${fetched}
+              ${remote.length > fetched
+                ? html`, could not be fetched: ${remote.length - fetched}`
+                : nothing}`
+            : nothing}
+        </div>
+        ${this.renderArchive(v.seq)}
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Path</th>
+            <th>Size</th>
+            <th>Type</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${own.map((x) => {
+            const href = artifactFileUrl(this.artifactId, v.seq, x.path);
+            return html`
+              <tr>
+                <td>
+                  <span class="file-path">
+                    <sl-icon name="file-earmark"></sl-icon>
+                    ${x.path}
+                    ${x.path === v.entryPath
+                      ? html`<sl-badge pill variant="primary">entry</sl-badge>`
+                      : nothing}
+                  </span>
+                </td>
+                <td class="muted">${formatBytes(x.size)}</td>
+                <td class="muted">${x.mediaType}</td>
+                <td class="actions-cell">
+                  ${isInlineType(x.mediaType)
+                    ? html`<sl-icon-button
+                        name="eye"
+                        label=${`Open ${x.path}`}
+                        href=${href}
+                        target="_blank"
+                      ></sl-icon-button>`
+                    : html`<sl-icon-button
+                        name="eye"
+                        label="Not shown in the browser"
+                        disabled
+                      ></sl-icon-button>`}
+                  <sl-icon-button
+                    name="download"
+                    label=${`Download ${x.path}`}
+                    href=${href}
+                    download=${baseName(x.path)}
+                  ></sl-icon-button>
+                </td>
+              </tr>
+            `;
+          })}
+        </tbody>
+      </table>
+    `;
+  }
+
+  /**
+   * Download all (.zip) on the Files tab (ptone/scion#7106). It is shown
+   * only when the hub's version response says whether the zip is
+   * available, so the hub alone decides; the browser's download manager
+   * shows progress and allows cancel.
+   */
+  private renderArchive(seq: number): TemplateResult | typeof nothing {
+    const archive = this.data?.archive;
+    if (!archive) return nothing;
+    if (!archive.available) {
+      const why =
+        archive.reason === 'unsupported_name'
+          ? 'A file name cannot be stored in a zip; download files individually'
+          : 'Too large for one archive; download files individually';
+      return html`<div class="archive">
+        <sl-button size="small" disabled>
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download all (.zip)
+        </sl-button>
+        <span class="archive-note">${why}</span>
+      </div>`;
+    }
+    return html`<div class="archive">
+      <sl-button size="small" href=${artifactArchiveUrl(this.artifactId, seq)} download="">
+        <sl-icon slot="prefix" name="download"></sl-icon>
+        Download all (.zip)
+      </sl-button>
+    </div>`;
+  }
+
+  private createdBy(v: ArtifactVersion): string {
+    if (!v.createdByKind) return '';
+    return this.label(v.createdByKind, v.createdByRef ?? '');
+  }
+
+  /**
+   * The History rows: the ready versions and, between them by number, the
+   * discarded ones (ptone/scion#4577). Consecutive discarded versions
+   * collapse into one muted row that expands to each one's reason and
+   * time; they have no actions.
+   */
+  private historyRows(shown: number | undefined): TemplateResult[] {
+    const rows: TemplateResult[] = [];
+    let d = 0;
+    const gapsAbove = (seq: number): void => {
+      const group: DiscardedVersion[] = [];
+      for (; d < this.discarded.length && this.discarded[d].seq > seq; d++) {
+        group.push(this.discarded[d]);
+      }
+      if (group.length > 0) rows.push(...this.renderDiscardedGroup(group));
+    };
+    for (const x of this.versions) {
+      gapsAbove(x.seq);
+      rows.push(this.renderVersionRow(x, shown));
+    }
+    gapsAbove(0);
+    return rows;
+  }
+
+  private renderDiscardedGroup(group: DiscardedVersion[]): TemplateResult[] {
+    const newest = group[0].seq;
+    const oldest = group[group.length - 1].seq;
+    const range = group.length === 1 ? `v${newest}` : `v${oldest}–v${newest}`;
+    const reasons = new Set(group.map((g) => g.reason));
+    const summary =
+      reasons.size === 1
+        ? `discarded: ${discardReasonText(group[0].reason)}`
+        : `${group.length} discarded`;
+    const open = this.expandedGaps.has(newest);
+    const toggle = (): void => {
+      const next = new Set(this.expandedGaps);
+      if (open) next.delete(newest);
+      else next.add(newest);
+      this.expandedGaps = next;
+    };
+    const rows = [
+      html`<tr class="discarded-group muted">
+        <td colspan="7">
+          <span class="discarded-range">${range}</span> · ${summary}
+          <sl-button size="small" variant="text" @click=${toggle}
+            >${open ? 'Hide' : 'Details'}</sl-button
+          >
+        </td>
+      </tr>`,
+    ];
+    if (open) {
+      for (const g of group) {
+        rows.push(
+          html`<tr class="discarded-version muted">
+            <td>v${g.seq}</td>
+            <td colspan="6">
+              discarded: ${discardReasonText(g.reason)} · ${formatInstant(g.createdAt)}
+            </td>
+          </tr>`
+        );
+      }
+    }
+    return rows;
+  }
+
+  private renderVersionRow(x: ArtifactVersion, shown: number | undefined): TemplateResult {
+    return html`
+      <tr>
+        <td>
+          <strong>v${x.seq}</strong>
+          ${x.seq === this.latestSeq
+            ? html`<sl-badge pill variant="success">current</sl-badge>`
+            : nothing}
+        </td>
+        <td>
+          <sl-badge pill class=${`kind-${x.kind}`} variant="primary">${x.kind}</sl-badge>
+        </td>
+        <td>${this.createdBy(x)}</td>
+        <td class="muted">${formatInstant(x.createdAt)}</td>
+        <td>${x.note ?? ''}</td>
+        <td class="muted">${x.fileCount}</td>
+        <td class="actions-cell">
+          ${x.seq === shown
+            ? nothing
+            : html`<sl-icon-button
+                name="eye"
+                label=${`View v${x.seq}`}
+                @click=${(): void => this.goToVersion(x.seq)}
+              ></sl-icon-button>`}
+          ${x.fileCount === 1 && x.entryPath
+            ? html`<sl-icon-button
+                name="download"
+                label=${`Download v${x.seq}`}
+                href=${artifactFileUrl(this.artifactId, x.seq, x.entryPath)}
+                download=${baseName(x.entryPath)}
+              ></sl-icon-button>`
+            : nothing}
+        </td>
+      </tr>
+    `;
+  }
+
+  private renderHistory(): TemplateResult {
+    if (this.versionsError) {
+      return html`<div class="error-state">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        <p>${this.versionsError}</p>
+        <sl-button size="small" @click=${(): void => void this.loadVersions()}>Retry</sl-button>
+      </div>`;
+    }
+    const shown = this.data?.version?.seq;
+    return html`
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>Kind</th>
+            <th>Published by</th>
+            <th>When</th>
+            <th>Note</th>
+            <th>Files</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${this.historyRows(shown)}
+        </tbody>
+      </table>
+      ${this.versions.some((x) => x.kind === 'review')
+        ? html`<div class="history-note">
+            A review is a version with marks. Publishing after a review resolves it and clears the
+            badge.
+          </div>`
+        : nothing}
+      ${this.versionsNext > 0
+        ? html`<div class="more">
+            <sl-button
+              size="small"
+              ?disabled=${this.versionsLoading}
+              @click=${(): void => void this.loadVersions(this.versionsNext)}
+              >Load more</sl-button
+            >
+          </div>`
+        : nothing}
+      ${this.versions.length === 1
+        ? html`<div class="single-version">
+            Only one version so far.
+            ${this.canPublish
+              ? html`<div class="buttons">
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    ?disabled=${this.refreshing}
+                    @click=${(): void => {
+                      this.publishOpen = true;
+                    }}
+                  >
+                    <sl-icon slot="prefix" name="upload"></sl-icon>
+                    Upload new version
+                  </sl-button>
+                  ${this.canEdit
+                    ? html`<sl-button
+                        size="small"
+                        ?disabled=${this.refreshing}
+                        @click=${this.startEdit}
+                      >
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>`
+                    : nothing}
+                </div>`
+              : nothing}
+          </div>`
+        : this.canPublish
+          ? html`<div class="more">
+              <sl-button
+                size="small"
+                ?disabled=${this.refreshing}
+                @click=${(): void => {
+                  this.publishOpen = true;
+                }}
+              >
+                <sl-icon slot="prefix" name="upload"></sl-icon>
+                Upload new version
+              </sl-button>
+            </div>`
+          : nothing}
+    `;
+  }
+
+  /** The Marks / Clean / Accepted switch of a review's preview. */
+  private renderCriticToggle(): TemplateResult {
+    return html`<sl-radio-group
+      size="small"
+      label="Show marks"
+      class="critic-toggle"
+      value=${this.criticView}
+      @sl-change=${(e: Event): void => {
+        this.criticView = (e.target as HTMLElement & { value: string }).value as
+          | 'marks'
+          | 'clean'
+          | 'accept';
+      }}
+    >
+      <sl-radio-button value="marks">Marks</sl-radio-button>
+      <sl-radio-button value="clean">Clean</sl-radio-button>
+      <sl-radio-button value="accept">Accepted</sl-radio-button>
+    </sl-radio-group>`;
+  }
+
+  /** Says who reviewed and what, while the current version is a review. */
+  private renderReviewBanner(): TemplateResult | typeof nothing {
+    const v = this.data?.version;
+    if (!v || !this.reviewPendingNow) return nothing;
+    const a = this.data!.artifact;
+    const counts = this.text !== null ? countCritic(this.text) : null;
+    const base = this.versions.find((x) => x.seq < v.seq);
+    const what = counts ? describeMarks(counts) : 'marks';
+    const owner = this.label(a.ownerKind, a.ownerRef);
+    // The hub tells an agent owner about reviews by others only.
+    const notified =
+      a.ownerKind === 'agent' &&
+      !(v.createdByKind === a.ownerKind && v.createdByRef === a.ownerRef);
+    return html`<sl-alert class="review-banner" variant="warning" open>
+      <sl-icon slot="icon" name="chat-dots"></sl-icon>
+      <strong>Review pending.</strong>
+      ${this.createdBy(v) || 'A reviewer'} left ${what}${base ? ` on v${base.seq}` : ''}.
+      ${notified ? `${owner} was notified; ` : ''}the badge clears when a new version is published.
+    </sl-alert>`;
+  }
+
+  /** The reviewer's discarded text, read-only with Copy. */
+  private renderDiscarded(): TemplateResult | typeof nothing {
+    if (this.discardedReview === null) return nothing;
+    return html`<sl-details class="discarded-review" summary="Your discarded review (read-only)">
+      <pre>${this.discardedReview}</pre>
+      <sl-button size="small" @click=${(): void => void this.copyDiscarded()}>
+        <sl-icon slot="prefix" name="clipboard"></sl-icon>
+        Copy
+      </sl-button>
+    </sl-details>`;
+  }
+
+  /** Why Review mode closed, with the discarded text, outside Review mode. */
+  private renderReviewNotice(): TemplateResult | typeof nothing {
+    if (!this.reviewNotice) return nothing;
+    return html`<sl-alert class="review-notice" variant="warning" open>
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        ${this.reviewNotice}
+      </sl-alert>
+      ${this.renderDiscarded()}`;
+  }
+
+  /**
+   * The hint strip under the graphical review toolbar: an always-mounted
+   * live region (role=status), filled when there is a hint, so screen
+   * readers announce each one.
+   */
+  private renderGraphicalHint(): TemplateResult {
+    return html`<div class="hint-region" role="status" aria-live="polite">
+      ${this.renderHintStrip()}
+    </div>`;
+  }
+
+  /** The current hint, inside the live region. */
+  private renderHintStrip(): TemplateResult | typeof nothing {
+    const hint = this.graphicalHint;
+    if (!hint) return nothing;
+    const t = REVIEW_HINT_TEXT[hint];
+    const icon =
+      hint === 'image'
+        ? 'image'
+        : hint === 'load-failed'
+          ? 'exclamation-triangle'
+          : hint === 'source-own' || hint === 'large' || hint === 'too-large'
+            ? 'info-circle'
+            : 'slash-circle';
+    const action =
+      hint === 'image' ||
+      hint === 'load-failed' ||
+      hint === 'earlier' ||
+      hint === 'source-own' ||
+      hint === 'large' ||
+      hint === 'too-large'
+        ? nothing
+        : html`<div class="hint-actions">
+            <sl-button size="small" @click=${(): void => this.setReviewView('source')}>
+              <sl-icon slot="prefix" name="code-slash"></sl-icon>
+              Open Source view
+            </sl-button>
+          </div>`;
+    return html`<div class="hint-strip ${hint === 'load-failed' ? 'warning' : ''}">
+      <sl-icon class="hint-icon" name=${icon}></sl-icon>
+      <div class="hint-text"><strong>${t.title}</strong> ${t.body}${action}</div>
+      <sl-icon-button
+        name="x-lg"
+        label="Close"
+        @click=${(): void => this.clearHint()}
+      ></sl-icon-button>
+    </div>`;
+  }
+
+  /**
+   * Review on the graphical review page (experiment
+   * web.artifact_review_editor): one wide editor with a Graphical and
+   * Source toggle. Source is today's code editor and tool buttons; saving
+   * is today's Save review.
+   */
+  private renderGraphicalReview(): TemplateResult | typeof nothing {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) return nothing;
+    const counts = countCritic(this.reviewText);
+    const marks = counts.suggestions + counts.comments + counts.highlights;
+    const marksOnly = onlyMarksChanged(this.reviewText, this.reviewBaseline);
+    const graphical = this.reviewView === 'graphical';
+    return html`
+      <div class="edit-bar">
+        Reviewing ${f.path}, based on
+        v${v.seq}.${graphical ? ' Your edits are recorded as suggestions.' : ''} Save review
+        publishes a new version as a review; v${v.seq} stays as it is.
+      </div>
+      <div class="graphical-review" @keydown=${this.onReviewKeydown}>
+        <div class="g-sticky">
+          <div class="g-toolbar" role="toolbar" aria-label="Review tools">
+            ${graphical
+              ? html`<sl-tooltip content="A review records every edit as a suggestion">
+                    <!-- A disabled switch takes no focus: the wrapper does, so the
+                       tooltip is reachable by keyboard. -->
+                    <span
+                      class="track-wrap"
+                      tabindex="0"
+                      role="switch"
+                      aria-checked="true"
+                      aria-disabled="true"
+                      aria-label="Track changes: on. A review records every edit as a suggestion."
+                    >
+                      <sl-switch size="small" checked disabled class="track" aria-hidden="true">
+                        <span class="lbl">Track changes</span
+                        ><span class="narrow" aria-hidden="true">Track</span>
+                      </sl-switch>
+                    </span>
+                  </sl-tooltip>
+                  <span class="sep"></span>
+                  <sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                    <sl-button
+                      size="small"
+                      class="comment"
+                      ?disabled=${this.editorLoad !== 'ready'}
+                      @click=${(): void => void this.graphicalEditor?.comment()}
+                    >
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      <span class="lbl">Comment</span>
+                    </sl-button>
+                  </sl-tooltip>`
+              : html`<sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                    <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      <span class="lbl">Comment</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest a replacement for the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
+                      <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                      <span class="lbl">Suggest</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest an insertion after the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
+                      <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                      <span class="lbl">Insert</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest deleting the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
+                      <sl-icon slot="prefix" name="dash-circle"></sl-icon>
+                      <span class="lbl">Delete</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
+            <span class="spacer"></span>
+            <sl-tooltip
+              content=${this.reviewSize === 'too-large'
+                ? TOO_LARGE_TOOLTIP
+                : this.reviewSize === null || this.choosingGraphical
+                  ? SIZING_TOOLTIP
+                  : 'Undo history is kept per view and resets when you switch'}
+            >
+              <sl-radio-group
+                size="small"
+                label="View"
+                class="view-toggle"
+                value=${this.reviewView}
+                @sl-change=${(e: Event): void => {
+                  const group = e.target as HTMLElement & { value: string };
+                  this.chooseReviewView(group.value as ReviewView);
+                  // A refused switch puts the control back.
+                  if (group.value !== this.reviewView) group.value = this.reviewView;
+                }}
+              >
+                <sl-radio-button
+                  value="graphical"
+                  ?disabled=${this.reviewSize === null ||
+                  this.reviewSize === 'too-large' ||
+                  this.choosingGraphical}
+                >
+                  <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
+                  <span class="lbl">Graphical</span>
+                </sl-radio-button>
+                <sl-radio-button value="source">
+                  <sl-icon slot="prefix" name="code-slash"></sl-icon>
+                  <span class="lbl">Source</span>
+                </sl-radio-button>
+              </sl-radio-group>
+            </sl-tooltip>
+            <sl-dropdown placement="bottom-end" distance="4">
+              <sl-icon-button
+                slot="trigger"
+                name="question-circle"
+                label="About reviews and shortcuts"
+              ></sl-icon-button>
+              <div class="help-panel">
+                <p>
+                  Edit the text directly: typing, deleting and replacing are recorded as
+                  suggestions. Select text and choose Comment to leave a note. A review may change
+                  nothing outside its marks.
+                </p>
+                <div class="help-sub">Shortcuts</div>
+                <table>
+                  <tr>
+                    <td>Comment</td>
+                    <td><kbd>Ctrl+Alt+M</kbd></td>
+                  </tr>
+                  <tr>
+                    <td>Edit the selected comment</td>
+                    <td><kbd>Enter</kbd></td>
+                  </tr>
+                </table>
+                <div class="help-sub">Changes that need the Source view</div>
+                <p>
+                  Formatting, headings, lists, tables, code blocks and paragraph breaks are edited
+                  in the Source view.
+                </p>
+              </div>
+            </sl-dropdown>
+          </div>
+          ${this.renderGraphicalHint()}
+        </div>
+        <div class="g-work">
+          ${graphical
+            ? this.editorLoad === 'ready' && this.reviewSize !== null
+              ? html`<scion-review-editor
+                  .content=${this.reviewText}
+                  .artifactId=${this.artifactId}
+                  .seq=${v.seq}
+                  .entryPath=${f.path}
+                  .files=${v.files}
+                  .noteAuthor=${this.createdBy(v)}
+                  .scrollInset=${this.stickyInset}
+                  @review-change=${(e: CustomEvent<ReviewChangeDetail>): void => {
+                    this.reviewText = e.detail.text;
+                    // A change sent after typing pauses closes the hint. One
+                    // sent because focus left the editor keeps it, even when it
+                    // carries an edit made just before: focus leaves on the
+                    // press of a toolbar or hint button, and the strip closing
+                    // then would move the button from under the pointer before
+                    // the click. A later change sent after a pause, or the
+                    // view switch, also closes it.
+                    if (e.detail.blur) return;
+                    if (this.graphicalHint !== 'load-failed') this.clearHint();
+                  }}
+                  @review-hint=${(e: CustomEvent<{ kind: ReviewHint }>): void =>
+                    this.showHint(e.detail.kind)}
+                  @review-load-failed=${(): void => this.editorFailed()}
+                ></scion-review-editor>`
+              : html`<div
+                  class="skeleton"
+                  role="status"
+                  aria-busy="true"
+                  aria-label="Loading the editor"
+                >
+                  <div style="width:40%;height:1.3rem"></div>
+                  <div style="width:92%"></div>
+                  <div style="width:85%"></div>
+                  <div style="width:60%"></div>
+                  <div style="width:30%;height:1rem;margin-top:1.4rem"></div>
+                  <div style="width:88%"></div>
+                  <div style="width:70%"></div>
+                </div>`
+            : html`<scion-code-editor
+                class="review-editor"
+                .content=${this.reviewText}
+                .language=${getLanguageFromPath(f.path)}
+                @content-changed=${(e: CustomEvent<{ content: string }>): void =>
+                  this.onReviewInput(e.detail.content)}
+              ></scion-code-editor>`}
+        </div>
+      </div>
+      ${!marksOnly
+        ? html`<sl-alert variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Text outside marks has changed. Undo those edits: a review may only add marks.
+          </sl-alert>`
+        : nothing}
+      ${this.reviewError
+        ? html`<sl-alert variant="danger" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${this.reviewError}
+          </sl-alert>`
+        : nothing}
+      ${this.renderDiscarded()}
+      <div class="edit-footer">
+        <sl-input
+          size="small"
+          placeholder="Note for this review (optional)"
+          .value=${this.reviewNote}
+          @sl-input=${(e: Event): void => {
+            this.reviewNote = (e.target as HTMLInputElement).value;
+          }}
+        ></sl-input>
+        <sl-button size="small" ?disabled=${this.reviewBusy} @click=${this.cancelReview}
+          >Cancel</sl-button
+        >
+        <sl-button
+          size="small"
+          variant="primary"
+          ?loading=${this.reviewBusy}
+          ?disabled=${marks === 0 || !marksOnly || this.reviewText === lfText(this.text)}
+          @click=${(): void => void this.saveReview()}
+        >
+          <sl-icon slot="prefix" name="floppy"></sl-icon>
+          Save review
+        </sl-button>
+      </div>
+    `;
+  }
+
+  private renderReview(): TemplateResult | typeof nothing {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) return nothing;
+    const counts = countCritic(this.reviewText);
+    const marks = counts.suggestions + counts.comments + counts.highlights;
+    const marksOnly = onlyMarksChanged(this.reviewText, this.reviewBaseline);
+    const p = countCritic(this.reviewPreview);
+    const previewMarks = p.suggestions + p.comments + p.highlights;
+    const ref = this.data!.artifact.ref;
+    return html`
+      <div class="edit-bar">
+        Reviewing ${f.path}, based on v${v.seq}. Save review publishes a new version as a review;
+        v${v.seq} stays as it is.
+      </div>
+      <div class="review-toolbar">
+        <sl-tooltip content="Comment on the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
+            <sl-icon slot="prefix" name="chat-text"></sl-icon>
+            Comment
+          </sl-button>
+        </sl-tooltip>
+        <sl-tooltip content="Suggest a replacement for the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
+            <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+            Suggest
+          </sl-button>
+        </sl-tooltip>
+        <sl-tooltip content="Suggest an insertion after the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
+            <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+            Insert
+          </sl-button>
+        </sl-tooltip>
+        <sl-tooltip content="Suggest deleting the selection">
+          <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
+            <sl-icon slot="prefix" name="dash-circle"></sl-icon>
+            Delete
+          </sl-button>
+        </sl-tooltip>
+        <span class="counts">
+          ${this.reviewHint
+            ? html`<span class="hint">${this.reviewHint}</span>`
+            : marks === 0
+              ? 'Select text and choose Comment or Suggest.'
+              : html`${counts.suggestions}
+                ${counts.suggestions === 1 ? 'suggestion' : 'suggestions'} · ${counts.comments}
+                ${counts.comments === 1 ? 'comment' : 'comments'}`}
+        </span>
+        <span class="spacer"></span>
+        <span class="label">Preview</span>
+        ${this.renderCriticToggle()}
+        <sl-dropdown placement="bottom-end" distance="4">
+          <sl-icon-button
+            slot="trigger"
+            name="question-circle"
+            label="About reviews"
+          ></sl-icon-button>
+          <div class="help-panel">
+            Select text and choose a toolbar action. Marks are
+            <a
+              href="https://github.com/CriticMarkup/CriticMarkup-toolkit"
+              target="_blank"
+              rel="noopener noreferrer"
+              >CriticMarkup</a
+            >: a review may change nothing outside them. The owner reads your review next and
+            publishes the resolved text. An agent reads it with
+            <code>scion artifact get ${ref} --clean</code> (without the marks) or without
+            <code>--clean</code> (with them).
+          </div>
+        </sl-dropdown>
+      </div>
+      ${!marksOnly
+        ? html`<sl-alert variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Text outside marks has changed. Undo those edits: a review may only add marks.
+          </sl-alert>`
+        : nothing}
+      ${this.reviewError
+        ? html`<sl-alert variant="danger" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${this.reviewError}
+          </sl-alert>`
+        : nothing}
+      ${this.renderDiscarded()}
+      <div class="review-panes">
+        <scion-code-editor
+          class="review-editor"
+          .content=${this.reviewText}
+          .language=${getLanguageFromPath(f.path)}
+          @content-changed=${(e: CustomEvent<{ content: string }>): void =>
+            this.onReviewInput(e.detail.content)}
+        ></scion-code-editor>
+        <scion-artifact-markdown-frame
+          .content=${this.reviewPreview}
+          .artifactId=${this.artifactId}
+          .seq=${v.seq}
+          .entryPath=${f.path}
+          .files=${v.files}
+          .critic=${this.criticView}
+          .marginNotes=${this.wideReviewViewport}
+          .noteAuthor=${'You'}
+          .sideNote=${this.criticView === 'marks' && previewMarks === 0
+            ? 'No comments or suggestions yet.'
+            : this.criticSideNote(v.seq)}
+          .sideNoteEmpty=${this.criticView === 'marks'}
+        ></scion-artifact-markdown-frame>
+      </div>
+      <div class="edit-footer">
+        <sl-input
+          size="small"
+          placeholder="Note for this review (optional)"
+          .value=${this.reviewNote}
+          @sl-input=${(e: Event): void => {
+            this.reviewNote = (e.target as HTMLInputElement).value;
+          }}
+        ></sl-input>
+        <sl-button size="small" ?disabled=${this.reviewBusy} @click=${this.cancelReview}
+          >Cancel</sl-button
+        >
+        <sl-button
+          size="small"
+          variant="primary"
+          ?loading=${this.reviewBusy}
+          ?disabled=${marks === 0 || !marksOnly || this.reviewText === lfText(this.text)}
+          @click=${(): void => void this.saveReview()}
+        >
+          <sl-icon slot="prefix" name="floppy"></sl-icon>
+          Save review
+        </sl-button>
+      </div>
+    `;
+  }
+
+  private renderEditor(): TemplateResult {
+    const v = this.data!.version!;
+    const f = this.entry!;
+    return html`
+      <div class="edit-bar">
+        Editing ${f.path}, based on v${v.seq}. Publishing saves a new version; v${v.seq} stays as it
+        is.
+      </div>
+      <scion-code-editor
+        .content=${this.editText}
+        .language=${getLanguageFromPath(f.path)}
+        @content-changed=${(e: CustomEvent<{ content: string }>): void => {
+          this.editText = e.detail.content;
+        }}
+      ></scion-code-editor>
+      ${this.editError
+        ? html`<sl-alert variant="danger" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${this.editError}
+          </sl-alert>`
+        : nothing}
+      <div class="edit-footer">
+        <sl-input
+          size="small"
+          placeholder="Note for this version (optional)"
+          .value=${this.editNote}
+          @sl-input=${(e: Event): void => {
+            this.editNote = (e.target as HTMLInputElement).value;
+          }}
+        ></sl-input>
+        <sl-button
+          size="small"
+          ?disabled=${this.editBusy}
+          @click=${(): void => {
+            this.editing = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          size="small"
+          variant="primary"
+          ?loading=${this.editBusy}
+          ?disabled=${this.editText === this.text}
+          @click=${(): void => void this.publishEdit()}
+          >Publish new version</sl-button
+        >
+      </div>
+      ${this.renderReviewOpenDialog()}
+    `;
+  }
+
+  /**
+   * The dialog shown when the hub refused an edit publish because someone
+   * is reviewing the current version (ptone/scion#6849). Wait closes it and
+   * keeps the edit; Publish anyway publishes with force.
+   */
+  private renderReviewOpenDialog(): TemplateResult | typeof nothing {
+    const open = this.reviewOpen;
+    if (!open) return nothing;
+    const [first, ...rest] = open.reviews;
+    const others = rest.length + (open.truncated ? 1 : 0);
+    const who = !first
+      ? 'Someone is'
+      : others === 0
+        ? `${first.reviewer} is`
+        : `${first.reviewer} and ${open.truncated ? 'others' : `${others} ${others === 1 ? 'other' : 'others'}`} are`;
+    const wait = (): void => {
+      this.reviewOpen = null;
+    };
+    return html`
+      <sl-dialog
+        class="review-open-dialog"
+        label="Publish over an open review?"
+        open
+        @sl-request-close=${(e: Event): void => {
+          // Escape and the overlay mean Wait, unless a publish is running.
+          if (this.editBusy) e.preventDefault();
+          else wait();
+        }}
+      >
+        <p class="review-open-who">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <strong>${who} reviewing this version.</strong>
+        </p>
+        <ul class="review-open-list">
+          ${open.reviews.map(
+            (r) =>
+              html`<li>
+                ${r.reviewer}${r.lastActivityAt
+                  ? html` — last active ${formatRelative(r.lastActivityAt)}`
+                  : nothing}${r.unsavedChanges ? ', unsaved changes' : ''}
+              </li>`
+          )}
+          ${open.truncated ? html`<li>and others</li>` : nothing}
+        </ul>
+        <p>
+          If you publish now, their review can't be saved on this version. They keep their text.
+          Your edit stays in the editor if you wait.
+        </p>
+        <sl-button slot="footer" class="review-open-wait" variant="primary" autofocus @click=${wait}
+          >Wait</sl-button
+        >
+        <sl-button
+          slot="footer"
+          class="review-open-force"
+          variant="warning"
+          ?loading=${this.editBusy}
+          @click=${(): void => void this.publishEdit(true)}
+          >Publish anyway</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'scion-page-artifact-detail': ScionPageArtifactDetail;
+  }
+}

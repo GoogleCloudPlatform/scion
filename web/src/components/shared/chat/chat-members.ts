@@ -30,52 +30,31 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import type { PropertyValues } from 'lit';
-import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
+import type { PropertyValues, TemplateResult } from 'lit';
+import { ACTIVITY_DISPLAY, stateLabel } from '../../../shared/agent-state-display.js';
+import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
+import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
+import { touchMenuItemStyles } from '../touch-styles.js';
+import { RECENT_USERS_LIMIT } from '../../../client/user-directory.js';
+import { LongPressController, type LongPressPoint } from './long-press.js';
+import {
+  MenuFocus,
+  placeMenuInViewport,
+  renderMenu,
+  runMenuAction,
+  shouldUseMenuSheet,
+  type MenuAction,
+} from './context-menu.js';
+import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
+import './chat-action-sheet.js';
 import './chat-avatar.js';
 import '../status-badge.js';
+import { formatInstantWithZone, formatRelative } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 
-/** Popup window geometry for a terminal. Roughly 80x24 at a comfortable size. */
-const TERMINAL_POPOUT_WIDTH = 1024;
-const TERMINAL_POPOUT_HEIGHT = 700;
-
-/**
- * Open an agent's terminal in its own window.
- *
- * The window is *named per agent*, which is the whole point: clicking the same
- * agent again focuses the window that is already open instead of spawning
- * another one. Six agents means six windows, not one window per click - the
- * tab pile-up that made this control painful in the first place.
- *
- * A terminal is also a poor fit for in-app navigation, because reaching it
- * replaces the chat you were reading it alongside.
- *
- * Note the deliberate absence of `noopener`: a named window cannot be reused
- * or focused if the opener is severed, and the target is our own same-origin
- * route. Falls back to in-app navigation when a popup blocker intervenes, so
- * the control always does something.
- */
-function openTerminalPopout(agentId: string): void {
-  const features = [
-    'popup=yes',
-    `width=${TERMINAL_POPOUT_WIDTH}`,
-    `height=${TERMINAL_POPOUT_HEIGHT}`,
-    'resizable=yes',
-    'scrollbars=yes',
-  ].join(',');
-
-  const path = `/agents/${agentId}/terminal`;
-  const base = import.meta.env.BASE_URL;
-  const url = base && base !== '/' ? base.replace(/\/$/, '') + path : path;
-
-  const win = window.open(url, `scion-term-${agentId}`, features);
-  if (win) {
-    win.focus();
-    return;
-  }
-  navigateTo(`/agents/${agentId}/terminal`);
-}
+/** Ages under this are shown relative; older ones as an absolute date. */
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Statuses that represent a settled agent. Entering one of these is the end of
@@ -96,6 +75,45 @@ const TERMINAL_STATUSES = new Set([
 
 /** How long an agent avatar wobbles after a state change. */
 const WOBBLE_DURATION_MS = 3000;
+
+/** A foldable section of the members sidebar. */
+export type MembersSection = 'people' | 'agents';
+
+/**
+ * localStorage key for the folded members sections, scoped to the user like
+ * the space rail's thread-group collapse key (chat-space-rail.ts).
+ */
+const MEMBERS_COLLAPSE_STORAGE_KEY = 'scion-chat-members-collapse';
+
+function membersCollapseKey(userId: string): string {
+  return userId ? `${MEMBERS_COLLAPSE_STORAGE_KEY}:${userId}` : MEMBERS_COLLAPSE_STORAGE_KEY;
+}
+
+/**
+ * Read the folded sections. Missing or unavailable storage, a parse error or
+ * an unexpected shape fall back to nothing folded: folding is a nicety and
+ * must never hide the members list by accident.
+ */
+function loadCollapsedSections(userId: string): Set<MembersSection> {
+  try {
+    const raw = localStorage.getItem(membersCollapseKey(userId));
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((s): s is MembersSection => s === 'people' || s === 'agents'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedSections(userId: string, sections: Set<MembersSection>): void {
+  try {
+    localStorage.setItem(membersCollapseKey(userId), JSON.stringify([...sections]));
+  } catch {
+    // Storage unavailable (private browsing) or full: the fold just won't
+    // survive a reload this time.
+  }
+}
 
 /** A human member from the GET /chat/spaces/{id}/members endpoint. */
 export interface ChatHumanMember {
@@ -153,9 +171,25 @@ export interface MemberClickDetail {
 
 @customElement('scion-chat-members')
 export class ScionChatMembers extends LitElement {
+  /** Re-renders absolute activity dates when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Human members of the space. */
   @property({ type: Array })
   humans: ChatHumanMember[] = [];
+
+  /**
+   * Set when `humans` is a bounded page of a larger user list (the hub
+   * view). The sidebar then shows a people search: it filters the listed
+   * people and fires `member-search` so the page can ask the hub for
+   * people beyond the page.
+   */
+  @property({ type: Boolean })
+  humansTruncated = false;
+
+  /** Set while the page's server-side people search is pending. */
+  @property({ type: Boolean })
+  searching = false;
 
   /** Agent members of the space. */
   @property({ type: Array })
@@ -181,11 +215,28 @@ export class ScionChatMembers extends LitElement {
   @property({ type: Array })
   unreadFromIds: string[] = [];
 
-  /** Filter mode: 'all' shows every member, 'unread' shows only those with unread messages. */
-  @state() private memberFilter: 'all' | 'unread' = 'all';
+  /**
+   * Map of DM peer ID → DM info, for members with an existing, non-empty DM.
+   * Drives the "Mark unread" context-menu item: hidden for a member with no
+   * entry here (no DM exists, or it has no messages yet), or whose DM is
+   * already unread — checked here via `hasUnread` directly rather than via
+   * `unreadFromIds`, which deliberately excludes muted-but-unread DMs (the
+   * dot-suppression rule from #1029) and would otherwise make an
+   * already-unread muted DM look eligible again.
+   */
+  @property({ type: Object })
+  dmInfoByPeerId: Record<string, { key: string; muted: boolean; hasUnread: boolean }> = {};
+
+  /** The people search query (shown only while `humansTruncated`). */
+  @state() private peopleQuery = '';
 
   /** Sort mode: 'alpha' sorts A-Z by display name, 'activity' sorts by recent activity. */
   @state() private memberSort: 'alpha' | 'activity' = 'alpha';
+
+  /** Sections folded down to their heading, persisted per user. */
+  @state() private collapsedSections = new Set<MembersSection>();
+  /** The `currentUserId` that `collapsedSections` was last restored for. */
+  private _collapseRestoredFor: string | null = null;
 
   /** Agent IDs that recently changed state — drives wobble animation. */
   @state() private recentlyChangedAgents = new Set<string>();
@@ -194,13 +245,39 @@ export class ScionChatMembers extends LitElement {
   /** Previous agent state snapshots for change detection. */
   private _prevAgentStates = new Map<string, string>();
 
+  /** The member the right-click/long-press context menu targets, if open. */
+  @state() private contextMenuTarget: { peerId: string } | null = null;
+  /** Viewport position to render the context menu at. */
+  @state() private contextMenuPos = { x: 0, y: 0 };
+  /** The open member menu is the mobile bottom sheet, not the popup. */
+  @state() private menuAsSheet = false;
+  private readonly longPress = new LongPressController(this);
+  /** Bound so it can be removed with the same reference it was added with. */
+  private _outsideClickHandler: ((e: Event) => void) | null = null;
+
   static override styles = css`
+    ${touchMenuItemStyles}
+
     :host {
       display: flex;
       flex-direction: column;
       height: 100%;
-      overflow-y: auto;
+      overflow: hidden;
       font-family: var(--sl-font-sans);
+    }
+
+    .members-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      /* Set by the chat page's mobile panels; see chat.ts. */
+      touch-action: var(--chat-touch-action, auto);
+      /* The last row clears the home indicator (the page uses
+         viewport-fit=cover); the inset is 0 elsewhere. A host that pins
+         its own footer below this list, which takes the inset, sets
+         --chat-list-inset-bottom to 0px (see chat.ts's .palette-footer). */
+      padding-bottom: var(--chat-list-inset-bottom, env(safe-area-inset-bottom, 0px));
     }
 
     .section-label {
@@ -210,6 +287,60 @@ export class ScionChatMembers extends LitElement {
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--scion-text-muted, #94a3b8);
+    }
+
+    /* A foldable section heading, styled like the plain label. */
+    .section-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      border: none;
+      background: none;
+      font-family: inherit;
+      text-align: left;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .section-toggle:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .section-toggle:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .section-toggle .chevron {
+      transition: transform 0.15s;
+      font-size: 0.625rem;
+      flex-shrink: 0;
+    }
+
+    .section-toggle .chevron.collapsed {
+      transform: rotate(-90deg);
+    }
+
+    .section-unread-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
+    }
+
+    /* Text for assistive technology only. */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
 
     .member-item {
@@ -224,7 +355,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-item:hover {
-      background: var(--scion-surface-hover, rgba(0, 0, 0, 0.05));
+      background: var(--scion-bg-subtle, #f1f5f9);
     }
 
     .member-item.active-peer {
@@ -252,16 +383,23 @@ export class ScionChatMembers extends LitElement {
       color: var(--scion-text-muted, #94a3b8);
     }
 
-    .default-agent-label {
+    .agent-subsection-label {
+      padding: 4px 16px 2px;
       font-size: var(--chat-fs-xs, 0.625rem);
-      font-weight: 600;
-      color: var(--scion-primary, #3b82f6);
+      font-weight: 500;
       text-transform: uppercase;
       letter-spacing: 0.04em;
+      color: var(--scion-text-muted, #94a3b8);
+    }
+
+    .agent-default-divider {
+      border: none;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      margin: 6px 16px;
     }
 
     .agent-terminal,
-    .agent-popout {
+    .agent-graph {
       display: inline-flex;
       align-items: center;
       color: var(--scion-text-muted, #94a3b8);
@@ -272,12 +410,12 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-item:hover .agent-terminal,
-    .member-item:hover .agent-popout {
+    .member-item:hover .agent-graph {
       opacity: 1;
     }
 
     .agent-terminal:hover,
-    .agent-popout:hover {
+    .agent-graph:hover {
       color: var(--scion-primary, #3b82f6);
     }
 
@@ -297,57 +435,30 @@ export class ScionChatMembers extends LitElement {
       max-width: 260px;
     }
 
-    /* Filter + sort toolbar */
+    /* Sort toolbar */
     .members-toolbar {
       display: flex;
       align-items: center;
-      gap: 0.375rem;
+      justify-content: flex-end;
       padding: 0.375rem 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    .filter-toggle {
-      display: inline-flex;
+    .people-search {
+      padding: 0.375rem 0.75rem 0;
+    }
+
+    .people-search input {
+      box-sizing: border-box;
+      width: 100%;
+      height: 1.75rem;
+      padding: 0 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.375rem;
-      overflow: hidden;
-      flex: 1;
-    }
-
-    .filter-toggle button {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.125rem;
-      height: 1.5rem;
-      border: none;
       background: var(--scion-surface, #ffffff);
-      color: var(--scion-text-muted, #64748b);
-      cursor: pointer;
-      padding: 0 0.5rem;
+      color: var(--scion-text, #1e293b);
       font-size: var(--chat-fs-sm);
       font-family: inherit;
-      font-weight: 500;
-      transition: all 150ms ease;
-      white-space: nowrap;
-      flex: 1;
-      justify-content: center;
-    }
-
-    .filter-toggle button:not(:last-child) {
-      border-right: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .filter-toggle button:hover:not(.active) {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .filter-toggle button.active {
-      background: var(--scion-primary, #3b82f6);
-      color: white;
-    }
-
-    .filter-toggle button sl-icon {
-      font-size: var(--chat-fs-sm);
     }
 
     .sort-btn {
@@ -443,13 +554,129 @@ export class ScionChatMembers extends LitElement {
         opacity: 1;
       }
     }
+
+    /* Context menu (same look as the space rail's). It renders hidden and is
+       shown once placed in the viewport. */
+    .context-menu {
+      visibility: hidden;
+      position: fixed;
+      z-index: 1000;
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+      min-width: 160px;
+      padding: 0.25rem 0;
+    }
+
+    .context-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 0.75rem;
+      font-size: var(--chat-fs-md, 0.875rem);
+      cursor: pointer;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .context-menu-item:hover,
+    .context-menu-item:focus {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      outline: none;
+    }
+
+    .context-menu-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .context-menu-item sl-icon {
+      font-size: var(--chat-fs-lg, 1rem);
+    }
+
+    /* Long-press opens the member menu on touch: keep iOS's callout and text
+       selection from taking the press first. */
+    @media (hover: none) {
+      .member-item {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .sort-btn::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+    }
   `;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // Close the context menu on outside click, same as the space rail's.
+    this._outsideClickHandler = () => {
+      if (!this.contextMenuTarget) return;
+      this.contextMenuTarget = null;
+      this.menuFocus.closed();
+    };
+    document.addEventListener('click', this._outsideClickHandler);
+  }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     // Clean up wobble timers
     for (const timer of this._wobbleTimers.values()) clearTimeout(timer);
     this._wobbleTimers.clear();
+    if (this._outsideClickHandler) {
+      document.removeEventListener('click', this._outsideClickHandler);
+    }
+  }
+
+  override willUpdate(changedProps: PropertyValues): void {
+    super.willUpdate(changedProps);
+    // The search belongs to the bounded list it was typed over: a view
+    // without one (a space) drops it, and so starts clean when it returns.
+    if (changedProps.has('humansTruncated') && !this.humansTruncated) this.peopleQuery = '';
+    if (this._collapseRestoredFor !== this.currentUserId) {
+      this._collapseRestoredFor = this.currentUserId;
+      this.collapsedSections = loadCollapsedSections(this.currentUserId);
+    }
+  }
+
+  /** Fold or unfold a section and remember the choice. */
+  private toggleSection(section: MembersSection): void {
+    const next = new Set(this.collapsedSections);
+    if (next.has(section)) next.delete(section);
+    else next.add(section);
+    this.collapsedSections = next;
+    saveCollapsedSections(this.currentUserId, next);
+  }
+
+  /**
+   * The heading of a foldable section: a button showing the count, with an
+   * unread dot while folded so a folded section never hides new messages.
+   */
+  private renderSectionHeader(
+    section: MembersSection,
+    label: string,
+    unread: boolean
+  ): TemplateResult {
+    const collapsed = this.collapsedSections.has(section);
+    return html`<button
+      type="button"
+      class="section-label section-toggle"
+      data-section=${section}
+      aria-expanded=${collapsed ? 'false' : 'true'}
+      @click=${() => this.toggleSection(section)}
+    >
+      <sl-icon name="chevron-down" class="chevron ${collapsed ? 'collapsed' : ''}"></sl-icon>
+      <span>${label}</span>
+      ${collapsed && unread
+        ? html`<span class="section-unread-dot" aria-hidden="true"></span
+            ><span class="sr-only">, unread messages</span>`
+        : nothing}
+    </button>`;
   }
 
   override updated(changedProps: PropertyValues): void {
@@ -457,7 +684,15 @@ export class ScionChatMembers extends LitElement {
     if (changedProps.has('agents')) {
       this.checkAgentStateChanges();
     }
+    if (this.contextMenuTarget && !this.menuAsSheet) {
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPos);
+      this.menuFocus.afterRender(menu);
+    }
   }
+
+  /** Keyboard focus around the member popup menu. */
+  private readonly menuFocus = new MenuFocus();
 
   /**
    * Compare current agent states against previous to detect changes for wobble.
@@ -514,30 +749,144 @@ export class ScionChatMembers extends LitElement {
   }
 
   override render() {
-    return html` ${this.renderToolbar()} ${this.renderHumans()} ${this.renderAgents()} `;
+    return html`
+      ${this.renderToolbar()} ${this.renderPeopleSearch()}
+      <div class="members-body">${this.renderHumans()} ${this.renderAgents()}</div>
+      ${this.contextMenuTarget && !this.menuAsSheet ? this.renderContextMenu() : nothing}
+      ${this.renderMenuSheet()}
+    `;
   }
 
-  /** Render the filter + sort toolbar at the top of the members sidebar. */
+  /**
+   * Whether "Mark unread" applies to this member: not the caller themselves
+   * (moot for agents, and humans already exclude self from the list), an
+   * existing non-empty DM must exist, and it must not already be unread —
+   * checked via the DM's own `hasUnread`, not `unreadFromIds` (that list
+   * excludes muted DMs regardless of their real unread state, so a muted DM
+   * that is already unread must still be hidden, not offered again).
+   */
+  private canMarkUnread(peerId: string): boolean {
+    if (peerId === this.currentUserId) return false;
+    const info = this.dmInfoByPeerId[peerId];
+    if (!info) return false;
+    return !info.hasUnread;
+  }
+
+  private handleContextMenu(e: MouseEvent, peerId: string): void {
+    if (this.longPress.contextMenu(e)) return;
+    if (!this.canMarkUnread(peerId)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.openMemberMenu(peerId, { x: e.clientX, y: e.clientY });
+  }
+
+  /** Long-press on a member row: opens the menu only when it has actions. */
+  private handleMemberPointerDown(e: PointerEvent, peerId: string): void {
+    if (!this.canMarkUnread(peerId)) {
+      this.longPress.cancel();
+      return;
+    }
+    this.longPress.pointerDown(e, (at) => {
+      if (this.canMarkUnread(peerId)) this.openMemberMenu(peerId, at);
+    });
+  }
+
+  /** Open a member's menu: the popup at `at`, or the sheet on mobile. */
+  private openMemberMenu(peerId: string, at: LongPressPoint): void {
+    this.contextMenuTarget = { peerId };
+    this.contextMenuPos = at;
+    this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
+  }
+
+  /** The actions of a member's menu, shared by the popup and the sheet. */
+  private memberMenuActions(peerId: string): MenuAction[] {
+    return [
+      {
+        id: 'mark-unread',
+        label: 'Mark unread',
+        icon: 'envelope',
+        run: () => void this.handleMarkUnread(peerId),
+      },
+    ];
+  }
+
+  /** Display name of a member, for the sheet heading. */
+  private memberName(peerId: string): string {
+    return (
+      this.humans.find((m) => m.id === peerId)?.displayName ??
+      this.agents.find((a) => a.id === peerId)?.displayName ??
+      ''
+    );
+  }
+
+  private renderContextMenu() {
+    if (!this.contextMenuTarget) return nothing;
+    const { peerId } = this.contextMenuTarget;
+    const name = this.memberName(peerId);
+    return renderMenu(this.memberMenuActions(peerId), {
+      label: name ? `Actions for ${name}` : 'Member actions',
+      focus: this.menuFocus,
+      close: () => {
+        this.contextMenuTarget = null;
+      },
+    });
+  }
+
+  /** The mobile presentation of the member menu. */
+  private renderMenuSheet() {
+    const target = this.menuAsSheet ? this.contextMenuTarget : null;
+    return html`
+      <scion-action-sheet
+        .items=${target ? this.memberMenuActions(target.peerId) : []}
+        heading=${target ? this.memberName(target.peerId) : ''}
+        .open=${target !== null}
+        @action-sheet-select=${(e: CustomEvent<ActionSheetSelectDetail>): void => {
+          if (this.contextMenuTarget) {
+            runMenuAction(this.memberMenuActions(this.contextMenuTarget.peerId), e.detail.id);
+          }
+        }}
+        @action-sheet-close=${(): void => {
+          this.contextMenuTarget = null;
+        }}
+      ></scion-action-sheet>
+    `;
+  }
+
+  /**
+   * Mark this member's DM unread. The dot itself is server-confirmed state
+   * the chat page owns (unreadFromIds, respecting mute) — on success this
+   * dispatches member-marked-unread with the DM key so the page can both
+   * reflect the dot immediately (mute permitting) and suppress the open
+   * thread's auto-advance without waiting on the SSE round trip, the same
+   * way the space rail reflects its own "Mark unread" locally.
+   */
+  private async handleMarkUnread(peerId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    const info = this.dmInfoByPeerId[peerId];
+    if (!info) return;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(info.key)}/unread`,
+        { method: 'POST' }
+      );
+      if (!res.ok) return;
+      this.dispatchEvent(
+        new CustomEvent('member-marked-unread', {
+          detail: { peerId, conversationKey: info.key },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /** Render the sort toolbar at the top of the members sidebar. */
   private renderToolbar() {
     return html`
       <div class="members-toolbar">
-        <div class="filter-toggle">
-          <button
-            class=${this.memberFilter === 'all' ? 'active' : ''}
-            aria-pressed=${this.memberFilter === 'all'}
-            @click=${() => this.setMemberFilter('all')}
-          >
-            All
-          </button>
-          <button
-            class=${this.memberFilter === 'unread' ? 'active' : ''}
-            aria-pressed=${this.memberFilter === 'unread'}
-            @click=${() => this.setMemberFilter('unread')}
-          >
-            <sl-icon name="envelope"></sl-icon>
-            Unread
-          </button>
-        </div>
         <sl-dropdown>
           <sl-icon-button
             slot="trigger"
@@ -563,10 +912,31 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  /** Set the member filter mode. */
-  private setMemberFilter(filter: 'all' | 'unread'): void {
-    if (this.memberFilter === filter) return;
-    this.memberFilter = filter;
+  /** The people search box, shown while the people list is a bounded page. */
+  private renderPeopleSearch(): TemplateResult | typeof nothing {
+    if (!this.humansTruncated || this.collapsedSections.has('people')) return nothing;
+    return html`
+      <div class="people-search">
+        <input
+          type="search"
+          placeholder="Search people"
+          aria-label="Search people"
+          .value=${this.peopleQuery}
+          @input=${this.handlePeopleSearchInput}
+        />
+      </div>
+    `;
+  }
+
+  private handlePeopleSearchInput(e: Event): void {
+    this.peopleQuery = (e.target as HTMLInputElement).value;
+    this.dispatchEvent(
+      new CustomEvent('member-search', {
+        detail: { query: this.peopleQuery },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /** Handle sort mode selection from the dropdown. */
@@ -581,11 +951,17 @@ export class ScionChatMembers extends LitElement {
   private renderHumans() {
     // Filter out the current user so they don't appear in their own
     // members sidebar.
-    let visible = this.humans.filter((m) => m.id !== this.currentUserId);
+    const others = this.humans.filter((m) => m.id !== this.currentUserId);
+    let visible = others;
 
-    // Apply unread filter
-    if (this.memberFilter === 'unread') {
-      visible = visible.filter((m) => this.unreadFromIds.includes(m.id));
+    // Apply the people search (only offered for a bounded people list).
+    const query = this.humansTruncated ? this.peopleQuery.trim().toLowerCase() : '';
+    if (query) {
+      visible = visible.filter(
+        (m) =>
+          m.displayName.toLowerCase().includes(query) ||
+          (m.email || '').toLowerCase().includes(query)
+      );
     }
 
     const sorted = [...visible].sort((a, b) => {
@@ -600,14 +976,36 @@ export class ScionChatMembers extends LitElement {
       return a.displayName.localeCompare(b.displayName);
     });
 
-    return html`
-      <div class="section-label">People — ${sorted.length}</div>
-      ${sorted.length === 0
-        ? html`<div class="empty-note">
-            ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
-          </div>`
-        : sorted.map((m) => this.renderHuman(m))}
-    `;
+    // Unread counts every other person, not just the search matches, so a
+    // folded section still signals messages from someone filtered out.
+    const unread = others.some((m) => this.unreadFromIds.includes(m.id));
+    // A folded heading hides the search box, so it counts everyone rather
+    // than the matches of a search the user can no longer see.
+    const collapsed = this.collapsedSections.has('people');
+    const count = collapsed ? others.length : sorted.length;
+    const header = this.renderSectionHeader('people', `People — ${count}`, unread);
+
+    // The wrapper only groups the people part (it carries no styles), so it
+    // can be told apart from the agents part. One template for both fold
+    // states keeps the heading button, and so its focus, across a toggle.
+    return html`<div class="people-section">
+      ${header}
+      ${collapsed
+        ? nothing
+        : html`${sorted.length === 0
+            ? html`<div class="empty-note" role="status">
+                ${query ? (this.searching ? 'Searching…' : 'No matches') : 'No members'}
+              </div>`
+            : sorted.map((m) => this.renderHuman(m))}
+          ${query && this.searching && sorted.length > 0
+            ? html`<div class="empty-note" role="status">Searching…</div>`
+            : nothing}
+          ${this.humansTruncated && !query
+            ? html`<div class="empty-note">
+                Showing up to ${RECENT_USERS_LIMIT} people. Search to find others.
+              </div>`
+            : nothing}`}
+    </div>`;
   }
 
   private renderHuman(m: ChatHumanMember) {
@@ -618,6 +1016,8 @@ export class ScionChatMembers extends LitElement {
       <div
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(m.id, 'user', m.displayName)}
+        @pointerdown=${(e: PointerEvent): void => this.handleMemberPointerDown(e, m.id)}
+        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, m.id)}
         title="${m.email || m.displayName}"
       >
         <div class="avatar-wrapper">
@@ -641,15 +1041,9 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  private renderAgents() {
-    let visible = [...this.agents];
-
-    // Apply unread filter
-    if (this.memberFilter === 'unread') {
-      visible = visible.filter((a) => this.unreadFromIds.includes(a.id));
-    }
-
-    const sorted = visible.sort((a, b) => {
+  /** Sort agents per the current sort mode (alphabetical or recent activity). */
+  private sortAgents(list: ChatAgentMember[]): ChatAgentMember[] {
+    return [...list].sort((a, b) => {
       if (this.memberSort === 'activity') {
         // Sort by lastActivityEvent timestamp (most recent first)
         const aRaw = a.lastActivityEvent ? Date.parse(a.lastActivityEvent) : NaN;
@@ -662,14 +1056,50 @@ export class ScionChatMembers extends LitElement {
       // Alphabetical
       return a.displayName.localeCompare(b.displayName);
     });
+  }
 
+  private renderAgents() {
+    const agents = this.agents;
+
+    // Pin the thread-default agent first, under its own sub-heading, as long
+    // as it is actually present in the list — otherwise we'd show an orphaned
+    // "Thread default" heading with nothing under it.
+    const defaultAgent = this.defaultAgentSlug
+      ? agents.find((a) => a.slug === this.defaultAgentSlug)
+      : undefined;
+
+    const rest = defaultAgent ? agents.filter((a) => a !== defaultAgent) : agents;
+    const sortedRest = this.sortAgents(rest);
+
+    const unread = agents.some((a) => this.unreadFromIds.includes(a.id));
+    const header = this.renderSectionHeader('agents', `Agents — ${agents.length}`, unread);
+
+    // One template for both fold states keeps the heading button, and so its
+    // focus, across a toggle; only the body is conditional.
     return html`
-      <div class="section-label">Agents — ${sorted.length}</div>
-      ${sorted.length === 0
-        ? html`<div class="empty-note">
-            ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
-          </div>`
-        : sorted.map((a) => this.renderAgent(a))}
+      ${header}
+      ${this.collapsedSections.has('agents')
+        ? nothing
+        : agents.length === 0
+          ? html`<div class="empty-note">No agents</div>`
+          : html`
+              ${defaultAgent
+                ? this.renderDefaultAgentGroup(defaultAgent, sortedRest.length > 0)
+                : nothing}
+              ${sortedRest.map((a) => this.renderAgent(a))}
+            `}
+    `;
+  }
+
+  /**
+   * Render the pinned thread-default agent under its "Thread default"
+   * sub-heading, followed by a divider when other agents follow it.
+   */
+  private renderDefaultAgentGroup(defaultAgent: ChatAgentMember, hasRest: boolean) {
+    return html`
+      <div class="agent-subsection-label">Thread default</div>
+      ${this.renderAgent(defaultAgent)}
+      ${hasRest ? html`<hr class="agent-default-divider" />` : nothing}
     `;
   }
 
@@ -688,13 +1118,16 @@ export class ScionChatMembers extends LitElement {
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
     const hasUnread = this.unreadFromIds.includes(a.id);
-    const isDefault = this.defaultAgentSlug && a.slug === this.defaultAgentSlug;
 
     // Build tooltip: status detail (line 1) + updated time (line 2). The
     // detail message is the same text the agent detail page shows, and
     // "Updated" is the last state change — matching the agent list's column,
     // not the `lastSeen` heartbeat.
-    const detailText = a.detailMessage || a.activity || a.phase || 'unknown';
+    const detailText =
+      a.detailMessage ||
+      (a.activity ? stateLabel(a.activity.toLowerCase()) : '') ||
+      a.phase ||
+      'unknown';
     const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';
     const updatedText = updated ? `Updated: ${updated}` : '';
     const tooltipContent = updatedText ? `${detailText}\n${updatedText}` : detailText;
@@ -705,6 +1138,8 @@ export class ScionChatMembers extends LitElement {
       <div
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
+        @pointerdown=${(e: PointerEvent): void => this.handleMemberPointerDown(e, a.id)}
+        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, a.id)}
       >
         <div class="avatar-wrapper ${this.recentlyChangedAgents.has(a.id) ? 'active' : ''}">
           <scion-chat-avatar
@@ -719,15 +1154,14 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          ${isDefault ? html`<span class="default-agent-label">thread default</span>` : nothing}
           <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
         ${a.canAttach !== true
           ? nothing
           : html`<a
-              href="/agents/${a.id}/terminal"
+              href=${terminalHref(a.id)}
               class="agent-terminal"
-              title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
+              title="Open terminal"
               @click=${(e: MouseEvent) => {
                 e.stopPropagation();
                 // Leave modified and non-primary clicks to the browser so
@@ -737,20 +1171,26 @@ export class ScionChatMembers extends LitElement {
                   return;
                 }
                 e.preventDefault();
-                openTerminalPopout(a.id);
+                openTerminal(a.id);
               }}
             >
               <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
             </a>`}
-        <a
-          href="/agents/${a.id}"
-          target="_blank"
-          class="agent-popout"
-          title="Open agent detail"
-          @click=${(e: Event) => e.stopPropagation()}
-        >
-          <sl-icon name="box-arrow-up-right" style="font-size: var(--chat-fs-base);"></sl-icon>
-        </a>
+        ${a.projectId
+          ? html`<a
+              href=${agentGraphHref(a.projectId, a.id)}
+              class="agent-graph"
+              title="Open in graph"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                navigateTo(agentGraphHref(a.projectId!, a.id));
+              }}
+            >
+              <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
+            </a>`
+          : nothing}
       </div>
     `;
 
@@ -759,21 +1199,17 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  /** Format an ISO timestamp as relative time (e.g., "2 min ago"). */
+  /** Format an ISO timestamp as a compact relative age (e.g., "2m ago"). */
   private formatRelativeTime(iso: string): string {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
-    const now = Date.now();
-    const diffMs = now - d.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
-
-    if (diffMin < 1) return 'just now';
-    if (diffMin < 60) return `${diffMin} min ago`;
-    const diffHrs = Math.floor(diffMin / 60);
-    if (diffHrs < 24) return `${diffHrs} hr ago`;
-    const diffDays = Math.floor(diffHrs / 24);
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    const ageMs = Date.now() - d.getTime();
+    // A future instant is clock skew between hub and browser.
+    if (ageMs < 0) return 'now';
+    // Under a week: a compact relative age.
+    if (ageMs < WEEK_MS) return formatRelative(iso, { style: 'narrow' });
+    // Older than a week: an absolute date in the display zone, zone named.
+    return formatInstantWithZone(iso, 'date');
   }
 
   private handleMemberClick(id: string, kind: 'user' | 'agent', displayName: string) {

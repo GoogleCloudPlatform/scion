@@ -1,0 +1,21 @@
+{
+  "profile_map": {
+    "a": "k8s-agents-a",
+    "b": "k8s-agents-b"
+  },
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "notice",
+      "path": "profiles.*",
+      "profiles": [
+        "a",
+        "b"
+      ],
+      "message_contains": [
+        "differ in kubernetes_service_account_mappings.agent@proj.iam.gserviceaccount.com;",
+        "k8s-agents-a (a), k8s-agents-b (b)"
+      ]
+    }
+  ]
+}

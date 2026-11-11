@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
+  // The isolated terminal-test project compiles transitive toast.ts and
+  // confirm-dialog.ts without client/main.ts. main.ts normally imports
+  // alert.js and dialog.js, supplying the HTMLElementTagNameMap
+  // augmentation. These type-only declarations are pinned to the installed
+  // Shoelace package.
+  "files": [
+    "../../node_modules/@shoelace-style/shoelace/dist/components/alert/alert.d.ts",
+    "../../node_modules/@shoelace-style/shoelace/dist/components/dialog/dialog.d.ts"
+  ],
+  // Every terminal unit test, by glob (ptone/scion#5335).
+  "include": ["terminal-*.test.ts"],
+  "exclude": []
+}

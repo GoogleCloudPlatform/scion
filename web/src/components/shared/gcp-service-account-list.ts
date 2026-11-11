@@ -59,7 +59,10 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from './confirm-dialog.js';
+import { deleteGCPServiceAccount } from '../../shared/gcp-service-account-delete.js';
+import { formatRelative } from '../../utils/time.js';
 
 /** Detail payload for the `sa-list-changed` CustomEvent. */
 export interface SAListChangedDetail {
@@ -510,13 +513,13 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.deletingId = account.id;
 
     try {
-      const response = await apiFetch(saRef(account), { method: 'DELETE' });
-
-      if (!response.ok && response.status !== 204) {
-        throw new Error(
-          await extractApiError(response, `Failed to delete (HTTP ${response.status})`)
-        );
-      }
+      const outcome = await deleteGCPServiceAccount(
+        saRef(account),
+        (url) => apiFetch(url, { method: 'DELETE' }),
+        (message) => showConfirm(message)
+      );
+      if (outcome.status === 'cancelled') return;
+      if (outcome.status === 'failed') throw new Error(outcome.message);
 
       await this.loadAccounts();
       this.dispatchSAChange({ action: 'deleted', account });
@@ -531,32 +534,6 @@ export class ScionGCPServiceAccountList extends LitElement {
   private getVerificationStatus(account: GCPServiceAccount): GCPVerificationStatus {
     if (account.verificationStatus) return account.verificationStatus;
     return account.verified ? 'verified' : 'unverified';
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
   }
 
   // ── Rendering ────────────────────────────────────────────────────────
@@ -699,15 +676,14 @@ export class ScionGCPServiceAccountList extends LitElement {
   }
 
   private async copyEmail(email: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(email);
-      this.copiedEmail = email;
-      setTimeout(() => {
-        this.copiedEmail = null;
-      }, 1500);
-    } catch {
-      // Clipboard unavailable
+    if (!(await copyToClipboard(email))) {
+      showCopyFailedToast();
+      return;
     }
+    this.copiedEmail = email;
+    setTimeout(() => {
+      this.copiedEmail = null;
+    }, 1500);
   }
 
   private renderRow(account: GCPServiceAccount) {
@@ -760,11 +736,11 @@ export class ScionGCPServiceAccountList extends LitElement {
   }
 
   /**
-   * The email links to a detail page only where one exists. saDetailPath
-   * returns null for project-scoped accounts, which are managed from their
-   * project's settings tab -- so this renders a link for exactly the accounts
-   * that have somewhere to go, rather than for every row with a dead
-   * destination for most of them.
+   * The email links to the account's detail page. saDetailPath picks the
+   * address: parentless accounts get the plain page with their actions;
+   * project-scoped ones get the project-relative status view, which shows no
+   * actions (verify and delete for them stay in this list). It returns null
+   * only for a row it cannot address, which then renders as plain text.
    */
   private renderEmail(account: GCPServiceAccount) {
     const href = saDetailPath(account);
@@ -779,7 +755,7 @@ export class ScionGCPServiceAccountList extends LitElement {
         ? html`<sl-badge variant="success">
             Verified
             ${account.verifiedAt
-              ? html`<sl-tooltip content="Verified ${this.formatRelativeTime(account.verifiedAt)}"
+              ? html`<sl-tooltip content="Verified ${formatRelative(account.verifiedAt)}"
                   ><span>✓</span></sl-tooltip
                 >`
               : ''}

@@ -1,0 +1,310 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
+# check. PRs and main pushes run only when web/ (or this file) changes,
+# or one of the few Go paths the page-policy and port-proxy suites
+# exercise (listed under on:, below); the nightly run covers everything
+# else, such as browser drift.
+#
+# One matrix job per suite config under web/e2e/*/playwright.config.ts,
+# all in full Chromium. Every suite except test-identity-session,
+# page-policy and port-proxy (below) serves the web sources itself (Vite
+# dev server or an esbuild bundle) with a mocked hub. Only
+# terminal-workspace also needs a production build: some of its tests
+# check the Shoelace icon files in web/dist, so that job runs npm run build
+# first.
+#
+# test-identity-session and page-policy run against the real Go hub binary
+# (a throwaway hub started by their global setup; test-identity-session's
+# is a member-level test hub, ptone/scion#4240; page-policy checks the page
+# script policy the hub sends, ptone/scion#5912). They and port-proxy are
+# the only jobs that set up Go (go.mod version, with setup-go's built-in
+# cache; ci.yml uses per-job caches instead, see
+# .github/actions/setup-go-cache) and build the binary (make build) and
+# the web assets (npm run build) before the suite runs.
+#
+# port-proxy (ptone/scion#5568) runs against the real hub binary too, with
+# the same Go setup and builds, plus the fake agent helper (go build of
+# hack/e2e/fakeagent) that serves the fixture app's port from agents.
+# The workflow-level path filter below also lists the Go files that suite
+# depends on (the hub's port proxy, its no-credentials answer and session
+# fallthrough, the agent-side tunnel clients and the helper). GitHub path
+# filters apply to the whole workflow, not one matrix entry, so a change to
+# those paths runs every suite here; the list is kept to those files.
+#
+# iap-driver (ptone/scion#4240, WS2) needs no hub and no web build: it
+# checks the e2e harness IAP driver hook against two local HTTP servers it
+# starts itself, in well under a minute.
+#
+# Not covered here:
+# - web/e2e/iap-journey (ptone/scion#4240, X5): operator-run only against a
+#   live IAP-fronted test hub; it skips without IAP_JOURNEY=1 and its
+#   environment (web/e2e/iap-journey/README.md).
+# - web/e2e/chat-mobile: the chat-mobile-e2e job in ci.yml owns it (sharded,
+#   with a stable required-check name), so it is not run twice.
+# - web/playwright.config.ts (e2e/*.spec.ts), which builds and starts the Go
+#   hub in its global setup.
+#
+# CI-only settings (retry, trace on retry, github and HTML reporters,
+# webServer start timeout, globalTimeout) live in each suite config, gated
+# on CI, so local runs are unchanged.
+#
+# Runtime and cost: about 23 minutes of test time per full run (most of it
+# terminal-workspace, chat-palette, terminal-entrypoints and
+# terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
+# 50-60 runner-minutes across the 14 mocked-hub jobs; retries of failing
+# tests add to that. The terminal-workspace job also runs a Vite production
+# build first, which adds about 1 minute (that job takes about 4 minutes in
+# total). The three real-hub jobs, test-identity-session, page-policy and
+# port-proxy, each add setup-go, a Go build (make build; a few minutes on a
+# cold Go cache, less with the setup-go cache) and a Vite production build
+# before a short suite; port-proxy also builds the helper and runs a second
+# suite (the page view journeys, ptone/scion#5569) on a second hub, which
+# adds a few minutes; its job timeout is 35 minutes, the others' 20.
+# iap-driver is the 18th job.
+# Wall clock is bounded by the slowest job, about 8-10 minutes.
+
+name: Web E2E (advisory)
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'pkg/hub/web.go'
+      - 'pkg/hub/web_csp.go'
+      - 'pkg/hub/csp_reports.go'
+      - 'pkg/cspreport/**'
+      - '.github/workflows/web-e2e.yml'
+      # port-proxy suite (ptone/scion#5568): see the header.
+      - 'hack/e2e/**'
+      - 'pkg/hub/port_forward_handlers.go'
+      - 'pkg/hub/conduit_proxy.go'
+      - 'pkg/hub/project_workspace_handlers.go'
+      - 'pkg/hub/auth.go'
+      - 'pkg/hub/port_proxy_metrics.go'
+      - 'pkg/hub/web.go'
+      - 'pkg/hub/port_view.go'
+      - 'pkg/hub/internal/portview/**'
+      - 'pkg/hub/server.go'
+      - 'pkg/util/logging/**'
+      - 'pkg/portforward/**'
+      - 'pkg/sciontool/portforward/**'
+      - 'pkg/sciontool/conduit/**'
+  push:
+    branches: [ main ]
+    paths:
+      - 'web/**'
+      - 'pkg/hub/web.go'
+      - 'pkg/hub/web_csp.go'
+      - 'pkg/hub/csp_reports.go'
+      - 'pkg/cspreport/**'
+      - '.github/workflows/web-e2e.yml'
+      # port-proxy suite (ptone/scion#5568): see the header.
+      - 'hack/e2e/**'
+      - 'pkg/hub/port_forward_handlers.go'
+      - 'pkg/hub/conduit_proxy.go'
+      - 'pkg/hub/project_workspace_handlers.go'
+      - 'pkg/hub/auth.go'
+      - 'pkg/hub/port_proxy_metrics.go'
+      - 'pkg/hub/web.go'
+      - 'pkg/hub/port_view.go'
+      - 'pkg/hub/internal/portview/**'
+      - 'pkg/hub/server.go'
+      - 'pkg/util/logging/**'
+      - 'pkg/portforward/**'
+      - 'pkg/sciontool/portforward/**'
+      - 'pkg/sciontool/conduit/**'
+  # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+# Same grouping as ci.yml: a new push to a PR cancels the superseded run;
+# main, scheduled and manual runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
+jobs:
+  e2e:
+    name: e2e (${{ matrix.suite }})
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    # port-proxy runs two suites, each on its own hub (see below).
+    timeout-minutes: ${{ matrix.suite == 'port-proxy' && 35 || 20 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - agent-store-count
+          - chat
+          - chat-file-preview
+          - chat-palette
+          - project-files-tabs
+          - terminal-coordinator
+          - terminal-entrypoints
+          - terminal-hidden
+          - terminal-lifecycle
+          - terminal-owner
+          - terminal-pane
+          - terminal-workspace
+          - test-hub-banner
+          - broker-area
+          - test-identity-session
+          - page-policy
+          - port-proxy
+          - iap-driver
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24' # Node.js 24 (LTS)
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./web
+        run: npm ci
+
+      # test-identity-session, page-policy and port-proxy: the suites start
+      # the real hub binary.
+      - name: Setup Go (real hub suites)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'port-proxy'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build hub binary and web assets (test-identity-session, page-policy)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy'
+        run: |
+          make build
+          npm --prefix web run build
+
+      # port-proxy also runs the fake agent helper (hack/e2e/fakeagent).
+      - name: Build hub binary, web assets and fake agent helper (port-proxy)
+        if: matrix.suite == 'port-proxy'
+        run: |
+          make build
+          npm --prefix web run build
+          go build -buildvcs=false -o build/e2e-fakeagent ./hack/e2e/fakeagent
+
+      # terminal-workspace tests (workspace.pw.ts, dm-buttons.pw.ts) read
+      # icon files from the production build output in web/dist/client.
+      - name: Build web (production)
+        if: matrix.suite == 'terminal-workspace'
+        working-directory: ./web
+        run: npm run build
+
+      - name: Read Playwright version
+        id: playwright
+        working-directory: ./web
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Full Chromium is installed, not the headless shell used by the
+      # chat-mobile-e2e job in ci.yml: the terminal-entrypoints test that
+      # Ctrl-clicks a terminal link expects the new tab to load the link's
+      # href, and under the headless shell that tab stays on about:blank.
+      # Browser binaries are keyed on the Playwright version; the key names
+      # full Chromium so a headless-shell-only cache is never restored. The
+      # OS packages Chromium needs are not cacheable and are installed each
+      # run.
+      - name: Cache Playwright Chromium
+        id: browser-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-full-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # A normal install of full Chromium takes about 1-3 minutes; the
+      # timeout makes a stalled download fail fast instead of using up the
+      # job timeout, with headroom for a slow but progressing download.
+      - name: Install Chromium
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        working-directory: ./web
+        run: npx playwright install --with-deps --no-shell chromium
+
+      - name: Install Chromium system dependencies
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+        working-directory: ./web
+        run: npx playwright install-deps chromium
+
+      # CHROMIUM_EXECUTABLE / TERMINAL_OWNER_CHROMIUM point every suite at
+      # the Playwright full Chromium binary, from chromium.executablePath().
+      # The suite configs set executablePath only when one of these is set;
+      # otherwise a headless launch uses Playwright's headless shell, which
+      # the --no-shell install above does not download. So CI must export
+      # the full Chromium path. terminal-owner reads TERMINAL_OWNER_CHROMIUM
+      # and every other suite reads CHROMIUM_EXECUTABLE, so both are
+      # exported. The step stops with a clear error if the binary is
+      # missing, for example after a partial install or cache restore.
+      - name: Run Playwright suite
+        id: suite
+        working-directory: ./web
+        env:
+          SUITE: ${{ matrix.suite }}
+          # Read only by test-identity-session, page-policy and port-proxy:
+          # the binaries and web assets were built in the steps above.
+          E2E_PREBUILT: '1'
+        run: |
+          CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
+          if [ ! -x "$CHROMIUM_EXECUTABLE" ]; then
+            echo "::error::Playwright Chromium not found at $CHROMIUM_EXECUTABLE (expected from npx playwright install --no-shell chromium)"
+            exit 1
+          fi
+          export CHROMIUM_EXECUTABLE
+          export TERMINAL_OWNER_CHROMIUM="$CHROMIUM_EXECUTABLE"
+          npx playwright test -c "e2e/$SUITE/playwright.config.ts"
+
+      # The page view journeys (ptone/scion#5569) need the hub.port_view
+      # experiment on from hub start, so they run on a second hub of the
+      # same rig, under their own config. They run whenever the suite above
+      # ran, also when its journeys failed, so both results are reported.
+      - name: Run Playwright page view suite (port-proxy)
+        if: ${{ !cancelled() && matrix.suite == 'port-proxy' && (steps.suite.outcome == 'success' || steps.suite.outcome == 'failure') }}
+        working-directory: ./web
+        env:
+          E2E_PREBUILT: '1'
+        run: |
+          CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
+          export CHROMIUM_EXECUTABLE
+          npx playwright test -c e2e/port-proxy/playwright.view.config.ts
+
+      # Uploaded whenever the suite ran, so retry traces of flaky tests (which
+      # pass the job) are kept too. Paths match each config's HTML report
+      # folder (playwright-report/<suite>) and outputDir (test-results/<suite>).
+      # Configs that set no outputDir (agent-store-count, terminal-entrypoints,
+      # terminal-workspace) use Playwright's default, web/test-results.
+      - name: Upload traces and report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-e2e-${{ matrix.suite }}
+          path: |
+            web/playwright-report/
+            web/test-results/
+          if-no-files-found: ignore
+          retention-days: 14

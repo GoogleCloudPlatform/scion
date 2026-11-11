@@ -1,0 +1,231 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package api
+
+import (
+	"reflect"
+	"slices"
+	"sort"
+	"strings"
+)
+
+// ClearedEnvPathPrefix prefixes a ScionConfig.ClearedFields entry that names
+// one env key: "env.FOO" clears the agent's own value for FOO.
+const ClearedEnvPathPrefix = "env."
+
+// clearableConfigKeys are the top-level ScionConfig json keys a
+// ClearedFields entry may name: the limits, thinking level, resources and
+// system prompt. Each is a key whose inherited value a start re-derives from
+// the template, so removing the agent's own value restores it. Other keys
+// are left out until a test shows their inherited value comes back after a
+// clear: the harness-config layer (model, image, command args, task flag,
+// harness auth, kubernetes pull policy) is written into the agent's config
+// at provision and not re-applied at start, so clearing those would drop
+// the harness config's value instead of restoring it. Collections are not
+// cleared wholesale: env is cleared per key (ClearedEnvPathPrefix), and
+// removing a whole volume list could drop mounts the broker added itself,
+// such as the workspace. Telemetry is left out: its TLS cert and key files
+// must clear together.
+var clearableConfigKeys = map[string]bool{
+	"max_turns":       true,
+	"max_model_calls": true,
+	"max_duration":    true,
+	"thinking_level":  true,
+	"resources":       true,
+	"system_prompt":   true,
+}
+
+// resourceSubPaths are the ScionConfig.ClearedFields entries that name one
+// sub-field of resources (ptone/scion#5676): clearing one removes the
+// agent's own value for that sub-field only, so the per-start resource
+// tiers (profile, hub agent_defaults, settings default_resources, the
+// built-in CPU default) fill it, while the sub-fields the agent still sets
+// are kept. A Runtime Broker that applies them advertises the
+// clearedResourceSubfields capability; an older one ignores them.
+var resourceSubPaths = map[string]func(*ResourceSpec) *string{
+	"resources.requests.cpu":    func(r *ResourceSpec) *string { return &r.Requests.CPU },
+	"resources.requests.memory": func(r *ResourceSpec) *string { return &r.Requests.Memory },
+	"resources.limits.cpu":      func(r *ResourceSpec) *string { return &r.Limits.CPU },
+	"resources.limits.memory":   func(r *ResourceSpec) *string { return &r.Limits.Memory },
+	"resources.disk":            func(r *ResourceSpec) *string { return &r.Disk },
+}
+
+// resourceSubPathList is resourceSubPaths' keys, sorted, built once.
+// TestResourceSubPaths pins that the two hold the same paths.
+var resourceSubPathList = []string{
+	"resources.disk",
+	"resources.limits.cpu",
+	"resources.limits.memory",
+	"resources.requests.cpu",
+	"resources.requests.memory",
+}
+
+// ResourceSubPaths returns the resources sub-field ClearedFields entries,
+// sorted. The result is a copy the caller may change.
+func ResourceSubPaths() []string {
+	return slices.Clone(resourceSubPathList)
+}
+
+// IsResourceSubPath reports whether path names one resources sub-field
+// (see ResourceSubPaths).
+func IsResourceSubPath(path string) bool {
+	_, ok := resourceSubPaths[path]
+	return ok
+}
+
+// ResourceSubField returns a pointer to the sub-field of r that the
+// resources sub-path path names, or nil when path is not one or r is nil.
+func ResourceSubField(r *ResourceSpec, path string) *string {
+	f, ok := resourceSubPaths[path]
+	if !ok || r == nil {
+		return nil
+	}
+	return f(r)
+}
+
+// ResourceSubFieldValue returns the value of the sub-field of r that the
+// resources sub-path path names, or "" when path is not one or r is nil
+// (ResourceSubField returns nil), so callers never dereference nil.
+func ResourceSubFieldValue(r *ResourceSpec, path string) string {
+	if f := ResourceSubField(r, path); f != nil {
+		return *f
+	}
+	return ""
+}
+
+// ClearableConfigPath reports whether path is a ScionConfig.ClearedFields
+// entry a Runtime Broker applies: a key in clearableConfigKeys, a resources
+// sub-field (ResourceSubPaths), or ClearedEnvPathPrefix followed by a
+// non-empty env key.
+func ClearableConfigPath(path string) bool {
+	if k, ok := strings.CutPrefix(path, ClearedEnvPathPrefix); ok {
+		return k != ""
+	}
+	return clearableConfigKeys[path] || IsResourceSubPath(path)
+}
+
+// scionConfigFieldIndex indexes ScionConfig's fields by json key.
+var scionConfigFieldIndex = func() map[string]int {
+	m := map[string]int{}
+	typ := reflect.TypeOf(ScionConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+		if name != "" && name != "-" {
+			m[name] = i
+		}
+	}
+	return m
+}()
+
+// ApplyClearedFields applies the cleared paths to cfg, in place. An env path
+// removes that key from cfg.Env (a template's env is applied at start as a
+// final fill, so it is never copied here). A resources sub-path empties
+// that sub-field of cfg.Resources and never reads inherit: templates never
+// supply resources, so the per-start resource tiers fill it. Any other path
+// takes its value from inherit when inherit is non-nil, and is zeroed
+// otherwise, so the value the start derives under cfg applies. A path
+// ClearableConfigPath does not accept is left alone and returned in
+// ignored. Applying the same paths again gives the same result.
+func ApplyClearedFields(cfg *ScionConfig, paths []string, inherit *ScionConfig) (ignored []string) {
+	if cfg == nil {
+		return nil
+	}
+	v := reflect.ValueOf(cfg).Elem()
+	for _, p := range paths {
+		if !ClearableConfigPath(p) {
+			ignored = append(ignored, p)
+			continue
+		}
+		if k, ok := strings.CutPrefix(p, ClearedEnvPathPrefix); ok {
+			delete(cfg.Env, k)
+			continue
+		}
+		if IsResourceSubPath(p) {
+			if f := ResourceSubField(cfg.Resources, p); f != nil {
+				*f = ""
+			}
+			continue
+		}
+		i, ok := scionConfigFieldIndex[p]
+		if !ok {
+			ignored = append(ignored, p)
+			continue
+		}
+		f := v.Field(i)
+		if inherit != nil {
+			f.Set(reflect.ValueOf(inherit).Elem().Field(i))
+		} else {
+			f.Set(reflect.Zero(f.Type()))
+		}
+	}
+	return ignored
+}
+
+// rerenderableConfigKeys are the top-level ScionConfig json keys whose
+// values provisioning renders into files in the agent home (instructions,
+// system prompt, installed skills, the services file), so a start applies
+// a change to them only by rendering those files again. A
+// ScionConfig.ChangedFields entry names one of them.
+var rerenderableConfigKeys = map[string]bool{
+	"system_prompt":      true,
+	"agent_instructions": true,
+	"skills":             true,
+	"services":           true,
+}
+
+// RerenderableConfigKeys returns the keys a ScionConfig.ChangedFields entry
+// may name, sorted.
+func RerenderableConfigKeys() []string {
+	out := make([]string, 0, len(rerenderableConfigKeys))
+	for k := range rerenderableConfigKeys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RerenderableConfigKey reports whether key is a provision-rendered config
+// key (see RerenderableConfigKeys).
+func RerenderableConfigKey(key string) bool {
+	return rerenderableConfigKeys[key]
+}
+
+// RerenderConfigKeys returns the provision-rendered keys a start with the
+// hub inline config cfg re-renders: those cfg.ChangedFields lists, and
+// those cfg.ClearedFields lists (a cleared value is rendered again from
+// the template). Entries that are not rerenderable are dropped. The result
+// is sorted and nil when empty.
+func RerenderConfigKeys(cfg *ScionConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, list := range [][]string{cfg.ChangedFields, cfg.ClearedFields} {
+		for _, k := range list {
+			if rerenderableConfigKeys[k] {
+				set[k] = true
+			}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}

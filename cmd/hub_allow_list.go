@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -143,7 +144,7 @@ func runAllowListList(cmd *cobra.Command, args []string) error {
 	for _, entry := range resp.Items {
 		fmt.Printf("%-40s %-30s %s\n",
 			entry.Email,
-			entry.Created.Format(time.RFC3339),
+			clitime.Format(entry.Created, clitime.Full),
 			entry.Note,
 		)
 	}
@@ -250,9 +251,21 @@ func runAllowListImport(cmd *cobra.Command, args []string) error {
 }
 
 func parseImportCSV(r io.Reader) ([]hubclient.AllowListAddRequest, error) {
+	return parseEmailRecords(r, false, true)
+}
+
+// parseEmailRecords reads one address per record with an optional second
+// note column, skipping empty records and an "email" header on the first
+// line. With comments, lines starting with '#' are skipped. With
+// requireAt, records without '@' are dropped; without it they are kept, so
+// the hub can report them (batch invite).
+func parseEmailRecords(r io.Reader, comments, requireAt bool) ([]hubclient.AllowListAddRequest, error) {
 	reader := csv.NewReader(bufio.NewReader(r))
 	reader.TrimLeadingSpace = true
 	reader.FieldsPerRecord = -1
+	if comments {
+		reader.Comment = '#'
+	}
 
 	var emails []hubclient.AllowListAddRequest
 	lineNum := 0
@@ -276,7 +289,7 @@ func parseImportCSV(r io.Reader) ([]hubclient.AllowListAddRequest, error) {
 			continue
 		}
 
-		if email == "" || !strings.Contains(email, "@") {
+		if email == "" || (requireAt && !strings.Contains(email, "@")) {
 			continue
 		}
 

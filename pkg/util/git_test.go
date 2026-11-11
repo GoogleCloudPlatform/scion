@@ -15,6 +15,8 @@
 package util
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,7 +123,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Remove
-		if _, err := RemoveWorktree(worktreePath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, worktreePath, repoDir, ""); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 		// Wait/Check? git worktree remove deletes the directory usually.
@@ -129,40 +131,20 @@ func TestGitUtils(t *testing.T) {
 			t.Errorf("worktree dir still exists after removal")
 		}
 
-		// Test PruneWorktrees
-		prunePath := filepath.Join(repoDir, "prune-test")
-		pruneBranch := "prune-branch"
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
-			t.Fatalf("CreateWorktree for prune failed: %v", err)
-		}
-		// Manually remove directory to simulate stale worktree
-		if err := os.RemoveAll(prunePath); err != nil {
-			t.Fatalf("Failed to remove prune path: %v", err)
-		}
-		// Prune
-		if err := PruneWorktrees(); err != nil {
-			t.Fatalf("PruneWorktrees failed: %v", err)
-		}
-		// Verify we can create it again (if prune failed, this might fail with 'already exists')
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
-			t.Errorf("Failed to recreate worktree after prune: %v", err)
-		}
-		// Clean up
-		_, _ = RemoveWorktree(prunePath, true)
 	})
 
-	t.Run("PruneWorktreesIn", func(t *testing.T) {
-		prunePath := filepath.Join(repoDir, "prune-in-test")
-		pruneBranch := "prune-in-branch"
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
+	t.Run("RemoveWorktreeEntryIn", func(t *testing.T) {
+		stalePath := filepath.Join(repoDir, "stale-entry-test")
+		staleBranch := "stale-entry-branch"
+		if err := CreateWorktree(stalePath, staleBranch); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 		// Manually remove directory to simulate stale worktree
-		if err := os.RemoveAll(prunePath); err != nil {
-			t.Fatalf("Failed to remove prune path: %v", err)
+		if err := os.RemoveAll(stalePath); err != nil {
+			t.Fatalf("Failed to remove stale path: %v", err)
 		}
 
-		// PruneWorktreesIn should work even when CWD is outside the repo
+		// RemoveWorktreeEntryIn works even when CWD is outside the repo
 		outsideDir := t.TempDir()
 		prevWd, _ := os.Getwd()
 		if err := os.Chdir(outsideDir); err != nil {
@@ -170,19 +152,19 @@ func TestGitUtils(t *testing.T) {
 		}
 		defer func() { _ = os.Chdir(prevWd) }()
 
-		if err := PruneWorktreesIn(repoDir); err != nil {
-			t.Fatalf("PruneWorktreesIn failed: %v", err)
+		if err := RemoveWorktreeEntryIn(repoDir, stalePath); err != nil {
+			t.Fatalf("RemoveWorktreeEntryIn failed: %v", err)
 		}
 
-		// Verify we can create the worktree again (prune cleared the stale record)
+		// Verify we can create the worktree again (the stale entry is gone)
 		if err := os.Chdir(prevWd); err != nil {
 			t.Fatal(err)
 		}
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
-			t.Errorf("Failed to recreate worktree after PruneWorktreesIn: %v", err)
+		if err := CreateWorktree(stalePath, staleBranch); err != nil {
+			t.Errorf("Failed to recreate worktree after RemoveWorktreeEntryIn: %v", err)
 		}
 		// Clean up
-		_, _ = RemoveWorktree(prunePath, true)
+		_, _ = RemoveWorktree(repoDir, stalePath, repoDir, "")
 	})
 
 	t.Run("DeleteBranchIn", func(t *testing.T) {
@@ -192,13 +174,13 @@ func TestGitUtils(t *testing.T) {
 		if err := CreateWorktree(wtPath, branch); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
-		if _, err := RemoveWorktree(wtPath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, wtPath, repoDir, ""); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 
 		// Branch should still exist
-		if !BranchExists(branch) {
-			t.Fatal("expected branch to still exist after RemoveWorktree(deleteBranch=false)")
+		if !BranchExistsIn(repoDir, branch) {
+			t.Fatal("expected branch to still exist after RemoveWorktree with no branch to delete")
 		}
 
 		// DeleteBranchIn should remove it
@@ -207,7 +189,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Branch should be gone
-		if BranchExists(branch) {
+		if BranchExistsIn(repoDir, branch) {
 			t.Error("expected branch to be deleted after DeleteBranchIn")
 		}
 
@@ -217,7 +199,7 @@ func TestGitUtils(t *testing.T) {
 		}
 	})
 
-	t.Run("FindWorktreeByBranch", func(t *testing.T) {
+	t.Run("FindWorktreeByBranchIn", func(t *testing.T) {
 		wtPath := filepath.Join(repoDir, "wt-find")
 		branch := "find-branch"
 
@@ -225,9 +207,9 @@ func TestGitUtils(t *testing.T) {
 			t.Fatalf("setup failed: %v", err)
 		}
 
-		foundPath, err := FindWorktreeByBranch(branch)
+		foundPath, err := FindWorktreeByBranchIn(repoDir, branch)
 		if err != nil {
-			t.Errorf("FindWorktreeByBranch failed: %v", err)
+			t.Errorf("FindWorktreeByBranchIn failed: %v", err)
 		}
 
 		// Normalize paths for comparison (resolve symlinks)
@@ -239,7 +221,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Clean up
-		_, _ = RemoveWorktree(wtPath, true)
+		_, _ = RemoveWorktree(repoDir, wtPath, repoDir, "")
 	})
 
 	t.Run("RemoveWorktreeWithBranch", func(t *testing.T) {
@@ -250,14 +232,14 @@ func TestGitUtils(t *testing.T) {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
-		deleted, err := RemoveWorktree(wtPath, true)
+		deleted, err := RemoveWorktree(repoDir, wtPath, repoDir, branch)
 		if err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 		if !deleted {
 			t.Error("expected branch to be deleted")
 		}
-		if BranchExists(branch) {
+		if BranchExistsIn(repoDir, branch) {
 			t.Error("branch still exists after RemoveWorktree with deleteBranch=true")
 		}
 	})
@@ -309,6 +291,55 @@ func TestGitUtils(t *testing.T) {
 	})
 }
 
+// TestBranchAndWorktreeLookups_CwdOutsideRepo checks that BranchExistsIn and
+// FindWorktreeByBranchIn run against the repository they are given, not the
+// process's current directory: a runtime broker runs outside the project
+// repository and must still find the agent's branch and worktree
+// (ptone/scion#4439).
+func TestBranchAndWorktreeLookups_CwdOutsideRepo(t *testing.T) {
+	repoDir := setupGitRepo(t)
+	branch := "outside-cwd-branch"
+	wtPath := filepath.Join(t.TempDir(), "outside-cwd-wt")
+	if out, err := exec.Command("git", "-C", repoDir, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", repoDir, "branch", "plain-branch").CombinedOutput(); err != nil {
+		t.Fatalf("git branch: %v: %s", err, out)
+	}
+
+	// The process sits in a plain directory outside any repository.
+	t.Chdir(t.TempDir())
+
+	if !BranchExistsIn(repoDir, branch) {
+		t.Errorf("BranchExistsIn(%q) = false with cwd outside the repo, want true", branch)
+	}
+	if !BranchExistsIn(repoDir, "plain-branch") {
+		t.Error("BranchExistsIn(plain-branch) = false with cwd outside the repo, want true")
+	}
+	if BranchExistsIn(repoDir, "no-such-branch") {
+		t.Error("BranchExistsIn(no-such-branch) = true, want false")
+	}
+	if BranchExistsIn("", branch) {
+		t.Error("BranchExistsIn with an empty repo dir = true, want false")
+	}
+
+	found, err := FindWorktreeByBranchIn(repoDir, branch)
+	if err != nil {
+		t.Fatalf("FindWorktreeByBranchIn with cwd outside the repo: %v", err)
+	}
+	evalFound, _ := filepath.EvalSymlinks(found)
+	evalWt, _ := filepath.EvalSymlinks(wtPath)
+	if evalFound != evalWt {
+		t.Errorf("FindWorktreeByBranchIn = %q, want %q", found, wtPath)
+	}
+	if found, err := FindWorktreeByBranchIn(repoDir, "plain-branch"); err != nil || found != "" {
+		t.Errorf("FindWorktreeByBranchIn(plain-branch) = %q, %v; want \"\", nil", found, err)
+	}
+	if _, err := FindWorktreeByBranchIn("", branch); err == nil {
+		t.Error("FindWorktreeByBranchIn with an empty repo dir: want an error, got nil")
+	}
+}
+
 func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 	// Clear container context so worktree creation is allowed
 	t.Setenv("SCION_HOST_UID", "")
@@ -345,8 +376,8 @@ func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 	}
 
 	// Clean up
-	_, _ = RemoveWorktree(siblingPath, true)
-	_, _ = RemoveWorktree(wtPath, true)
+	_, _ = RemoveWorktree(mainRepo, siblingPath, mainRepo, "")
+	_, _ = RemoveWorktree(mainRepo, wtPath, mainRepo, "")
 }
 
 func TestCreateWorktree_RejectsInsideContainer(t *testing.T) {
@@ -366,19 +397,556 @@ func TestCreateWorktree_RejectsInsideContainer(t *testing.T) {
 	}
 }
 
-func TestPruneWorktrees_SkipsInsideContainer(t *testing.T) {
-	// When SCION_HOST_UID is set (agent container), pruning should be a no-op
-	// to prevent destroying sibling worktree metadata that appears stale from
-	// the container's mount layout.
-	t.Setenv("SCION_HOST_UID", "1000")
+// addWorktreeDirect runs `git -C repoRoot worktree add` directly, not
+// through CreateWorktree, whose own directory computation assumes the new
+// worktree's parent directory is already inside a git working tree -- not
+// true for a genuine sibling of repoRoot, which is exactly the shape these
+// tests need to create.
+func addWorktreeDirect(t *testing.T, repoRoot, path, branch string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", branch, path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, output)
+	}
+}
 
-	// Both prune functions should return nil without running git at all.
-	if err := PruneWorktrees(); err != nil {
-		t.Errorf("PruneWorktrees should no-op inside container, got: %v", err)
+// TestSplitPorcelainRecords_HandlesCRLF proves CRLF-terminated porcelain
+// output is still split into the correct per-worktree records: a literal
+// "\r\n\r\n" blank-line separator shares no "\n\n" substring with an
+// unnormalized split, so without the CRLF-to-LF normalization this would
+// return the whole input as a single record instead of two, and each
+// record's "worktree <path>" line would carry a trailing "\r" into the
+// parsed path.
+func TestSplitPorcelainRecords_HandlesCRLF(t *testing.T) {
+	input := "worktree /repo\r\nHEAD abc123\r\nbranch refs/heads/main\r\n\r\nworktree /repo/.scion-worktrees/wt1\r\nHEAD def456\r\nbranch refs/heads/feature\r\n"
+	records := splitPorcelainRecords(input)
+	if len(records) != 2 {
+		t.Fatalf("splitPorcelainRecords(CRLF input) returned %d record(s), want 2: %q", len(records), records)
 	}
-	if err := PruneWorktreesIn("/nonexistent/path"); err != nil {
-		t.Errorf("PruneWorktreesIn should no-op inside container, got: %v", err)
+	if !strings.Contains(records[0], "worktree /repo\n") {
+		t.Errorf("record[0] = %q, want a \"worktree /repo\" line with no trailing \\r", records[0])
 	}
+	if !strings.Contains(records[1], "worktree /repo/.scion-worktrees/wt1\n") {
+		t.Errorf("record[1] = %q, want a \"worktree /repo/.scion-worktrees/wt1\" line with no trailing \\r", records[1])
+	}
+}
+
+// TestSplitPorcelainRecords_PlainLFUnchanged proves the normalization step
+// is a no-op on ordinary LF-only output (what git actually emits on Linux),
+// so the CRLF handling added for TestSplitPorcelainRecords_HandlesCRLF does
+// not change behavior on the common path.
+func TestSplitPorcelainRecords_PlainLFUnchanged(t *testing.T) {
+	input := "worktree /repo\nHEAD abc123\n\nworktree /repo/.scion-worktrees/wt1\nHEAD def456\n"
+	records := splitPorcelainRecords(input)
+	if len(records) != 2 {
+		t.Fatalf("splitPorcelainRecords(LF input) returned %d record(s), want 2: %q", len(records), records)
+	}
+}
+
+func TestIsRegisteredWorktree_MainWorktreeAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	ok, err := IsRegisteredWorktree(mainRepo, mainRepo)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected the main repository itself to be a registered worktree")
+	}
+}
+
+// TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree
+// covers a project that lives in a linked worktree rather than the main
+// one: repoRoot (derived from the project's own directory) is the linked
+// worktree's path, not the main worktree's. The main worktree must still be
+// recognized as belonging to the same repository -- recognized because its
+// .git is a directory that resolves to the repository's common git dir, not
+// by equality with repoRoot, which never holds in this shape even though
+// both worktrees share one repository.
+func TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-feature")
+	addWorktreeDirect(t, mainRepo, linkedPath, "feature")
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, mainRepo, "") }()
+
+	// repoRoot is the LINKED worktree here, simulating a project that lives
+	// there; path is the MAIN worktree, which must still be recognized as
+	// this repository's own.
+	ok, err := IsRegisteredWorktree(linkedPath, mainRepo)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected the main worktree to be accepted when repoRoot is a linked worktree of the same repository")
+	}
+}
+
+func TestIsRegisteredWorktree_SiblingWorktreeAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	// A plain sibling worktree, not under any particular convention --
+	// `git worktree add` accepts any destination.
+	siblingPath := filepath.Join(filepath.Dir(mainRepo), "sibling-repo-feature")
+	addWorktreeDirect(t, mainRepo, siblingPath, "feature")
+	defer func() { _, _ = RemoveWorktree(mainRepo, siblingPath, mainRepo, "") }()
+
+	ok, err := IsRegisteredWorktree(mainRepo, siblingPath)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected a plain sibling worktree to be accepted as a registered worktree")
+	}
+}
+
+func TestIsRegisteredWorktree_ScionWorktreesConventionAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	// The legacy {parent}/.scion_worktrees/{project}/{agent} layout is just
+	// another caller-named destination as far as git worktree add is concerned
+	// -- it needs no special-case handling, only real git registration.
+	wtPath := filepath.Join(filepath.Dir(mainRepo), ".scion_worktrees", "proj", "agent")
+	addWorktreeDirect(t, mainRepo, wtPath, "agent-branch")
+	defer func() { _, _ = RemoveWorktree(mainRepo, wtPath, mainRepo, "") }()
+
+	ok, err := IsRegisteredWorktree(mainRepo, wtPath)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if !ok {
+		t.Error("expected a .scion_worktrees-convention worktree to be accepted as a registered worktree")
+	}
+}
+
+func TestIsRegisteredWorktree_NonWorktreeDirRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	// An ordinary directory that merely sits next to the repo, never
+	// registered with git as a worktree of it.
+	notAWorktree := filepath.Join(filepath.Dir(mainRepo), "just-a-directory")
+	if err := os.MkdirAll(notAWorktree, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, notAWorktree)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a non-worktree directory to be rejected")
+	}
+}
+
+func TestIsRegisteredWorktree_DifferentRepoWorktreeRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	repoA := setupGitRepo(t)
+	repoB := setupGitRepo(t)
+
+	// A worktree that genuinely belongs to a DIFFERENT repository must not
+	// be accepted as a worktree of repoA.
+	wtOfB := filepath.Join(filepath.Dir(repoB), "repoB-feature")
+	addWorktreeDirect(t, repoB, wtOfB, "feature")
+	defer func() { _, _ = RemoveWorktree(repoB, wtOfB, repoB, "") }()
+
+	ok, err := IsRegisteredWorktree(repoA, wtOfB)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a worktree of a different repository to be rejected")
+	}
+}
+
+func TestIsRegisteredWorktree_SymlinkToNonRegisteredPathRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	outside := filepath.Join(filepath.Dir(mainRepo), "outside-target")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(filepath.Dir(mainRepo), "link-to-outside")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, link)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a symlink resolving to a non-registered path to be rejected")
+	}
+}
+
+func TestIsRegisteredWorktree_GitListFailureFailsClosed(t *testing.T) {
+	// repoRoot is not a git repository at all, so `git worktree list` fails.
+	// The failure itself must be surfaced as an error, not silently reported
+	// as "not a worktree" -- and certainly never as "is a worktree."
+	notARepo := t.TempDir()
+	somePath := t.TempDir()
+
+	ok, err := IsRegisteredWorktree(notARepo, somePath)
+	if err == nil {
+		t.Fatal("expected an error when git worktree list fails, got nil")
+	}
+	if ok {
+		t.Error("expected false alongside the error (fail closed, never fail open)")
+	}
+}
+
+func TestIsRegisteredWorktree_PrunableRecreatedPathRejected(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	staleWt := filepath.Join(filepath.Dir(mainRepo), "stale-wt")
+	addWorktreeDirect(t, mainRepo, staleWt, "stale-branch")
+
+	// Remove the worktree directory directly (not via `git worktree
+	// remove`), leaving git's own registration in place but pointing at a
+	// gitdir that no longer resolves -- exactly what makes `git worktree
+	// list --porcelain` report the entry as prunable.
+	if err := os.RemoveAll(staleWt); err != nil {
+		t.Fatal(err)
+	}
+	// Recreate a plain directory at the same path: nothing git-related,
+	// just a directory that happens to have the same name.
+	if err := os.MkdirAll(staleWt, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, staleWt)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree: %v", err)
+	}
+	if ok {
+		t.Error("expected a prunable (stale) worktree registration, now a plain recreated directory, to be rejected")
+	}
+}
+
+// TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused covers a
+// worktree path that was removed and then recreated as the root of a
+// completely different, independent repository (via `git init`, not `git
+// worktree add`) -- as opposed to
+// TestIsRegisteredWorktree_PrunableRecreatedPathRejected's plain directory,
+// which git's own porcelain output flags "prunable" and IsRegisteredWorktree
+// filters out before either structural check ever runs. A fresh `git init`
+// leaves a real directory at .git, so the record is NOT prunable (git only
+// checks that something is there, not that it points back correctly), and
+// the path-equality check against the registered worktree path still
+// matches. Recognition then depends entirely on isMainWorktreeOf resolving
+// the recreated .git directory and finding it does NOT equal the original
+// repository's common git dir (see git.go's isMainWorktreeOf) -- no other
+// existing test depends on that specific comparison, which is what makes
+// this case worth pinning directly.
+func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mainRepo := setupGitRepo(t)
+
+	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-for-foreign-gitdir-test")
+	addWorktreeDirect(t, mainRepo, linkedPath, "linked-branch")
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, mainRepo, "") }()
+
+	recreatedWt := filepath.Join(filepath.Dir(mainRepo), "recreated-wt")
+	addWorktreeDirect(t, mainRepo, recreatedWt, "recreated-branch")
+
+	// Remove the worktree directory entirely, then recreate it as the root
+	// of a brand new, unrelated repository -- not via `git worktree add`, so
+	// it is never registered with mainRepo at all. What is left on disk at
+	// recreatedWt is a normal (directory) .git, structurally identical in
+	// shape to a main worktree's .git, but it resolves to this new repo's
+	// own git dir, not mainRepo's common git dir.
+	if err := os.RemoveAll(recreatedWt); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(recreatedWt, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init", recreatedWt)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+
+	ok, err := IsRegisteredWorktree(mainRepo, recreatedWt)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree(mainRepo): %v", err)
+	}
+	if ok {
+		t.Error("expected a worktree path recreated with a foreign repo's own .git dir to be rejected against the main repo")
+	}
+
+	ok, err = IsRegisteredWorktree(linkedPath, recreatedWt)
+	if err != nil {
+		t.Fatalf("IsRegisteredWorktree(linkedPath): %v", err)
+	}
+	if ok {
+		t.Error("expected a worktree path recreated with a foreign repo's own .git dir to be rejected against a linked worktree repoRoot")
+	}
+}
+
+// TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir covers a real
+// linked worktree's gitdir always naming a specific entry under worktrees/,
+// never the worktrees directory itself -- there is no registration that is
+// the whole administrative directory, so a gitdir resolving to exactly
+// worktreesDir must not be treated as a match.
+func TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir(t *testing.T) {
+	mainRepo := setupGitRepo(t)
+
+	commonDir, err := GetCommonGitDir(mainRepo)
+	if err != nil {
+		t.Fatalf("GetCommonGitDir: %v", err)
+	}
+	worktreesDir := filepath.Join(commonDir, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := filepath.Join(filepath.Dir(mainRepo), "gitdir-equals-worktreesdir")
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(wtPath, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+worktreesDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if isLinkedWorktreeOf(wtPath, worktreesDir) {
+		t.Error("expected a gitdir equal to worktreesDir itself to be rejected, got true")
+	}
+
+	// A gitdir naming a real entry under worktreesDir is still accepted --
+	// this fix must not over-refuse the legitimate shape.
+	namedEntry := filepath.Join(worktreesDir, "some-worktree")
+	if err := os.MkdirAll(namedEntry, 0755); err != nil {
+		t.Fatal(err)
+	}
+	wtPath2 := filepath.Join(filepath.Dir(mainRepo), "gitdir-names-real-entry")
+	if err := os.MkdirAll(wtPath2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtPath2, ".git"), []byte("gitdir: "+namedEntry+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !isLinkedWorktreeOf(wtPath2, worktreesDir) {
+		t.Error("expected a gitdir naming a real entry under worktreesDir to be accepted, got false")
+	}
+}
+
+// TestRemoveWorktree_RefusesOutOfTreePath covers acceptance criterion
+// 8: RemoveWorktree must refuse to remove a path whose resolved (symlink-free)
+// location does not lie under base, and must not touch anything under the
+// real external target while refusing.
+func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	t.Run("path directly outside base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		outside := t.TempDir()
+		marker := filepath.Join(outside, "keep-me")
+		if err := os.WriteFile(marker, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := RemoveWorktree(base, outside, base, "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained, got: %v", err)
+		}
+		if _, statErr := os.Stat(marker); statErr != nil {
+			t.Errorf("external content must survive a refused removal: %v", statErr)
+		}
+	})
+
+	t.Run("candidate equals base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		_, err := RemoveWorktree(base, base, base, "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for candidate==base, got: %v", err)
+		}
+		if _, statErr := os.Stat(base); statErr != nil {
+			t.Errorf("base must survive a refused removal: %v", statErr)
+		}
+	})
+
+	t.Run("symlinked leaf pointing outside base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		outside := t.TempDir()
+		target := filepath.Join(outside, "real-content")
+		if err := os.MkdirAll(filepath.Join(target, "keep"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(target, "keep", "important.txt")
+		if err := os.WriteFile(marker, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		worktreesDir := filepath.Join(base, "worktrees")
+		if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		leaf := filepath.Join(worktreesDir, "out-of-tree-name")
+		if err := os.Symlink(target, leaf); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := RemoveWorktree(base, leaf, base, "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained, got: %v", err)
+		}
+		if _, statErr := os.Stat(marker); statErr != nil {
+			t.Errorf("symlink target content must survive a refused removal: %v", statErr)
+		}
+		if _, statErr := os.Lstat(leaf); statErr != nil {
+			t.Errorf("the symlink itself must be left alone by a refused removal: %v", statErr)
+		}
+	})
+
+	t.Run("symlinked intermediate directory pointing outside base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		outside := t.TempDir()
+		target := filepath.Join(outside, "external-worktrees")
+		named := filepath.Join(target, "name")
+		if err := os.MkdirAll(named, 0755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(named, "important.txt")
+		if err := os.WriteFile(marker, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// base/worktrees itself is a symlink to the external directory, so
+		// base/worktrees/name is lexically inside base but resolves outside it.
+		worktreesLink := filepath.Join(base, "worktrees")
+		if err := os.Symlink(target, worktreesLink); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(base, "worktrees", "name")
+
+		_, err := RemoveWorktree(base, candidate, base, "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained, got: %v", err)
+		}
+		if _, statErr := os.Stat(marker); statErr != nil {
+			t.Errorf("content behind the symlinked intermediate dir must survive: %v", statErr)
+		}
+	})
+
+	t.Run("legitimate in-tree worktree is unaffected", func(t *testing.T) {
+		base := setupGitRepo(t)
+		originalWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(originalWd) }()
+		if err := os.Chdir(base); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.MkdirAll(filepath.Join(base, "worktrees"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		wtPath := filepath.Join(base, "worktrees", "good")
+		if err := CreateWorktree(wtPath, "good-branch"); err != nil {
+			t.Fatalf("CreateWorktree failed: %v", err)
+		}
+
+		if _, err := RemoveWorktree(base, wtPath, base, ""); err != nil {
+			t.Fatalf("RemoveWorktree of a legitimate in-tree worktree should succeed, got: %v", err)
+		}
+		if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
+			t.Errorf("legitimate in-tree worktree should have been removed, stat err=%v", statErr)
+		}
+	})
+
+	t.Run("non-existent path is a no-op, not an error", func(t *testing.T) {
+		base := setupGitRepo(t)
+		deleted, err := RemoveWorktree(base, filepath.Join(base, "worktrees", "never-existed"), base, "")
+		if err != nil {
+			t.Errorf("removing a non-existent path should be a no-op, got: %v", err)
+		}
+		if deleted {
+			t.Error("expected deleted=false for a non-existent path")
+		}
+	})
+}
+
+// TestRemoveWorktree_PreRemovalValidationFailures_NoFallback covers a
+// required fix: every pre-removal validation failure — not just the explicit
+// not-contained case — must wrap ErrPathNotContained, so a caller checking
+// errors.Is(err, ErrPathNotContained) correctly treats ALL of them as
+// no-fallback-eligible. Previously, empty/relative input, a non-ENOENT
+// Lstat error, and an EvalSymlinks failure (symlink loop, unresolvable
+// component) returned plain errors that a caller would NOT recognize as
+// containment failures, and would therefore incorrectly fall back to a raw,
+// unvalidated RemoveAllSafe(path) — exactly what this whole check exists to
+// prevent.
+func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	t.Run("empty base", func(t *testing.T) {
+		_, err := RemoveWorktree("", "/some/path", "", "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for empty base, got: %v", err)
+		}
+	})
+
+	t.Run("empty path", func(t *testing.T) {
+		_, err := RemoveWorktree("/some/base", "", "/some/base", "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for empty path, got: %v", err)
+		}
+	})
+
+	t.Run("relative base", func(t *testing.T) {
+		_, err := RemoveWorktree("relative/base", "/some/path", "relative/base", "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for relative base, got: %v", err)
+		}
+	})
+
+	t.Run("relative path", func(t *testing.T) {
+		_, err := RemoveWorktree("/some/base", "relative/path", "/some/base", "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for relative path, got: %v", err)
+		}
+	})
+
+	t.Run("non-ENOENT Lstat error (path under a regular file, not a directory)", func(t *testing.T) {
+		base := t.TempDir()
+		notADir := filepath.Join(base, "not-a-dir")
+		if err := os.WriteFile(notADir, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(notADir, "child")
+		_, err := RemoveWorktree(base, candidate, base, "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for a non-ENOENT Lstat error, got: %v", err)
+		}
+	})
+
+	t.Run("EvalSymlinks failure (symlink loop)", func(t *testing.T) {
+		base := t.TempDir()
+		loopA := filepath.Join(base, "loop-a")
+		loopB := filepath.Join(base, "loop-b")
+		if err := os.Symlink(loopB, loopA); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(loopA, loopB); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RemoveWorktree(base, loopA, base, "")
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for a symlink loop, got: %v", err)
+		}
+	})
 }
 
 func TestIsGitURL(t *testing.T) {
@@ -743,7 +1311,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 	}
 
 	t.Run("PullNoChanges", func(t *testing.T) {
-		result, err := PullSharedWorkspace(cloneDir, "")
+		result, err := PullSharedWorkspace(cloneDir, sourceDir, "")
 		if err != nil {
 			t.Fatalf("Pull failed: %v", err)
 		}
@@ -768,7 +1336,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result, err := PullSharedWorkspace(cloneDir, "")
+		result, err := PullSharedWorkspace(cloneDir, sourceDir, "")
 		if err != nil {
 			t.Fatalf("Pull failed: %v", err)
 		}
@@ -794,7 +1362,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 
 	t.Run("PullFailure_NotARepo", func(t *testing.T) {
 		notARepo := t.TempDir()
-		_, err := PullSharedWorkspace(notARepo, "")
+		_, err := PullSharedWorkspace(notARepo, sourceDir, "")
 		if err == nil {
 			t.Fatal("expected pull to fail for non-repo directory")
 		}
@@ -902,80 +1470,308 @@ func TestGitError_UserGuidance(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedCloneURL(t *testing.T) {
-	const token = "ghp_exampletoken"
-
-	tests := []struct {
-		name     string
-		cloneURL string
-		token    string
-		want     string
-	}{
-		{
-			name:     "plain https remote gets credentials",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    token,
-			want:     "https://oauth2:" + token + "@github.com/org/repo.git",
-		},
-		{
-			name:     "remote that already carries userinfo is not doubled up",
-			cloneURL: "https://org@dev.azure.com/org/project/_git/repo",
-			token:    token,
-			want:     "https://oauth2:" + token + "@dev.azure.com/org/project/_git/repo",
-		},
-		{
-			name:     "empty token leaves the URL alone",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "",
-			want:     "https://github.com/org/repo.git",
-		},
-		{
-			name:     "token with reserved characters is escaped",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "p@ss/word",
-			want:     "https://oauth2:p%40ss%2Fword@github.com/org/repo.git",
-		},
-		{
-			name:     "non-default port is preserved",
-			cloneURL: "https://host.example.com:8443/org/repo.git",
-			token:    token,
-			want:     "https://oauth2:" + token + "@host.example.com:8443/org/repo.git",
-		},
-		{
-			name:     "scp-style ssh remote is left alone",
-			cloneURL: "git@github.com:org/repo.git",
-			token:    token,
-			want:     "git@github.com:org/repo.git",
-		},
-		{
-			name:     "ssh scheme is left alone rather than given an oauth token",
-			cloneURL: "ssh://git@github.com/org/repo.git",
-			token:    token,
-			want:     "ssh://git@github.com/org/repo.git",
-		},
-		{
-			name:     "plain http is left alone",
-			cloneURL: "http://internal.example.com/org/repo.git",
-			token:    token,
-			want:     "http://internal.example.com/org/repo.git",
-		},
-		{
-			name:     "unparseable remote is returned unchanged",
-			cloneURL: "not a url",
-			token:    token,
-			want:     "not a url",
-		},
+// fakeGitBinary writes a shell script that reports the given `git --version`
+// output and returns its path, for pointing SCION_GIT_BINARY at a specific
+// version without depending on whatever git happens to be installed on the
+// host running the test.
+func fakeGitBinary(t *testing.T, version string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "git")
+	script := fmt.Sprintf("#!/bin/sh\necho 'git version %s'\n", version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake git binary: %v", err)
 	}
+	return path
+}
 
+// TestCheckGitVersion_Gate is the required regression guard for the
+// worktree-per-agent git-version bump (2.47 -> 2.48): `git worktree add
+// --relative-paths` did not exist until 2.48, so a 2.47.x host must be
+// rejected by CheckGitVersion rather than silently falling back to
+// clone-per-agent later. 2.48.0 must still be accepted.
+func TestCheckGitVersion_Gate(t *testing.T) {
+	t.Run("2.47.x is rejected", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.47.2"))
+		err := CheckGitVersion()
+		if err == nil {
+			t.Fatal("CheckGitVersion() = nil, want an error for git 2.47.2")
+		}
+		if !strings.Contains(err.Error(), "2.48.0") {
+			t.Errorf("error %q should name the 2.48.0 requirement", err.Error())
+		}
+	})
+
+	t.Run("2.48.0 is accepted", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.48.0"))
+		if err := CheckGitVersion(); err != nil {
+			t.Errorf("CheckGitVersion() = %v, want nil for git 2.48.0", err)
+		}
+	})
+
+	t.Run("2.49.0 (above minimum) is accepted", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.49.0"))
+		if err := CheckGitVersion(); err != nil {
+			t.Errorf("CheckGitVersion() = %v, want nil for git 2.49.0", err)
+		}
+	})
+}
+
+func TestStripGitURLCredentials(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"https token", "https://x-access-token:ghp_SECRET@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"https user only", "https://org@dev.azure.com/org/proj/_git/repo", "https://dev.azure.com/org/proj/_git/repo"},
+		{"https password containing @", "https://u:p@ss@github.com/org/repo", "https://github.com/org/repo"},
+		{"http token", "http://u:t@gitlab.example.com/g/r.git", "http://gitlab.example.com/g/r.git"},
+		{"git scheme", "git://u:t@host.example/r.git", "git://host.example/r.git"},
+		{"uppercase scheme", "HTTPS://u:t@github.com/org/repo", "HTTPS://github.com/org/repo"},
+		{"ssh keeps login drops password", "ssh://git:pw@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"ssh login only unchanged", "ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"ssh empty login", "ssh://:pw@github.com/org/repo.git", "ssh://github.com/org/repo.git"},
+		{"no credentials", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"@ in path is not userinfo", "https://github.com/org/repo@v1", "https://github.com/org/repo@v1"},
+		{"scp shorthand unchanged", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
+		{"password containing /", "https://u:p/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password containing / and @", "https://u:p/w@x@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"ssh password containing /", "ssh://git:p/w@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"credentials and @ in path", "https://tok@github.com/org/repo@v1", "https://github.com/org/repo@v1"},
+		{"no path", "https://u:t@github.com", "https://github.com"},
+		{"query preserved", "https://u:t@github.com/org/repo?x=1", "https://github.com/org/repo?x=1"},
+		{"@ only in query", "https://github.com/org/repo?u=a@b", "https://github.com/org/repo?u=a@b"},
+		{"@ host in path is not userinfo", "https://github.com/org/repo@github.com/x", "https://github.com/org/repo@github.com/x"},
+		{"credentials then @ host in path", "https://u:p@github.com/org/x@github.com/repo", "https://github.com/org/x@github.com/repo"},
+		{"login containing / is path", "https://a/b@github.com/x", "https://a/b@github.com/x"},
+		// A port then '@' in the path is not userinfo (#2368 review).
+		{"port then @ in path", "https://host:8443/org/repo@v1", "https://host:8443/org/repo@v1"},
+		{"default port then @ in path", "https://github.com:443/org/repo@v1", "https://github.com:443/org/repo@v1"},
+		{"ipv6 port then @ in path", "https://[::1]:8443/org/repo@v1", "https://[::1]:8443/org/repo@v1"},
+		{"credentials, port, @ in path", "https://u:t@host:8443/org/repo@v1", "https://host:8443/org/repo@v1"},
+		// A password with '/' that cannot be a port is still stripped.
+		{"password starting with / stripped", "https://u:/pw@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with leading-zero digits and / stripped", "https://u:0123/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with out-of-range digits and / stripped", "https://u:65536/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with digits+letters and / stripped", "https://u:12ab/w@github.com/org/repo", "https://github.com/org/repo"},
+		// Port-like password: RFC 3986 reads a port; the hub rejects the '@' path.
+		{"port-like password read as port", "https://u:8443/w@github.com/org/repo", "https://u:8443/w@github.com/org/repo"},
+		{"empty", "", ""},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := authenticatedCloneURL(tt.cloneURL, tt.token)
-			if got != tt.want {
-				t.Errorf("authenticatedCloneURL(%q, token) = %q, want %q", tt.cloneURL, got, tt.want)
-			}
-			if tt.token != "" && strings.Count(got, "@") > 1 {
-				t.Errorf("result contains more than one @ separator: %q", got)
+			if got := StripGitURLCredentials(tt.in); got != tt.want {
+				t.Errorf("StripGitURLCredentials(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// After CloneSharedWorkspace, no credential remains anywhere in the clone's
+// .git/config (the remote URL included): the token is supplied through a scoped
+// credential helper in the environment, never embedded in the URL.
+func TestCloneSharedWorkspace_NoCredentialInConfig(t *testing.T) {
+	source := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(source, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range [][]string{{"add", "hello.txt"}, {"commit", "-m", "c"}} {
+		c := exec.Command("git", a...)
+		c.Dir = source
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", a, err, out)
+		}
+	}
+	const token = "shared-clone-secret-token"
+	dest := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(dest, source, "", token); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	cfg, err := os.ReadFile(filepath.Join(dest, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfg), token) || strings.Contains(string(cfg), "oauth2:") {
+		t.Errorf(".git/config must carry no credential, got:\n%s", cfg)
+	}
+}
+
+// CloneSharedWorkspace with an https URL, run through a PATH-first fake git.
+// Asserts (i) the clone env carries the host-scoped credential helper, (ii) no
+// token appears on any git argv or in a GIT_CONFIG_VALUE, and (iii) the resulting
+// .git/config is credential-free (the token is supplied only via the env helper,
+// never embedded in the URL).
+func TestCloneSharedWorkspace_HTTPS_NoCredentialOnArgvOrConfig(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	const token = "shared-https-secret-token"
+	root := t.TempDir()
+	argvLog := filepath.Join(root, "argv.log")
+	envLog := filepath.Join(root, "env.log")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Fake git: record argv + the credential-relevant env; a clone becomes a local
+	// init + remote add of the (credential-free) URL; config passes through.
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> '" + argvLog + "'\n" +
+		"env | grep -E '^(GIT_CONFIG_|SCION_SCOPED_GIT_CREDENTIAL)' >> '" + envLog + "'\n" +
+		"a1=''; a2=''; for a in \"$@\"; do a1=\"$a2\"; a2=\"$a\"; done\n" +
+		"case \" $* \" in\n" +
+		"  *' clone '*) '" + realGit + "' init -q \"$a2\" >/dev/null 2>&1; '" + realGit + "' -C \"$a2\" remote add origin \"$a1\" >/dev/null 2>&1; exit 0 ;;\n" +
+		"  *) exec '" + realGit + "' \"$@\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dest := filepath.Join(root, "workspace")
+	if err := CloneSharedWorkspace(dest, "https://github.com/org/repo.git", "", token); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	argv, _ := os.ReadFile(argvLog)
+	envDump, _ := os.ReadFile(envLog)
+	cfg, _ := os.ReadFile(filepath.Join(dest, ".git", "config"))
+
+	// (i) the env carries the host-scoped credential helper.
+	if !strings.Contains(string(envDump), "credential.https://github.com.helper") {
+		t.Errorf("clone env is missing the host-scoped credential helper:\n%s", envDump)
+	}
+	// (ii) no token on any argv, and no GIT_CONFIG_VALUE carries it (the helper
+	// text is the constant; the token lives only in SCION_SCOPED_GIT_CREDENTIAL).
+	if strings.Contains(string(argv), token) {
+		t.Errorf("token appeared on a git argv:\n%s", argv)
+	}
+	for _, line := range strings.Split(string(envDump), "\n") {
+		if strings.HasPrefix(line, "GIT_CONFIG_VALUE_") && strings.Contains(line, token) {
+			t.Errorf("a GIT_CONFIG_VALUE carried the token: %q", line)
+		}
+	}
+	// (iii) .git/config ends credential-free.
+	if strings.Contains(string(cfg), token) || strings.Contains(string(cfg), "oauth2:") {
+		t.Errorf(".git/config must be credential-free, got:\n%s", cfg)
+	}
+}
+
+// addRefusedRepoConfigKey appends, as data, an include directive (refused by
+// every repository config policy) to the main repository's config.
+func addRefusedRepoConfigKey(t *testing.T, repo string) {
+	t.Helper()
+	cfg := filepath.Join(repo, ".git", "config")
+	f, err := os.OpenFile(cfg, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[include]\n\tpath = /dev/null\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A repository whose config the linked-checkout policy refuses reports no
+// branch.
+// Mutant this catches: BranchExistsIn still calling hostGit("-C", ...) with
+// no policy check (it would stay true).
+func TestBranchExistsIn_RefusedRepoConfig(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := setupGitRepo(t)
+	if out, err := exec.Command("git", "-C", repo, "branch", "b").CombinedOutput(); err != nil {
+		t.Fatalf("git branch: %v: %s", err, out)
+	}
+	if !BranchExistsIn(repo, "b") {
+		t.Fatal("control: BranchExistsIn = false before the refused key, want true")
+	}
+	addRefusedRepoConfigKey(t, repo)
+	if BranchExistsIn(repo, "b") {
+		t.Error("BranchExistsIn = true for a repository whose config the policy refuses, want false")
+	}
+}
+
+// A repository whose config the linked-checkout policy refuses makes the
+// worktree lookup fail, and the error names no host path.
+// Mutants this catches: FindWorktreeByBranchIn still calling hostGit("-C",
+// ...) with no policy check (it would return the worktree path);
+// hostGitLookupOptions using AudienceLocal (the error would name the
+// repository directory).
+func TestFindWorktreeByBranchIn_RefusedRepoConfig(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := setupGitRepo(t)
+	wt := filepath.Join(filepath.Dir(repo), "wt-refused-config")
+	addWorktreeDirect(t, repo, wt, "w")
+	want, err := filepath.EvalSymlinks(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := FindWorktreeByBranchIn(repo, "w")
+	if err != nil {
+		t.Fatalf("control: FindWorktreeByBranchIn: %v", err)
+	}
+	if resolved, _ := filepath.EvalSymlinks(got); resolved != want {
+		t.Fatalf("control: FindWorktreeByBranchIn = %q, want %q", got, want)
+	}
+
+	addRefusedRepoConfigKey(t, repo)
+	got, err = FindWorktreeByBranchIn(repo, "w")
+	if err == nil || got != "" {
+		t.Fatalf("FindWorktreeByBranchIn = (%q, %v) for a repository whose config the policy refuses, want (\"\", error)", got, err)
+	}
+	t.Run("refusal names no path", func(t *testing.T) {
+		resolvedRepo, _ := filepath.EvalSymlinks(repo)
+		for _, p := range []string{repo, resolvedRepo, filepath.Dir(repo), filepath.Dir(resolvedRepo)} {
+			if p != "" && strings.Contains(err.Error(), p) {
+				t.Errorf("error %q names the host path %q", err, p)
+			}
+		}
+	})
+}
+
+// A repository whose config the linked-checkout policy refuses makes the
+// membership check fail closed with an error.
+// Mutant this catches: IsRegisteredWorktree still calling hostGit("-C", ...)
+// with no policy check (it would report (true, nil)).
+func TestIsRegisteredWorktree_RefusedRepoConfig(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := setupGitRepo(t)
+	sibling := filepath.Join(filepath.Dir(repo), "sibling-refused-config")
+	addWorktreeDirect(t, repo, sibling, "feature")
+	ok, err := IsRegisteredWorktree(repo, sibling)
+	if err != nil || !ok {
+		t.Fatalf("control: IsRegisteredWorktree = (%v, %v), want (true, nil)", ok, err)
+	}
+	addRefusedRepoConfigKey(t, repo)
+	ok, err = IsRegisteredWorktree(repo, sibling)
+	if err == nil || ok {
+		t.Errorf("IsRegisteredWorktree = (%v, %v) for a repository whose config the policy refuses, want (false, error)", ok, err)
+	}
+}
+
+// Creating a worktree from inside a bare repository resolves the repository
+// root to the bare repository's parent, which holds no .git entry, so the
+// host-git door is in discovery mode and refuses the worktree add before
+// anything runs.
+// Mutant this catches: the worktree add running outside the door, or the
+// door running subcommands other than rev-parse in discovery mode (the error
+// would not wrap errHostGitDiscoverySubcommand: git would run at the bare
+// repository's parent, which holds no repository, and fail on its own).
+func TestCreateWorktree_BareRepoRefused(t *testing.T) {
+	hostGitTestEnv(t)
+	base := t.TempDir()
+	bare := filepath.Join(base, "repo.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	path := filepath.Join(bare, "wt")
+	err := CreateWorktree(path, "feature")
+	if !errors.Is(err, errHostGitDiscoverySubcommand) {
+		t.Fatalf("CreateWorktree in a bare repository: err = %v, want errHostGitDiscoverySubcommand", err)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Errorf("worktree directory %q exists after the refusal (Lstat err %v)", path, statErr)
 	}
 }

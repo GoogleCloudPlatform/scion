@@ -14,7 +14,11 @@
 
 package hub
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+)
 
 // RouteClassification categorizes routes by their authentication/authorization model.
 type RouteClassification string
@@ -53,6 +57,48 @@ type RouteMetadata struct {
 	// Action is the action from the permission registry (e.g., "read", "create", "update").
 	// Only meaningful when Classification == RoutePolicy.
 	Action string
+
+	// BearerTarget selects the hub-level target the RouteHubAdmin guard
+	// checks for a route that declares a Permission (routeGuardTarget):
+	// "" checks {Type: Resource, ID: "hub"}; "hub_instance" checks
+	// hubScopedResource(Resource, "hub"); "hub_collection" checks a
+	// collection-level request with hubCollectionEvidence(Permission).
+	// It is set only on a route whose catalog operations admit a user
+	// access token on the hub boundary, and never on a "hub" resource
+	// route, whose target already resolves to the hub scope.
+	BearerTarget string
+	// SessionOnly, when set, is the catalog's session-only reason for the
+	// route: the RouteHubAdmin guard refuses any credential other than an
+	// interactive session or dev credential with a session-only refusal
+	// (session_only_gate.go), before the permission decision.
+	SessionOnly authzop.SessionOnlyReason
+	// AlsoPermits lists further permissions the RouteHubAdmin guard
+	// accepts in place of Permission, on the same target (the first
+	// allowed decision admits the request). It is set only on a route whose
+	// handler then checks the permission the request actually needs: POST
+	// /api/v1/test-identities/admin admits test_identity.issue_super_admin
+	// as well, so an issuer token scoped to exactly that capability reaches
+	// the handler, which decides the requested kind's capability; POST
+	// /api/v1/test-identities/{id}/web-login-code admits both admin kinds'
+	// capabilities, and its handler requires the one the identity's kind
+	// needs (WS4); POST /api/v1/test-identities/{id}/token admits both
+	// admin kinds' capabilities so that an admin-scope workload delegation
+	// reaches handleIssueTestAdminTokenThroughDelegation (X4b), while every
+	// other caller gets 409 for an admin-kind identity or 404.
+	AlsoPermits []string
+	// VisitorMethods lists the HTTP methods on which the route admits a
+	// visitor (a request whose identity is a *VisitorIdentity). routeGuard
+	// refuses a visitor on every other method, and on every route whose
+	// list is empty, with 403 and visitorRouteRefusalMessage, before the
+	// handler runs (refuseVisitorRequest); an admitted visitor then passes
+	// the classification's guard like any other identity. List only the
+	// methods whose handler is safe for a visitor. validateVisitorRoutes
+	// limits the list to authenticated and policy routes and to methods
+	// the pattern serves. On a subtree pattern (one ending in "/") a
+	// listed method admits a visitor only on the sub-paths
+	// visitorAdmittedSubRoutes lists for the pattern and method, and only
+	// when the sub-route's per-request check passes (admitVisitorSubRoute).
+	VisitorMethods []string
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -126,6 +172,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/settings/public", RouteID: "settings.public",
 		Classification: RoutePublic,
 	},
+	"GET /api/v1/test-infra/status": {
+		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
+		Classification: RoutePublic,
+	},
+	"POST /api/v1/csp-reports": {
+		Pattern: "POST /api/v1/csp-reports", RouteID: "cspReports.create",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,
@@ -153,6 +207,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/auth/me": {
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
+		// handleAuthMe reads the caller's own profile. The pattern has no
+		// method, so the mux serves every method, HEAD included; a
+		// visitor is admitted on the reads only. The handler serves GET
+		// and answers 405 to HEAD, as for any caller.
+		VisitorMethods: []string{http.MethodGet, http.MethodHead},
+	},
+	"/api/v1/experiments": {
+		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/profiling": {
+		Pattern: "/api/v1/profiling", RouteID: "profiling.client",
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/auth/admin-status": {
 		Pattern: "/api/v1/auth/admin-status", RouteID: "auth.admin-status",
@@ -170,6 +237,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/scopes", RouteID: "auth.scopes",
 		Classification: RouteAuthenticated,
 	},
+	// User access credential for a peer hub: the handler admits an
+	// interactive session or a hub-boundary user access token carrying
+	// federation_token:mint (handlers_federation_token.go).
+	"POST /api/v1/auth/federation-token": {
+		Pattern: "POST /api/v1/auth/federation-token", RouteID: "auth.federationToken",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/metrics/session/": {
 		Pattern: "/api/v1/metrics/session/", RouteID: "metrics.session",
 		Classification: RouteAuthenticated,
@@ -177,6 +251,20 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/users/me/groups": {
 		Pattern: "/api/v1/users/me/groups", RouteID: "users.me.groups",
 		Classification: RouteAuthenticated,
+	},
+	// A project visitor's own visitor grants (handleUserMeVisitorGrants):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-grants": {
+		Pattern: "/api/v1/users/me/visitor-grants", RouteID: "users.me.visitorGrants",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
+	},
+	// A project visitor's own DMs with agents (handleUserMeVisitorDMs):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-dms": {
+		Pattern: "/api/v1/users/me/visitor-dms", RouteID: "users.me.visitorDMs",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
 	},
 	"/api/v1/principals/": {
 		Pattern: "/api/v1/principals/", RouteID: "principals.byId",
@@ -188,6 +276,18 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/users/me/injected-skills/": {
 		Pattern: "/api/v1/users/me/injected-skills/", RouteID: "users.me.injectedSkills.byId",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/delegations": {
+		Pattern: "/api/v1/users/me/delegations", RouteID: "users.me.delegations",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/delegations/revoke-all": {
+		Pattern: "/api/v1/users/me/delegations/revoke-all", RouteID: "users.me.delegations.revokeAll",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/terminal-workspace": {
+		Pattern: "/api/v1/users/me/terminal-workspace", RouteID: "users.me.terminalWorkspace",
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/users/me/templates": {
@@ -228,6 +328,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/conversations/resolve": {
 		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups": {
+		Pattern: "/api/v1/thread-groups", RouteID: "threadGroups.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups/": {
+		Pattern: "/api/v1/thread-groups/", RouteID: "threadGroups.byId",
 		Classification: RouteAuthenticated,
 	},
 
@@ -302,6 +410,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/agents/", RouteID: "agents.byId",
 		Classification: RoutePolicy,
 		Permission:     "agent.read", Resource: "agent", Action: "read",
+		// A visitor may only send a message: POST {agentId}/message
+		// (visitorAdmittedSubRoutes).
+		VisitorMethods: []string{http.MethodPost},
 	},
 
 	// -------------------------------------------------------------------------
@@ -315,31 +426,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/projects/register": {
 		Pattern: "/api/v1/projects/register", RouteID: "projects.register",
 		Classification: RoutePolicy,
-		Permission:     "project.register", Resource: "project", Action: "register",
+		// Register checks project.create (handleProjectRegister). Its
+		// embedded-broker form is session-only.
+		Permission: "project.create", Resource: "project", Action: "create",
 	},
 	"/api/v1/projects/": {
 		Pattern: "/api/v1/projects/", RouteID: "projects.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-
-	// -------------------------------------------------------------------------
-	// Policy: Legacy groves (aliases for projects)
-	// -------------------------------------------------------------------------
-	"/api/v1/groves": {
-		Pattern: "/api/v1/groves", RouteID: "groves.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/groves/register": {
-		Pattern: "/api/v1/groves/register", RouteID: "groves.register",
-		Classification: RoutePolicy,
-		Permission:     "project.register", Resource: "project", Action: "register",
-	},
-	"/api/v1/groves/": {
-		Pattern: "/api/v1/groves/", RouteID: "groves.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
+		// A visitor may only send a message (POST
+		// {projectId}/agents/{agentId}/message) and list and read the
+		// project's agents in the visitor view (GET {projectId}/agents and
+		// GET {projectId}/agents/{agentId}); see visitorAdmittedSubRoutes.
+		VisitorMethods: []string{http.MethodGet, http.MethodPost},
 	},
 
 	// -------------------------------------------------------------------------
@@ -389,6 +488,68 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "gcp_service_account.read", Resource: "gcp_service_account", Action: "read",
 	},
 
+	// gs:// link fetch: identity-only at the route level (any identity may
+	// reach the handler); the handler itself requires a user identity and
+	// derives every further check from the requested message, never from a
+	// registry permission — see handleGCSObject.
+	"/api/v1/gcs/object": {
+		Pattern: "/api/v1/gcs/object", RouteID: "gcs.object",
+		Classification: RouteAuthenticated,
+	},
+
+	// Conduit grant verification keys (public halves only), behind the
+	// hub.conduit experiment. Any authenticated principal may read them.
+	"/api/v1/conduit/grant-keys": {
+		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
+		Classification: RouteAuthenticated,
+	},
+	// Conduit sessions (WebSocket), behind hub.conduit. Agent principals
+	// authenticate with an agent token carrying agent:port:forward (the
+	// handler reads the agent row); runtime broker principals authenticate
+	// with broker HMAC through the shared /runtime-brokers/connect verifier,
+	// and their sessions carry the hub's transient broker RPCs.
+	"/api/v1/conduit": {
+		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
+		Classification: RouteAgentToken,
+	},
+
+	// -------------------------------------------------------------------------
+	// Policy: Artifacts (pkg/artifacts, behind the hub.artifacts experiment).
+	// The service performs the fine-grained checks through artifacts.Host;
+	// the share-link route authenticates by link token only.
+	// -------------------------------------------------------------------------
+	"/api/v1/artifacts": {
+		Pattern: "/api/v1/artifacts", RouteID: "artifacts.list",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/": {
+		Pattern: "/api/v1/artifacts/", RouteID: "artifacts.byId",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/shared/": {
+		Pattern: "/api/v1/artifacts/shared/", RouteID: "artifacts.shared",
+		Classification: RoutePublic,
+	},
+	// The view route serves one version's files to a sandboxed frame and
+	// authenticates by the view capability in its path only (the service
+	// verifies it on every request).
+	"/api/v1/artifacts/view/": {
+		Pattern: "/api/v1/artifacts/view/", RouteID: "artifacts.view",
+		Classification: RoutePublic,
+	},
+
+	// -------------------------------------------------------------------------
+	// Port page view (behind the hub.port_view experiment). The route serves
+	// an agent's exposed port on the page link in its path only (the handler
+	// checks it, and the user's port access, on every request).
+	// -------------------------------------------------------------------------
+	"/api/v1/portview/": {
+		Pattern: "/api/v1/portview/", RouteID: "ports.view",
+		Classification: RoutePublic,
+	},
+
 	// -------------------------------------------------------------------------
 	// Policy: Skills
 	// -------------------------------------------------------------------------
@@ -415,11 +576,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/skill-registries", RouteID: "skillRegistries.list",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/skill-registries/": {
 		Pattern: "/api/v1/skill-registries/", RouteID: "skillRegistries.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
@@ -510,16 +673,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
-	"/api/v1/chat/threads": {
-		Pattern: "/api/v1/chat/threads", RouteID: "chat.threads.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/chat/threads/": {
-		Pattern: "/api/v1/chat/threads/", RouteID: "chat.threads.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
 	"/api/v1/chat/spaces": {
 		Pattern: "/api/v1/chat/spaces", RouteID: "chat.spaces.list",
 		Classification: RoutePolicy,
@@ -534,6 +687,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/chat/conversations/", RouteID: "chat.conversations.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
+		// A visitor may only read its own DM with an agent: GET
+		// {dmKey}/messages, GET and POST {dmKey}/read
+		// (visitorAdmittedSubRoutes).
+		VisitorMethods: []string{http.MethodGet, http.MethodPost},
 	},
 	"/api/v1/chat/topics/": {
 		Pattern: "/api/v1/chat/topics/", RouteID: "chat.topics.byId",
@@ -545,11 +702,57 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	"/api/v1/chat/unread-count": {
+		Pattern: "/api/v1/chat/unread-count", RouteID: "chat.unreadCount",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	// decisions.byId reads and answers a choice prompt decision; the
+	// handler authorizes per conversation (read or send rights on the
+	// prompt's thread or DM). 404 while web.chat_choices is off.
+	"/api/v1/decisions/": {
+		Pattern: "/api/v1/decisions/", RouteID: "decisions.byId",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	"/api/v1/choice-prompts/": {
+		Pattern: "/api/v1/choice-prompts/", RouteID: "choiceprompts.byId",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
 	"/api/v1/chat/search": {
 		Pattern: "/api/v1/chat/search", RouteID: "chat.search",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.stars and chat.stars.byId serve the caller's own starred
+	// messages; every read and add also needs read access to the message's
+	// thread (project.read), checked per conversation by the handler.
+	"/api/v1/chat/stars": {
+		Pattern: "/api/v1/chat/stars", RouteID: "chat.stars",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	"/api/v1/chat/stars/": {
+		Pattern: "/api/v1/chat/stars/", RouteID: "chat.stars.byId",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	// chat.starredConversations is the Starred rail: the caller's own
+	// conversations with stars, each kept only while the caller can read
+	// it (project.read for a thread), checked per conversation by the
+	// handler.
+	"/api/v1/chat/starred-conversations": {
+		Pattern: "/api/v1/chat/starred-conversations", RouteID: "chat.starredConversations",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	// chat.attachments.list and chat.attachments.byId are wrapped by
+	// chatAttachmentRoute: an agent credential is admitted on the collection
+	// only, for POST (upload) and GET (the capability probe), and must pass
+	// agentMaySend there; the by-id route stays session and token only
+	// (ptone/scion#4596). Neither route is on the delegated-agent admission
+	// list.
 	"/api/v1/chat/attachments": {
 		Pattern: "/api/v1/chat/attachments", RouteID: "chat.attachments.list",
 		Classification: RoutePolicy,
@@ -612,7 +815,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/maintenance": {
 		Pattern: "/api/v1/admin/maintenance", RouteID: "admin.maintenance",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.admin_mode.update", Resource: "hub", Action: "update",
+		Permission:     "hub.admin_mode.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/maintenance/operations": {
 		Pattern: "/api/v1/admin/maintenance/operations", RouteID: "admin.maintenance.operations",
@@ -634,8 +837,23 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
+	"/api/v1/admin/maintenance/update-available": {
+		Pattern: "/api/v1/admin/maintenance/update-available", RouteID: "admin.maintenance.updateAvailable",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
 	"/api/v1/admin/maintenance/restart": {
 		Pattern: "/api/v1/admin/maintenance/restart", RouteID: "admin.maintenance.restart",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
+	"/api/v1/admin/maintenance/update-status": {
+		Pattern: "/api/v1/admin/maintenance/update-status", RouteID: "admin.maintenance.updateStatus",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
+	"/api/v1/admin/maintenance/releases": {
+		Pattern: "/api/v1/admin/maintenance/releases", RouteID: "admin.maintenance.releases",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
@@ -647,32 +865,36 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/allow-list": {
 		Pattern: "/api/v1/admin/allow-list", RouteID: "admin.allowList",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
+		Permission:     "hub.allow_list.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/allow-list/": {
 		Pattern: "/api/v1/admin/allow-list/", RouteID: "admin.allowList.byEmail",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
+		Permission:     "hub.allow_list.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/users/invite/bulk": {
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/users/invite": {
 		Pattern: "/api/v1/admin/users/invite", RouteID: "admin.users.invite",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites": {
 		Pattern: "/api/v1/admin/invites", RouteID: "admin.invites",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites/": {
 		Pattern: "/api/v1/admin/invites/", RouteID: "admin.invites.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/server-config/schema": {
 		Pattern: "/api/v1/admin/server-config/schema", RouteID: "admin.serverConfig.schema",
@@ -699,10 +921,74 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.messaging.update", Resource: "hub", Action: "update",
 	},
+	"/api/v1/admin/experiments": {
+		Pattern: "/api/v1/admin/experiments", RouteID: "admin.experiments",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
+	},
+	// Profiling switches (DB-only "profiling" section). Session only: no
+	// token reads or writes them.
+	"/api/v1/admin/profiling": {
+		Pattern: "/api/v1/admin/profiling", RouteID: "admin.profiling",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonHostOperations,
+	},
+	// Chat message retention settings (DB-only "chat_retention" section,
+	// behind hub.chat_retention). Session only: the window decides what is
+	// deleted, irreversibly, across every user's history.
+	"/api/v1/admin/chat-retention": {
+		Pattern: "/api/v1/admin/chat-retention", RouteID: "admin.chatRetention",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonIrreversibleCascade,
+	},
+	// Conduit grant key rotation, behind hub.conduit. Returns kids and
+	// timestamps only.
+	"/api/v1/admin/conduit/grant-keys/rotate": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Conduit grant key revocation, behind hub.conduit. Removes a key at
+	// once; returns the kid only.
+	"/api/v1/admin/conduit/grant-keys/revoke": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/revoke", RouteID: "admin.conduit.grantKeys.revoke",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Server key status, behind
+	// server.secret_rotation. Deliberately no registered permission: the
+	// guard falls back to requireAdmin, so only an unscoped platform admin
+	// on a session or dev credential reads it, and it cannot be delegated.
+	"/api/v1/admin/keys/status": {
+		Pattern: "/api/v1/admin/keys/status", RouteID: "admin.keys.status",
+		Classification: RouteHubAdmin,
+	},
+	// Bulk agent auth reset. Session only: a session-recovery route, like
+	// revoke-sessions.
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.auth_reset.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonSessionRecovery,
+	},
+	// Delegation-provenance adoption recovery: hub system admin on a session
+	// or local development credential only (checked again in the handler).
+	// Deliberately no registered permission, so it cannot be delegated.
+	"/api/v1/admin/delegation-adoption": {
+		Pattern: "/api/v1/admin/delegation-adoption", RouteID: "admin.delegationAdoption",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/previews": {
+		Pattern: "/api/v1/admin/delegation-adoption/previews", RouteID: "admin.delegationAdoption.previews",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/commits": {
+		Pattern: "/api/v1/admin/delegation-adoption/commits", RouteID: "admin.delegationAdoption.commits",
+		Classification: RouteHubAdmin,
 	},
 	"/api/v1/admin/gcp-quota": {
 		Pattern: "/api/v1/admin/gcp-quota", RouteID: "admin.gcpQuota",
@@ -754,6 +1040,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.health.read", Resource: "hub", Action: "read",
 	},
+	// Orphaned and revoked agents, an operator diagnostic under the
+	// permission of the health summary. Session only (GOV_PENDING): its
+	// token admission waits for its governance batch.
+	"/api/v1/admin/orphaned-agents": {
+		Pattern: "/api/v1/admin/orphaned-agents", RouteID: "admin.orphanedAgents",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.health.read", Resource: "hub", Action: "read",
+		SessionOnly: authzop.ReasonGovernancePending,
+	},
 	"/api/v1/admin/messaging/divergence": {
 		Pattern: "/api/v1/admin/messaging/divergence", RouteID: "admin.messaging.divergence",
 		Classification: RouteHubAdmin,
@@ -777,50 +1072,63 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/limits", RouteID: "admin.limits",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/limits/": {
 		Pattern: "/api/v1/admin/limits/", RouteID: "admin.limits.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/entitlements/": {
 		Pattern: "/api/v1/admin/entitlements/", RouteID: "admin.entitlements.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/usage": {
 		Pattern: "/api/v1/admin/usage", RouteID: "admin.usage",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/usage/": {
 		Pattern: "/api/v1/admin/usage/", RouteID: "admin.usage.byLimit",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Role management (PR-C1)
+	// Hub admin: Role management (PR-C1). The route guard checks role.read
+	// on the hub-level role records for every method, so a hub-boundary
+	// token needs role:read; every write method is checked again inline with
+	// its own permission (role:create, role:update or role:delete on the
+	// same records) and the delegation check on the role's permissions.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/roles": {
 		Pattern: "/api/v1/admin/roles", RouteID: "admin.roles",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/export": {
 		Pattern: "/api/v1/admin/roles/export", RouteID: "admin.roles.export",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/import": {
 		Pattern: "/api/v1/admin/roles/import", RouteID: "admin.roles.import",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/": {
 		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/role-bindings": {
 		Pattern: "/api/v1/admin/role-bindings", RouteID: "admin.roleBindings",
@@ -828,8 +1136,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 		// inline. GET checks role_binding.read at hub scope. POST defers
 		// to the membership service for project-scoped requests (project
 		// owners need only project.manage, not hub-level role_binding.create)
-		// and checks role_binding.create at hub scope for system-scoped
-		// requests.
+		// for built-in project roles, and checks role_binding.create on the
+		// hub-level binding records for custom project roles and
+		// system-scoped requests.
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/role-bindings/": {
@@ -837,44 +1146,73 @@ var routeMetadataTable = map[string]RouteMetadata{
 		// RouteAuthenticated: authorization is method-aware and handled
 		// inline, matching the collection endpoint's pattern.
 		// GET /user/{userID} checks role_binding.read inline.
-		// DELETE /{id} checks role_binding.delete inline via
-		// requireWritePermissionForRoleBinding.
+		// DELETE /{id} of a project-scoped binding checks project.manage on
+		// the binding's project first and defers to the membership
+		// service; otherwise it checks role_binding.delete at hub scope
+		// (authorizeRoleBindingDelete).
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/permissions": {
 		Pattern: "/api/v1/admin/permissions", RouteID: "admin.permissions",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Access Constraints (AC1)
+	// Hub admin: Access Constraints (AC1). The route guard checks
+	// access_constraint.read on the hub-level constraint records for every
+	// method, so a hub-boundary token needs access_constraint:read; every
+	// write method is checked again inline with access_constraint.admin on
+	// the same records (access_constraint:admin). The preview routes check
+	// access_constraint.admin in the guard.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/access-constraints": {
 		Pattern: "/api/v1/admin/access-constraints", RouteID: "admin.accessConstraints",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/access-constraints/": {
 		Pattern: "/api/v1/admin/access-constraints/", RouteID: "admin.accessConstraints.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+		BearerTarget: "hub_instance",
+	},
+	"GET /api/v1/admin/access-constraints/{id}/audit": {
+		Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", RouteID: "admin.accessConstraints.audit",
+		Classification: RoutePolicy,
+		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "read",
 	},
 	"/api/v1/admin/access-constraint-previews": {
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/access-constraint-previews/": {
 		Pattern: "/api/v1/admin/access-constraint-previews/", RouteID: "admin.accessConstraintPreviews.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+		BearerTarget: "hub_instance",
 	},
 
 	"/api/v1/admin/effective-access": {
 		Pattern: "/api/v1/admin/effective-access", RouteID: "admin.effectiveAccess",
 		Classification: RouteAuthenticated,
-		Permission:     "hub.audit.read", Resource: "hub", Action: "manage",
+		Permission:     "hub.audit.read", Resource: "hub", Action: "read",
+	},
+
+	// -------------------------------------------------------------------------
+	// Authenticated: the caller's own pending secrets
+	// -------------------------------------------------------------------------
+	"/api/v1/pending-secrets": {
+		Pattern: "/api/v1/pending-secrets", RouteID: "pendingSecrets.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/pending-secrets/": {
+		Pattern: "/api/v1/pending-secrets/", RouteID: "pendingSecrets.decide",
+		Classification: RouteAuthenticated,
 	},
 
 	// -------------------------------------------------------------------------
@@ -897,6 +1235,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "PUT /api/v1/github-app", RouteID: "githubApp.config.update",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonCredentialManagement,
 	},
 	"GET /api/v1/github-app/installations": {
 		Pattern: "GET /api/v1/github-app/installations", RouteID: "githubApp.installations.list",
@@ -935,10 +1274,155 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
+	// scope, admitting a hub-boundary token carrying test_identity:issue.
+	// The handlers return 404 unless the hub runs with
+	// --test-mode=member or above.
+	// -------------------------------------------------------------------------
+	"POST /api/v1/test-identities": {
+		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"GET /api/v1/test-identities": {
+		Pattern: "GET /api/v1/test-identities", RouteID: "testIdentities.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// The handler requires test_identity.issue for a member-tier identity.
+	// The admin kinds' capabilities are admitted as well, so an admin-scope
+	// workload delegation (phase X4b) reaches the handler, which re-issues
+	// only for an admin-kind identity of the delegation's kind that the
+	// same delegation issued, with that kind's issuer checks
+	// (handleIssueTestAdminTokenThroughDelegation); any other caller gets
+	// no admin-kind token (409).
+	"POST /api/v1/test-identities/{id}/token": {
+		Pattern: "POST /api/v1/test-identities/{id}/token", RouteID: "testIdentities.token",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+		AlsoPermits:  []string{"test_identity.issue_admin", "test_identity.issue_super_admin"},
+	},
+	// The handler further limits the code to the identity's issuer, a
+	// workload delegation for the member-tier identities it issued, or an
+	// unscoped platform admin session (canManageTestIdentity,
+	// workloadWebCodeAdmitted) and to hubs where test identity web sessions
+	// are available. The admin kinds' capabilities are admitted as well, so
+	// an issuer token scoped to exactly one of them reaches the handler; it
+	// requires test_identity.issue for a member-tier identity and, for an
+	// admin-kind identity (WS4), that kind's capability and issuer checks
+	// (testAdminCredentialIssuer). An admin-scope workload delegation
+	// reaches the code only for an admin-kind identity of its scope's kind
+	// that it issued itself (phase X4b).
+	"POST /api/v1/test-identities/{id}/web-login-code": {
+		Pattern: "POST /api/v1/test-identities/{id}/web-login-code", RouteID: "testIdentities.webLoginCode",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+		AlsoPermits:  []string{"test_identity.issue_admin", "test_identity.issue_super_admin"},
+	},
+	// The handler further limits a delete to the identity's issuer, an
+	// unscoped platform admin session, or a holder of test_identity.issue
+	// and user.delete (canDeleteTestIdentity).
+	"DELETE /api/v1/test-identities/{id}": {
+		Pattern: "DELETE /api/v1/test-identities/{id}", RouteID: "testIdentities.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Issuer-scoped orphan cleanup (Phase 3c). The handler selects the
+	// targets from the provenance stamps of expired or deleted test
+	// identities of the caller's issuer scope (its own identities, its own
+	// workload delegation's, or every issuer's for an unscoped platform
+	// admin session); the request names none.
+	"POST /api/v1/test-identities/cleanup": {
+		Pattern: "POST /api/v1/test-identities/cleanup", RouteID: "testIdentities.cleanup",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Provenance explain (Phase 3c): proven or unproven for one resource;
+	// no owner or creator data for an unproven one.
+	"GET /api/v1/test-identities/provenance": {
+		Pattern: "GET /api/v1/test-identities/provenance", RouteID: "testIdentities.provenance",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Admin-kind test identities (admin tier A1, A2): test_identity.issue_admin
+	// (or, for issuance, test_identity.issue_super_admin) at hub scope, held
+	// only by super-admin. The handlers return 404 unless the hub started
+	// with --test-mode=admin or above, and re-check the issuer (human, live
+	// super-admin, the requested kind's capability, exact-scope hub token at
+	// most 8 h old). A workload issuer delegation of the kind's scope (X4)
+	// reaches issuance too, as its grantor within that one scope.
+	"POST /api/v1/test-identities/admin": {
+		Pattern: "POST /api/v1/test-identities/admin", RouteID: "testIdentities.admin.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
+		BearerTarget: "hub_collection",
+		AlsoPermits:  []string{"test_identity.issue_super_admin"},
+	},
+	// Revoke-all is session only, for a human super-admin (checked again in
+	// the handler).
+	"POST /api/v1/test-identities/admin/revoke-all": {
+		Pattern: "POST /api/v1/test-identities/admin/revoke-all", RouteID: "testIdentities.admin.revokeAll",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// The residue report of an admin-kind identity (A3) is session only,
+	// for a human super-admin (checked again in the handler).
+	"GET /api/v1/test-identities/admin/{id}/residue": {
+		Pattern: "GET /api/v1/test-identities/admin/{id}/residue", RouteID: "testIdentities.admin.residue",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Workload-bound issuer delegations (phases X2, X4): test_identity.issue
+	// at hub scope from an interactive session only (no PAT, agent or
+	// workload credential). The handlers further require a live human
+	// user row, for an admin scope also the scope's capability and a live
+	// super-admin grantor, and limit list and revoke to the grantor or an
+	// unscoped platform admin session.
+	"POST /api/v1/test-identity-delegations": {
+		Pattern: "POST /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	"GET /api/v1/test-identity-delegations": {
+		Pattern: "GET /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	"DELETE /api/v1/test-identity-delegations/{id}": {
+		Pattern: "DELETE /api/v1/test-identity-delegations/{id}", RouteID: "testIdentityDelegations.revoke",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+
+	// -------------------------------------------------------------------------
 	// Broker HMAC: Registration and lifecycle
+	//
+	// These routes are RouteBrokerHMAC (route-guard pass-through) because
+	// several of them (join, inbound, callback) are broker-credentialed or
+	// unauthenticated by design, not because none of them need a permission
+	// check. POST /api/v1/brokers is user-credentialed and enforces
+	// broker.create itself, in-handler, via authorizeBrokerCreate
+	// (handlers_brokers.go) — see createBrokerRegistration and its
+	// ptone/scion#2138 gate. UATs are admitted through
+	// authorizeBrokerCreate's bearer gate; broker on-behalf-of requests are
+	// not admitted. It is not RoutePolicy because the same path also
+	// carries the additional target owner/super-admin re-registration
+	// check, which a declarative Permission entry cannot express.
 	// -------------------------------------------------------------------------
 	"/api/v1/brokers": {
-		Pattern: "/api/v1/brokers", RouteID: "brokers.list",
+		Pattern: "/api/v1/brokers", RouteID: "brokers.create",
 		Classification: RouteBrokerHMAC,
 	},
 	"/api/v1/brokers/join": {
@@ -957,6 +1441,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/broker/inbound/routed", RouteID: "broker.inbound.routed",
 		Classification: RouteBrokerHMAC,
 	},
+	"/api/v1/broker/inbound/attachments": {
+		Pattern: "/api/v1/broker/inbound/attachments", RouteID: "broker.inbound.attachments",
+		Classification: RouteBrokerHMAC,
+	},
+	"/api/v1/broker/inbound/attachments/check": {
+		Pattern: "/api/v1/broker/inbound/attachments/check", RouteID: "broker.inbound.attachments.check",
+		Classification: RouteBrokerHMAC,
+	},
 	"/api/v1/broker/callback": {
 		Pattern: "/api/v1/broker/callback", RouteID: "broker.callback",
 		Classification: RouteBrokerHMAC,
@@ -967,6 +1459,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/runtime-brokers/connect": {
 		Pattern: "/api/v1/runtime-brokers/connect", RouteID: "runtimeBrokers.connect",
+		Classification: RouteBrokerHMAC,
+	},
+	// Attachment delivery capability redemption (ptone/scion#4596): the
+	// handler requires the broker credential whose broker id the capability
+	// names, and answers every refusal with one 404.
+	"/api/v1/attachment-deliveries/": {
+		Pattern: "/api/v1/attachment-deliveries/", RouteID: "attachmentDeliveries.redeem",
 		Classification: RouteBrokerHMAC,
 	},
 
@@ -996,6 +1495,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/system/identity": {
 		Pattern: "/api/v1/system/identity", RouteID: "system.identity",
 		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/system/status": {
 		Pattern: "/api/v1/system/status", RouteID: "system.status",
@@ -1032,6 +1532,22 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/system/workstation-settings": {
 		Pattern: "/api/v1/system/workstation-settings", RouteID: "system.workstationSettings",
 		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/preview": {
+		Pattern: "/api/v1/system/welcome/preview", RouteID: "system.welcome.preview",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/install": {
+		Pattern: "/api/v1/system/welcome/install", RouteID: "system.welcome.install",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/system/welcome/skip": {
+		Pattern: "/api/v1/system/welcome/skip", RouteID: "system.welcome.skip",
+		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/system/fs/list": {
 		Pattern: "/api/v1/system/fs/list", RouteID: "system.fs.list",
@@ -1055,6 +1571,133 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 }
 
+// routePermissionOutcome is the result of routePermissionDecision.
+type routePermissionOutcome int
+
+const (
+	routePermissionForbidden routePermissionOutcome = iota
+	routePermissionAllowed
+	routePermissionMisconfigured
+	routePermissionUnauthenticated
+	routePermissionSessionOnly
+)
+
+// routePermissionDecisionResult carries what the route guard needs to
+// answer a refused request.
+type routePermissionDecisionResult struct {
+	outcome  routePermissionOutcome
+	message  string   // for routePermissionMisconfigured
+	identity Identity // for the denial log
+	target   Resource // for the denial log; unset when nonUser
+	reason   string   // for the denial log
+	// nonUser is set when the caller is not a user identity, so no target
+	// was resolved.
+	nonUser bool
+}
+
+// routePermissionDecision makes the permission decision for a
+// RouteHubAdmin route that declares a Permission: the route guard uses it,
+// and so does any handler that needs to know whether the caller would be
+// allowed on another route (for example the health summary, for the
+// Integrations admin route). It has no side effects other than the
+// decision audit Decide records. Anything but routePermissionAllowed is a
+// refusal; the zero outcome is forbidden.
+func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) routePermissionDecisionResult {
+	// A route that declares a Permission is only ever evaluated through
+	// the authorization service; without one it is refused rather than
+	// served via requireAdmin.
+	if s.authzService == nil {
+		return routePermissionDecisionResult{outcome: routePermissionMisconfigured, message: "authorization unavailable"}
+	}
+	// Validate route metadata completeness
+	if meta.Permission == "" || meta.Resource == "" || meta.Action == "" {
+		return routePermissionDecisionResult{outcome: routePermissionMisconfigured,
+			message: "route misconfigured: Resource and Action must be set when Permission is set"}
+	}
+	// D4 conversion: permission-based check via Decide. Routes that
+	// declare a Permission in their metadata are evaluated through the
+	// authorization pipeline, which preserves super-admin access and
+	// enables scoped admin access through role bindings.
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		return routePermissionDecisionResult{outcome: routePermissionUnauthenticated}
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		return routePermissionDecisionResult{outcome: routePermissionForbidden, identity: identity,
+			nonUser: true, reason: "non-user identity"}
+	}
+	target, evidence, targetOK := routeGuardTarget(meta)
+	if !targetOK {
+		return routePermissionDecisionResult{outcome: routePermissionMisconfigured, message: "route misconfigured: unknown bearer target"}
+	}
+	// Session-only: a route-level refusal of every non-session credential,
+	// before the permission decision. Decide still runs for a session.
+	if meta.SessionOnly != "" && !sessionCredentialAllowed(r.Context()) {
+		return routePermissionDecisionResult{outcome: routePermissionSessionOnly, identity: identity,
+			target: target, reason: "session-only operation"}
+	}
+	decision := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:      principalContextForIdentity(user),
+		Credential:     credentialContextForIdentity(user),
+		Resource:       target,
+		Action:         Action(meta.Action),
+		Permission:     meta.Permission,
+		TargetEvidence: evidence,
+	})
+	for _, alt := range meta.AlsoPermits {
+		if decision.Allowed {
+			break
+		}
+		altTarget, altEvidence, ok := routeGuardTarget(RouteMetadata{Resource: meta.Resource, Permission: alt, BearerTarget: meta.BearerTarget})
+		if !ok {
+			break
+		}
+		if d := s.authzService.Decide(r.Context(), AuthzRequest{
+			Principal:      principalContextForIdentity(user),
+			Credential:     credentialContextForIdentity(user),
+			Resource:       altTarget,
+			Action:         Action(permissionAction(alt)),
+			Permission:     alt,
+			TargetEvidence: altEvidence,
+		}); d.Allowed {
+			decision = d
+		}
+	}
+	if !decision.Allowed {
+		return routePermissionDecisionResult{outcome: routePermissionForbidden, identity: identity,
+			target: target, reason: decision.Reason}
+	}
+	return routePermissionDecisionResult{outcome: routePermissionAllowed, identity: identity, target: target}
+}
+
+// enforceRoutePermission reports whether the request may proceed, writing the
+// refusal when it may not.
+func (s *Server) enforceRoutePermission(w http.ResponseWriter, r *http.Request, meta RouteMetadata) bool {
+	d := s.routePermissionDecision(r, meta)
+	switch d.outcome {
+	case routePermissionAllowed:
+		return true
+	case routePermissionMisconfigured:
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, d.message, nil)
+	case routePermissionUnauthenticated:
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+	case routePermissionSessionOnly:
+		logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
+		writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
+	default:
+		if d.nonUser {
+			// No target was resolved; label the log with the route's
+			// resource type only.
+			logAuthzDenial(r, d.identity, Resource{Type: meta.Resource}, Action(meta.Action), d.reason)
+		} else {
+			logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
+		}
+		writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
+	}
+	return false
+}
+
 // guarded looks up the route metadata for a pattern and wraps the handler with
 // the declarative route guard. If the pattern has no entry in routeMetadataTable,
 // it returns a handler that fails closed with 500.
@@ -1072,6 +1715,38 @@ func (s *Server) guarded(pattern string, handler http.HandlerFunc) http.HandlerF
 // It runs BEFORE the handler. The handler's own authorization checks remain as defense-in-depth.
 func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Every guarded route's decision audit carries its RouteID.
+		if meta.RouteID != "" {
+			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
+		}
+		// A visitor (a federated account, VisitorIdentity) is admitted
+		// only on the methods a route lists in VisitorMethods, whatever
+		// the route's classification; any other request is refused here.
+		if refuseVisitorRequest(w, r, meta) {
+			return
+		}
+		// On a subtree route a visitor is admitted only on the sub-paths
+		// listed in visitorAdmittedSubRoutes, for an agent it may message
+		// now; every other visitor request gets the same refusal.
+		if !s.admitVisitorSubRoute(w, r, meta) {
+			return
+		}
+		// An agent delegated credential is admitted only on the routes in
+		// agentDelegationAdmittedRoutes, whatever the route's
+		// classification (.design/agent-delegation.md §11.1).
+		if isDelegatedAgentIdentity(GetIdentityFromContext(r.Context())) {
+			admitted, ok := s.admitDelegatedRequest(w, r, meta)
+			if !ok {
+				return
+			}
+			r = admitted
+			// A list route's item filter writes one aggregated record
+			// when the request ends, including on a panic or a
+			// cancelled request (.design/agent-delegation.md §14.2).
+			if c := listFilterCollectorFromContext(r.Context()); c != nil {
+				defer s.flushListFilter(r.Context(), c)
+			}
+		}
 		switch meta.Classification {
 		case RoutePublic:
 			// No guard — pass through
@@ -1089,56 +1764,42 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			// The handler performs per-resource authorization with full context.
 			// The declarative guard classifies the route; enforcement stays in
 			// the handler where resource IDs, ownership, and visibility are known.
+			if agentSubRouteGuardedRoutes[meta.RouteID] {
+				// Agent sub-routes resolve once here, for every caller
+				// kind; handlers dispatch on the stored value.
+				resolved, ok := resolveAgentSubRouteForRequest(w, r)
+				if !ok {
+					return
+				}
+				r = resolved
+			}
 			next(w, r)
 		case RouteHubAdmin:
-			if meta.Permission != "" && s.authzService != nil {
-				// Validate route metadata completeness
-				if meta.Resource == "" || meta.Action == "" {
-					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-						"route misconfigured: Resource and Action must be set when Permission is set", nil)
-					return
-				}
-				// D4 conversion: permission-based check via Decide.
-				// Routes that declare a Permission in their metadata are
-				// evaluated through the authorization pipeline, which
-				// preserves the super-admin bypass and enables scoped
-				// admin access through role bindings.
-				identity := GetIdentityFromContext(r.Context())
-				if identity == nil {
-					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-					return
-				}
-				user, ok := identity.(UserIdentity)
-				if !ok {
-					logAuthzDenial(r, identity, Resource{Type: meta.Resource}, Action(meta.Action), "non-user identity")
-					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
-					return
-				}
-				decision := s.authzService.Decide(r.Context(), AuthzRequest{
-					Principal:  principalContextForIdentity(user),
-					Credential: credentialContextForIdentity(user),
-					Resource:   Resource{Type: meta.Resource, ID: "hub"},
-					Action:     Action(meta.Action),
-					Permission: meta.Permission,
-				})
-				if !decision.Allowed {
-					logAuthzDenial(r, identity, Resource{Type: meta.Resource, ID: "hub"}, Action(meta.Action), decision.Reason)
-					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
+			if meta.Permission != "" {
+				if !s.enforceRoutePermission(w, r, meta) {
 					return
 				}
 				next(w, r)
 			} else {
-				// Fallback: unconverted route still uses requireAdmin.
-				// This makes incremental D4 conversion safe — routes
-				// without a declared Permission behave exactly as before.
+				// Fallback: a route without a declared Permission still
+				// uses requireAdmin. This makes incremental D4 conversion
+				// safe — such routes behave exactly as before.
 				if _, ok := s.requireAdmin(w, r); !ok {
 					return
 				}
 				next(w, r)
 			}
 		case RouteWorkstation:
-			// Delegate to existing requireWorkstation check
-			s.requireWorkstation(http.HandlerFunc(next)).ServeHTTP(w, r)
+			if !s.workstation {
+				http.NotFound(w, r)
+				return
+			}
+			if meta.Permission != "" {
+				if !s.enforceRoutePermission(w, r, meta) {
+					return
+				}
+			}
+			next(w, r)
 		case RouteBrokerHMAC:
 			// Broker routes are already wrapped with broker auth middleware — pass through
 			next(w, r)

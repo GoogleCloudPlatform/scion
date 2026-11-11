@@ -1,0 +1,420 @@
+/**
+ * P3.2 (#1659): Playwright browser tests for explicit reconnect and
+ * agent-unavailable transitions.
+ *
+ * A retriable drop on a frontmost pane makes exactly one automatic
+ * reconnect attempt; the manual Reconnect overlay is what remains once that
+ * attempt fails (ptone/scion#1972). dropConnection() reproduces that path.
+ */
+import { test, expect, type Locator, type Page } from '@playwright/test';
+import { emitEventSourceUpdate, installEventSourceStub } from '../event-source-stub.js';
+
+const agent = '11111111-1111-4111-8111-111111111111';
+
+interface AgentFixture {
+  id: string;
+  name: string;
+  phase: string;
+  projectId: string;
+  activity?: string;
+}
+
+async function setup(
+  page: Page,
+  agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'reconnect-agent',
+      phase: 'running',
+      projectId: 'fixture-project',
+    },
+  }
+): Promise<{
+  readonly attaches: number;
+  readonly closes: number;
+  disconnectAll(): void;
+  refuseNextAttach(): void;
+  sent: string[];
+}> {
+  let attaches = 0;
+  let closes = 0;
+  const sent: string[] = [];
+  let refuseNext = 0;
+  const sockets = new Set<{ close: (options?: { code?: number; reason?: string }) => void }>();
+  // Simulate the connected handshake so SSEClient marks the connection open.
+  await installEventSourceStub(page, { serverConnectedEvent: true });
+  await page.route('**/auth/me', (route) =>
+    route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
+  );
+  await page.route('**/api/v1/settings/public', (route) =>
+    route.fulfill({ json: { nativeChatEnabled: true } })
+  );
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    const id =
+      route
+        .request()
+        .url()
+        .match(/\/api\/v1\/agents\/([^/?]+)/)?.[1] ?? agent;
+    void route.fulfill({
+      status: agents[id] ? 200 : 404,
+      json: agents[id] ?? { error: 'not found' },
+    });
+  });
+  await page.route('**/api/v1/system/status', (route) =>
+    route.fulfill({ json: { complete: true } })
+  );
+  await page.routeWebSocket('**/pty?*', (socket) => {
+    attaches++;
+    if (refuseNext > 0) {
+      // An attach whose stream never opens: closed before any data frame,
+      // which the client counts as a failed attempt.
+      refuseNext--;
+      void socket.close({ code: 1006, reason: 'fixture refused' });
+      return;
+    }
+    sockets.add(socket);
+    socket.onMessage((message) => sent.push(String(message)));
+    socket.onClose(() => {
+      closes++;
+      sockets.delete(socket);
+    });
+    // tmux sends a redraw on attach; a session only counts as connected on
+    // its first inbound data frame (see client/terminal-sessions.ts), and
+    // the disconnect overlay only follows a session that was connected.
+    socket.send(JSON.stringify({ type: 'data', data: '' }));
+  });
+  return {
+    get attaches(): number {
+      return attaches;
+    },
+    get closes(): number {
+      return closes;
+    },
+    disconnectAll(): void {
+      for (const socket of [...sockets]) {
+        sockets.delete(socket);
+        socket.close({ code: 1006, reason: 'fixture disconnect' });
+      }
+    },
+    refuseNextAttach(): void {
+      refuseNext++;
+    },
+    sent,
+  };
+}
+
+/**
+ * Drops the live socket and refuses the one automatic attempt that follows,
+ * leaving the pane on the DISCONNECTED overlay with manual Reconnect.
+ */
+async function dropConnection(
+  page: Page,
+  socket: Awaited<ReturnType<typeof setup>>
+): Promise<Locator> {
+  const before = socket.attaches;
+  socket.refuseNextAttach();
+  socket.disconnectAll();
+  await expect.poll(() => socket.attaches).toBe(before + 1);
+  const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
+  await expect(overlay.locator('.overlay-detail')).toContainText('Automatic reconnection failed');
+  return overlay;
+}
+
+test('disconnect overlay appears on socket loss and shows Reconnect button', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Disconnect; the single automatic attempt fails
+  const overlay = await dropConnection(page, socket);
+
+  // Overlay with disconnect info and Reconnect button should appear
+  await expect(overlay).toBeVisible();
+  await expect(overlay.locator('.overlay-title')).toContainText('DISCONNECTED');
+  await expect(overlay.locator('.overlay-reconnect')).toBeVisible();
+  await expect(overlay.locator('.overlay-reconnect')).toBeEnabled();
+
+  // Only that one automatic attempt: no retry loop behind the overlay
+  await page.waitForTimeout(500);
+  expect(socket.attaches).toBe(2);
+});
+
+test('Reconnect button works and creates new connection', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  await expect(await dropConnection(page, socket)).toBeVisible();
+
+  // Click Reconnect on the overlay
+  await page.locator('scion-terminal-pane .overlay-reconnect').click();
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Overlay should disappear after successful reconnect
+  await expect(page.locator('scion-terminal-pane .disconnected-overlay')).toBeHidden();
+});
+
+test('repeated Reconnect clicks produce only one attempt', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await expect(await dropConnection(page, socket)).toBeVisible();
+
+  // Make the agent metadata fetch slow so the reconnect stays pending
+  // while we click multiple times. Use a holder object so TypeScript does
+  // not narrow the property to null at the call site (TS2349).
+  const slowFetch = { resolve: null as (() => void) | null };
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    // Delay the response to keep reconnect in pending state
+    slowFetch.resolve = () => {
+      void route.fulfill({
+        json: {
+          id: agent,
+          name: 'reconnect-agent',
+          phase: 'running',
+          projectId: 'fixture-project',
+        },
+      });
+    };
+  });
+
+  // Click Reconnect button multiple times rapidly via visible UI
+  const reconnectBtn = page.locator('scion-terminal-pane .overlay-reconnect');
+  await reconnectBtn.click();
+
+  // Button should show "Reconnecting..." and be disabled after first click
+  await expect(reconnectBtn).toContainText('Reconnecting...');
+  await expect(reconnectBtn).toBeDisabled();
+
+  // Additional clicks are prevented by the disabled state — try force-clicking
+  // to verify no additional attempts are created
+  await reconnectBtn.click({ force: true });
+  await reconnectBtn.click({ force: true });
+
+  // Resolve the slow fetch to complete the reconnect
+  slowFetch.resolve?.();
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Despite multiple clicks, only one additional WebSocket connection was made
+  expect(socket.attaches).toBe(3);
+});
+
+test('auth failure shows appropriate error without retry loop', async ({ page }) => {
+  // Set up a scenario where the preflight will fail with 403
+  const socket = await setup(page);
+
+  // After initial connect, make the preflight return 403
+  let preflight403 = false;
+  await page.route('**/api/v1/agents/**/pty', (route) => {
+    if (preflight403) {
+      void route.fulfill({ status: 403, json: { error: 'forbidden' } });
+    } else {
+      void route.fulfill({ json: {} });
+    }
+  });
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  await expect(await dropConnection(page, socket)).toBeVisible();
+
+  // Now make preflight return 403
+  preflight403 = true;
+  await page.locator('scion-terminal-pane .overlay-reconnect').click();
+
+  // Wait for error to appear in the overlay or error bar
+  await expect(page.locator('scion-terminal-pane')).toContainText('permission');
+
+  // Only the initial attach + the automatic attempt; the manual attempt
+  // opens no new WebSocket because its preflight failed, and nothing retries
+  expect(socket.attaches).toBe(2);
+});
+
+test('connected session navigation does not reset scrollback', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Write terminal content to the buffer before navigation
+  await page.evaluate(() => {
+    const pane = document.querySelector('scion-terminal-pane');
+    const container = pane?.shadowRoot?.querySelector('.terminal-container');
+    if (container) {
+      // Inject visible content into the terminal container to simulate buffer output
+      const marker = document.createElement('div');
+      marker.className = 'scrollback-marker';
+      marker.textContent = 'SCROLLBACK_CONTENT_BEFORE_NAV';
+      container.appendChild(marker);
+    }
+  });
+
+  const initialAttaches = socket.attaches;
+
+  // Navigate away
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('nav-click', { detail: { path: '/' } }))
+  );
+
+  // Navigate back to the same terminal
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/terminals/${agent}`
+  );
+
+  // No new socket connection — session was preserved
+  expect(socket.attaches).toBe(initialAttaches);
+  expect(socket.closes).toBe(0);
+
+  // Buffer content should still be present after round-trip navigation
+  const markerPresent = await page.evaluate(() => {
+    const pane = document.querySelector('scion-terminal-pane');
+    const marker = pane?.shadowRoot?.querySelector('.scrollback-marker');
+    return marker?.textContent ?? null;
+  });
+  expect(markerPresent).toBe('SCROLLBACK_CONTENT_BEFORE_NAV');
+});
+
+test('unavailable agent shows correct state in rail and pane', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Deliver an SSE agent-stopped event through the mocked EventSource.
+  // The production SSE→metadata→session bridge in the workspace root should
+  // call markUnavailable automatically when the metadata reports phase=stopped.
+  await emitEventSourceUpdate(page, `agent.${agent}.status`, {
+    phase: 'stopped',
+    activity: 'offline',
+  });
+
+  // Rail should show unavailable state, not disconnected. The row carries no
+  // visible status text; the state lives in its data attributes and in the
+  // select button's accessible label.
+  const railItem = page.locator('#terminal-workspace .terminal-rail-item');
+  await expect(railItem).toHaveAttribute('data-connection', 'unavailable');
+  await expect(railItem).toHaveAttribute('data-disconnect-reason', 'agent-stopped');
+  await expect(railItem.locator('.terminal-rail-select')).toHaveAttribute(
+    'aria-label',
+    /Unavailable/
+  );
+
+  // Overlay should show AGENT UNAVAILABLE title
+  const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
+  await expect(overlay).toBeVisible();
+  await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
+});
+
+test('toolbar reconnect button disabled during active reconnect attempt', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await dropConnection(page, socket);
+
+  // Install a slow mock fetch to keep the reconnect attempt pending while we
+  // assert the toolbar button state. Without this gate the reconnect can
+  // complete before the assertions run, causing a transient failure.
+  const slowFetch = { resolve: null as (() => void) | null };
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    slowFetch.resolve = () => {
+      void route.fulfill({
+        json: {
+          id: agent,
+          name: 'reconnect-agent',
+          phase: 'running',
+          projectId: 'fixture-project',
+        },
+      });
+    };
+  });
+
+  const toolbarBtn = page.locator('scion-terminal-pane .reconnect-btn');
+  await expect(toolbarBtn).toBeVisible();
+
+  // Click toolbar reconnect
+  await toolbarBtn.click();
+
+  // The toolbar button should show "Reconnecting..." and be disabled while
+  // the agent metadata fetch is still pending.
+  await expect(toolbarBtn).toContainText('Reconnecting...');
+  await expect(toolbarBtn).toBeDisabled();
+
+  // Resolve the slow fetch to complete the reconnect
+  slowFetch.resolve?.();
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Also verify: for terminal-permanent disconnect reasons (agent-deleted),
+  // the reconnect button should be disabled.
+  // Deliver SSE deleted event — the production bridge calls markUnavailable.
+  await emitEventSourceUpdate(page, `agent.${agent}.deleted`, {});
+
+  // The reconnect button should now be visible but disabled for agent-deleted reason
+  await expect(toolbarBtn).toBeVisible();
+  await expect(toolbarBtn).toBeDisabled();
+});
+
+test('disconnected session transitions to unavailable when agent stops', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Step 1: Disconnect via network — session enters "disconnected" state
+  // once the single automatic attempt has failed
+  const overlay = await dropConnection(page, socket);
+  await expect(overlay).toBeVisible();
+  await expect(overlay.locator('.overlay-title')).toContainText('DISCONNECTED');
+
+  // Reconnect button should be enabled (disconnected, not unavailable)
+  const reconnectBtn = page.locator('scion-terminal-pane .overlay-reconnect');
+  await expect(reconnectBtn).toBeEnabled();
+
+  // Step 2: Deliver SSE agent-stopped event while session is disconnected
+  await emitEventSourceUpdate(page, `agent.${agent}.status`, {
+    phase: 'stopped',
+    activity: 'offline',
+  });
+
+  // Step 3: Session should transition from disconnected → unavailable
+  await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
+  // Overlay should have the 'unavailable' class applied (drives CSS styling)
+  await expect(overlay).toHaveClass(/unavailable/);
+});
+
+test('stopped session transitions to deleted when agent is deleted', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Step 1: Deliver SSE agent-stopped event — session becomes unavailable
+  // with reason agent-stopped (reconnect still enabled)
+  await emitEventSourceUpdate(page, `agent.${agent}.status`, {
+    phase: 'stopped',
+    activity: 'offline',
+  });
+
+  const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
+  await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
+
+  // Reconnect button should be enabled (agent-stopped allows reconnect)
+  const reconnectBtn = page.locator('scion-terminal-pane .overlay-reconnect');
+  await expect(reconnectBtn).toBeEnabled();
+
+  // Step 2: Deliver SSE agent-deleted event — session should transition
+  // from unavailable/agent-stopped to unavailable/agent-deleted
+  await emitEventSourceUpdate(page, `agent.${agent}.deleted`, {});
+
+  // Overlay should now show DELETED title and reconnect should be disabled
+  await expect(overlay.locator('.overlay-title')).toContainText('DELETED');
+  await expect(reconnectBtn).toBeDisabled();
+});

@@ -37,40 +37,18 @@ const testWorkspaceDevToken = "scion_dev_workspace_test_token_1234567890"
 // testWorkspaceServer creates a test server for workspace handler tests.
 func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testWorkspaceDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv, s
-}
-
-// createTestProject creates a project for tests that need to create agents.
-// It uses projectID to generate unique slug and git remote to avoid unique constraint violations.
-func createTestProject(t *testing.T, s store.Store, projectID string) {
-	t.Helper()
-	project := &store.Project{
-		ID:        projectID,
-		Slug:      projectID, // Use projectID as slug to ensure uniqueness
-		Name:      "Test Project " + projectID,
-		GitRemote: "https://github.com/test/" + projectID, // Unique git remote per project
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	if err := s.CreateProject(context.Background(), project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
 }
 
 func TestWorkspaceRoutesParsing(t *testing.T) {
@@ -828,7 +806,7 @@ func TestBrokerError_Error(t *testing.T) {
 		},
 		{
 			name:     "without brokerID",
-			err:      &brokerError{statusCode: 500, msg: "internal error"},
+			err:      &brokerError{msg: "internal error"},
 			expected: "internal error",
 		},
 		{
@@ -858,111 +836,4 @@ func TestErrBrokerNotConnected(t *testing.T) {
 	if err.Error() != expected {
 		t.Errorf("error message = %q, want %q", err.Error(), expected)
 	}
-}
-
-func TestErrRuntimeBrokerError(t *testing.T) {
-	err := errRuntimeBrokerError(503, "service unavailable")
-	if err == nil {
-		t.Fatal("expected non-nil error")
-	}
-
-	expected := "service unavailable"
-	if err.Error() != expected {
-		t.Errorf("error message = %q, want %q", err.Error(), expected)
-	}
-
-	hostErr, ok := err.(*brokerError)
-	if !ok {
-		t.Fatal("expected *brokerError type")
-	}
-	if hostErr.statusCode != 503 {
-		t.Errorf("status code = %d, want 503", hostErr.statusCode)
-	}
-}
-
-func TestSyncHubManagedWorkspaceBack_SkipsGitProject(t *testing.T) {
-	srv, st := testWorkspaceServer(t)
-	ctx := context.Background()
-
-	// Create a git-backed project (has GitRemote)
-	project := &store.Project{
-		ID:        tid("project-git-sync"),
-		Slug:      tid("project-git-sync"),
-		Name:      "Git Project",
-		GitRemote: "github.com/test/repo",
-	}
-	if err := st.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	agent := &store.Agent{
-		ID:        "agent-sync-1",
-		ProjectID: tid("project-git-sync"),
-	}
-
-	// This should return without doing anything for git-backed projects
-	srv.syncHubManagedWorkspaceBack(ctx, agent, "workspaces/project-git-sync/agent-sync-1")
-	// No panic/error = success
-}
-
-func TestSyncHubManagedWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
-	srv, st := testWorkspaceServer(t)
-	ctx := context.Background()
-
-	// Create a hub-managed project
-	project := &store.Project{
-		ID:   tid("project-colo-sync"),
-		Slug: tid("project-colo-sync"),
-		Name: "Hub Native Colo",
-		// No GitRemote = hub-managed
-	}
-	if err := st.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	// Create a broker with local path (colocated)
-	broker := &store.RuntimeBroker{
-		ID:       tid("broker-colo"),
-		Name:     "colo-broker",
-		Slug:     "colo-broker",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create broker: %v", err)
-	}
-	provider := &store.ProjectProvider{
-		ProjectID:  tid("project-colo-sync"),
-		BrokerID:   tid("broker-colo"),
-		BrokerName: "colo-broker",
-		LocalPath:  "/home/user/.scion",
-		Status:     store.BrokerStatusOnline,
-	}
-	if err := st.AddProjectProvider(ctx, provider); err != nil {
-		t.Fatalf("failed to add provider: %v", err)
-	}
-
-	agent := &store.Agent{
-		ID:              "agent-colo-sync",
-		ProjectID:       tid("project-colo-sync"),
-		RuntimeBrokerID: tid("broker-colo"),
-	}
-
-	// Should skip sync because broker has local path
-	srv.syncHubManagedWorkspaceBack(ctx, agent, "workspaces/project-colo-sync/project-workspace")
-	// No panic/error = success
-}
-
-func TestSyncHubManagedWorkspaceBack_NoProjectID(t *testing.T) {
-	srv, _ := testWorkspaceServer(t)
-	ctx := context.Background()
-
-	agent := &store.Agent{
-		ID:        "agent-no-project",
-		ProjectID: "", // No project ID
-	}
-
-	// Should return immediately
-	srv.syncHubManagedWorkspaceBack(ctx, agent, "some-path")
-	// No panic/error = success
 }

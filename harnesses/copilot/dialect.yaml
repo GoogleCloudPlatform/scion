@@ -4,43 +4,61 @@ dialect: copilot
 
 event_name_field: hook_event_name
 
+# Copilot sends the hook payload on stdin. Event names registered in
+# camelCase (as provision.py does) select Copilot's camelCase payload format,
+# so the fields below use camelCase keys (sessionId, toolName, toolArgs,
+# toolResult). See docs.github.com/en/copilot/reference/hooks-configuration.
 mappings:
   # Session lifecycle.
   sessionStart:
     event: session-start
+    fields:
+      session_id: sessionId
+      source: source
   sessionEnd:
     event: session-end
+    fields:
+      session_id: sessionId
+      reason: reason
 
   # Prompt lifecycle.
   userPromptSubmitted:
     event: prompt-submit
     fields:
       prompt: prompt
-      session_id: session_id
+      session_id: sessionId
 
   # Tool lifecycle.
   preToolUse:
     event: tool-start
     fields:
-      tool_name: tool_name
-      tool_input: tool_input
+      session_id: sessionId
+      tool_name: toolName
+      tool_input: toolArgs
   postToolUse:
     event: tool-end
     fields:
-      tool_name: tool_name
-      tool_output: tool_output
-      success: success
-      error: error
+      session_id: sessionId
+      tool_name: toolName
+      tool_input: toolArgs
+      tool_output: toolResult.textResultForLlm
+      # resultType is a string; only "success" counts as a successful tool.
+      success: toolResult.resultType
 
   # Error events.
   errorOccurred:
     event: notification
     fields:
-      error: error
-      message: message
+      session_id: sessionId
+      error: error.message
+      message: error.message
 
   # Agent completion.
   agentStop:
     event: agent-end
+    fields:
+      session_id: sessionId
   subagentStop:
     event: subagent-end
+    fields:
+      session_id: sessionId

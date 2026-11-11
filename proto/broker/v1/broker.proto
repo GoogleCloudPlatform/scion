@@ -41,7 +41,11 @@ message StructuredMessage {
   string msg = 8;
   string type = 9;
   bool plain = 10;
-  bool raw = 11;
+  // Field 11 was "raw" (keystroke delivery through messages). Raw delivery
+  // has been removed in favour of the agent keys endpoint; the hub never
+  // sets it, so the number and name stay reserved and are not reused.
+  reserved 11;
+  reserved "raw";
   bool urgent = 12;
   bool broadcasted = 13;
   bool observer_only = 14;

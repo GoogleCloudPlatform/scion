@@ -5,11 +5,14 @@ Copyright 2025 The Scion Authors.
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -18,8 +21,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -56,6 +62,7 @@ Examples:
   sciontool hook task_completed "Implemented feature X"`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		if len(args) > 0 {
 			// Handle subcommands: ask_user, task_completed
 			switch args[0] {
@@ -107,6 +114,7 @@ var askUserCmd = &cobra.Command{
 	Short: "Signal that the agent is waiting for user input",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		message := "Input requested"
 		if len(args) > 0 {
 			message = args[0]
@@ -121,12 +129,30 @@ var taskCompletedCmd = &cobra.Command{
 	Short: "Signal that the agent has completed its task",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		message := "Task completed"
 		if len(args) > 0 {
 			message = args[0]
 		}
 		runTaskCompleted(message)
 	},
+}
+
+// hookExit exits the process. Tests replace it.
+var hookExit = os.Exit
+
+// recoverHookPanic, deferred at the top of a hook command's Run, turns a
+// panic into a logged error and exit code 1. An unrecovered panic exits
+// with code 2, which some harnesses read as a hook result with its own
+// meaning (Copilot, for example, then adds the hook's stdout to the model
+// context). A runtime fatal error cannot be recovered and still exits 2.
+func recoverHookPanic() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	log.Error("Hook panicked: %v\n%s", r, debug.Stack())
+	hookExit(1)
 }
 
 // runHookFromStdin processes hook events from stdin.
@@ -150,17 +176,113 @@ func runHookFromStdin() error {
 	return processHookData(data)
 }
 
-// runHookWithEvent creates and processes a synthetic event.
+// runHookWithEvent processes an event named on the command line
+// (`sciontool hook <event> --dialect=...`). Harnesses that register their
+// hooks this way (Copilot) still pipe the event's JSON payload on stdin, so
+// the payload is read when there is one and merged under the explicit event
+// name. Without a payload the event is synthetic, as before.
 func runHookWithEvent(eventName string) {
-	data := map[string]interface{}{
-		"hook_event_name": eventName,
-	}
-	jsonData, _ := json.Marshal(data)
+	jsonData := positionalEventData(eventName, readOptionalStdin(os.Stdin, positionalStdinWait))
 	if err := processHookData(jsonData); err != nil {
 		log.Error("Hook processing failed: %v", err)
 		os.Exit(1)
 	}
 }
+
+// positionalStdinWait bounds how long the positional event path waits for a
+// stdin payload. A harness writes its payload at once and closes stdin; the
+// wait only matters when stdin is a pipe that nobody writes to or closes,
+// and then the event is processed without a payload instead of blocking the
+// hook. A variable only so tests can shorten it.
+var positionalStdinWait = 500 * time.Millisecond
+
+// readOptionalStdin returns the first JSON value on in, or nil when there is
+// none: in is a terminal (or another character device such as /dev/null),
+// it is empty, it does not hold valid JSON, or no complete value arrives
+// within wait. It returns as soon as one complete value has been read, so a
+// harness that writes its payload and keeps stdin open does not lose it.
+// It never blocks for longer than wait. On a timeout the reading goroutine
+// is abandoned; the hook process exits shortly after.
+func readOptionalStdin(in *os.File, wait time.Duration) []byte {
+	if in == nil {
+		return nil
+	}
+	stat, err := in.Stat()
+	if err != nil || stat.Mode()&os.ModeCharDevice != 0 {
+		return nil
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		// Decode one value rather than read to EOF: the decoder returns
+		// once the value is complete, whether or not stdin is closed.
+		var raw json.RawMessage
+		err := json.NewDecoder(io.LimitReader(in, maxPositionalStdinBytes+1)).Decode(&raw)
+		done <- result{raw, err}
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		if errors.Is(r.err, io.EOF) {
+			return nil // empty (or whitespace-only) stdin: no payload
+		}
+		if r.err != nil {
+			log.Error("Hook: stdin payload is not valid JSON (or exceeds %d bytes), ignoring it: %v", maxPositionalStdinBytes, r.err)
+			return nil
+		}
+		return r.data
+	case <-timer.C:
+		log.Warn("Hook: no complete stdin payload within %s, processing the event without it", wait)
+		return nil
+	}
+}
+
+// maxPositionalStdinBytes bounds the stdin payload read on the positional
+// event path, so a runaway writer cannot exhaust the hook's memory.
+const maxPositionalStdinBytes = 8 << 20
+
+// positionalEventData builds the event JSON for the positional event path:
+// the stdin payload, when it is a JSON object, with hook_event_name set to
+// eventName (the explicit event wins over any name in the payload). An
+// empty, malformed or non-object payload is ignored (logged), so the event
+// is still processed, as a synthetic event.
+func positionalEventData(eventName string, payload []byte) []byte {
+	data := map[string]interface{}{}
+	if len(bytes.TrimSpace(payload)) > 0 {
+		if err := json.Unmarshal(payload, &data); err != nil || data == nil {
+			log.Error("Hook: stdin payload for %s is not a JSON object, ignoring it: %v", eventName, err)
+			data = map[string]interface{}{}
+		}
+	}
+	data["hook_event_name"] = eventName
+	jsonData, _ := json.Marshal(data)
+	return jsonData
+}
+
+// hookHubBudget bounds the total time one hook process spends on Hub
+// calls: the status update, the limits count report, and the session-end
+// metrics report all share it. Each call is also capped on its own, but the
+// caps used to add up (10-15s with a black-holed Hub) past harness hook
+// timeouts (antigravity 10s; opencode and grok-build 5s). Together with
+// telemetry's own bound (about 0.75s) this keeps a hook under 5s.
+// The calls run in order, so a slow earlier call (the status update) can use
+// up the budget and the later ones (limits counts, session-end metrics) are
+// then dropped. That is acceptable: those are informational, and
+// limits_exceeded and the final stop status are reported by sciontool init.
+const hookHubBudget = 3 * time.Second
+
+// shutdownSessionReportTimeout bounds the Hub call with which sciontool init
+// reports a session still open at shutdown (reportOpenSessionAtShutdown,
+// session_backstop.go): the session-end metrics report that a hook process
+// never made because session-end did not fire. It is the init-side
+// counterpart of hookHubBudget. Together with the session state lock wait
+// (2s) it keeps that backstop well inside the runtime's default 10s stop
+// grace period. A variable only so tests can shorten it.
+var shutdownSessionReportTimeout = 3 * time.Second
 
 // processHookData parses and handles hook event data.
 func processHookData(data []byte) error {
@@ -168,6 +290,11 @@ func processHookData(data []byte) error {
 	if err := json.Unmarshal(data, &rawData); err != nil {
 		return fmt.Errorf("parsing JSON: %w", err)
 	}
+
+	// One Hub client and one deadline for every Hub call this process makes.
+	hubBudget, cancelHubBudget := context.WithTimeout(context.Background(), hookHubBudget)
+	defer cancelHubBudget()
+	hubClient := hub.NewClient()
 
 	// Create processor with handlers
 	processor := hooks.NewHarnessProcessor()
@@ -185,10 +312,20 @@ func processHookData(data []byte) error {
 	statusHandler := handlers.NewStatusHandler()
 	loggingHandler := handlers.NewLoggingHandler()
 	promptHandler := handlers.NewPromptHandler()
-	hubHandler := handlers.NewHubHandler()
-	limitsHandler := handlers.NewLimitsHandler()
+	hubHandler := handlers.NewHubHandlerForClient(hubClient).WithBudget(hubBudget)
+	limitsHandler := handlers.NewLimitsHandler(hubHandler)
 
 	processor.AddHandler(statusHandler.Handle)
+	// The ready marker is written right after the local status write, so
+	// a reader that sees the marker (sciontool init's readiness watcher)
+	// knows this event's activity is already in agent-info.json. It still
+	// comes before the Hub post, so it is not delayed by the Hub budget,
+	// and Dispatch runs every handler, so a failed status write does not
+	// stop it. Local file write only; never fails or delays the hook.
+	processor.AddHandler(func(ev *hooks.Event) error {
+		markHarnessReadyFn(ev)
+		return nil
+	})
 	processor.AddHandler(loggingHandler.Handle)
 	processor.AddHandler(promptHandler.Handle)
 
@@ -202,64 +339,116 @@ func processHookData(data []byte) error {
 		processor.AddHandler(limitsHandler.Handle)
 	}
 
-	// Add telemetry handler if telemetry is enabled
-	cfg := telemetry.LoadConfig()
-	if cfg != nil && cfg.Enabled {
-		redactor := telemetry.NewRedactor(cfg.Redaction)
-
-		// Create real providers for span + log export (sync mode for short-lived hook)
-		ctx := context.Background()
-		providers, err := telemetry.NewProviders(ctx, cfg, false)
-		if err != nil {
-			log.Error("Failed to create telemetry providers: %v", err)
-		}
-		if providers != nil {
-			defer func() {
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := providers.Shutdown(shutdownCtx); err != nil {
-					log.Error("Failed to shutdown telemetry providers: %v", err)
-				}
-			}()
-		}
-
-		var tp trace.TracerProvider
-		var lp otellog.LoggerProvider
-		var mp metric.MeterProvider
-		if providers != nil {
-			tp = providers.TracerProvider
-			lp = providers.LoggerProvider
-			if providers.MeterProvider != nil {
-				mp = providers.MeterProvider
-			}
-		}
-
-		telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
-		// Note: OnSessionEnd is not wired here. In per-invocation mode
-		// (hook.go), the hub client is not available and the process is
-		// short-lived. Metrics reporting to the Hub requires daemon mode
-		// (init.go), where the long-lived hub client wires the callback.
-		processor.AddHandler(telemetryHandler.Handle)
+	event, err := processor.ParseRaw(rawData, hookDialect)
+	if err != nil {
+		return err
 	}
-
-	if err := processor.ProcessRaw(rawData, hookDialect); err != nil {
+	if err := processor.Dispatch(event); err != nil {
 		return err
 	}
 
-	// Emit the response JSON that the harness expects on stdout.
-	// Dialects that don't declare a responses section (e.g. claude) produce
-	// no output, preserving backward compatibility.
-	if mappingDialect != nil {
-		if rawEventName := mappingDialect.EventName(rawData); rawEventName != "" {
-			if resp := mappingDialect.Response(rawEventName); resp != nil {
-				if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
-					return fmt.Errorf("writing hook response: %w", err)
-				}
+	// Emit the response JSON that the harness expects on stdout BEFORE any
+	// telemetry export. The response depends only on the dialect, and some
+	// harnesses (antigravity: 10s) kill a hook that has not answered in time,
+	// which fails the tool call. Telemetry must never delay the answer.
+	if err := writeHookResponse(hookStdout, mappingDialect, rawData); err != nil {
+		return err
+	}
+
+	runHookTelemetry(hubBudget, event, hubClient)
+	return nil
+}
+
+// hookStdout is where hook responses are written. Tests replace it to
+// observe when the response is written relative to telemetry export.
+var hookStdout io.Writer = os.Stdout
+
+// writeHookResponse writes the response declared by the dialect for this
+// event, if any. Dialects that don't declare a responses section (e.g.
+// claude) produce no output, preserving backward compatibility. os.Stdout is
+// unbuffered, so the response reaches the harness as soon as this returns.
+func writeHookResponse(w io.Writer, mappingDialect *dialects.MappingDialect, rawData map[string]interface{}) error {
+	if mappingDialect == nil {
+		return nil
+	}
+	rawEventName := mappingDialect.EventName(rawData)
+	if rawEventName == "" {
+		return nil
+	}
+	resp := mappingDialect.Response(rawEventName)
+	if resp == nil {
+		return nil
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		return fmt.Errorf("writing hook response: %w", err)
+	}
+	return nil
+}
+
+// hookOTelErrorHandler logs OTel SDK errors (failed exports) at debug level.
+var hookOTelErrorHandler = otel.ErrorHandlerFunc(func(err error) {
+	log.Debug("Hook telemetry export dropped: %v", err)
+})
+
+// runHookTelemetry exports the hook event as telemetry to the loopback
+// receiver, if telemetry is enabled. It runs after the response is written
+// and is best effort: exports are bounded by telemetry.HookExportTimeout and
+// telemetry.HookShutdownTimeout, are not retried, and a failure is logged at
+// debug level only. It never writes to stdout and never fails the hook.
+// When the Hub client is configured it also persists session counts and, on
+// session-end, reports the session summary to the Hub (bounded by
+// sessionMetricsReportTimeout and by hubBudget, the hook's shared Hub
+// deadline).
+func runHookTelemetry(hubBudget context.Context, event *hooks.Event, hubClient *hub.Client) {
+	cfg := telemetry.LoadConfig()
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+
+	// The OTel SDK reports failed exports to its global error handler, which
+	// by default logs to stderr. In the hook a missing receiver is expected
+	// (for example when the pipeline failed to start), so keep it at debug.
+	// This is process-wide and deliberately not restored: otel pins the
+	// default handler's delegate to the first handler ever set, so a restore
+	// would not take effect anyway. The hook subcommands run in their own
+	// short-lived process, so sciontool init is unaffected.
+	otel.SetErrorHandler(hookOTelErrorHandler)
+
+	redactor := telemetry.NewRedactor(cfg.Redaction)
+
+	// Synchronous, bounded providers for the short-lived hook process.
+	ctx := context.Background()
+	providers, err := telemetry.NewHookProviders(ctx, cfg)
+	if err != nil {
+		log.Error("Failed to create telemetry providers: %v", err)
+	}
+	if providers != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetry.HookShutdownTimeout)
+			defer cancel()
+			if err := providers.Shutdown(shutdownCtx); err != nil {
+				log.Debug("Hook telemetry shutdown incomplete: %v", err)
 			}
+		}()
+	}
+
+	var tp trace.TracerProvider
+	var lp otellog.LoggerProvider
+	var mp metric.MeterProvider
+	if providers != nil {
+		tp = providers.TracerProvider
+		lp = providers.LoggerProvider
+		if providers.MeterProvider != nil {
+			mp = providers.MeterProvider
 		}
 	}
 
-	return nil
+	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
+	telemetryHandler.Analytics = hookUsageAnalytics(cfg)
+	wireSessionMetrics(hubBudget, telemetryHandler, hubClient, hookHomeDir())
+	if err := telemetryHandler.Handle(event); err != nil {
+		log.Debug("Hook telemetry handler: %v", err)
+	}
 }
 
 // runAskUser updates status to waiting for input.
@@ -314,4 +503,61 @@ func runTaskCompleted(message string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[sciontool] Agent completed: %s\n", message)
+}
+
+// sessionMetricsReportTimeout bounds the session summary report a hook
+// process sends to the Hub on session-end.
+const sessionMetricsReportTimeout = 5 * time.Second
+
+// wireSessionMetrics connects a hook process's telemetry handler to Hub
+// session-metrics reporting. Each hook event runs in a new process, so the
+// session's counts are kept in a state file under home between events (see
+// handlers.FileSessionState), and the process that handles session-end
+// reports the summary. The report's deadline is derived from parent (the
+// hook's shared Hub budget). Nothing is wired when the Hub client is not
+// configured or no home directory is known.
+//
+// When the usage source is native (SCION_USAGE_SOURCE=native), session-end
+// does not send: the report is held so that usage the harness exports after
+// session-end is added to it first, and sciontool init (or a later hook
+// process) sends it (handlers.FileSessionState.HoldReports).
+func wireSessionMetrics(parent context.Context, h *handlers.TelemetryHandler, client *hub.Client, home string) {
+	if h == nil || client == nil || !client.IsConfigured() || home == "" {
+		return
+	}
+	store := handlers.NewFileSessionState(home)
+	store.HoldReports = !telemetry.HookUsageFeedsSessionMetrics()
+	h.SessionState = store
+	h.OnSessionEnd = func(summary telemetry.SessionSummary) {
+		ctx, cancel := context.WithTimeout(parent, sessionMetricsReportTimeout)
+		defer cancel()
+		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
+			log.Error("Failed to report session metrics to hub: %v", err)
+			return
+		}
+		log.Info("Session metrics reported to hub for session %s", summary.SessionID)
+	}
+}
+
+// hookHomeDir returns the agent's home directory for hook state files.
+func hookHomeDir() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return home
+}
+
+// hookUsageAnalytics returns the hook-path agent.usage producer, or nil when
+// analytics is disabled: hook usage not selected (SCION_USAGE_SOURCE is not
+// "hooks") or no GCP exporter configured. It does no I/O.
+func hookUsageAnalytics(cfg *telemetry.Config) *telemetry.UsageAnalytics {
+	if os.Getenv("SCION_USAGE_SOURCE") != telemetrycontract.UsageSourceHooks || !telemetry.AnalyticsEnabledForHooks(cfg) {
+		return nil
+	}
+	// Opened lazily: only a model-end event pays for the open and flock.
+	// The directory is the agent home's (the hook runs as the agent user,
+	// HOME=<agent home>), the same one init resolves for the pipeline.
+	dir := telemetry.AnalyticsOutboxDirFor(hookHomeDir())
+	return telemetry.NewLazyUsageAnalytics(dir, nil, telemetrycontract.UsageSourceHooks)
 }

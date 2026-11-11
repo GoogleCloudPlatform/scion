@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +29,6 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -39,9 +37,7 @@ import (
 // maps back to the hub host, the file is copied into the attachment store, and
 // the message it arrived with links to it.
 
-func TestAgentAttachmentHostPath(t *testing.T) {
-	const shared = "/srv/project-configs/demo/shared-dirs/scratchpad"
-
+func TestAgentAttachmentRelPath(t *testing.T) {
 	tests := []struct {
 		name      string
 		agentPath string
@@ -51,13 +47,13 @@ func TestAgentAttachmentHostPath(t *testing.T) {
 		{
 			name:      "staged under the scratchpad mount",
 			agentPath: "/scion-volumes/scratchpad/.attachments/sender/msg1/shot.png",
-			want:      shared + "/.attachments/sender/msg1/shot.png",
+			want:      ".attachments/sender/msg1/shot.png",
 			wantOK:    true,
 		},
 		{
 			name:      "in-workspace mount point",
 			agentPath: "/workspace/.scion-volumes/scratchpad/.attachments/sender/msg1/shot.png",
-			want:      shared + "/.attachments/sender/msg1/shot.png",
+			want:      ".attachments/sender/msg1/shot.png",
 			wantOK:    true,
 		},
 		{
@@ -84,7 +80,7 @@ func TestAgentAttachmentHostPath(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := agentAttachmentHostPath(tc.agentPath, shared)
+			got, ok := agentAttachmentRelPath(tc.agentPath)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v (path %q)", ok, tc.wantOK, got)
 			}
@@ -111,74 +107,12 @@ func TestAttachmentMimeForName(t *testing.T) {
 	}
 }
 
-// agentAttachmentServer wires a server with attachment storage plus a project
-// whose scratchpad shared dir exists on this host, and returns that host dir.
-func agentAttachmentServer(t *testing.T) (*Server, store.Store, *store.Project, string) {
-	t.Helper()
-
-	srv, s := testServer(t)
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	as, err := NewLocalDiskAttachmentStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewLocalDiskAttachmentStore: %v", err)
-	}
-	srv.SetAttachmentStore(as)
-
-	project := &store.Project{
-		ID:         api.NewUUID(),
-		Name:       "attach-project",
-		Slug:       "attach-project",
-		SharedDirs: []api.SharedDir{{Name: attachmentSharedDirName}},
-	}
-	if err := s.CreateProject(context.Background(), project); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	// sharedDirHostPath falls back to the conventional project-configs layout
-	// under the home directory when no co-located broker reports a path.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	sharedDir := config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName)
-	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-
-	return srv, s, project, sharedDir
-}
-
-// stageAgentFile writes a file where the CLI would have staged it and returns
-// the container-visible path the agent would send.
-func stageAgentFile(t *testing.T, sharedDir, name, content string) string {
-	t.Helper()
-
-	dir := filepath.Join(sharedDir, ".attachments", "sender", "msg1")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	return "/scion-volumes/" + attachmentSharedDirName + "/.attachments/sender/msg1/" + name
-}
-
 func TestIngestAgentAttachments(t *testing.T) {
 	srv, _, project, sharedDir := agentAttachmentServer(t)
 	ctx := context.Background()
 
 	staged := stageAgentFile(t, sharedDir, "notes.md", "# hello\n")
-	refs := srv.ingestAgentAttachments(ctx, project.ID, "agent-1", []string{
+	refs, _ := srv.ingestAgentAttachments(ctx, project.ID, "agent-1", []string{
 		staged,
 		"/etc/passwd", // outside the shared dir: skipped, not fatal
 		filepath.Join(sharedDir, ".attachments", "sender", "msg1", "notes.md"), // host path, not a mount path
@@ -224,7 +158,7 @@ func TestIngestAgentAttachments_RefusesMarkup(t *testing.T) {
 
 	for _, name := range []string{"evil.html", "diagram.svg", "page.htm "} {
 		staged := stageAgentFile(t, sharedDir, name, `<img src=x onerror=alert(1)>`)
-		refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{staged})
+		refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{staged})
 		if len(refs) != 0 {
 			t.Errorf("%q was published as %+v; markup extensions are refused on both paths", name, refs)
 		}
@@ -246,7 +180,7 @@ func TestIngestAgentAttachments_RejectsSymlink(t *testing.T) {
 		t.Fatalf("Symlink: %v", err)
 	}
 
-	refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1",
+	refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1",
 		[]string{"/scion-volumes/" + attachmentSharedDirName + "/.attachments/sender/msg1/leak.txt"})
 	if len(refs) != 0 {
 		t.Fatalf("a symlink into the hub's filesystem must not be published: %+v", refs)

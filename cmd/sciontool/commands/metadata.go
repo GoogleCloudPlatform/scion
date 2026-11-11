@@ -17,6 +17,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/netcap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 var metadataCmd = &cobra.Command{
@@ -41,6 +43,33 @@ Exit code 0 means all critical checks passed; non-zero means at least one failed
 func init() {
 	rootCmd.AddCommand(metadataCmd)
 	metadataCmd.AddCommand(metadataStatusCmd)
+}
+
+// Seams for runMetadataStatus's iptables section. Tests replace them to
+// reach the root branch without root; the defaults check the real process.
+var (
+	metadataStatusGetuid         = os.Getuid
+	metadataStatusNetAdminUsable = netcap.Usable
+	metadataStatusIPTablesCheck  = checkMetadataIPTablesRedirect
+)
+
+// checkMetadataIPTablesRedirect prints whether the metadata REDIRECT rule
+// for port is present. It needs CAP_NET_ADMIN to read the nat table.
+func checkMetadataIPTablesRedirect(portStr string) {
+	iptablesPath, err := rootexec.Resolve("iptables")
+	if err != nil {
+		fmt.Printf("[WARN] could not resolve a trusted iptables binary: %v\n", err)
+		return
+	}
+	cmd := exec.Command(iptablesPath, "-t", "nat", "-C", "OUTPUT",
+		"-d", "169.254.169.254", "-p", "tcp", "--dport", "80",
+		"-j", "REDIRECT", "--to-port", portStr)
+	cmd.Env = rootexec.Env()
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("[WARN] iptables REDIRECT rule not found (port %s)\n", portStr)
+	} else {
+		fmt.Printf("[ OK ] iptables REDIRECT rule present (169.254.169.254:80 -> localhost:%s)\n", portStr)
+	}
 }
 
 func runMetadataStatus() int {
@@ -166,20 +195,20 @@ func runMetadataStatus() int {
 		}
 	}
 
-	// iptables check (best-effort, requires root)
+	// iptables check (best-effort, requires root). Reading the nat table needs
+	// CAP_NET_ADMIN. When this process cannot use it, the rule cannot be
+	// checked, so report that instead of "not found". Init drops the
+	// capability once network setup is done; some runtimes never grant it,
+	// so not-usable alone does not show which case applies.
 	fmt.Println("\n=== iptables ===")
-	if os.Getuid() != 0 {
+	if metadataStatusGetuid() != 0 {
 		fmt.Println("[INFO] Not running as root — skipping iptables check")
+	} else if usable, err := metadataStatusNetAdminUsable(); err != nil {
+		fmt.Printf("[WARN] skipping the iptables check: %v\n", err)
+	} else if !usable {
+		fmt.Printf("[INFO] iptables rule not verifiable: %s is not usable by this process (init drops it once network setup is done)\n", netcap.CapabilityName)
 	} else {
-		portStr := strconv.Itoa(cfg.Port)
-		cmd := exec.Command("iptables", "-t", "nat", "-C", "OUTPUT",
-			"-d", "169.254.169.254", "-p", "tcp", "--dport", "80",
-			"-j", "REDIRECT", "--to-port", portStr)
-		if err := cmd.Run(); err != nil {
-			fmt.Printf("[WARN] iptables REDIRECT rule not found (port %s)\n", portStr)
-		} else {
-			fmt.Printf("[ OK ] iptables REDIRECT rule present (169.254.169.254:80 -> localhost:%s)\n", portStr)
-		}
+		metadataStatusIPTablesCheck(strconv.Itoa(cfg.Port))
 	}
 
 	if failed {

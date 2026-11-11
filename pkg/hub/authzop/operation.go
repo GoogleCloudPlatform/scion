@@ -105,6 +105,12 @@ type OperationSpec struct {
 	// requirements. Each exemption must declare which specific
 	// obligations it waives.
 	Exemptions []Exemption
+
+	// Bearer records how the operation treats a user access token.
+	// Required unless the operation is listed in PendingBearerOperations.
+	// Credentials must agree with it: scoped_uat is listed if and only if
+	// Bearer admits a token.
+	Bearer BearerDisposition
 }
 
 // OperationID is a stable, unique operation identifier.
@@ -123,6 +129,17 @@ type EntryPoint struct {
 	// Method is the HTTP method for HTTPRoute entry points. Empty for
 	// non-HTTP entry points.
 	Method string
+
+	// Variant distinguishes entry points that share a kind, method and
+	// pattern but select a different branch by query or body (for
+	// example "scope=user"). Empty when the pattern alone identifies the
+	// branch.
+	Variant string
+
+	// Response classifies what the entry point's response body can carry.
+	// Empty means nothing that needs special handling. HTTP-like entry
+	// points only.
+	Response ResponseSensitivity
 }
 
 // EntryPointKind classifies entry point types.
@@ -158,6 +175,39 @@ var httpLikeEntryPoints = map[EntryPointKind]bool{
 	EntryPointSSE:       true,
 }
 
+// ResponseSensitivity classifies a response body that must not share a
+// compression context with other content. Every catalog entry point,
+// exemption and pending entry with a non-empty value must be covered by the
+// hub compression bypass (pkg/hub isCompressBypassPath);
+// TestCompressBypass_SensitiveResponsesFromCatalog enforces it.
+type ResponseSensitivity string
+
+const (
+	// ResponseCredential marks a response that can carry a credential:
+	// an access, refresh or identity token, a device code, a secret or
+	// environment value, a join, invite or one-time login code, or a
+	// signed object-store or capability URL. Agent create is tagged
+	// because its response carries the new agent's environment values
+	// and signed upload URLs.
+	ResponseCredential ResponseSensitivity = "credential"
+
+	// ResponseCallerSpecific marks a response that carries caller-specific
+	// configuration of a resource (for example the agent item).
+	ResponseCallerSpecific ResponseSensitivity = "caller_specific"
+)
+
+// validResponseSensitivities is the closed set of non-empty response
+// sensitivity values.
+var validResponseSensitivities = map[ResponseSensitivity]bool{
+	ResponseCredential:     true,
+	ResponseCallerSpecific: true,
+}
+
+// Valid reports whether r is empty or a recognized value.
+func (r ResponseSensitivity) Valid() bool {
+	return r == "" || validResponseSensitivities[r]
+}
+
 // PrincipalKind identifies a class of authenticated principal.
 // Credential types are declared separately via CredentialKind.
 type PrincipalKind string
@@ -168,6 +218,10 @@ const (
 	PrincipalBroker         PrincipalKind = "broker"
 	PrincipalServiceAccount PrincipalKind = "service_account"
 	PrincipalSystem         PrincipalKind = "system"
+	// PrincipalAgentDelegated is an agent acting with an agent delegated
+	// credential (.design/agent-delegation.md §12.1). An operation admits
+	// it only together with CredentialDelegatedAgent.
+	PrincipalAgentDelegated PrincipalKind = "agent_delegated"
 )
 
 // validPrincipalKinds is the closed set of recognized principal kinds.
@@ -177,6 +231,7 @@ var validPrincipalKinds = map[PrincipalKind]bool{
 	PrincipalBroker:         true,
 	PrincipalServiceAccount: true,
 	PrincipalSystem:         true,
+	PrincipalAgentDelegated: true,
 }
 
 // CredentialKind identifies a class of authentication credential
@@ -192,17 +247,33 @@ const (
 	CredentialServiceAccount CredentialKind = "service_account_key"
 	CredentialSystemInternal CredentialKind = "system_internal"
 	CredentialIdentityToken  CredentialKind = "identity_token"
+	// CredentialDelegatedAgent is an agent delegated credential. An
+	// operation admits it only together with PrincipalAgentDelegated.
+	CredentialDelegatedAgent CredentialKind = "delegated_agent"
+	// CredentialWorkloadDelegation is a workload-bound test identity issuer
+	// delegation: a pinned workload's Google ID token plus the id of the
+	// delegation a human issuer created (ptone/scion#4240). It acts for the
+	// delegation's grantor, within the delegation's single scope.
+	CredentialWorkloadDelegation CredentialKind = "workload_delegation"
+	// CredentialFederatedUser is a trusted issuer's credential for one of
+	// its users, presented as the federation credential, whose identity is
+	// linked to a local federated account (a visitor). It names no
+	// unlinked federated user and no federated agent or service identity.
+	CredentialFederatedUser CredentialKind = "federated_user"
 )
 
 // validCredentialKinds is the closed set of recognized credential kinds.
 var validCredentialKinds = map[CredentialKind]bool{
-	CredentialSessionJWT:     true,
-	CredentialScopedUAT:      true,
-	CredentialAgentJWT:       true,
-	CredentialBrokerToken:    true,
-	CredentialServiceAccount: true,
-	CredentialSystemInternal: true,
-	CredentialIdentityToken:  true,
+	CredentialSessionJWT:         true,
+	CredentialScopedUAT:          true,
+	CredentialAgentJWT:           true,
+	CredentialBrokerToken:        true,
+	CredentialServiceAccount:     true,
+	CredentialSystemInternal:     true,
+	CredentialIdentityToken:      true,
+	CredentialDelegatedAgent:     true,
+	CredentialWorkloadDelegation: true,
+	CredentialFederatedUser:      true,
 }
 
 // SecurityEffect classifies the security-meaningful consequence of an
@@ -481,8 +552,9 @@ var validInvariantKinds = map[InvariantKind]bool{
 
 // AuditObligation specifies audit requirements for an operation.
 type AuditObligation struct {
-	// EventType is the audit event type (e.g., "membership.add",
-	// "constraint.relax").
+	// EventType is the audit event type: the mutation type the hub
+	// writes on the audit record (e.g., "group_member_add",
+	// "role_binding_create").
 	EventType string
 
 	// ContextFields lists context fields always required in the
@@ -579,6 +651,27 @@ const (
 	DenialCredentialInsufficient  DenialCode = "credential_insufficient"
 	DenialUserSuspended           DenialCode = "user_suspended"
 	DenialResourceNotFound        DenialCode = "not_found"
+	DenialConflict                DenialCode = "conflict"
+	DenialUserDeleteBlocked       DenialCode = "user_delete_blocked"
+	// DenialUserDeleteForceForbidden: a forced user delete names agents
+	// the caller may not delete (ptone/scion#2143).
+	DenialUserDeleteForceForbidden DenialCode = "user_delete_force_forbidden"
+	// DenialUserDeleteBlockersChanged: the agents blocking a forced user
+	// delete changed before its transaction ran.
+	DenialUserDeleteBlockersChanged DenialCode = "user_delete_blockers_changed"
+	// DenialUserDeletionInProgress: a forced deletion of the user is in
+	// progress.
+	DenialUserDeletionInProgress DenialCode = "user_deletion_in_progress"
+	// DenialConstraintAdminLockout: the change would leave a scope without
+	// a constraint admin.
+	DenialConstraintAdminLockout DenialCode = "constraint_admin_lockout"
+	// DenialMembershipGroupDerived: a project leave by a caller whose only
+	// membership comes from a group (ptone/scion#7494).
+	DenialMembershipGroupDerived DenialCode = "membership_group_derived"
+	// DenialLeaveBindingUnclassified: a project leave refused, failing
+	// closed, because a caller binding is of a kind the leave does not
+	// classify (ptone/scion#7494).
+	DenialLeaveBindingUnclassified DenialCode = "leave_binding_unclassified"
 )
 
 // TestRef references an executable test that proves part of the contract.

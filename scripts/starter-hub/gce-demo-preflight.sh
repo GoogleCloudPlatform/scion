@@ -102,7 +102,7 @@ for tool in gcloud git openssl; do
         case "$tool" in
             gcloud)  check_fail "$tool not found" "Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install" ;;
             git)     check_fail "$tool not found" "Install git: https://git-scm.com/downloads" ;;
-            openssl) check_fail "$tool not found" "Install openssl (needed to generate SESSION_SECRET)" ;;
+            openssl) check_fail "$tool not found" "Install openssl (needed to generate SCION_SERVER_SESSION_SECRET)" ;;
         esac
     fi
 done
@@ -151,9 +151,8 @@ else
 
     REQUIRED_VARS=(
         SCION_HUB_STORAGE_BUCKET
-        SESSION_SECRET
+        SCION_SERVER_SESSION_SECRET
         SCION_SERVER_BASE_URL
-        SCION_IMAGE_REGISTRY
     )
 
     OAUTH_VARS=(
@@ -176,7 +175,7 @@ else
         val=$(get_env_value "$var" "${HUB_ENV_FILE}")
         if is_placeholder "$val"; then
             hint="Set ${var} in ${HUB_ENV_FILE}"
-            if [[ "$var" == "SESSION_SECRET" ]]; then
+            if [[ "$var" == "SCION_SERVER_SESSION_SECRET" ]]; then
                 hint="Generate with: openssl rand -base64 32"
             fi
             check_fail "${var} is missing or still a placeholder" "$hint"
@@ -204,12 +203,65 @@ else
     done
 
     # Optional vars — warn if missing
-    for var in SCION_SERVER_HUB_ENDPOINT SCION_SERVER_AUTH_AUTHORIZEDDOMAINS SCION_SERVER_HUB_ADMINEMAILS; do
-        val=$(get_env_value "$var" "${HUB_ENV_FILE}")
-        if [[ -z "$val" ]]; then
-            check_warn "${var} is not set (optional — see hub.env.sample)"
+    # Without SCION_IMAGE_REGISTRY, gce-start-hub.sh --full writes
+    # image_registry (IMAGE_REGISTRY, default localhost/scion) to settings.yaml.
+    # The starter scripts do not build agent images (see hub-config.sh). With
+    # ENABLE_GKE=true the registry that takes effect must not be loopback:
+    # GKE nodes cannot pull from the VM's local store.
+    # hub.env is read with hub_env_value, as --full and systemd read it (last
+    # assignment wins, spaces around "=" and a trailing CR allowed), so this
+    # check predicts --full. IMAGE_REGISTRY is checked on every run, because
+    # --full always writes it to settings.yaml.
+    reg_ok=true
+    if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+        reg_ok=false
+        check_fail "IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path" \
+            "Use letters, digits and . _ : / - only, for example us-docker.pkg.dev/<project>/<repo>"
+    fi
+    val=$(hub_env_value SCION_IMAGE_REGISTRY)
+    if [[ -z "$val" ]]; then
+        # An invalid IMAGE_REGISTRY was reported above; say nothing more about it.
+        if [[ "$reg_ok" == true && "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "${IMAGE_REGISTRY}"; then
+            check_fail "ENABLE_GKE=true, but the image registry ${IMAGE_REGISTRY} is a loopback address GKE nodes cannot pull from" \
+                "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} (or IMAGE_REGISTRY) to a registry the cluster can pull from"
+        elif [[ "$reg_ok" == true ]]; then
+            check_pass "SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry ${IMAGE_REGISTRY}"
+            if registry_is_loopback "${IMAGE_REGISTRY}"; then
+                check_warn "The starter scripts do not build agent images: build them on the VM (image-build/README.md) or set SCION_IMAGE_REGISTRY"
+            fi
+        fi
+    elif is_placeholder "$val"; then
+        check_fail "SCION_IMAGE_REGISTRY is still a placeholder" \
+            "Set it to your registry in ${HUB_ENV_FILE}, or remove it to use image_registry ${IMAGE_REGISTRY}"
+    elif [[ "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "$val"; then
+        check_fail "ENABLE_GKE=true, but SCION_IMAGE_REGISTRY ${val} is a loopback address GKE nodes cannot pull from" \
+            "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} to a registry the cluster can pull from"
+    else
+        check_pass "SCION_IMAGE_REGISTRY"
+    fi
+
+    val=$(get_env_value SCION_SERVER_HUB_ENDPOINT "${HUB_ENV_FILE}")
+    if [[ -z "$val" ]]; then
+        check_warn "SCION_SERVER_HUB_ENDPOINT is not set (optional — see hub.env.sample)"
+    else
+        check_pass "SCION_SERVER_HUB_ENDPOINT"
+    fi
+
+    # Seed vars — accept the SCION_SEED_SERVER_ name or the older
+    # SCION_SERVER_ name; the warning reports the SEED name.
+    for suffix in AUTH_AUTHORIZEDDOMAINS HUB_ADMINEMAILS; do
+        seed_var="SCION_SEED_SERVER_${suffix}"
+        old_var="SCION_SERVER_${suffix}"
+        val=$(get_env_value "$seed_var" "${HUB_ENV_FILE}")
+        if [[ -n "$val" ]]; then
+            check_pass "${seed_var}"
+            continue
+        fi
+        val=$(get_env_value "$old_var" "${HUB_ENV_FILE}")
+        if [[ -n "$val" ]]; then
+            check_pass "${old_var} (older name; ${seed_var} is preferred)"
         else
-            check_pass "${var}"
+            check_warn "${seed_var} is not set (optional — see hub.env.sample)"
         fi
     done
 fi

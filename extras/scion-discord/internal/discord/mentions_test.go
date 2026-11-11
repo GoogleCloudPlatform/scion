@@ -352,37 +352,51 @@ func TestExtractUnresolvedMentions_AllIsKnown(t *testing.T) {
 
 // --- agentFromReply tests ---
 
-func TestAgentFromReply_WebhookMessage(t *testing.T) {
+// ownsOnly reports ownership for exactly one webhook ID.
+func ownsOnly(id string) func(string) bool {
+	return func(webhookID string) bool { return webhookID == id }
+}
+
+func TestAgentFromReply_OwnWebhookMessage(t *testing.T) {
 	ref := &discordgo.Message{
 		WebhookID: "wh-123",
 		Author:    &discordgo.User{ID: "wh-123", Username: "coder"},
 	}
-	assert.Equal(t, "coder", agentFromReply(ref, "BOT123"))
+	assert.Equal(t, "coder", agentFromReply(ref, ownsOnly("wh-123")))
+}
+
+func TestAgentFromReply_OnlyOwnWebhookResolves(t *testing.T) {
+	ref := &discordgo.Message{
+		WebhookID: "wh-other",
+		Author:    &discordgo.User{ID: "wh-other", Username: "coder"},
+	}
+	assert.Equal(t, "", agentFromReply(ref, ownsOnly("wh-123")))
+	assert.Equal(t, "", agentFromReply(ref, nil))
 }
 
 func TestAgentFromReply_BotMessage(t *testing.T) {
 	ref := &discordgo.Message{
 		Author: &discordgo.User{ID: "BOT123", Username: "ScionBot"},
 	}
-	assert.Equal(t, "", agentFromReply(ref, "BOT123"))
+	assert.Equal(t, "", agentFromReply(ref, ownsOnly("wh-123")))
 }
 
 func TestAgentFromReply_NilRef(t *testing.T) {
-	assert.Equal(t, "", agentFromReply(nil, "BOT123"))
+	assert.Equal(t, "", agentFromReply(nil, ownsOnly("wh-123")))
 }
 
 func TestAgentFromReply_NilAuthor(t *testing.T) {
 	ref := &discordgo.Message{
 		WebhookID: "wh-123",
 	}
-	assert.Equal(t, "", agentFromReply(ref, "BOT123"))
+	assert.Equal(t, "", agentFromReply(ref, ownsOnly("wh-123")))
 }
 
 func TestAgentFromReply_RegularUserMessage(t *testing.T) {
 	ref := &discordgo.Message{
 		Author: &discordgo.User{ID: "USER999", Username: "someone"},
 	}
-	assert.Equal(t, "", agentFromReply(ref, "BOT123"))
+	assert.Equal(t, "", agentFromReply(ref, ownsOnly("wh-123")))
 }
 
 func TestAgentFromReply_WebhookWithHyphenatedSlug(t *testing.T) {
@@ -390,7 +404,7 @@ func TestAgentFromReply_WebhookWithHyphenatedSlug(t *testing.T) {
 		WebhookID: "wh-456",
 		Author:    &discordgo.User{ID: "wh-456", Username: "my-agent"},
 	}
-	assert.Equal(t, "my-agent", agentFromReply(ref, "BOT123"))
+	assert.Equal(t, "my-agent", agentFromReply(ref, ownsOnly("wh-456")))
 }
 
 // --- classifyMentions tests ---

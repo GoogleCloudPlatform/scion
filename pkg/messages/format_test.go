@@ -15,6 +15,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -115,20 +116,20 @@ func TestFormatForDelivery_EmptyMsg(t *testing.T) {
 	}
 }
 
-func TestFormatForDelivery_Raw(t *testing.T) {
-	msg := &StructuredMessage{
-		Version:   Version,
-		Timestamp: "2026-03-07T14:30:00Z",
-		Sender:    "user:alice",
-		Recipient: "agent:dev",
-		Msg:       "Escape",
-		Type:      TypeInstruction,
-		Raw:       true,
+// TestFormatForDelivery_IgnoresRetiredRawMember pins that a historical
+// row or payload still carrying "raw" decodes as a normal message: the field
+// no longer exists, so it cannot select bare-text delivery.
+func TestFormatForDelivery_IgnoresRetiredRawMember(t *testing.T) {
+	var msg StructuredMessage
+	if err := json.Unmarshal([]byte(`{"version":1,"sender":"user:alice","recipient":"agent:dev","msg":"Escape","type":"instruction","raw":true}`), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	result := FormatForDelivery(msg)
-	if result != "Escape" {
-		t.Errorf("raw mode should return raw msg, got %q", result)
+	result := FormatForDelivery(&msg)
+	if result == "Escape" {
+		t.Fatalf("retired raw member must not select bare-text delivery, got %q", result)
+	}
+	if !strings.Contains(result, "---BEGIN SCION MESSAGE---") {
+		t.Errorf("expected the normal envelope, got %q", result)
 	}
 }
 
@@ -312,5 +313,55 @@ func TestFormatForDelivery_WithAttachments(t *testing.T) {
 	result := FormatForDelivery(msg)
 	if !strings.Contains(result, "src/auth.go") {
 		t.Error("missing attachment in output")
+	}
+}
+
+// The legacy renderer forwards the hub-set visitor sender keys
+// (ptone/scion#4603).
+func TestFormatForDelivery_ForwardsVisitorSenderKeys(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-10-13T10:00:00Z",
+		Sender:    "user:5f1c2d3e-0000-4000-8000-0000000000a1",
+		Recipient: "agent:dev",
+		Msg:       "hi",
+		Type:      TypeInstruction,
+		Metadata: map[string]string{
+			MetadataSenderVisitor: "true",
+			MetadataSenderEmail:   "alice@corp.example",
+			MetadataSenderIssuer:  "issuer.example",
+			MetadataSenderDisplay: "alice@corp.example (visitor via issuer.example)",
+			"telegram_chat_id":    "123",
+		},
+	}
+	result := FormatForDelivery(msg)
+	for _, want := range []string{
+		`"sender_visitor": "true"`,
+		`"sender_email": "alice@corp.example"`,
+		`"sender_issuer": "issuer.example"`,
+		`"sender_display": "alice@corp.example (visitor via issuer.example)"`,
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("delivery lacks %s:\n%s", want, result)
+		}
+	}
+	if strings.Contains(result, "telegram_chat_id") {
+		t.Errorf("a key outside the allowlist was forwarded:\n%s", result)
+	}
+}
+
+// The legacy renderer forwards the hub-set sender time zone.
+func TestFormatForDelivery_ForwardsSenderTimezone(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-10-31T10:00:00Z",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:dev",
+		Msg:       "hi",
+		Type:      TypeInstruction,
+		Metadata:  map[string]string{MetadataSenderTimezone: "Europe/Berlin"},
+	}
+	if result := FormatForDelivery(msg); !strings.Contains(result, `"sender_timezone": "Europe/Berlin"`) {
+		t.Errorf("delivery lacks sender_timezone:\n%s", result)
 	}
 }

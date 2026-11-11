@@ -17,12 +17,17 @@
 package storetest_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/storetest"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // compositeFactory returns a Factory that builds the production-shaped
@@ -45,4 +50,145 @@ func compositeFactory(t *testing.T) store.Store {
 // current CompositeStore across all ported domains.
 func TestCompositeStore_CRUDParity(t *testing.T) {
 	storetest.RunStoreSuite(t, compositeFactory)
+}
+
+// TestCompositeStore_SecretEncryption runs the secret encryption
+// conformance suite (payload scan, ciphertext-only replacement, policy and
+// migration records, policy fence; ptone/scion#1530 §6) on whichever
+// backend compositeFactory selects.
+func TestCompositeStore_SecretEncryption(t *testing.T) {
+	storetest.SecretEncryptionConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_UsageReservation runs the usage reservation
+// conformance check (GetActiveReservation and the typed active-reservation
+// violation) against the CompositeStore on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_UsageReservation(t *testing.T) {
+	storetest.UsageReservationConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_ReservationRelease runs the conditional reservation
+// release conformance check (ReleaseReservationIfAgent and
+// ReleaseReservationIfScopeBrokerAbsent) on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_ReservationRelease(t *testing.T) {
+	storetest.ReservationReleaseConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_TransferBrokerReservation runs the reservation
+// transfer conformance check on whichever backend compositeFactory selects.
+func TestCompositeStore_TransferBrokerReservation(t *testing.T) {
+	storetest.TransferBrokerReservationConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_TransferBrokerReservationHook runs the hook-based
+// reservation transfer checks (atomicity at each step, the zero-row
+// release). They set the process-global test hook, so they do not run in
+// parallel.
+func TestCompositeStore_TransferBrokerReservationHook(t *testing.T) {
+	storetest.TransferBrokerReservationHookConformance(t, compositeFactory, setTransferHook)
+}
+
+// setTransferHook adapts entadapter.SetTransferBrokerReservationTestHook to
+// the storetest hook type.
+func setTransferHook(fn storetest.TransferHook) (restore func()) {
+	return entadapter.SetTransferBrokerReservationTestHook(entadapter.TransferHookFunc(fn))
+}
+
+// TestReleaseIfScopeBrokerAbsent_UnparseableScopeID_Released runs on both
+// dialects: a scope ID that cannot be a broker ID is released, with no
+// error.
+func TestReleaseIfScopeBrokerAbsent_UnparseableScopeID_Released(t *testing.T) {
+	storetest.ReleaseIfScopeBrokerAbsentUnparseableScopeConformance(t, compositeFactory)
+}
+
+// TestReleaseIfScopeBrokerAbsent_NonCanonicalScopeID: an upper-case
+// spelling of a registered broker's ID keeps the row.
+func TestReleaseIfScopeBrokerAbsent_NonCanonicalScopeID(t *testing.T) {
+	storetest.ReleaseIfScopeBrokerAbsentNonCanonicalScopeConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_GroupDirectParents runs the direct-parent group query
+// conformance check against the CompositeStore on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_GroupDirectParents(t *testing.T) {
+	storetest.GroupDirectParentsConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_GroupChildEdgeRemoval runs the child-group edge removal
+// conformance check against the CompositeStore on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_GroupChildEdgeRemoval(t *testing.T) {
+	storetest.GroupChildEdgeRemovalConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_RuntimeBrokerPresentation runs the fenced
+// presentation-write conformance check (SetRuntimeBrokerPresentation, and
+// the full-row writers that must not touch its columns) on whichever
+// backend compositeFactory selects (SQLite by default, Postgres under -tags
+// integration).
+func TestCompositeStore_RuntimeBrokerPresentation(t *testing.T) {
+	storetest.RuntimeBrokerPresentationConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_RuntimeBrokerConversionPlan runs the conversion plan
+// write conformance check (SetRuntimeBrokerConversionPlan, and the full-row
+// writers that must not touch its columns) on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_RuntimeBrokerConversionPlan(t *testing.T) {
+	storetest.RuntimeBrokerConversionPlanConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_RuntimeBrokerCursorPagination is a targeted conformance
+// case, not part of the generic CRUD-parity oracle above: the oracle's
+// pagination category (storetest's internal testPaginate) only checks a
+// single bounded page, it does not thread ListOptions.Cursor across pages.
+// This proves ListRuntimeBrokers' keyset pagination enumerates every broker
+// across pages — including the oldest — on whichever backend compositeFactory
+// selects (SQLite by default, Postgres under -tags integration).
+//
+// Before the underlying fix, ListRuntimeBrokers silently ignored
+// ListOptions.Cursor and never set NextCursor, so a paginating caller only
+// ever saw the first page of newest brokers. A caller that must reach the
+// oldest rows — exactly what a legacy-data backfill does — never would.
+func TestCompositeStore_RuntimeBrokerCursorPagination(t *testing.T) {
+	s := compositeFactory(t)
+	ctx := context.Background()
+
+	const total = 12
+	const pageSize = 5
+	created := make(map[string]bool, total)
+	for i := 0; i < total; i++ {
+		id := uuid.NewString()
+		name := fmt.Sprintf("broker-%d-%s", i, id[:8])
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: id, Name: name, Slug: name}))
+		created[id] = true
+	}
+
+	first, err := s.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: pageSize})
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(first.Items), pageSize, "page must cap at requested limit")
+	assert.NotEmpty(t, first.NextCursor, "more pages exist, so NextCursor must be set")
+
+	seen := make(map[string]bool, total)
+	cursor := ""
+	for pages := 0; ; pages++ {
+		require.LessOrEqual(t, pages, total, "pagination did not terminate")
+		page, err := s.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: pageSize, Cursor: cursor})
+		require.NoError(t, err)
+		for _, b := range page.Items {
+			require.False(t, seen[b.ID], "duplicate broker across pages: %s", b.ID)
+			seen[b.ID] = true
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	assert.Len(t, seen, total, "cursor pagination must enumerate every broker")
+	for id := range created {
+		assert.True(t, seen[id], "broker missing from pagination: %s", id)
+	}
 }

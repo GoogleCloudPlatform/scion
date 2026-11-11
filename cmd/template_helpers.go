@@ -239,15 +239,15 @@ func PromptTemplateChoice(matches []TemplateMatch, action string) (*TemplateMatc
 		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --project, or --global flags to specify")
 	}
 
-	fmt.Printf("\nTemplate '%s' found in multiple locations:\n", matches[0].Name)
+	fmt.Fprintf(os.Stderr, "\nTemplate '%s' found in multiple locations:\n", matches[0].Name)
 	for i, m := range matches {
-		fmt.Printf("  [%d] %s\n", i+1, m.DisplayLocation())
+		fmt.Fprintf(os.Stderr, "  [%d] %s\n", i+1, m.DisplayLocation())
 	}
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Printf("Select a template to %s (or 'c' to cancel): ", action)
+		fmt.Fprintf(os.Stderr, "Select a template to %s (or 'c' to cancel): ", action)
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("failed to read input: %w", err)
@@ -260,7 +260,7 @@ func PromptTemplateChoice(matches []TemplateMatch, action string) (*TemplateMatc
 
 		choice, err := strconv.Atoi(input)
 		if err != nil || choice < 1 || choice > len(matches) {
-			fmt.Printf("Invalid choice. Please enter 1-%d.\n", len(matches))
+			fmt.Fprintf(os.Stderr, "Invalid choice. Please enter 1-%d.\n", len(matches))
 			continue
 		}
 
@@ -284,16 +284,16 @@ func PromptTemplateChoiceWithAll(matches []TemplateMatch, action string) ([]Temp
 		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --project, or --global flags to specify")
 	}
 
-	fmt.Printf("\nTemplate '%s' found in multiple locations:\n", matches[0].Name)
+	fmt.Fprintf(os.Stderr, "\nTemplate '%s' found in multiple locations:\n", matches[0].Name)
 	for i, m := range matches {
-		fmt.Printf("  [%d] %s\n", i+1, m.DisplayLocation())
+		fmt.Fprintf(os.Stderr, "  [%d] %s\n", i+1, m.DisplayLocation())
 	}
-	fmt.Printf("  [a] All of the above\n")
-	fmt.Println()
+	fmt.Fprintf(os.Stderr, "  [a] All of the above\n")
+	fmt.Fprintln(os.Stderr)
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Printf("Select template(s) to %s (or 'c' to cancel): ", action)
+		fmt.Fprintf(os.Stderr, "Select template(s) to %s (or 'c' to cancel): ", action)
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("failed to read input: %w", err)
@@ -310,7 +310,7 @@ func PromptTemplateChoiceWithAll(matches []TemplateMatch, action string) ([]Temp
 
 		choice, err := strconv.Atoi(input)
 		if err != nil || choice < 1 || choice > len(matches) {
-			fmt.Printf("Invalid choice. Please enter 1-%d or 'a' for all.\n", len(matches))
+			fmt.Fprintf(os.Stderr, "Invalid choice. Please enter 1-%d or 'a' for all.\n", len(matches))
 			continue
 		}
 

@@ -1,0 +1,6 @@
+schema_version: "1"
+active_profile: local
+default_template: claude
+hub:
+    endpoint: https://hub.example.com
+image_registry: ghcr.io/example

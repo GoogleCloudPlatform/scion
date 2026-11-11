@@ -35,15 +35,23 @@
     "resources": { "$ref": "#/$defs/resourceSpec" },
     "max_turns": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Maximum number of LLM turns before the agent is stopped.",
+      "minimum": 0,
+      "description": "Maximum number of LLM turns before the agent is stopped. 0 means no limit and overrides any inherited or default limit; omit the key to inherit.",
       "x-since": "1"
     },
     "max_model_calls": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Maximum number of LLM model API calls before the agent is stopped.",
+      "minimum": 0,
+      "description": "Maximum number of LLM model API calls before the agent is stopped. 0 means no limit and overrides any inherited or default limit; omit the key to inherit.",
       "x-since": "1"
+    },
+    "clone_depth": {
+      "oneOf": [
+        { "type": "string", "pattern": "^(|full|[1-9][0-9]{0,8})$" },
+        { "type": "integer", "minimum": 1, "maximum": 999999999 },
+        { "type": "null" }
+      ],
+      "description": "Git clone depth for a clone-per-agent workspace: \"full\" for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. Overrides any profiles.<name>.clone_depth. Unset (absent, null or \"\") keeps the profile value, else the default shallow (depth 1) clone."
     },
     "max_duration": {
       "type": "string",
@@ -72,6 +80,11 @@
     "model": {
       "type": "string",
       "description": "Model size alias (small, medium, large) or concrete model name. Prefer size aliases for portability — they are resolved to harness-specific model names at provision time via the harness-config's model_aliases map. Concrete names are passed through unchanged but tie the template to a specific harness."
+    },
+    "message_mode": {
+      "type": "string",
+      "enum": ["none", "lineage", "branch", "project", "hub"],
+      "description": "Initial message mode for agents created from this template on a Hub, used when the create request names none."
     },
     "args": {
       "type": "array",
@@ -102,7 +115,7 @@
     },
     "hub": {
       "type": "object",
-      "description": "Hub connection settings override for this agent/template. Takes highest priority over grove and server settings.",
+      "description": "Hub connection settings override for this agent/template. Takes highest priority over project and server settings.",
       "properties": {
         "endpoint": {
           "type": "string",
@@ -119,6 +132,21 @@
       "type": "array",
       "items": { "$ref": "#/$defs/requiredSecret" },
       "description": "Required secrets for this agent/template."
+    },
+    "agent_plugins": {
+      "type": "array",
+      "description": "Agent Plugins 1.0.0 bundles to install natively into the harness (experiment hub.agent_plugins). Paths are relative to the template directory.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "optional": { "type": "boolean" },
+          "scope": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "x-since": "1"
     },
     "agent_instructions": {
       "type": "string",
@@ -140,6 +168,21 @@
         "namespace": { "type": "string" },
         "runtimeClassName": { "type": "string" },
         "serviceAccountName": { "type": "string" },
+        "priorityClassName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "PriorityClass name (DNS-1123 subdomain) applied to the agent pod's spec.priorityClassName, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. Overrides any runtimes.<name>.priority_class_name default."
+        },
+        "safeToEvict": {
+          "type": "boolean",
+          "description": "Kubernetes only. false adds the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to the agent pod (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Overrides any profiles.<name>.safe_to_evict or runtimes.<name>.safe_to_evict default."
+        },
+        "imagePullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Kubernetes image pull policy. Overrides any Hub settings harness_configs.<name>.image_pull_policy default."
+        },
         "resources": {
           "type": "object",
           "properties": {
@@ -318,7 +361,9 @@
               "properties": {
                 "enabled": { "type": "boolean" },
                 "insecure_skip_verify": { "type": "boolean" },
-                "ca_file": { "type": "string" }
+                "ca_file": { "type": "string" },
+                "cert_file": { "type": "string" },
+                "key_file": { "type": "string" }
               },
               "additionalProperties": false
             },

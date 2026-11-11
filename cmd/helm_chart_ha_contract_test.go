@@ -60,13 +60,16 @@ const chartDir = "../deploy/helm/scion-hub"
 const gatesArtifact = chartDir + "/hack/ha-gates.txt"
 
 // audienceWellFormed is a Cloud Run IAP audience in the shape
-// isSupportedIAPAudience accepts. audienceMalformed is the shape an operator
-// produces by pasting an OAuth client ID into the field, which is the mistake
-// the format gate exists to catch.
-const (
-	audienceWellFormed = "/projects/1/locations/us-central1/services/hub"
-	audienceMalformed  = "my-iap-audience"
-)
+// isSupportedIAPAudience accepts. The walk offers it only if the hub asks for
+// an audience.
+//
+// THERE USED TO BE A SECOND, MALFORMED-AUDIENCE ARM. It existed to reach the
+// format gate. The chart now renders an audience on every proxy shape and
+// refuses an HA render whose audience the format gate would refuse, so the hub
+// never asks this walk for one and the two arms were byte-identical. The format
+// gate is covered instead by TestHelmChartIAPAudiencePattern, which checks the
+// chart's audience patterns against isSupportedIAPAudience directly.
+const audienceWellFormed = "/projects/1/locations/us-central1/services/hub"
 
 // supplier grants exactly the thing one gate asked for, and reports what it
 // granted. A supplier that returns ok=false has hit the probe's limit, not the
@@ -179,19 +182,15 @@ func gateSupplier(t *testing.T, audience string) supplier {
 //
 // The third is the one a wantGates literal would have passed.
 var authoredProxyGates = []string{
-	// server.database.url headed this list until the Cloud SQL phase. It was
-	// removed because THIS TRIPWIRE WENT RED AND NAMED IT - "gates the authored
-	// list names and the hub no longer refuses on: [server.database.url]" - not
-	// because an author decided the phase had landed it. That is the intended
-	// direction of travel: the chart renders a URL, the hub stops objecting, the
-	// authored list is corrected by the object it is a tripwire for.
+	// server.database.url headed this list until the Cloud SQL phase, and the
+	// six IAP/transport gates followed the session secret until the chart
+	// modelled auth.proxy and auth.transport. Each was removed because THIS
+	// TRIPWIRE WENT RED AND NAMED IT - "gates the authored list names and the
+	// hub no longer refuses on: [...]" - not because an author decided a phase
+	// had landed it. That is the intended direction of travel: the chart
+	// renders a value, the hub stops objecting, the authored list is corrected
+	// by the object it is a tripwire for.
 	"", // the durable session/signing secret: a prose gate, it names no key
-	"server.auth.proxy.provider",
-	"server.auth.proxy.iap.audience",
-	"server.auth.transport",
-	"server.auth.transport.mode",
-	"server.auth.transport.oidc_audience",
-	"server.auth.transport.platform_auth_sa",
 }
 
 // TestHelmChartHAGateWalk derives the gate list and compares it to the
@@ -279,8 +278,9 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 	b.WriteString("# time because the preflight returns on first failure.\n")
 	b.WriteString("#\n")
 	b.WriteString("# THE COUNT DEPENDS ON WHAT THE ARM SUPPLIES. Each step records its grant.\n")
-	b.WriteString("# The two audience arms differ in exactly one value and return different\n")
-	b.WriteString("# lists; that is a fact about the hub, not a defect in the walk.\n")
+	b.WriteString("# The arm's audience is offered only if the hub asks for one. The chart's\n")
+	b.WriteString("# proxy shapes all render one, so the audience format gate is checked by\n")
+	b.WriteString("# TestHelmChartIAPAudiencePattern rather than by a malformed-audience arm.\n")
 	b.WriteString("#\n")
 	b.WriteString("# CORPUS BINDING. This walk reads the committed goldens, so on its own it\n")
 	b.WriteString("# measures the goldens and not the chart. The digests below close that gap\n")
@@ -313,7 +313,6 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 		}
 		for _, arm := range []struct{ label, audience string }{
 			{"audience well-formed", audienceWellFormed},
-			{"audience malformed", audienceMalformed},
 		} {
 			fmt.Fprintf(&b, "\n===== %s [%s = %q]\n", filepath.Base(g), arm.label, arm.audience)
 			n, keys := walkOne(t, &b, settings, gateSupplier(t, arm.audience))
@@ -351,7 +350,7 @@ the walk.`, addedGates, removedGates)
 	// TERMINATED lines that round-trips against itself forever. The number is
 	// not the subject of any claim; it exists so that zero cannot pass.
 	if totalRefusals == 0 {
-		t.Fatal("VACUOUS: the walk recorded no refusals at all across every golden and both audience arms. Whatever this run measured, it was not the hub's preflight.")
+		t.Fatal("VACUOUS: the walk recorded no refusals at all across every golden. Whatever this run measured, it was not the hub's preflight.")
 	}
 
 	got := b.String()

@@ -95,7 +95,7 @@ func TestLoadGCPDialOptions_ValidKey(t *testing.T) {
 }
 
 func TestLoadOTLPTLSConfig_EmptyPath(t *testing.T) {
-	tlsConfig, err := loadOTLPTLSConfig("")
+	tlsConfig, err := loadOTLPTLSConfig("", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -105,10 +105,13 @@ func TestLoadOTLPTLSConfig_EmptyPath(t *testing.T) {
 	if tlsConfig.RootCAs != nil {
 		t.Errorf("expected nil RootCAs without CA file, got %#v", tlsConfig.RootCAs)
 	}
+	if len(tlsConfig.Certificates) != 0 {
+		t.Errorf("expected no client certificates when unset, got %d", len(tlsConfig.Certificates))
+	}
 }
 
 func TestLoadOTLPTLSConfig_InvalidPath(t *testing.T) {
-	_, err := loadOTLPTLSConfig("/nonexistent/path/root.pem")
+	_, err := loadOTLPTLSConfig("/nonexistent/path/root.pem", "", "")
 	if err == nil {
 		t.Fatal("expected error for missing CA file")
 	}
@@ -122,7 +125,7 @@ func TestLoadOTLPTLSConfig_ValidCAFile(t *testing.T) {
 		t.Fatalf("failed to write CA file: %v", err)
 	}
 
-	tlsConfig, err := loadOTLPTLSConfig(caPath)
+	tlsConfig, err := loadOTLPTLSConfig(caPath, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -11,6 +11,44 @@
 - All container images built and published to Artifact Registry (core-base, scion-base, scion-claude, scion-gemini, scion-opencode, scion-codex)
 
 ### Changed
+- **A project's default count limits now have an explicit Unlimited.** On the project settings
+  `PUT`, `defaultMaxTurns` and `defaultMaxModelCalls` now take `0` as Unlimited (an explicit "no
+  limit" that new agents get above the template, hub and Runtime Broker defaults) and `null` to
+  clear; `0` used to clear. A negative value is refused with `422`. **Reload any open hub web tabs
+  after upgrading:** a project settings page loaded before the upgrade sends `0` for an empty count
+  limit on every save, which now sets Unlimited for every new agent of the project. The Hub records
+  the audit event `project_settings_limit_unlimited` (and logs a warning) for such a change, so it
+  can be found and reverted. (ptone/scion#3925)
+- **Clearing one resources sub-field now applies at the next start.** A `config` PATCH whose
+  `resources` leaves out a sub-field the agent stores (requests or limits `cpu`/`memory`, or `disk`)
+  now clears just that sub-field, and the resource defaults fill it again at the next start, on a
+  Runtime Broker that advertises `clearedResourceSubfields`. Upgrade the Hub first, then the
+  brokers; with an older broker the clear still waits for the next reincarnation. A sub-field drop
+  that an older broker held before this change keeps its stale value until the agent is
+  reincarnated, because the Hub's inline config no longer holds that value and a later PATCH
+  cannot detect the drop. The Hub records such a clear on every broker, so an agent whose broker is
+  upgraded after the edit applies it at its next start, which can be earlier than the reincarnation
+  the edit was reported as waiting for. (ptone/scion#5676)
+- **`SCION_SHARED_WORKSPACE` removed.** The broker no longer sets `SCION_SHARED_WORKSPACE` in agent
+  containers, and `sciontool init` no longer reads it. Use `SCION_WORKSPACE_MODE=shared-plain` with
+  `SCION_WORKSPACE_GIT=true` to detect a shared git workspace. An agent image with this change,
+  started by an older broker that sets neither new variable, is not treated as a shared git workspace,
+  so its shared-workspace git setup is skipped. Likewise, an agent image whose `sciontool` predates
+  `SCION_WORKSPACE_MODE` (ptone/scion#572) reads only the legacy variable, so on this broker it also
+  skips the shared-workspace git setup. Run matching broker and agent image versions.
+  (ptone/scion#575)
+- **Session-end metrics are kept until sent; mixed agent images can drop unsent ones.** A finished
+  session's summary now stays in the agent's session state file (`~/.scion/session-metrics.json`)
+  until a send has been attempted, so a report survives the hook or init process being killed and
+  is sent later by another hook or by the init daemon. Agent images built before this change do not
+  know about these unsent reports: if an agent home last used by a newer image is started on an
+  older one (an image rollback, or a staged rollout where some templates or brokers still use older
+  images), the older `sciontool` rewrites or deletes the state file without them, and those reports
+  are lost. They are never sent twice, because older images never send them. Upgrading from an
+  older image to a newer one is safe. To avoid the loss, update all agent images together and avoid
+  rolling an agent back across this change; otherwise expect a small loss of session metrics for
+  agents that move between image versions. Nothing else in the state file, and no other metrics or
+  agent behavior, is affected.
 - **Eight broker authentication event types begin emitting.** `register`, `deregister`, `join`,
   `rotate`, `revoke`, `link`, `unlink` and **`auth_failure`** produce log records again. They have
   emitted **nothing at all** until now, so **plan for the added log volume** — anything consuming

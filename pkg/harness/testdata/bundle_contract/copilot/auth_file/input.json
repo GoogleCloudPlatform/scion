@@ -1,0 +1,12 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [],
+    "env_secret_files": {},
+    "files": [],
+    "file_secret_files": {
+      "COPILOT_CONFIG": "$HOME/.scion/harness/secrets/COPILOT_CONFIG"
+    }
+  },
+  "harness_config": {}
+}

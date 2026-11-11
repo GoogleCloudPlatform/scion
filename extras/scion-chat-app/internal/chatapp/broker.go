@@ -30,6 +30,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	goplugin "github.com/hashicorp/go-plugin"
 )
 
@@ -378,10 +380,10 @@ func ResolveOutboundAttachments(log *slog.Logger, attachmentPaths []string, proj
 			continue
 		}
 
-		hostPath := resolveAgentPath(agentPath, projectSlug, projectID)
-		if hostPath == "" {
+		hostPath, err := resolveAgentPath(agentPath, projectSlug, projectID)
+		if err != nil || hostPath == "" {
 			log.Warn("cannot resolve attachment path, skipping",
-				"agent_path", agentPath)
+				"agent_path", agentPath, "error", err)
 			continue
 		}
 
@@ -451,20 +453,43 @@ func SizeLimitErrorCard(filename string, size int64) Card {
 	}
 }
 
-// resolveGChatAttachmentDir returns the host-side directory for storing
-// Google Chat attachments in the shared scratchpad volume.
-func resolveGChatAttachmentDir(projectSlug, projectID, conversationID string) (string, error) {
+// resolveGChatScratchpad resolves the project's scratchpad shared dir, where
+// Google Chat attachments are stored under .attachments/_gchat/<conversation>/
+// (written through the layout authority, ptone/scion#5831).
+func resolveGChatScratchpad(projectSlug, projectID string) (scionruntime.SharedDirHostPath, error) {
 	if projectSlug == "" || projectID == "" {
-		return "", fmt.Errorf("project slug or ID is empty")
+		return scionruntime.SharedDirHostPath{}, fmt.Errorf("project slug or ID is empty")
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("resolving home directory: %w", err)
+		return scionruntime.SharedDirHostPath{}, fmt.Errorf("resolving home directory: %w", err)
 	}
 
-	sharedDirBase := sharedDirHostPath(home, projectSlug, projectID, "scratchpad")
-	return filepath.Join(sharedDirBase, ".attachments", gchatAttachmentDir, conversationID), nil
+	res, err := resolveSharedDir(home, projectSlug, projectID, projectfs.ScratchpadName)
+	if err != nil {
+		return scionruntime.SharedDirHostPath{}, fmt.Errorf("resolving scratchpad shared dir: %w", err)
+	}
+	return res, nil
+}
+
+// maxSizeReader reads r and fails once more than max bytes were read, so an
+// oversized attachment is refused (and its partial file removed) rather
+// than silently truncated.
+type maxSizeReader struct {
+	r    io.Reader
+	max  int64
+	n    int64
+	name string
+}
+
+func (m *maxSizeReader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p)
+	m.n += int64(n)
+	if m.n > m.max {
+		return n, fmt.Errorf("attachment %q too large (more than %d bytes)", m.name, m.max)
+	}
+	return n, err
 }
 
 // resolveAgentPath translates agent-side container paths to host-side paths.
@@ -473,7 +498,11 @@ func resolveGChatAttachmentDir(projectSlug, projectID, conversationID string) (s
 //   - /scion-volumes/<name>/<file> → shared dir host path
 //   - /workspace/.scion-volumes/<name>/<file> → same as above
 //   - Absolute paths starting with / that are already host paths → returned as-is
-func resolveAgentPath(agentPath, projectSlug, projectID string) string {
+//
+// It returns "" with a nil error for paths it does not translate, and an
+// error when a shared dir's host path cannot be resolved (for example, its
+// nfs storage is unavailable).
+func resolveAgentPath(agentPath, projectSlug, projectID string) (string, error) {
 	// Handle /scion-volumes/<name>/... paths.
 	if strings.HasPrefix(agentPath, "/scion-volumes/") {
 		return resolveSharedDirPath(agentPath, projectSlug, projectID)
@@ -495,7 +524,7 @@ func resolveAgentPath(agentPath, projectSlug, projectID string) string {
 				// Re-check prefix after Clean to prevent traversal (e.g. /workspace/../etc/passwd).
 				if strings.HasPrefix(clean, prefix) {
 					if _, err := os.Stat(clean); err == nil {
-						return clean
+						return clean, nil
 					}
 				}
 				break
@@ -503,50 +532,63 @@ func resolveAgentPath(agentPath, projectSlug, projectID string) string {
 		}
 	}
 
-	return ""
+	return "", nil
 }
 
-// resolveSharedDirPath converts a /scion-volumes/<name>/... path to the host-side path.
-func resolveSharedDirPath(containerPath, projectSlug, projectID string) string {
+// resolveSharedDirPath converts a /scion-volumes/<name>/... path to the
+// host-side path, resolving the shared dir through the backend-aware
+// resolver. It returns "" with a nil error for malformed or escaping
+// paths, and the resolver's error when the shared dir cannot be resolved.
+func resolveSharedDirPath(containerPath, projectSlug, projectID string) (string, error) {
 	if projectSlug == "" || projectID == "" {
-		return ""
+		return "", nil
 	}
 
 	trimmed := strings.TrimPrefix(containerPath, "/scion-volumes/")
 	if trimmed == "" || trimmed == containerPath {
-		return ""
+		return "", nil
 	}
 
 	parts := strings.SplitN(trimmed, "/", 2)
 	sharedDirName := parts[0]
 	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." || strings.ContainsAny(sharedDirName, "/\\") {
-		return ""
+		return "", nil
 	}
 
 	relPath := ""
 	if len(parts) > 1 {
 		relPath = filepath.Clean(parts[1])
 		if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
-			return ""
+			return "", nil
 		}
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("resolving home directory: %w", err)
 	}
 
-	base := sharedDirHostPath(home, projectSlug, projectID, sharedDirName)
+	base, err := resolveSharedDirHostPath(home, projectSlug, projectID, sharedDirName)
+	if err != nil {
+		return "", fmt.Errorf("resolving shared dir %q: %w", sharedDirName, err)
+	}
 	if relPath == "" || relPath == "." {
-		return base
+		return base, nil
 	}
 
 	hostPath := filepath.Join(base, relPath)
 	// Verify the resolved path doesn't escape the shared dir.
-	if !strings.HasPrefix(hostPath, base+string(filepath.Separator)) {
-		return ""
+	if !isStrictlyWithinDir(hostPath, base) {
+		return "", nil
 	}
-	return hostPath
+	return hostPath, nil
+}
+
+// isStrictlyWithinDir reports whether hostPath is below base, not base
+// itself. base is cleaned first, so a trailing separator on base does not
+// make a child fail the check; hostPath is compared as given.
+func isStrictlyWithinDir(hostPath, base string) bool {
+	return strings.HasPrefix(hostPath, filepath.Clean(base)+string(filepath.Separator))
 }
 
 // sanitizePathComponent removes characters that are unsafe in file paths.
@@ -571,19 +613,4 @@ func formatFileSize(bytes int64) string {
 		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mb))
 	}
 	return fmt.Sprintf("%.1f KB", float64(bytes)/1024.0)
-}
-
-// sharedDirHostPath computes the host-side directory path for a shared
-// directory. This replicates the logic from pkg/config.SharedDirHostPath
-// to avoid pulling in the full config package with its heavy transitive
-// dependencies (ent, koanf, rclone, etc.).
-//
-// Path format: ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>
-func sharedDirHostPath(home, slug, projectID, sharedDirName string) string {
-	shortUUID := strings.ReplaceAll(projectID, "-", "")
-	if len(shortUUID) > 8 {
-		shortUUID = shortUUID[:8]
-	}
-	dirName := fmt.Sprintf("%s__%s", slug, shortUUID)
-	return filepath.Join(home, ".scion", "project-configs", dirName, "shared-dirs", sharedDirName)
 }

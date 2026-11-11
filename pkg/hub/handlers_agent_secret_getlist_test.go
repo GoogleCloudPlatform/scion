@@ -34,8 +34,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// setupAgentSecretGetTest creates a test server with a project, agent, and a
-// pre-existing secret for GET/LIST testing.
+// setupAgentSecretGetTest creates a test server with a project, an active
+// member root user, and an agent descending from that root, plus a
+// pre-existing secret, for GET/LIST testing. The agent's token carries
+// ScopeProjectSecretRead and an ancestry rooted at the member user, so it
+// passes the runtime material precheck (material_runtime.go): the delegation
+// edge backfill marker is absent in test servers (testServer, handlers_test.go),
+// so the pre-backfill ceiling exception admits a hub-attested agent with no
+// recorded edge.
 func setupAgentSecretGetTest(t *testing.T) (*Server, store.Store, string, string, string) {
 	t.Helper()
 	srv, s := testServer(t)
@@ -51,48 +57,26 @@ func setupAgentSecretGetTest(t *testing.T) (*Server, store.Store, string, string
 		t.Fatalf("failed to create project: %v", err)
 	}
 
+	userID := tid("user-agent-get-secret-root")
+	createDCUser(t, s, userID, "root-agent-get-secret@test.com", projectID, store.ProjectRoleOwner)
+
 	agentID := tid("agent-get-secret-1")
 	agent := &store.Agent{
 		ID: agentID, Slug: "get-secret-agent", Name: "Get Secret Agent",
 		ProjectID: projectID, Phase: string(state.PhaseRunning), StateVersion: 1,
-		Created: time.Now(), Updated: time.Now(),
+		Ancestry: []string{userID},
+		Created:  time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
 	return srv, s, agentID, projectID, agentToken
-}
-
-// seedSecret creates a secret in the backend for testing.
-func seedSecret(t *testing.T, backend secret.SecretBackend, key, value, secretType, target, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	if secretType == "" {
-		secretType = store.SecretTypeEnvironment
-	}
-	if target == "" {
-		target = key
-	}
-	input := &secret.SetSecretInput{
-		Name:       key,
-		Value:      value,
-		SecretType: secretType,
-		Target:     target,
-		Scope:      store.ScopeProject,
-		ScopeID:    projectID,
-		CreatedBy:  "test-user",
-		UpdatedBy:  "test-user",
-	}
-	_, _, err := backend.Set(ctx, input)
-	if err != nil {
-		t.Fatalf("failed to seed secret %q: %v", key, err)
-	}
 }
 
 // ============================================================================

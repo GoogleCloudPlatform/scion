@@ -195,8 +195,7 @@ func TestPM1_LastOwnerProtection_CanDeleteNonLastOwner(t *testing.T) {
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner2.ID))
 
 	// Verify two owners exist.
-	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, project.ID)
 	require.Equal(t, 2, count)
 
 	// Delete one owner — should succeed because the other remains.
@@ -209,13 +208,12 @@ func TestPM1_LastOwnerProtection_CanDeleteNonLastOwner(t *testing.T) {
 		"should be able to delete a non-last owner; got: %s", rec.Body.String())
 
 	// Verify only one owner remains.
-	count, err = srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
-	require.NoError(t, err)
+	count = usableOwnerCount(t, s, project.ID)
 	assert.Equal(t, 1, count)
 }
 
 // TestPM1_LastOwnerCount_ExcludesExpiredBindings verifies that
-// countActiveDirectOwnersFromStore does not count expired owner bindings. This is
+// the usable-owner predicate (bindingIsUsableOwner) does not count expired owner bindings. This is
 // a regression test for G8: the count must use the same activation semantics
 // as isProjectOwner to prevent removing the last active owner while expired
 // bindings remain.
@@ -260,14 +258,13 @@ func TestPM1_LastOwnerCount_ExcludesExpiredBindings(t *testing.T) {
 	require.NoError(t, err)
 
 	// Count must be 1 (only the active binding), not 2.
-	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, project.ID)
 	assert.Equal(t, 1, count,
 		"G8: active owner count must exclude expired bindings")
 }
 
 // TestPM1_LastOwnerCount_ExcludesFutureBindings verifies that
-// countActiveDirectOwnersFromStore does not count not-yet-active owner bindings.
+// the usable-owner predicate (bindingIsUsableOwner) does not count not-yet-active owner bindings.
 func TestPM1_LastOwnerCount_ExcludesFutureBindings(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -309,8 +306,7 @@ func TestPM1_LastOwnerCount_ExcludesFutureBindings(t *testing.T) {
 	require.NoError(t, err)
 
 	// Count must be 1 (only the active binding), not 2.
-	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, project.ID)
 	assert.Equal(t, 1, count,
 		"G8: active owner count must exclude not-yet-active bindings")
 }
@@ -320,7 +316,7 @@ func TestPM1_LastOwnerCount_ExcludesFutureBindings(t *testing.T) {
 // This is the core G8 regression: without activation filtering, a caller
 // could remove the last active owner while expired owners inflate the count.
 func TestPM1_LastOwnerCount_OnlyExpiredMeansZero(t *testing.T) {
-	srv, s := testServer(t)
+	_, s := testServer(t)
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -353,8 +349,7 @@ func TestPM1_LastOwnerCount_OnlyExpiredMeansZero(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, project.ID)
 	assert.Equal(t, 0, count,
 		"G8: all-expired owner bindings must produce count 0")
 }

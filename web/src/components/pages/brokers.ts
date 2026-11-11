@@ -20,16 +20,24 @@
  * Displays all runtime brokers with their status, version, and capabilities
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, RuntimeBroker } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
-import { extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import { listPageStyles, brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
+import {
+  brokerVersionStyles,
+  renderBrokerVersion,
+  renderHubVersionNote,
+} from '../shared/broker-version.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -58,23 +66,43 @@ export class ScionPageBrokers extends LitElement {
   private error: string | null = null;
 
   /**
+   * The fleet hub version each broker's versionStatus was compared with
+   * (the list's hubVersion): a build token, "mixed", or "" when unknown.
+   */
+  @state()
+  private hubVersion = '';
+
+  /**
    * Current view mode (grid or list)
    */
   @state()
   private viewMode: ViewMode = 'grid';
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
 
   static override styles = [
     listPageStyles,
     brokerTypeBadgeStyles,
+    brokerVersionStyles,
     css`
       .broker-header {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 1rem;
+      }
+
+      /* The header's first child holds the name and version. As a flex item
+         it defaults to min-width:auto and grows to fit a long unbroken name,
+         pushing it past the card edge; min-width:0 lets it shrink so the
+         shared wrapping rules can break the name instead. */
+      .broker-header > div {
+        min-width: 0;
+      }
+
+      .hub-version-row {
+        margin-bottom: 0.75rem;
       }
 
       .broker-version {
@@ -110,6 +138,22 @@ export class ScionPageBrokers extends LitElement {
         color: var(--sl-color-success-700, #15803d);
       }
 
+      /* Visible marker for a broker cap whose source is "not_enforced"
+       * (design.md Amendment A1): the value shown is a real, resolved cap
+       * that is not currently enforced. Must not be tooltip-only. */
+      .not-enforced-marker {
+        display: inline-flex;
+        align-items: center;
+        align-self: flex-start;
+        margin-left: 0.375rem;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #a16207);
+      }
+
       .broker-meta {
         display: flex;
         gap: 1.5rem;
@@ -140,22 +184,17 @@ export class ScionPageBrokers extends LitElement {
 
     // Subscribe to broker SSE events
     stateManager.setScope({ type: 'brokers-list' });
-    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated as EventListener);
+    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
     // Periodically re-render to keep relative timestamps fresh
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'brokers-updated',
-      this.boundOnBrokersUpdated as EventListener
-    );
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
   }
 
   private onBrokersUpdated(): void {
@@ -174,9 +213,7 @@ export class ScionPageBrokers extends LitElement {
     this.error = null;
 
     try {
-      const response = await fetch('/api/v1/runtime-brokers', {
-        credentials: 'include',
-      });
+      const response = await apiFetch('/api/v1/runtime-brokers', { authErrors: 'caller' });
 
       if (!response.ok) {
         throw new Error(
@@ -184,8 +221,11 @@ export class ScionPageBrokers extends LitElement {
         );
       }
 
-      const data = (await response.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
+      const data = (await response.json()) as
+        | { brokers?: RuntimeBroker[]; hubVersion?: string }
+        | RuntimeBroker[];
       this.brokers = Array.isArray(data) ? data : data.brokers || [];
+      this.hubVersion = Array.isArray(data) ? '' : data.hubVersion || '';
 
       // Seed stateManager so SSE delta merging has full baseline data
       stateManager.seedBrokers(this.brokers);
@@ -210,33 +250,40 @@ export class ScionPageBrokers extends LitElement {
     }
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
+  }
+
+  /**
+   * Renders the broker's effective agent capacity as "7 / 30" or
+   * "7 / unlimited", with the precedence source in a tooltip
+   * (ptone/scion#2061 P2.2, design.md §5.6). Renders an em dash "—" when the
+   * fields are absent — e.g. the caller lacks visibility, or capacity
+   * resolution didn't run. When agentLimitSource is "not_enforced" (design.md
+   * Amendment A1), the shown value is a real, resolved cap that is not
+   * currently enforced — a visible "not enforced" marker is appended next to
+   * it; the source tooltip alone is not enough (a caller must not have to
+   * hover to learn the cap doesn't apply).
+   */
+  private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
+    // == null: these fields are omitempty on the wire (Go omits, never sends
+    // null), but the loose check tolerates an explicit null too.
+    if (broker.agentCount == null) {
+      return html`<span class="meta-text">—</span>`;
+    }
+    const capLabel = broker.agentLimit != null ? String(broker.agentLimit) : 'unlimited';
+    // mono-cell only applies inside .resource-table-container (the table
+    // view); stat-value is unscoped, so it styles the grid card's value too.
+    // Shared between the table cell and the grid stat (review round 2, F2)
+    // so the two can't drift out of sync.
+    return html`
+      <span class="mono-cell stat-value" title="Source: ${broker.agentLimitSource || 'unknown'}"
+        >${broker.agentCount} / ${capLabel}</span
+      >
+      ${broker.agentLimitSource === 'not_enforced'
+        ? html`<span class="not-enforced-marker">not enforced</span>`
+        : nothing}
+    `;
   }
 
   override render() {
@@ -289,7 +336,10 @@ export class ScionPageBrokers extends LitElement {
       return this.renderEmptyState();
     }
 
-    return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
+    return html`
+      <div class="hub-version-row">${renderHubVersionNote(this.hubVersion)}</div>
+      ${this.viewMode === 'grid' ? this.renderGrid() : this.renderTable()}
+    `;
   }
 
   private renderEmptyState() {
@@ -328,9 +378,11 @@ export class ScionPageBrokers extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="hdd-rack"></sl-icon>
-              ${broker.name} ${this.renderBrokerTypeBadge(broker)}
+              <span>${broker.name} ${this.renderBrokerTypeBadge(broker)}</span>
             </h3>
-            ${broker.version ? html`<div class="broker-version">v${broker.version}</div>` : ''}
+            <div class="broker-version">
+              ${renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion)}
+            </div>
           </div>
           <scion-status-badge
             status=${this.getStatusVariant(broker.status)}
@@ -343,13 +395,21 @@ export class ScionPageBrokers extends LitElement {
         <div class="broker-meta">
           <div class="stat">
             <span class="stat-label">Last Heartbeat</span>
-            <span class="stat-value">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
+            <span class="stat-value">${formatRelative(broker.lastHeartbeat)}</span>
           </div>
           ${broker.profiles
             ? html`
                 <div class="stat">
                   <span class="stat-label">Profiles</span>
                   <span class="stat-value">${broker.profiles.length}</span>
+                </div>
+              `
+            : ''}
+          ${broker.agentCount != null
+            ? html`
+                <div class="stat">
+                  <span class="stat-label">Agents / Cap</span>
+                  ${this.renderAgentCapacity(broker)}
                 </div>
               `
             : ''}
@@ -369,7 +429,7 @@ export class ScionPageBrokers extends LitElement {
   private renderCapabilities(capabilities: import('../../shared/types.js').BrokerCapabilities) {
     return html`
       <div class="broker-details">
-        <span class="capability-tag ${capabilities.webPTY ? 'enabled' : ''}">WebPTY</span>
+        <span class="capability-tag ${capabilities.webPty ? 'enabled' : ''}">WebPTY</span>
         <span class="capability-tag ${capabilities.sync ? 'enabled' : ''}">Sync</span>
         <span class="capability-tag ${capabilities.attach ? 'enabled' : ''}">Attach</span>
       </div>
@@ -388,6 +448,7 @@ export class ScionPageBrokers extends LitElement {
               <th class="hide-mobile">Capabilities</th>
               <th>Last Heartbeat</th>
               <th class="hide-mobile">Profiles</th>
+              <th class="hide-mobile">Agents / Cap</th>
             </tr>
           </thead>
           <tbody>
@@ -403,8 +464,7 @@ export class ScionPageBrokers extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/brokers/${broker.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/brokers/${broker.id}`);
         }}
       >
         <td>
@@ -414,7 +474,7 @@ export class ScionPageBrokers extends LitElement {
           </span>
         </td>
         <td class="hide-mobile">
-          ${broker.version ? html`<span class="mono-cell">v${broker.version}</span>` : '\u2014'}
+          ${renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion)}
         </td>
         <td>
           <scion-status-badge
@@ -427,7 +487,7 @@ export class ScionPageBrokers extends LitElement {
           ${broker.capabilities
             ? html`
                 <span class="capability-tags-inline">
-                  <span class="capability-tag ${broker.capabilities.webPTY ? 'enabled' : ''}"
+                  <span class="capability-tag ${broker.capabilities.webPty ? 'enabled' : ''}"
                     >WebPTY</span
                   >
                   <span class="capability-tag ${broker.capabilities.sync ? 'enabled' : ''}"
@@ -441,9 +501,10 @@ export class ScionPageBrokers extends LitElement {
             : '\u2014'}
         </td>
         <td>
-          <span class="meta-text">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
+          <span class="meta-text">${formatRelative(broker.lastHeartbeat)}</span>
         </td>
         <td class="hide-mobile">${broker.profiles ? broker.profiles.length : '\u2014'}</td>
+        <td class="hide-mobile">${this.renderAgentCapacity(broker)}</td>
       </tr>
     `;
   }

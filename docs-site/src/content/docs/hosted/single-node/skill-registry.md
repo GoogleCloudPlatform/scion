@@ -9,8 +9,10 @@ The Hub is the authoritative **Skill Registry** for the Skill Bank: it stores pu
 
 The Hub persists two record types:
 
-- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, `visibility`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
+- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
 - **SkillVersion** — an immutable release of a skill: `version` (semver), `status` (`draft`, `published`, `deprecated`, `archived`), a `sha256:` `content_hash`, the file manifest, publisher, download count, and — for deprecated versions — a deprecation message and optional replacement URI.
+
+Resolving a version constraint or content hash considers only `published` and `deprecated` versions. Reading a file by version number, the versions list and a single version's details apply the same rule, except that the skill's owner, its creator and callers who can update the skill also see its `draft` and `archived` versions. A version outside that set is reported as not found, exactly like a version that does not exist. Signed file URLs that the Hub issues at dispatch serve the version they were issued for until they expire.
 
 `scion skills delete` performs a **soft delete**: the skill's status becomes `archived` and its records are retained for audit and history.
 
@@ -28,7 +30,7 @@ By default a skill reference resolves against the local Hub. Federation lets the
 
 ### GitHub source (`gh://`)
 
-Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+Skills can be sourced directly from a GitHub repository path. The resolver lists the skill directory with one GitHub git trees API call and caches its resolutions locally. Requests are retried with exponential backoff, and individual files are capped at 10 MB. For what a resolved `gh://` skill contains (subdirectories, executable files, symlinks and submodules), see [GitHub skill URIs](/scion/local/skills/#github-skill-uris-gh).
 
 #### Authentication & reliability
 
@@ -45,6 +47,11 @@ To avoid hitting GitHub API rate limits during concurrent agent launches, the Ru
 - **Broker-Level Singleton:** The cache is a long-lived, shared singleton service running within the Runtime Broker daemon, rather than a per-request ephemeral cache.
 - **Extended TTLs:** General resolution metadata remains cached for **30 minutes**.
 - **Git SHA Resolution (24h TTL):** Once a reference (like a branch or tag name) has been fully resolved to a specific Git commit SHA, the SHA resolution is cached for **24 hours**, bypassing external API queries entirely on subsequent requests.
+- **Shared resolutions:** Concurrent creates that need the same ref with the same credential share one resolution instead of each calling GitHub, and at most four GitHub fetches run at once per credential.
+- **Stale-while-revalidate:** After its 30-minute TTL expires, a branch or tag entry is still served for up to 24 hours from when it was cached while a background refresh runs. Full-SHA entries are not served stale.
+- **Rate-limit cooldown:** A GitHub `429`, or a `403` reporting an exhausted or secondary rate limit, starts a cooldown for that credential (or for all unauthenticated requests), taken from `Retry-After` or `X-RateLimit-Reset`, defaulting to 60 seconds and capped at 5 minutes. During the cooldown no request is sent for that credential: a cached or stale entry is served without a refresh, and a miss fails immediately with a rate-limit error that names the ref. The Hub's own `gh://` resolution uses the same cooldown.
+- **Resolution budget:** Each resolution has its own **20-second** budget, so a slow or retrying resolution fails inside the create request with an error that names the cause instead of a bare "context canceled".
+- **Persistence:** Resolutions made with a credential are written to the Runtime Broker's on-disk cache (keyed by a fingerprint of the credential, never the token itself) along with anonymous ones, so they survive a Runtime Broker restart.
 
 #### Private repository resolution
 
@@ -130,9 +137,18 @@ scion skills registries pin partner-hub \
 | :--- | :--- | :--- |
 | `<name-or-id>` | Yes | Registry name or ID. |
 | `<skill-uri>` | Yes | The skill URI to pin. |
-| `--hash` | Yes | The `sha256:` content hash to trust for that URI. |
+| `--hash` | Yes | The `sha256:` content hash to trust for that URI, in either form (see [Content hash forms](#content-hash-forms)). |
 
 Pins can also be managed from the [registry admin UI](#web-ui). Obtain the hash to pin with `scion skills resolve <uri>` or `scion skills versions <name>`.
+
+### Content hash forms
+
+A skill version has two `sha256:` content hashes:
+
+- **Content hash** (`contentHash`): covers the file contents only. Every hub records it and sends it, and every Runtime Broker verifies an installed skill against it. Existing pins hold this form.
+- **Content hash v2** (`contentHashV2`): covers each file's path and normalized mode (executable bit) as well as its contents, so a rename or a chmod-only change gives a different value. A hub sends it only while the `hub.skill_content_hash_v2` [experiment](/scion/reference/experiments/) is on (off by default); it is derived from the version's file list, so versions published before it existed have one too. `scion skills resolve <uri>` prints it as `Content Hash v2`.
+
+While the experiment is on, a pin, and an `@sha256:` version in a skill URI, match either form (the content hash first; when multiple versions of a skill share the same v1 `contentHash` because only paths or executable bits changed between them, an `@sha256:` lookup on that v1 hash resolves deterministically to the oldest matching version). An `@sha256:` lookup considers the same versions as the other version constraints: `published` and `deprecated` versions match, and `draft` and `archived` versions never do. For a federated skill the Hub also recomputes both hashes from the file list the registry returns and rejects the skill if the registry's claimed hash disagrees; a pinned registry must also list a hash for every file, and a skill with no content hash and no per-file hashes is rejected from any registry, since nothing could verify it. A Runtime Broker verifies the v2 hash whenever the Hub sends one, in addition to the content hash. While the experiment is off, a pin matches the content hash only, as before.
 
 ## Web UI
 
@@ -142,6 +158,12 @@ The web dashboard includes both user-facing and admin surfaces for skills:
 - **Skill Registries admin** (`/admin/skill-registries`) — list, create, edit, and remove external registries, toggle their status, and set their trust level. The registry detail page manages the registry's **pinned hashes** (add and remove pins) for pinned-trust registries.
 
 Registry administration is capability-gated; it is available to users with the appropriate admin permissions.
+
+### Global catalog authoring
+
+Publishing skills to the `global` scope requires the `skill.create_global` permission. Hub administrators hold this permission by default. For non-admin users who need to author global skills, assign the system-scoped `global-catalog-author` role. This role grants only `skill.create_global`, decoupling global skill authoring from full Hub administration authority.
+
+See [Permissions & Policy — Roles](/scion/hosted/ha/permissions/#roles) for the complete role listing.
 
 ## See also
 

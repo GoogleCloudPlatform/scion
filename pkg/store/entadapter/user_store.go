@@ -16,14 +16,17 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entschema "github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -64,6 +67,7 @@ func storePrefsToEnt(p *store.UserPreferences) *entschema.UserPreferences {
 		DefaultTemplate: p.DefaultTemplate,
 		DefaultProfile:  p.DefaultProfile,
 		Theme:           p.Theme,
+		Timezone:        p.Timezone,
 	}
 }
 
@@ -76,24 +80,34 @@ func entPrefsToStore(p *entschema.UserPreferences) *store.UserPreferences {
 		DefaultTemplate: p.DefaultTemplate,
 		DefaultProfile:  p.DefaultProfile,
 		Theme:           p.Theme,
+		Timezone:        p.Timezone,
 	}
 }
 
 // entUserToStore converts an Ent User entity to a store.User model.
 func entUserToStore(u *ent.User) *store.User {
 	su := &store.User{
-		ID:                u.ID.String(),
-		Email:             u.Email,
-		DisplayName:       u.DisplayName,
-		AvatarURL:         u.AvatarURL,
-		Role:              string(u.Role),
-		Status:            string(u.Status),
-		InvitedBy:         u.InvitedBy,
-		InviteNote:        u.InviteNote,
-		Preferences:       entPrefsToStore(u.Preferences),
-		SessionGeneration: u.SessionGeneration,
-		Created:           u.Created,
+		ID:                 u.ID.String(),
+		Email:              u.Email,
+		DisplayName:        u.DisplayName,
+		AvatarURL:          u.AvatarURL,
+		Role:               string(u.Role),
+		Status:             string(u.Status),
+		InvitedBy:          u.InvitedBy,
+		InviteNote:         u.InviteNote,
+		Preferences:        entPrefsToStore(u.Preferences),
+		SessionGeneration:  u.SessionGeneration,
+		Kind:               string(u.Kind),
+		ExpiresAt:          u.ExpiresAt,
+		IssuedBy:           u.IssuedBy,
+		Purpose:            u.Purpose,
+		IssuanceID:         u.IssuanceID,
+		IssuerCredentialID: u.IssuerCredentialID,
+		FederatedEmail:     u.FederatedEmail,
+		HomeIssuer:         u.HomeIssuer,
+		Created:            u.Created,
 	}
+	su.IssuerDelegationID = u.IssuerDelegationID
 	if u.LastLogin != nil {
 		su.LastLogin = *u.LastLogin
 	}
@@ -103,8 +117,210 @@ func entUserToStore(u *ent.User) *store.User {
 	return su
 }
 
-// CreateUser creates a new user record.
+// CreateUser creates a new user record. It refuses every test identity
+// kind and any email in a reserved test identity domain: only
+// CreateTestFixtureUser and CreateTestAdminUser write those. It refuses
+// the federated kind, its fields, the pending status and any address of
+// the federated synthetic shape with store.ErrFederatedAccountRefused:
+// only CreateFederatedUser writes those.
 func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
+	if u.Kind == store.UserKindFederated || u.FederatedEmail != nil || u.HomeIssuer != nil ||
+		u.Status == store.UserStatusPending || store.IsFederatedSyntheticEmail(u.Email) {
+		return store.ErrFederatedAccountRefused
+	}
+	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil ||
+		u.IssuanceID != nil || u.IssuerCredentialID != nil || u.IssuerDelegationID != nil || store.IsReservedTestIdentityEmail(u.Email) {
+		return store.ErrTestFixtureKindRefused
+	}
+	return s.createUser(ctx, u, nil)
+}
+
+// CreateTestFixtureUser creates a hub-issued test fixture user. See
+// store.UserStore.CreateTestFixtureUser for the required fields.
+func (s *UserStore) CreateTestFixtureUser(ctx context.Context, u *store.User) error {
+	if u.Kind != store.UserKindTestFixture {
+		return fmt.Errorf("%w: kind must be %s", store.ErrInvalidInput, store.UserKindTestFixture)
+	}
+	if u.ExpiresAt == nil || u.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: a test fixture user requires an expiry", store.ErrInvalidInput)
+	}
+	if u.IssuedBy == nil || strings.TrimSpace(*u.IssuedBy) == "" {
+		return fmt.Errorf("%w: a test fixture user requires an issuer", store.ErrInvalidInput)
+	}
+	if store.TestIdentityEmailKind(u.Email) != store.UserKindTestFixture {
+		return fmt.Errorf("%w: a test fixture user requires an email in %s", store.ErrInvalidInput, store.TestFixtureEmailDomain)
+	}
+	if u.IssuanceID != nil || u.IssuerCredentialID != nil {
+		return fmt.Errorf("%w: issuance and issuer credential IDs are for admin-kind test identities", store.ErrInvalidInput)
+	}
+	if u.Role != store.UserRoleMember && u.Role != store.UserRoleViewer {
+		return fmt.Errorf("%w: a test fixture user must have the member or viewer role", store.ErrInvalidInput)
+	}
+	if u.IssuerDelegationID != nil && strings.TrimSpace(*u.IssuerDelegationID) == "" {
+		return fmt.Errorf("%w: an issuer delegation ID must not be empty", store.ErrInvalidInput)
+	}
+	return s.createUser(ctx, u, func(create *ent.UserCreate) {
+		create.SetKind(user.KindTestFixture).
+			SetExpiresAt(*u.ExpiresAt).
+			SetIssuedBy(*u.IssuedBy)
+		if u.Purpose != nil {
+			create.SetPurpose(*u.Purpose)
+		}
+		if u.IssuerDelegationID != nil {
+			create.SetIssuerDelegationID(*u.IssuerDelegationID)
+		}
+	})
+}
+
+// CountLiveTestFixtureUsers counts test fixture users that expire after
+// now, for one issuer when issuedBy is non-empty.
+func (s *UserStore) CountLiveTestFixtureUsers(ctx context.Context, issuedBy string, now time.Time) (int, error) {
+	q := s.client.User.Query().Where(user.KindEQ(user.KindTestFixture), user.ExpiresAtGT(now))
+	if issuedBy != "" {
+		q = q.Where(user.IssuedByEQ(issuedBy))
+	}
+	n, err := q.Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// validateTestAdminUser checks the fields CreateTestAdminUser requires.
+func validateTestAdminUser(u *store.User) error {
+	if !store.IsTestAdminKind(u.Kind) {
+		return fmt.Errorf("%w: kind must be %s or %s", store.ErrInvalidInput, store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin)
+	}
+	if u.ExpiresAt == nil || u.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: an admin-kind test identity requires an expiry", store.ErrInvalidInput)
+	}
+	if u.IssuedBy == nil || strings.TrimSpace(*u.IssuedBy) == "" {
+		return fmt.Errorf("%w: an admin-kind test identity requires an issuer", store.ErrInvalidInput)
+	}
+	if u.IssuanceID == nil || strings.TrimSpace(*u.IssuanceID) == "" {
+		return fmt.Errorf("%w: an admin-kind test identity requires an issuance ID", store.ErrInvalidInput)
+	}
+	if u.IssuerCredentialID != nil && strings.TrimSpace(*u.IssuerCredentialID) == "" {
+		return fmt.Errorf("%w: an empty issuer credential ID must be omitted", store.ErrInvalidInput)
+	}
+	if u.IssuerDelegationID != nil && strings.TrimSpace(*u.IssuerDelegationID) == "" {
+		return fmt.Errorf("%w: an issuer delegation ID must not be empty", store.ErrInvalidInput)
+	}
+	if store.TestIdentityEmailKind(u.Email) != u.Kind {
+		return fmt.Errorf("%w: a %s user requires an email in %s", store.ErrInvalidInput, u.Kind, store.TestAdminEmailDomain(u.Kind))
+	}
+	if u.Role != store.TestAdminRole(u.Kind) {
+		return fmt.Errorf("%w: a %s user must have the %s role", store.ErrInvalidInput, u.Kind, store.TestAdminRole(u.Kind))
+	}
+	return nil
+}
+
+// createTestAdminRow writes the user row of CreateTestAdminUser. The
+// caller validated u (validateTestAdminUser) and runs it inside the
+// transaction that also creates the identity's binding.
+func (s *UserStore) createTestAdminRow(ctx context.Context, u *store.User) error {
+	return s.createUser(ctx, u, func(create *ent.UserCreate) {
+		create.SetKind(user.Kind(u.Kind)).
+			SetExpiresAt(testAdminExpiry(*u.ExpiresAt)).
+			SetIssuedBy(*u.IssuedBy).
+			SetIssuanceID(*u.IssuanceID)
+		if u.Purpose != nil {
+			create.SetPurpose(*u.Purpose)
+		}
+		if u.IssuerCredentialID != nil {
+			create.SetIssuerCredentialID(*u.IssuerCredentialID)
+		}
+		if u.IssuerDelegationID != nil {
+			create.SetIssuerDelegationID(*u.IssuerDelegationID)
+		}
+	})
+}
+
+// testAdminKinds are the ent values of the admin test identity kinds.
+var testAdminKinds = []user.Kind{user.KindTestHubAdmin, user.KindTestSuperAdmin}
+
+// CountLiveTestAdminUsers counts admin-kind test identities that expire
+// after now: of one kind when kind is non-empty, of one issuer when
+// issuedBy is non-empty.
+func (s *UserStore) CountLiveTestAdminUsers(ctx context.Context, kind, issuedBy string, now time.Time) (int, error) {
+	q := s.client.User.Query().Where(user.ExpiresAtGT(now))
+	switch {
+	case kind == "":
+		q = q.Where(user.KindIn(testAdminKinds...))
+	case store.IsTestAdminKind(kind):
+		q = q.Where(user.KindEQ(user.Kind(kind)))
+	default:
+		return 0, fmt.Errorf("%w: %q is not an admin test identity kind", store.ErrInvalidInput, kind)
+	}
+	if issuedBy != "" {
+		q = q.Where(user.IssuedByEQ(issuedBy))
+	}
+	n, err := q.Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// ListTestAdminUsers returns every admin-kind test identity, oldest first.
+func (s *UserStore) ListTestAdminUsers(ctx context.Context) ([]store.User, error) {
+	rows, err := s.client.User.Query().
+		Where(user.KindIn(testAdminKinds...)).
+		Order(user.ByCreated(sql.OrderAsc()), user.ByID()).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.User, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *entUserToStore(r))
+	}
+	return out, nil
+}
+
+// ListTestFixtureUsers returns test fixture users, newest first: for one
+// issuer when issuedBy is non-empty, only live ones when liveAt is non-zero,
+// and at most limit when limit is positive.
+func (s *UserStore) ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]store.User, error) {
+	q := s.client.User.Query().Where(user.KindEQ(user.KindTestFixture))
+	if issuedBy != "" {
+		q = q.Where(user.IssuedByEQ(issuedBy))
+	}
+	if !liveAt.IsZero() {
+		q = q.Where(user.ExpiresAtGT(liveAt))
+	}
+	q = q.Order(user.ByCreated(sql.OrderDesc()), user.ByID())
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.User, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *entUserToStore(r))
+	}
+	return out, nil
+}
+
+// LockTestFixtureIssuance takes the transaction-scoped issuance advisory
+// lock on PostgreSQL. SQLite serializes writers, so it is a no-op there.
+func (s *UserStore) LockTestFixtureIssuance(ctx context.Context) error {
+	if s.client.Driver().Dialect() != dialect.Postgres {
+		return nil
+	}
+	var res sql.Result
+	if err := s.client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1)", []any{int64(store.LockTestIdentityIssuance)}, &res); err != nil {
+		return fmt.Errorf("lock test identity issuance: %w", err)
+	}
+	return nil
+}
+
+// createUser is the shared create core of CreateUser and
+// CreateTestFixtureUser. extra, when non-nil, sets the test-fixture
+// fields; CreateUser never passes it.
+func (s *UserStore) createUser(ctx context.Context, u *store.User, extra func(*ent.UserCreate)) error {
 	uid, err := parseUUID(u.ID)
 	if err != nil {
 		return err
@@ -114,6 +330,19 @@ func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
 		u.Created = time.Now()
 	}
 	u.Email = normalizeEmail(u.Email)
+
+	// deleting is written only by MarkUserDeleting, and the ID of a user
+	// with a deletion tombstone is never reused (ptone/scion#2143).
+	if u.Status == store.UserStatusDeleting {
+		return store.ErrUserDeleting
+	}
+	tombstoned, err := s.client.UserDeletion.Query().Where(userdeletion.UserIDEQ(uid)).Exist(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if tombstoned {
+		return store.ErrAlreadyExists
+	}
 
 	create := s.client.User.Create().
 		SetID(uid).
@@ -148,6 +377,9 @@ func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
 	if !u.LastSeen.IsZero() {
 		create.SetLastSeen(u.LastSeen)
 	}
+	if extra != nil {
+		extra(create)
+	}
 
 	created, err := create.Save(ctx)
 	if err != nil {
@@ -173,10 +405,11 @@ func (s *UserStore) GetUser(ctx context.Context, id string) (*store.User, error)
 }
 
 // GetUserByEmail retrieves a user by email using a case-insensitive match,
-// preserving the COLLATE NOCASE semantics of the legacy SQLite schema.
+// preserving the COLLATE NOCASE semantics of the legacy SQLite schema. It
+// never returns a federated account, even for its synthetic address.
 func (s *UserStore) GetUserByEmail(ctx context.Context, email string) (*store.User, error) {
 	u, err := s.client.User.Query().
-		Where(user.EmailEqualFold(normalizeEmail(email))).
+		Where(user.EmailEqualFold(normalizeEmail(email)), notFederated()).
 		Only(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -193,7 +426,48 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 
 	u.Email = normalizeEmail(u.Email)
 
+	// kind is Immutable, so no update can change it. The email must also
+	// stay in the reserved domain of the row's kind: a human row cannot
+	// move into any test identity domain, and a test identity row cannot
+	// leave its own. A federated row keeps its synthetic email and the
+	// viewer role, and is never invited; no other row takes a federated
+	// synthetic address or the pending status.
+	current, err := s.client.User.Query().Where(user.IDEQ(uid)).Select(user.FieldKind, user.FieldEmail, user.FieldStatus).Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	// A user being deleted keeps its status until the deletion completes
+	// and removes the row (ptone/scion#2143): UpdateUser never writes
+	// deleting (MarkUserDeleting does) and never changes a deleting row.
+	// The update below repeats the status test in its WHERE clause, so a
+	// caller that read the row before MarkUserDeleting committed cannot
+	// write another status over it. That window lies between two
+	// statements of this call, so no conformance case reaches it; the
+	// conformance suite covers the refusal of a row already deleting.
+	if current.Status == user.StatusDeleting || u.Status == store.UserStatusDeleting {
+		return store.ErrUserDeleting
+	}
+	if current.Kind == user.KindFederated {
+		if u.Email != current.Email || u.Status == store.UserStatusInvited ||
+			(u.Role != "" && u.Role != store.UserRoleViewer) ||
+			u.InvitedBy != nil || u.InviteNote != nil {
+			return store.ErrFederatedAccountRefused
+		}
+	} else {
+		if store.IsFederatedSyntheticEmail(u.Email) || u.Status == store.UserStatusPending {
+			return store.ErrFederatedAccountRefused
+		}
+		wantKind := string(current.Kind)
+		if current.Kind == user.KindHuman {
+			wantKind = ""
+		}
+		if store.TestIdentityEmailKind(u.Email) != wantKind {
+			return store.ErrTestFixtureKindRefused
+		}
+	}
+
 	update := s.client.User.UpdateOneID(uid).
+		Where(user.StatusNEQ(user.StatusDeleting)).
 		SetEmail(u.Email).
 		SetDisplayName(u.DisplayName)
 
@@ -235,6 +509,42 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	}
 
 	if err := update.Exec(ctx); err != nil {
+		if ent.IsNotFound(err) {
+			// The row read above does not match any more: it was
+			// deleted, or marked deleting in between.
+			exists, qerr := s.client.User.Query().Where(user.IDEQ(uid)).Exist(ctx)
+			if qerr != nil {
+				return mapError(qerr)
+			}
+			if exists {
+				return store.ErrUserDeleting
+			}
+		}
+		return mapError(err)
+	}
+	return nil
+}
+
+// MarkUserDeleting sets the user's status to deleting (ptone/scion#2143).
+// It is the only write of that status.
+func (s *UserStore) MarkUserDeleting(ctx context.Context, id string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	if err := s.client.User.UpdateOneID(uid).SetStatus(user.StatusDeleting).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// UpdateUserLastLogin sets only the last_login timestamp for a user.
+func (s *UserStore) UpdateUserLastLogin(ctx context.Context, id string, t time.Time) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	if err := s.client.User.UpdateOneID(uid).SetLastLogin(t).Exec(ctx); err != nil {
 		return mapError(err)
 	}
 	return nil
@@ -252,10 +562,60 @@ func (s *UserStore) UpdateUserLastSeen(ctx context.Context, id string, t time.Ti
 	return nil
 }
 
+// LockUserRow locks the user row until the surrounding transaction ends.
+// On PostgreSQL it runs
+//
+//	SELECT id FROM users WHERE id = $1 FOR UPDATE      (exclusive)
+//	SELECT id FROM users WHERE id = $1 FOR KEY SHARE   (shared)
+//
+// so a user delete and an agent create or restore for that user serialize
+// under READ COMMITTED (ptone/scion#2769). The shared mode is FOR KEY SHARE,
+// not FOR SHARE: it conflicts only with FOR UPDATE (which the delete takes,
+// and which DELETE takes too), so plain UPDATEs of the user row, which take
+// FOR NO KEY UPDATE (last seen, profile edits, session revoke), do not wait
+// for an open create or restore transaction. On SQLite all writes are already
+// database-serialized, so it issues a plain read (the same dialect check as
+// ProjectStore.LockProjectForMembership).
+func (s *UserStore) LockUserRow(ctx context.Context, id string, exclusive bool) error {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return err
+	}
+
+	q := s.client.User.Query().Where(user.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		if exclusive {
+			q = q.ForUpdate()
+		} else {
+			q = q.ForShare(lockKeyShare)
+		}
+	}
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock user row: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// lockKeyShare turns ForShare into SELECT ... FOR KEY SHARE (the generated
+// UserQuery has no lock-strength option of its own).
+func lockKeyShare(o *sql.LockOptions) {
+	o.Strength = sql.LockKeyShare
+}
+
 // DeleteUser removes a user by ID.
 func (s *UserStore) DeleteUser(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
+		return err
+	}
+	// The user's choice answers keep their name and email snapshots but
+	// lose the user id (design choices v4, O2).
+	if err := clearDecisionAnswerUser(ctx, s.client, uid.String()); err != nil {
 		return err
 	}
 	if err := s.client.User.DeleteOneID(uid).Exec(ctx); err != nil {
@@ -266,9 +626,11 @@ func (s *UserStore) DeleteUser(ctx context.Context, id string) error {
 
 // ListUsers returns users matching the filter criteria. Pagination is
 // offset-based to match the legacy SQLite store: the cursor is the integer
-// offset of the next page.
+// offset of the next page. Federated accounts are never listed: they are
+// not hub users, and the startup and reconciliation loops that walk this
+// list (hub role grants, admin reconciliation) must never see them.
 func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts store.ListOptions) (*store.ListResult[store.User], error) {
-	query := s.client.User.Query()
+	query := s.client.User.Query().Where(notFederated())
 
 	if filter.Role != "" {
 		query.Where(user.RoleEQ(user.Role(filter.Role)))
@@ -314,7 +676,11 @@ func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts
 			order = user.ByDisplayName(sql.OrderAsc())
 		}
 	case "lastSeen":
-		order = user.ByLastSeen(sortOpt(opts.SortDir))
+		// Never-seen users (last_seen IS NULL) sort last in both directions.
+		// Postgres would otherwise put NULLs first under DESC (SQLite puts
+		// them last), so "most recently seen first" could list only users
+		// who have never signed in.
+		order = user.ByLastSeen(sortOpt(opts.SortDir), sql.OrderNullsLast())
 	default: // "created" and unspecified
 		order = user.ByCreated(sortOpt(opts.SortDir))
 	}
@@ -346,12 +712,14 @@ func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts
 
 // IsUserInvitedOrActive returns true if a User record exists with the given
 // email and status in ("invited", "active"). Used by the invite_only
-// authorization gate as a replacement for IsEmailAllowListed.
+// authorization gate as a replacement for IsEmailAllowListed. A federated
+// account never matches.
 func (s *UserStore) IsUserInvitedOrActive(ctx context.Context, email string) (bool, error) {
 	return s.client.User.Query().
 		Where(
 			user.EmailEqualFold(normalizeEmail(email)),
 			user.StatusIn(user.StatusInvited, user.StatusActive),
+			notFederated(),
 		).
 		Exist(ctx)
 }

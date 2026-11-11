@@ -21,12 +21,15 @@ import (
 )
 
 // WorktreeModeEligible reports whether the host environment supports
-// worktree-per-agent mode. It returns (true, "") when git >= 2.47 is
+// worktree-per-agent mode. It returns (true, "") when git >= 2.48 is
 // available (required for --relative-paths), or (false, reason) with a
 // human-readable explanation when the check fails.
 //
 // The caller is responsible for logging and for choosing the fallback
 // (typically clone-per-agent).
+//
+// 2.48 is required: `git worktree add --relative-paths` first shipped in
+// git 2.48; 2.47.x rejects the flag.
 func WorktreeModeEligible() (bool, string) {
 	version, _, err := util.GetGitVersion()
 	if err != nil {
@@ -36,11 +39,11 @@ func WorktreeModeEligible() (bool, string) {
 }
 
 // worktreeEligibleForVersion is the testable core: it checks whether the
-// given version string satisfies the git >= 2.47 requirement.
+// given version string satisfies the git >= 2.48 requirement.
 func worktreeEligibleForVersion(version string) (bool, string) {
-	if err := util.CompareGitVersion(version, 2, 47); err != nil {
+	if err := util.CompareGitVersion(version, 2, 48); err != nil {
 		return false, fmt.Sprintf(
-			"git >= 2.47.0 required for worktree-per-agent mode (--relative-paths), found %s",
+			"git >= 2.48.0 required for worktree-per-agent mode (--relative-paths), found %s",
 			version,
 		)
 	}

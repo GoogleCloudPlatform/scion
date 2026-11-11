@@ -30,6 +30,7 @@ Key sections:
 | `projects` | Which projects and agents to expose, with optional auto-provisioning |
 | `state` | SQLite database path |
 | `timeouts` | Send message timeout, SSE keepalive interval, push retry limit |
+| `reply_poll` | How agent replies are returned to callers (see [Agent replies](#agent-replies)) |
 | `rate_limit` | Per-key token-bucket rate limiting |
 | `logging` | Log level and format (text or JSON) |
 
@@ -116,6 +117,10 @@ Once installed, the bridge's admin-managed settings can be edited from the integ
 
 Changes saved via the admin UI take effect immediately on the running bridge — no bridge restart is required. The Hub pushes the updated configuration over the existing RPC connection.
 
+`hubBearer` (Google credential pass-through) and `geGoogle` (Google credential exchange — **deprecated and scheduled for removal in a future release; it continues to work until then**) are not offered in the **Auth scheme** dropdown. Configure either one via the `auth.scheme` key in `scion-a2a-bridge.yaml` instead — see `scion-a2a-bridge.yaml.sample` for the `hubBearer` block. `hubBearer` forwards the caller's Google credential to the Hub verbatim: no Hub-issued token to cache or refresh, and the Hub re-checks the user (including suspension) on every request.
+
+`hubBearer`/`geGoogle` set in YAML can't be overridden from the admin UI, and neither can any other scheme the dropdown doesn't offer (for example `federation`): saving A2A integration settings pushes the dropdown's `auth_scheme` value, but a scheme not offered in that dropdown is pinned and the push is ignored. The bridge logs a `WARN` naming both the YAML and the pushed scheme the first time this happens, and `DEBUG` for repeats of the same pair. (Bridges built before this protection was added should be upgraded; on those, the admin UI has no way to remove a previously pushed `auth_scheme` on its own.)
+
 ### Project and agent exposure
 
 The admin UI provides a structured editor for controlling which projects and agents are reachable via A2A:
@@ -182,8 +187,9 @@ Edit `scion-a2a-bridge.yaml`. The required fields are:
 | `hub.signing_key_secret` | GCP Secret Manager resource name for the signing key. Mutually exclusive with `hub.signing_key`. | `projects/my-project/secrets/hub-signing-key` |
 | `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
 | `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
+| `bridge.async_create` | Optional, default `true`. Auto-provisioning asks the Hub for an asynchronous create. With a Hub that has async launch on, the task reports `working` while the agent starts (streaming and SDK clients also see "provisioning agent (<step>)"), then the message is sent; a failed start ends the task `failed` without a send (streaming and SDK clients see "Agent failed to start (<code>): <message>"). `false` always uses the synchronous create. | `true` |
 | `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
-| `projects[].slug` | Grove slug to expose. Add one entry per project. | `my-project` |
+| `projects[].slug` | Project slug to expose. Add one entry per project. | `my-project` |
 | `plugin.listen_address` | Broker plugin RPC listen address | `localhost:9090` |
 
 Minimal config example:
@@ -296,11 +302,11 @@ curl -s -X POST \
   }'
 ```
 
-Replace `PROJECT` and `AGENT` with the target project slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields.
+Replace `PROJECT` and `AGENT` with the target project slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields. Artifacts appear only when the agent explicitly replies to the caller with `scion message`, or asks the caller for input (an `input-required` artifact carrying the question); the agent's final turn text is not forwarded automatically, so a task can complete with no artifact.
 
 ### 8. Docker deployment
 
-The Docker build requires `CGO_ENABLED=1` (for `go-sqlite3`). The default runtime image is `debian:bookworm-slim` (glibc). Alpine users must use a musl-compatible SQLite driver or switch to a glibc-based image.
+The bridge uses a pure-Go SQLite driver, so the Docker build sets `CGO_ENABLED=0` and needs no C toolchain. The default runtime image is `debian:bookworm-slim`; the binary does not depend on the image's C library.
 
 Build the image from the repository root (the Dockerfile expects the full repo context):
 
@@ -319,6 +325,59 @@ docker run -p 8443:8443 -p 9090:9090 \
 ```
 
 The container runs as non-root user `bridge` (UID 1000). The state database directory `/var/lib/scion-a2a-bridge/` is writable by this user inside the container (mode `0700`). To persist state across restarts, mount a volume at that path.
+
+## Agent replies
+
+While an A2A call waits, the bridge reads the agent's reply from the caller's own direct conversation with the agent, through the Hub API and with the caller's own credential (the caller's access token, forwarded credential or exchanged Hub token, a short-lived JWT the bridge mints for the caller under `hubJWT`, or the bridge admin credential in legacy mode). The Hub's read checks decide what the bridge can see, so a caller only ever receives content from its own conversation with the agent.
+
+For each call the bridge:
+
+1. refuses the call if the same caller already has a call to the same agent waiting in this bridge process;
+2. checks that the caller can read its conversation with the agent (it lists the caller's direct conversations and, when the conversation with the agent exists, reads from it; for a federated user, it instead reads one message from the user's own direct conversation with the agent); a refusal ends the call before anything is sent;
+3. sends the message, and anchors on the message ID the Hub returns;
+4. reads the conversation after the anchor (first after 1 s, then every 0.5 s longer, up to every 3 s) until the agent's reply arrives, a read is refused, or `timeouts.send_message` passes.
+
+The reply is the oldest message from the agent after the caller's message: a reply, or a question (an `input-needed` message the agent sends to the caller), which ends the call `input-required`. Pushed broker messages for a waiting call are not used: status changes the Hub pushes (for example `COMPLETED` or `ERROR`) are agent-wide and can belong to another conversation, so they never end a call.
+
+### Requirements
+
+- **User access tokens** need the `inbox:read` scope and access to the agent's project. Without them the call is refused with: "This access token can't read your conversation with this agent (it needs the inbox:read scope and access to the agent's project); agent replies can't be returned."
+- **Legacy mode** (no caller identity) needs `hub.user_id`: replies are read from the bridge admin user's conversation with the agent, and the Hub keys that conversation on the user ID. Without `hub.user_id` the call fails at once with "Your conversation with this agent can't be found; the agent's reply can't be returned."
+- **Federated users** are read through their own direct conversation's chat history, which needs the Hub's conversation envelope switch on (the default; the Hub also treats it as off when its messaging setting cannot be read). With it off, set `reply_poll.enabled: false`, or federated user calls time out.
+- The Hub must return the message ID of a send (`message_id`). With a Hub that does not, the bridge waits on pushed broker messages as before; on such a Hub, an agent reply pushed before the Hub has answered the send is not returned. A send the Hub delivered but did not store ends the call with "The hub did not record this message; the agent's reply can't be returned."
+
+### Configuration
+
+```yaml
+reply_poll:
+  enabled: true      # default; false = wait on pushed broker messages only
+  concurrency: 64    # cap on conversation reads in flight per bridge process
+```
+
+With `enabled: false` the bridge behaves as before reply polling existed: no same-caller check, no preflight, no reader. The push path's check that a pushed message comes from the caller's own user topic still applies. Agent callers (federated agents) always wait on the push path; federated users wait on it when `enabled` is `false`, or, as with any caller, when the Hub returns no message ID for the send.
+
+### Behaviour and limits
+
+- **Any channel counts.** Any reply from the agent in the caller's conversation after the caller's message ends the call, including a reply to a message the caller sent from the web or a chat integration in the meantime.
+- **Interim messages end the call.** A "working on it" message from the agent is returned as the reply, as before.
+- **A late reply can answer the next call.** The anchor carries no reply-to link: if a call times out and the agent's answer to it arrives after the caller's next message, the next call returns it.
+- **Thread replies are not found.** A reply the agent posts in a group conversation is not in the caller's direct conversation; the call times out.
+- **Agent failures time out.** If the agent fails or goes offline, the call ends at `timeouts.send_message`, not earlier.
+- **The Hub's WAITING_FOR_INPUT notification does not end a call.** An agent's question reaches the caller only if the agent sends it to the caller.
+- **More than 200 messages** in the conversation after the caller's message end the call with "Too many messages arrived in this conversation after the request; the agent's reply can't be located."
+- **Attachments** are not returned with replies read from the conversation.
+- **Legacy mode:** every external client is the same caller (the bridge admin's conversation), so one call per agent waits at a time in each bridge process, shared with calls by the admin user's own access token; and a late reply to one client's call can answer another client's next call.
+- **Standalone replicas** do not share the same-caller check: two replicas can run calls by the same caller to the same agent at once, and both may return the same reply. A client's push webhook may receive a pushed copy of a reply as well as the polled reply; the A2A response itself is never duplicated.
+- If the Hub's in-process bus drops a reply because a subscriber's buffer is full, the reply is never stored and the call times out.
+- If the bridge cannot record a reply it has found (its own task store refuses the write), the reply is not read again and the call times out.
+- **One Hub rate limit for forwarded credentials.** The Hub limits sign-ins with forwarded (external) bearer credentials that miss its credential cache per client IP address, and every caller of a bridge reaches the Hub from the bridge's address, so all of them share that budget. Reply reads add such sign-ins only when a cached credential expires.
+
+### Compatibility
+
+- Calls by access tokens that cannot read the caller's conversation are refused (before the send where possible, otherwise right after it). Such calls never received replies before.
+- A second concurrent call by the same caller to the same agent is refused with "Another request to this agent is still waiting for its reply; try again when it completes."
+- Legacy mode without `hub.user_id` fails at once instead of timing out.
+- In plugin mode, a pushed message is accepted for a task only from the task's agent and on the user topic of the task's caller (the bridge admin's topic for legacy calls); the legacy admin subscription uses `hub.user_id` when set.
 
 ## Standalone mode and horizontal scaling
 
@@ -382,7 +441,7 @@ SSE streams read from the durable `a2a_task_events` log using a monotonic cursor
 ## Known Limitations
 
 - **No gRPC or REST transport.** The bridge only supports JSON-RPC 2.0 over HTTP. gRPC and HTTP+JSON/REST transports are not implemented.
-- **Blocking-mode `input-required` flows.** In blocking mode, state-change messages are skipped for waiters so the actual content reply is delivered. A blocking `message/send` against an agent that transitions to `input-required` without sending content will time out (default 120s). Use non-blocking mode with push notifications or SSE for `input-required` flows.
+- **Blocking-mode `input-required` responses may lack the question.** A blocking `message/send` returns `input-required` when the agent asks for input. With the Hub's input-needed notification, the question is returned as an artifact. If `input-required` arrives only as a content-less state change (non-Hub senders), the response carries no question; use push notifications or SSE to receive follow-up content.
 
 ## Security considerations
 

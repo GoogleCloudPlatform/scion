@@ -8,10 +8,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -31,7 +31,10 @@ var (
 var secretCmd = &cobra.Command{
 	Use:   "secret",
 	Short: "Manage agent secrets",
-	Long:  `Commands for managing secrets from within an agent container.`,
+	Long: `Commands for managing secrets from within an agent container.
+
+To read a secret value, use 'scion secret get --value'; to list secrets, use
+'scion secret list'.`,
 }
 
 var secretSetCmd = &cobra.Command{
@@ -41,7 +44,9 @@ var secretSetCmd = &cobra.Command{
 
 By default, the secret is scoped to the current agent's project. Subsequent
 agents in the same project will receive this secret automatically. Use
---scope=user to store a personal credential visible only to your agents.
+--scope=user to save a personal credential for your agents: a user-scope
+secret waits for your approval in Scion before any agent receives it, and
+--force has no effect on it.
 
 If VALUE starts with @, the remainder is treated as a file path. The file
 contents are read and base64-encoded, and --type defaults to "file".
@@ -157,106 +162,33 @@ Examples:
 			os.Exit(1)
 		}
 
-		log.Info("Secret %q stored (scope: %s)", resp.Key, resp.Scope)
+		reportSetSecretResult(cmd.OutOrStdout(), resp)
 	},
 }
 
-var secretGetCmd = &cobra.Command{
-	Use:   "get KEY",
-	Short: "Retrieve a project-scoped secret via the Hub API",
-	Long: `Retrieve a project-scoped secret from the Hub from within an agent container.
-
-The decoded secret value is printed to stdout (suitable for piping).
-
-Examples:
-  # Retrieve a secret value
-  sciontool secret get MY_API_KEY
-
-  # Use in a script
-  export API_KEY=$(sciontool secret get MY_API_KEY)`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		key := args[0]
-
-		hubClient := hub.NewClient()
-		if hubClient == nil || !hubClient.IsConfigured() {
-			log.Error("Hub client not configured. Is SCION_HUB_ENDPOINT set?")
-			os.Exit(1)
+// reportSetSecretResult reports a successful save. A pending result is
+// written to w directly, whatever the log level, because callers such as
+// capture-auth read it to tell the user that the secret waits for
+// approval in Scion.
+func reportSetSecretResult(w io.Writer, resp *hub.SetSecretResponse) {
+	if resp.Pending() {
+		msg := fmt.Sprintf("Secret %q saved, pending approval in Scion (scope: %s)", resp.Key, resp.Scope)
+		if resp.ReplacesExisting {
+			msg += "; it replaces your existing secret once approved"
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		resp, err := hubClient.GetSecret(ctx, key)
-		if err != nil {
-			log.Error("%v", err)
-			os.Exit(1)
-		}
-
-		// Decode the base64 value and write raw bytes to stdout.
-		decoded, err := base64.StdEncoding.DecodeString(resp.Value)
-		if err != nil {
-			log.Error("Failed to decode secret value: %v", err)
-			os.Exit(1)
-		}
-
-		if _, err := os.Stdout.Write(decoded); err != nil {
-			log.Error("Failed to write secret value: %v", err)
-			os.Exit(1)
-		}
-	},
-}
-
-var secretListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List available project-scoped secrets via the Hub API",
-	Long: `List metadata for all project-scoped secrets from within an agent container.
-
-Only metadata (key, type, target) is returned — secret values are not included.
-
-Examples:
-  sciontool secret list`,
-	Args: cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		hubClient := hub.NewClient()
-		if hubClient == nil || !hubClient.IsConfigured() {
-			log.Error("Hub client not configured. Is SCION_HUB_ENDPOINT set?")
-			os.Exit(1)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		resp, err := hubClient.ListSecrets(ctx)
-		if err != nil {
-			log.Error("%v", err)
-			os.Exit(1)
-		}
-
-		if len(resp.Secrets) == 0 {
-			log.Info("No secrets found")
-			return
-		}
-
-		// Print header and table using tabwriter for aligned columns.
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "KEY\tTYPE\tTARGET") //nolint:errcheck
-		fmt.Fprintln(tw, "---\t----\t------") //nolint:errcheck
-		for _, s := range resp.Secrets {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Key, s.Type, s.Target) //nolint:errcheck
-		}
-		if err := tw.Flush(); err != nil {
-			log.Error("Failed to flush output: %v", err)
-			os.Exit(1)
-		}
-	},
+		_, _ = fmt.Fprintln(w, msg)
+		return
+	}
+	log.Info("Secret %q stored (scope: %s)", resp.Key, resp.Scope)
 }
 
 func init() {
 	rootCmd.AddCommand(secretCmd)
 	secretCmd.AddCommand(secretSetCmd)
-	secretCmd.AddCommand(secretGetCmd)
-	secretCmd.AddCommand(secretListCmd)
+	// get and list moved to the scion CLI (ptone/scion#5013); set stays
+	// for the harness capture and provisioning scripts.
+	secretCmd.AddCommand(movedSubcommand("get", "secret get", "secret get --value"))
+	secretCmd.AddCommand(movedSubcommand("list", "secret list", "secret list"))
 
 	secretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), variable, file")
 	secretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")

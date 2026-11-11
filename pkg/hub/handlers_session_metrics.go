@@ -221,7 +221,7 @@ func (s *Server) authorizeSessionMetricsAccess(w http.ResponseWriter, r *http.Re
 // GET /api/v1/agents/{id}/metrics/summary
 func (s *Server) handleAgentMetricsSummary(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -296,7 +296,7 @@ func (s *Server) handleSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -338,7 +338,7 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

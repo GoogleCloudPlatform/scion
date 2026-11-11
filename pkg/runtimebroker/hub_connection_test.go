@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -66,7 +67,7 @@ func newTestServerWithInMemoryCreds(creds *brokercredentials.BrokerCredentials) 
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt)
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 }
 
 func TestHubConnection_SingleConnection(t *testing.T) {
@@ -129,7 +130,7 @@ func TestHubConnection_MultipleConnections(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// The multi-store was initialized but pointed to default dir.
 	// Manually set up the multi-store and add the prod connection.
@@ -208,6 +209,76 @@ func TestMultiKeyBrokerAuth_MatchesAnyKey(t *testing.T) {
 	if rr3.Code != http.StatusUnauthorized {
 		t.Errorf("Expected 401 for request signed with wrong key, got %d", rr3.Code)
 	}
+}
+
+// TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue covers the
+// middleware setting authenticatingHubConnCtxKey to the name of the hub
+// connection whose key verified the request, not just letting the request
+// through, so resolveHubNameForLaunch's routing rule 2 (design §3.8.5) has
+// something real to read.
+func TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue(t *testing.T) {
+	secret1 := []byte("secret-key-for-hub-1-32bytes!!!!")
+	secret2 := []byte("secret-key-for-hub-2-32bytes!!!!")
+
+	middleware := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, false)
+	middleware.UpdateKeys([]secretKeyEntry{
+		{hubName: "hub-1", secretKey: secret1},
+		{hubName: "hub-2", secretKey: secret2},
+	})
+
+	var gotHubName string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHubName = authenticatingHubConnFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	signRequest(req, "broker-1", secret2)
+	rr := httptest.NewRecorder()
+	middleware.Middleware(handler).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if gotHubName != "hub-2" {
+		t.Fatalf("authenticatingHubConnFromContext = %q, want hub-2 (the key that verified the request)", gotHubName)
+	}
+}
+
+// TestMultiKeyBrokerAuth_NoContextValueWhenUnauthenticated covers the
+// disabled/allow-unauthenticated paths, where there is no key to attribute
+// the request to.
+func TestMultiKeyBrokerAuth_NoContextValueWhenUnauthenticated(t *testing.T) {
+	middleware := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, true)
+
+	var gotHubName string
+	var sawContextValue bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHubName, sawContextValue = ctxValueOK(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil) // no HMAC headers at all
+	rr := httptest.NewRecorder()
+	middleware.Middleware(handler).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (allowUnauthenticated), got %d", rr.Code)
+	}
+	if sawContextValue {
+		t.Fatalf("expected no authenticatingHubConnCtxKey value, got %q", gotHubName)
+	}
+}
+
+// ctxValueOK is authenticatingHubConnFromContext with an explicit "was it
+// set at all" bit, for the unauthenticated-path test above.
+func ctxValueOK(ctx context.Context) (string, bool) {
+	v := ctx.Value(authenticatingHubConnCtxKey{})
+	if v == nil {
+		return "", false
+	}
+	name, ok := v.(string)
+	return name, ok
 }
 
 func TestMultiKeyBrokerAuth_Disabled(t *testing.T) {
@@ -328,16 +399,16 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-3", ProjectID: "grove-hub2", Phase: "running"},
-			{Name: "agent-4", ProjectID: "grove-shared", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-3", ProjectID: "project-hub2", Phase: "running"},
+			{Name: "agent-4", ProjectID: "project-shared", Phase: "running"},
 		},
 	}
 
-	// Filter: only include grove-hub1 projects
+	// Filter: only include project-hub1 projects
 	projectFilter := func(projectID string) bool {
-		return projectID == "grove-hub1"
+		return projectID == "project-hub1"
 	}
 
 	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, projectFilter, slog.Default())
@@ -353,17 +424,17 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 
-	// Should only include grove-hub1 (2 agents), not grove-hub2 or grove-shared
+	// Should only include project-hub1 (2 agents), not project-hub2 or project-shared
 	if len(heartbeat.Projects) != 1 {
 		t.Errorf("Expected 1 project in heartbeat (filtered), got %d", len(heartbeat.Projects))
 	}
 
-	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "grove-hub1" {
-		t.Errorf("Expected grove-hub1, got %q", heartbeat.Projects[0].ProjectID)
+	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "project-hub1" {
+		t.Errorf("Expected project-hub1, got %q", heartbeat.Projects[0].ProjectID)
 	}
 
 	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].AgentCount != 2 {
-		t.Errorf("Expected 2 agents in grove-hub1, got %d", heartbeat.Projects[0].AgentCount)
+		t.Errorf("Expected 2 agents in project-hub1, got %d", heartbeat.Projects[0].AgentCount)
 	}
 }
 
@@ -371,8 +442,8 @@ func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-2", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-2", Phase: "running"},
 		},
 	}
 
@@ -535,8 +606,8 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 	if !ok {
 		t.Fatal("expected error object in response")
 	}
-	if errObj["code"] != "global_grove_disabled" {
-		t.Errorf("expected error code 'global_grove_disabled', got %q", errObj["code"])
+	if errObj["code"] != "global_project_disabled" {
+		t.Errorf("expected error code 'global_project_disabled', got %q", errObj["code"])
 	}
 }
 
@@ -575,8 +646,8 @@ func TestGlobalProjectRejection_WithProjectID_MultiHub(t *testing.T) {
 
 	body := `{
 		"name": "scoped-agent",
-		"groveId": "my-project",
-		"grovePath": "/some/path/.scion",
+		"projectId": "my-project",
+		"projectPath": "/some/path/.scion",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -606,8 +677,8 @@ func TestGlobalProjectRejection_GitProjectWithProjectID_NoPath_MultiHub(t *testi
 	srv.hubMu.Unlock()
 
 	body := `{
-		"name": "git-grove-agent",
-		"groveId": "abc-123-grove-id",
+		"name": "git-project-agent",
+		"projectId": "abc-123-project-id",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -816,7 +887,7 @@ func TestCredentialWatcher_AddConnection(t *testing.T) {
 	}
 
 	// Start with one connection file
-	creds1 := makeTestCreds("hub-one", "broker-1", "http://hub1.example.com")
+	creds1 := makeTestCreds("hub-one", "broker-1", "https://hub1.example.com")
 	data1, _ := json.MarshalIndent(creds1, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-one.json"), data1, 0600); err != nil {
 		t.Fatal(err)
@@ -829,7 +900,7 @@ func TestCredentialWatcher_AddConnection(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Manually set up multi-store and load initial connections
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
@@ -854,7 +925,7 @@ func TestCredentialWatcher_AddConnection(t *testing.T) {
 	}
 
 	// Add a new credential file
-	creds2 := makeTestCreds("hub-two", "broker-2", "http://hub2.example.com")
+	creds2 := makeTestCreds("hub-two", "broker-2", "https://hub2.example.com")
 	data2, _ := json.MarshalIndent(creds2, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-two.json"), data2, 0600); err != nil {
 		t.Fatal(err)
@@ -888,13 +959,13 @@ func TestCredentialWatcher_RemoveConnection(t *testing.T) {
 	}
 
 	// Start with two connections
-	creds1 := makeTestCreds("hub-one", "broker-1", "http://hub1.example.com")
+	creds1 := makeTestCreds("hub-one", "broker-1", "https://hub1.example.com")
 	data1, _ := json.MarshalIndent(creds1, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-one.json"), data1, 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	creds2 := makeTestCreds("hub-two", "broker-2", "http://hub2.example.com")
+	creds2 := makeTestCreds("hub-two", "broker-2", "https://hub2.example.com")
 	data2, _ := json.MarshalIndent(creds2, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-two.json"), data2, 0600); err != nil {
 		t.Fatal(err)
@@ -906,7 +977,7 @@ func TestCredentialWatcher_RemoveConnection(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 	multiCreds, _ := srv.multiCredStore.List()
@@ -955,10 +1026,10 @@ func TestCredentialWatcher_RemoveConnection(t *testing.T) {
 func TestBuildAuthMiddleware_NoKeys(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerAuthEnabled = true
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 	// With no connections and no keys, middleware should be nil
-	if srv.brokerAuthMiddleware != nil {
+	if srv.loadBrokerMiddleware() != nil {
 		t.Error("expected nil middleware when no keys available")
 	}
 }
@@ -974,9 +1045,9 @@ func TestBuildAuthMiddleware_WithKeys(t *testing.T) {
 	cfg.InMemoryCredentials = creds
 	cfg.BrokerAuthEnabled = true
 
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
-	if srv.brokerAuthMiddleware == nil {
+	if srv.loadBrokerMiddleware() == nil {
 		t.Error("expected middleware to be created when keys available")
 	}
 }
@@ -1001,7 +1072,7 @@ func TestRuntimeBroker_DefaultAuth_DeniesUnauthenticatedRequests(t *testing.T) {
 	cfg.HubEndpoint = "http://localhost:8080"
 	cfg.InMemoryCredentials = creds
 
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
 	w := httptest.NewRecorder()
@@ -1019,7 +1090,7 @@ func TestValidateBrokerAuthStartup_HubModeWithoutKeysLoopbackAllowed(t *testing.
 	cfg.HubEndpoint = "http://localhost:9810"
 	cfg.InMemoryCredentials = nil
 
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	if err := srv.validateBrokerAuthStartup(); err != nil {
 		t.Fatalf("loopback hub mode without keys should be allowed (pending registration), got: %v", err)
 	}
@@ -1032,7 +1103,7 @@ func TestValidateBrokerAuthStartup_HubModeWithoutKeysNonLoopbackFails(t *testing
 	cfg.HubEndpoint = "http://localhost:9810"
 	cfg.InMemoryCredentials = nil
 
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	if err := srv.validateBrokerAuthStartup(); err == nil {
 		t.Fatal("non-loopback hub mode without keys should fail")
 	}
@@ -1050,7 +1121,7 @@ func TestValidateBrokerAuthStartup_NonLoopbackPermissiveModeFails(t *testing.T) 
 	cfg.InMemoryCredentials = creds
 	cfg.BrokerAuthStrictMode = false
 
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	if err := srv.validateBrokerAuthStartup(); err == nil {
 		t.Fatal("expected startup validation to fail for non-loopback host without strict auth")
 	}
@@ -1124,7 +1195,7 @@ func TestColocated_RemoteConnection_GetsHeartbeat(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	conn, err := srv.createHubConnection("hub-prod", remoteCreds)
 	if err != nil {
@@ -1177,7 +1248,7 @@ func TestColocated_ComboMode_HeartbeatPerConnection(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Add remote connection from multi-store
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
@@ -1262,7 +1333,7 @@ func TestColocated_CredentialWatcher_PreservesLocalConnection(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Manually set up multi-store and add remote
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
@@ -1342,7 +1413,7 @@ func TestColocated_CredentialWatcher_AddRemoteAlongsideLocal(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 
@@ -1451,7 +1522,7 @@ func TestColocated_MultipleRemoteConnections(t *testing.T) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 	multiCreds, _ := srv.multiCredStore.List()

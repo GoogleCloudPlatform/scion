@@ -1,0 +1,149 @@
+package runtime
+
+import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"os"
+	"path/filepath"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+)
+
+var updatePodGolden = flag.Bool("update-pod-golden", false, "rewrite testdata/k8s_pod_golden from the current buildPod output")
+
+// podGoldenCases are representative run configs whose pod specs are pinned
+// byte for byte. They cover every file-carrying volume, the telemetry
+// credential env var, the Secrets Store CSI path and user volumes inside and
+// outside the home.
+func podGoldenCases() []struct {
+	name string
+	gke  bool
+	cfg  RunConfig
+} {
+	files := homeFileConfig()
+	files.ResolvedSecrets = append(files.ResolvedSecrets, api.ResolvedSecret{
+		Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/telemetry.json", Value: "c", Source: "user",
+	})
+
+	gke := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "GEMINI_OAUTH", Type: "file", Target: "~/.gemini/oauth_creds.json", Value: "tok", Source: "user", Ref: "projects/p/secrets/s"},
+			{Name: "TLS_CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "cert", Source: "user", Ref: "projects/p/secrets/c"},
+			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk", Source: "user", Ref: "projects/p/secrets/k"},
+		},
+	}
+
+	volumes := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Volumes: []api.VolumeMount{
+			{Type: "gcs", Bucket: "b1", Target: "/data"},
+			{Type: "gcs", Bucket: "b2", Target: "/home/scion/cache", ReadOnly: true},
+		},
+	}
+
+	// userVolumes: every `volumes:` shape on a pod (ptone/scion#5837):
+	// gcs volumes become CSI volume mounts, the others are skipped.
+	userVolumes := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Volumes: []api.VolumeMount{
+			{Type: "gcs", Bucket: "b1", Prefix: "p/q", Mode: "ro,implicit-dirs", Target: "/data", ReadOnly: true},
+			{Source: "/host/data", Target: "/local"},
+			{Type: "nfs", Server: "10.0.0.2", Source: "/export/x", Target: "/nfs"},
+			{Type: "gcs", Bucket: "b2", Target: "~/gcs"},
+		},
+	}
+
+	minimal := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+	}
+
+	return []struct {
+		name string
+		gke  bool
+		cfg  RunConfig
+	}{
+		{"home-files", false, files},
+		{"gke-csi", true, gke},
+		{"volumes", false, volumes},
+		{"volumes-user", false, userVolumes},
+		{"minimal", false, minimal},
+	}
+}
+
+// TestBuildPod_PlainPodGolden pins the pod spec for pods without an NFS home:
+// it must stay byte-identical to the captured testdata.
+func TestBuildPod_PlainPodGolden(t *testing.T) {
+	for _, tc := range podGoldenCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _, _ := newTestK8sRuntime()
+			rt.GKEMode = tc.gke
+			pod, err := rt.buildPod("default", tc.cfg)
+			if err != nil {
+				t.Fatalf("buildPod: %v", err)
+			}
+			normalizeHostIDs(pod, tc.cfg)
+			got, err := json.MarshalIndent(pod, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got = append(got, '\n')
+			file := filepath.Join("testdata", "k8s_pod_golden", tc.name+".json")
+			if *updatePodGolden {
+				if err := os.WriteFile(file, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			want, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatalf("read golden: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("pod spec for %s differs from %s:\n%s", tc.name, file, got)
+			}
+		})
+	}
+}
+
+// hostGIDForGolden returns the gid normalizeHostIDs treats as the test
+// process's gid. A test may replace it to stand in a host gid without
+// changing the process gid.
+var hostGIDForGolden = os.Getgid
+
+// normalizeHostIDs replaces the values buildPod takes from the uid and gid
+// of the test process, so the testdata does not depend on the machine.
+// The FSGroup of an NFS-backed pod is the configured NFS gid, not a host
+// value, so it is kept even when it equals the host gid.
+func normalizeHostIDs(pod *corev1.Pod, cfg RunConfig) {
+	hostGID := int64(hostGIDForGolden())
+	for i := range pod.Spec.Containers {
+		for j, e := range pod.Spec.Containers[i].Env {
+			switch e.Name {
+			case "SCION_HOST_UID":
+				pod.Spec.Containers[i].Env[j].Value = "HOST_UID"
+			case "SCION_HOST_GID":
+				pod.Spec.Containers[i].Env[j].Value = "HOST_GID"
+			}
+		}
+	}
+	if cfg.WorkspaceBackendName == "nfs" {
+		return
+	}
+	if sc := pod.Spec.SecurityContext; sc != nil && sc.FSGroup != nil && *sc.FSGroup == hostGID {
+		placeholder := int64(-1)
+		sc.FSGroup = &placeholder
+	}
+}

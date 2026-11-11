@@ -1,0 +1,10 @@
+{
+  "model": "golden-model",
+  "thinking_level": null,
+  "user": "",
+  "agent_instructions": "",
+  "system_prompt": "",
+  "max_turns": 0,
+  "max_model_calls": 0,
+  "max_duration": ""
+}

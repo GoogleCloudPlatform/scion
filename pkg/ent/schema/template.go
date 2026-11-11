@@ -29,7 +29,7 @@ import (
 // legacy SQLite `templates` table (final post-V50 state; grove_id renamed to
 // project_id).
 //
-// JSON columns (config, files) are kept as raw strings to stay dialect-neutral.
+// JSON columns (agent_config, files) are kept as raw strings to stay dialect-neutral.
 // Foreign references (project_id, scope_id, owner ids) are modeled as plain
 // strings rather than edges so global/unscoped rows with empty values port
 // cleanly; edges can be added later when the full entity migrates.
@@ -57,9 +57,13 @@ func (Template) Fields() []ent.Field {
 		field.String("harness"),
 		field.String("default_harness_config").
 			Optional(),
-		field.String("image").
-			Optional(),
-		field.String("config").
+		// The retired image and config columns are dropped after migration by
+		// entc.dropTemplateLegacyColumns (ptone/scion#4224).
+		// agent_config is a derived, read-only JSON snapshot of the template's
+		// own scion-agent.{yaml,yml,json} (api.ScionConfig). Only the hub's
+		// template commit path (pkg/hub/template_commit.go) sets it; it is
+		// never accepted from an API body. ptone/scion#4217.
+		field.String("agent_config").
 			Optional(),
 		field.String("content_hash").
 			Optional(),
@@ -75,6 +79,14 @@ func (Template) Fields() []ent.Field {
 			Optional(),
 		field.String("storage_path").
 			Optional(),
+		// layout is the storage layout of the template's files
+		// (ptone/scion#4221): "" is the legacy path layout
+		// (<storage_path>/<file path>), "blobs" is the content-addressed
+		// layout (<storage_path>.blobs/<sha256 hex>). Only CreateTemplate and
+		// UpdateTemplateContent write it.
+		field.String("layout").
+			Optional().
+			Default(""),
 		field.String("files").
 			Optional(),
 		field.String("base_template").
@@ -90,8 +102,6 @@ func (Template) Fields() []ent.Field {
 			Optional(),
 		field.String("source_url").
 			Optional(),
-		field.String("visibility").
-			Default("private"),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

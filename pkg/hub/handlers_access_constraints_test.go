@@ -20,9 +20,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,82 +38,6 @@ import (
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-// b7TestServer creates a test server with B3-B6 boundary services wired.
-// The dev user is automatically granted constraint admin + read permissions.
-func b7TestServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-
-	// The dev user is already seeded by testServer → New() → seedDevUser() with
-	// a super-admin role binding. Super-admin includes all permissions from the
-	// registry, but access_constraint.admin is intentionally excluded from the
-	// hub-admin built-in role (it requires explicit binding). For tests that need
-	// admin-level access, add a dedicated role binding.
-	rd := createTestRoleDefinition(t, s, "test-boundary-admin", store.RoleScopeSystem,
-		[]string{PermissionConstraintAdmin, PermissionConstraintRead,
-			"agent.read", "agent.create", "agent.delete", "project.read"})
-	pvSeedRoleBinding(t, s, rd.ID, "user", DevUserID, store.RoleScopeSystem, "")
-
-	// Ensure B3-B6 services are initialized.
-	if srv.previewService == nil {
-		srv.initBoundaryServices()
-	}
-
-	return srv, s
-}
-
-// b7SeedConstraint creates a constraint directly in the store for testing reads.
-// Targets a specific seeded user to avoid restricting the dev admin.
-func b7SeedConstraint(t *testing.T, s store.Store, name string) *store.AccessConstraint {
-	t.Helper()
-
-	// Seed a target user for the constraint subject.
-	targetUserID := pvSeedUser(t, s, "constraint-target-"+name)
-
-	principalType := "user"
-	c := &store.AccessConstraint{
-		Name:                 name,
-		Purpose:              "Test constraint",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &principalType,
-		SubjectPrincipalID:   &targetUserID,
-		ScopeType:            store.RoleScopeSystem,
-		ScopeID:              "",
-		MaximumPermissions:   []string{"agent.read", "agent.create"},
-		CreatedBy:            DevUserID,
-		UpdatedBy:            DevUserID,
-	}
-	created, err := s.CreateAccessConstraint(t.Context(), c)
-	require.NoError(t, err)
-	return created
-}
-
-// doRequestHeaders performs an HTTP request with custom headers against the test server.
-func doRequestHeaders(t *testing.T, srv *Server, method, path string, body interface{}, headers map[string]string) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		if err != nil {
-			t.Fatalf("failed to marshal body: %v", err)
-		}
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
 
 // ---------------------------------------------------------------------------
 // 1. List endpoint with cursor/filter/sort
@@ -723,12 +651,70 @@ func TestB7_GovernanceErrorStatus(t *testing.T) {
 		{ErrCodeRevisionConflict, http.StatusConflict},
 		{ErrCodeRecoveryDisabledImmutable, http.StatusConflict},
 		{ErrCodeInvalidRequest, http.StatusBadRequest},
+		{ErrCodePreviewTokenExpired, http.StatusConflict},
+		{ErrCodePreviewTokenReplay, http.StatusConflict},
+		{ErrCodePreviewActorMismatch, http.StatusForbidden},
+		{ErrCodePreviewOperationMismatch, http.StatusBadRequest},
+		{ErrCodePreviewConstraintMismatch, http.StatusBadRequest},
+		{ErrCodePreviewDraftModified, http.StatusConflict},
+		{ErrCodePreviewRevisionMismatch, http.StatusConflict},
+		{ErrCodePreviewStateMismatch, http.StatusConflict},
+		{ErrCodePreviewTokenInvalid, http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			assert.Equal(t, tt.expected, governanceErrorStatus(tt.code))
 		})
+	}
+}
+
+// TestB7_PreviewTokenCodes_SameStatusOnCommitPath pins that every preview
+// token error code (each ErrCodePreview* constant declared in the non-test
+// sources of pkg/hub and its guard-scanned areas) answers the same status on
+// the governance commit path as on the token error path, and never 500, so a
+// new code cannot be left out of governanceErrorStatus.
+func TestB7_PreviewTokenCodes_SameStatusOnCommitPath(t *testing.T) {
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: finds the ErrCodePreview* constants wherever they are declared.
+	files, err := globGuardScanDirs(".", "*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	codes := map[string]string{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, parser.SkipObjectResolution)
+		require.NoError(t, err, f)
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, name := range vs.Names {
+					if !strings.HasPrefix(name.Name, "ErrCodePreview") {
+						continue
+					}
+					if i >= len(vs.Values) {
+						t.Fatalf("%s has no explicit value; preview codes must be string literals", name.Name)
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					require.True(t, ok && lit.Kind == token.STRING, "%s must be a string literal", name.Name)
+					code, err := strconv.Unquote(lit.Value)
+					require.NoError(t, err)
+					codes[name.Name] = code
+				}
+			}
+		}
+	}
+	require.Contains(t, codes, "ErrCodePreviewConstraintMismatch", "the source scan must find the preview codes")
+	for name, code := range codes {
+		got := governanceErrorStatus(code)
+		assert.Equal(t, tokenErrorStatus(code), got, "%s (%s)", name, code)
+		assert.NotEqual(t, http.StatusInternalServerError, got, "%s (%s)", name, code)
 	}
 }
 
@@ -741,6 +727,7 @@ func TestB7_TokenErrorStatus(t *testing.T) {
 		{ErrCodePreviewTokenReplay, http.StatusConflict},
 		{ErrCodePreviewActorMismatch, http.StatusForbidden},
 		{ErrCodePreviewOperationMismatch, http.StatusBadRequest},
+		{ErrCodePreviewConstraintMismatch, http.StatusBadRequest},
 		{ErrCodePreviewDraftModified, http.StatusConflict},
 		{ErrCodePreviewRevisionMismatch, http.StatusConflict},
 		{ErrCodePreviewStateMismatch, http.StatusConflict},
@@ -883,6 +870,68 @@ func TestB7_PreviewTokenReplay(t *testing.T) {
 	secondResp := doRequest(t, srv, http.MethodPost,
 		"/api/v1/admin/access-constraints", createBody)
 	assert.NotEqual(t, http.StatusCreated, secondResp.Code, "replay should be rejected: %s", secondResp.Body.String())
+}
+
+// TestB7_DeleteCommit_PreviewTokenRefusalStatus pins that a preview-token
+// refusal on the delete commit path answers its 4xx with the token code: a
+// delete token for constraint A sent to delete constraint B answers 400
+// preview_constraint_mismatch and leaves B in place, a create token sent to a
+// delete answers 400 preview_operation_mismatch, and the delete token still
+// deletes A.
+func TestB7_DeleteCommit_PreviewTokenRefusalStatus(t *testing.T) {
+	srv, s := b7TestServer(t)
+	a := b7SeedConstraint(t, s, "token-status-a")
+	b := b7SeedConstraint(t, s, "token-status-b")
+	require.Equal(t, a.Revision, b.Revision, "only the constraint ID may differ")
+
+	preview := func(body previewCreateRequest) string {
+		t.Helper()
+		resp := doRequest(t, srv, http.MethodPost, "/api/v1/admin/access-constraint-previews", body)
+		require.Equal(t, http.StatusOK, resp.Code, "preview body: %s", resp.Body.String())
+		var result PreviewResult
+		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &result))
+		require.NotEmpty(t, result.PreviewToken)
+		return result.PreviewToken
+	}
+	deleteWith := func(id, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		return doRequestHeaders(t, srv, http.MethodDelete, "/api/v1/admin/access-constraints/"+id, nil,
+			map[string]string{"X-Preview-Token": token})
+	}
+	requireRefusal := func(resp *httptest.ResponseRecorder, status int, code string) {
+		t.Helper()
+		require.Equal(t, status, resp.Code, "body: %s", resp.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &errResp))
+		assert.Equal(t, code, errResp.Error.Code)
+	}
+
+	deleteToken := preview(previewCreateRequest{
+		Operation:    "delete",
+		ConstraintID: a.ID,
+		BaseRevision: strconv.FormatInt(a.Revision, 10),
+	})
+
+	requireRefusal(deleteWith(b.ID, deleteToken), http.StatusBadRequest, ErrCodePreviewConstraintMismatch)
+	_, err := s.GetAccessConstraint(t.Context(), b.ID)
+	require.NoError(t, err, "B must remain")
+
+	createToken := preview(previewCreateRequest{
+		Operation: "create",
+		Draft: &previewDraftRequest{
+			Name:               "token-status-create",
+			Purpose:            "Test token status",
+			Subject:            subjectSelectorRequest{Kind: "principal", PrincipalType: "user", PrincipalID: *b.SubjectPrincipalID},
+			Scope:              constraintScopeRequest{Type: "system"},
+			MaximumPermissions: []string{"agent.read"},
+		},
+	})
+	requireRefusal(deleteWith(b.ID, createToken), http.StatusBadRequest, ErrCodePreviewOperationMismatch)
+
+	resp := deleteWith(a.ID, deleteToken)
+	require.Equal(t, http.StatusOK, resp.Code, "the token must still delete A: %s", resp.Body.String())
+	_, err = s.GetAccessConstraint(t.Context(), a.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
 }
 
 // ---------------------------------------------------------------------------

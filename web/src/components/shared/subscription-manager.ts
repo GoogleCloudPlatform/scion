@@ -27,6 +27,12 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import type { Subscription, SubscriptionScope } from '../../shared/types.js';
+import { formatRelative } from '../../utils/time.js';
+import {
+  ALL_TRIGGERS,
+  DEFAULT_TRIGGERS,
+  triggerLabel,
+} from '../../shared/notification-triggers.js';
 
 interface SubscriptionTemplate {
   id: string;
@@ -36,16 +42,6 @@ interface SubscriptionTemplate {
   projectId: string;
   createdBy: string;
 }
-
-const DEFAULT_TRIGGERS = ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED'];
-const ALL_TRIGGERS = [
-  'COMPLETED',
-  'WAITING_FOR_INPUT',
-  'LIMITS_EXCEEDED',
-  'STALLED',
-  'ERROR',
-  'DELETED',
-];
 
 @customElement('scion-subscription-manager')
 export class ScionSubscriptionManager extends LitElement {
@@ -117,7 +113,7 @@ export class ScionSubscriptionManager extends LitElement {
       } else if (Array.isArray(data)) {
         this.subscriptions = data;
       } else {
-        this.subscriptions = (data as { subscriptions?: Subscription[] }).subscriptions || [];
+        this.subscriptions = data.subscriptions || [];
       }
     } catch (err) {
       console.error('Failed to load subscriptions:', err);
@@ -254,29 +250,6 @@ export class ScionSubscriptionManager extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to delete subscription';
     } finally {
       this.deletingId = null;
-    }
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
     }
   }
 
@@ -453,7 +426,7 @@ export class ScionSubscriptionManager extends LitElement {
                             this.editTriggers = next;
                           }}
                         />
-                        <span>${this.triggerLabel(trigger)}</span>
+                        <span>${triggerLabel(trigger)}</span>
                       </label>
                     `
                   )}
@@ -462,7 +435,7 @@ export class ScionSubscriptionManager extends LitElement {
             : html`<span class="meta-text">${triggers}</span>`}
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(sub.createdAt)}</span>
+          <span class="meta-text">${formatRelative(sub.createdAt)}</span>
         </td>
         <td class="actions-cell">
           ${isEditing
@@ -584,7 +557,7 @@ export class ScionSubscriptionManager extends LitElement {
                       }}
                     />
                     <span class="checkbox-text">
-                      <span>${this.triggerLabel(trigger)}</span>
+                      <span>${triggerLabel(trigger)}</span>
                       <span class="checkbox-description">${this.triggerDescription(trigger)}</span>
                     </span>
                   </label>
@@ -607,31 +580,12 @@ export class ScionSubscriptionManager extends LitElement {
     `;
   }
 
-  private triggerLabel(trigger: string): string {
-    switch (trigger) {
-      case 'COMPLETED':
-        return 'Completed';
-      case 'WAITING_FOR_INPUT':
-        return 'Waiting for Input';
-      case 'LIMITS_EXCEEDED':
-        return 'Limits Exceeded';
-      case 'STALLED':
-        return 'Stalled';
-      case 'ERROR':
-        return 'Error';
-      case 'DELETED':
-        return 'Deleted';
-      default:
-        return trigger;
-    }
-  }
-
   private triggerDescription(trigger: string): string {
     switch (trigger) {
       case 'COMPLETED':
         return 'Agent finished its task.';
       case 'WAITING_FOR_INPUT':
-        return 'Agent needs human input to continue.';
+        return 'Agent is waiting on its parent to continue.';
       case 'LIMITS_EXCEEDED':
         return 'Agent exceeded turn or model call limits.';
       case 'STALLED':

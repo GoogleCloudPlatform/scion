@@ -1,0 +1,763 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package artifacts
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// ErrNotFound is returned by Store lookups when no live row matches.
+var ErrNotFound = errors.New("artifacts: not found")
+
+// ErrConflict is returned when a write does not apply to the current state:
+// a key already taken, a version that is no longer pending, or a version
+// whose files have not all arrived.
+var ErrConflict = errors.New("artifacts: conflict")
+
+// ErrTooManyLinks is returned by CreateLink when an artifact already has
+// the maximum number of unexpired share links.
+var ErrTooManyLinks = errors.New("artifacts: too many share links")
+
+// ErrTooManyGrants is returned by PutGrant when an artifact already has
+// the maximum number of principal and scope grants.
+var ErrTooManyGrants = errors.New("artifacts: too many grants")
+
+// ErrHomeGrantAdmin is returned when a write would make the scope grant of
+// an artifact's home scope an admin grant (PutGrant), or move an artifact
+// to a scope that holds an admin grant on it (UpdateArtifact). The home
+// project's grant is read or write only.
+var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
+
+// ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
+// scope other than the artifact's home while sharing across scopes is off.
+var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
+
+// ErrStewardPrecondition is returned by a store write made under a steward
+// authority (Actor.Expect set) when, under the artifact's lock, its home
+// or owner no longer matches the state the authority was decided against
+// (a concurrent move or ownership transfer). It wraps ErrNotFound, so a
+// caller that maps ErrNotFound to 404 answers it the same way, as for a
+// concurrent delete; nothing is written.
+var ErrStewardPrecondition = fmt.Errorf("%w: the artifact's home or owner changed", ErrNotFound)
+
+// ErrStewardActionNotAllowed is returned by a store write made under a
+// steward authority that a steward may never make: an admin grant
+// (PutGrant) or a move (UpdateArtifact). The service refuses both before
+// the store is asked; the store refuses them again so no other path can
+// make them.
+var ErrStewardActionNotAllowed = errors.New("artifacts: a steward may not give admin or move an artifact")
+
+// ErrTooManyPending is returned by CreateVersion when an artifact already
+// has the maximum number of pending versions.
+var ErrTooManyPending = errors.New("artifacts: too many pending versions")
+
+// ErrStaleBase is returned by FinalizeVersion when the artifact's current
+// version is no longer the base version the caller checked against.
+var ErrStaleBase = errors.New("artifacts: current version changed")
+
+// ErrPendingNewer is returned by FinalizeVersion when a publish version
+// newer than the base is still pending or finalizing.
+var ErrPendingNewer = errors.New("artifacts: a newer version is being published")
+
+// ErrAttachmentNotShareable is returned by every store write that would
+// share, version or change a row of an attachment scope (PutGrant,
+// CreateLink, CreateVersion, UpdateArtifact, SetExpiry):
+// an attachment is exactly as readable as its message, and lives as long.
+var ErrAttachmentNotShareable = errors.New("artifacts: attachments cannot be shared or changed")
+
+// ErrAttachmentNotOwned is returned by BindAttachment when the upload was
+// made by someone other than the sender.
+var ErrAttachmentNotOwned = errors.New("artifacts: the attachment was uploaded by someone else")
+
+// ErrAttachmentBound is returned by BindAttachment when the attachment is
+// no longer an unsent upload: it was already sent in a message.
+var ErrAttachmentBound = errors.New("artifacts: the attachment was already sent")
+
+// Version kinds.
+const (
+	VersionKindPublish = "publish"
+	VersionKindReview  = "review"
+	// VersionKindAttachment is the one version of a web-chat attachment.
+	VersionKindAttachment = "attachment"
+)
+
+// Version states. A version is pending while its files upload (two-step
+// publish), finalizing while one finalize request completes it, and ready
+// once every file is stored. The single-file fast path writes ready
+// directly.
+const (
+	VersionStatePending    = "pending"
+	VersionStateFinalizing = "finalizing"
+	VersionStateReady      = "ready"
+	VersionStateFailed     = "failed"
+)
+
+// Grant subject kinds.
+const (
+	// SubjectScope grants every principal the host authorizes in the scope
+	// named by the subject ref. The home-scope read grant is one of these.
+	SubjectScope = "scope"
+	// SubjectPrincipal grants one principal. Its subject ref is
+	// PrincipalRef(kind, ref).
+	SubjectPrincipal = "principal"
+	// SubjectLink is a share link. Its subject ref is the hash of the link
+	// token, never the token itself.
+	SubjectLink = "link"
+)
+
+// Grant permissions. Read, write and admin are each stronger than the one
+// before. Review (ptone/scion#4538), for a user principal only, is apart
+// from that ladder: it appends versions of kind review only, gives no read
+// of its own, and counts only while its holder reads the artifact through
+// another path (the home project or a grant to one of the holder's
+// projects).
+const (
+	GrantRead   = "read"
+	GrantReview = "review"
+	GrantWrite  = "write"
+	GrantAdmin  = "admin"
+)
+
+// PrincipalRef is the subject ref of a principal grant.
+func PrincipalRef(kind, ref string) string { return kind + ":" + ref }
+
+// Artifact is a row of the artifact table.
+type Artifact struct {
+	ID        string
+	ScopeKind string
+	ScopeRef  string
+	OwnerKind string
+	OwnerRef  string
+	// Key is the publisher-chosen stable key, or "" when none was given.
+	Key   string
+	Title string
+	// CurrentSeq is the seq of the current version, or 0 when the artifact
+	// has no ready version yet.
+	CurrentSeq int
+	ExpiresAt  *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	DeletedAt  *time.Time
+	// OrphanedAt is when the owner liveness reconciler found the owner
+	// gone, or nil while the owner is live (or was never checked).
+	OrphanedAt *time.Time
+	// SponsorRef is, for an artifact owned by an agent in a project scope,
+	// the id of the user at the root of the agent's recorded delegation
+	// chain when the artifact was created (ptone/scion#6028): the agent's
+	// delegating user, as SponsorRecorder answered at creation or the
+	// sponsor backfill recorded later for an older artifact. It is ""
+	// when nothing was recorded: a user-owned artifact, an attachment, an
+	// artifact created before sponsors were recorded and not backfilled,
+	// or one whose delegating user could not be resolved. The creation-time
+	// value stands: nothing updates a recorded value. It never gives
+	// access by itself; the steward and review clauses check the user
+	// again on every request.
+	SponsorRef string
+	// MessageProjectID is, for an attachment bound to a message, the project
+	// of that message as the hub derived it at bind time (ptone/scion#4596):
+	// nil while unknown (an unbound upload, or a row bound before migration
+	// 0010_attachment_project), "" when the message has no project. nil and
+	// "" are distinct values and are never converted into each other. Rows
+	// that are not attachments always read nil.
+	MessageProjectID *string
+}
+
+// ArtifactRef names an artifact and its home scope.
+type ArtifactRef struct {
+	ID       string
+	ScopeRef string
+}
+
+// Version is a row of the artifact_version table.
+type Version struct {
+	ID            string
+	ArtifactID    string
+	Seq           int
+	Kind          string
+	EntryPath     string
+	Note          string
+	TotalBytes    int64
+	FileCount     int
+	CreatedByKind string
+	CreatedByRef  string
+	CreatedAt     time.Time
+	State         string
+	// FailReason is why a failed version stopped being pending (one of the
+	// FailReason constants), or "" for a version that is not failed or was
+	// failed before reasons were recorded.
+	FailReason string
+}
+
+// Reasons a version stopped being pending without becoming ready
+// (ptone/scion#4577). They are fixed codes, shown as they are in the API.
+const (
+	// FailReasonUnmarkedChanges: a review changed text outside its marks.
+	FailReasonUnmarkedChanges = "unmarked_changes"
+	// FailReasonStaleReview: the version a review was started from was no
+	// longer the latest.
+	FailReasonStaleReview = "stale_review"
+	// FailReasonNewerPublishPending: a newer publish was in progress when
+	// the review was finalized.
+	FailReasonNewerPublishPending = "newer_publish_pending"
+	// FailReasonExpired: the upload was abandoned and reaped after
+	// PendingVersionTTL.
+	FailReasonExpired = "expired"
+	// FailReasonDiscarded is reported for a failed version recorded before
+	// reasons were stored.
+	FailReasonDiscarded = "discarded"
+)
+
+// File origins.
+const (
+	// FileOriginUpload is a file whose bytes the publisher sent.
+	FileOriginUpload = "upload"
+	// FileOriginRemote is a remote resource the hub fetched at publish time.
+	FileOriginRemote = "remote"
+)
+
+// Fetch statuses of a remote file.
+const (
+	FetchStatusOK     = "ok"
+	FetchStatusFailed = "failed"
+)
+
+// File is a row of the artifact_file table: one file in a version's
+// manifest. SHA256 is the lowercase hex digest that addresses the blob, or
+// "" for a remote file whose fetch failed. Origin is FileOriginUpload (the
+// default when empty) or FileOriginRemote; SourceURL, FetchStatus and
+// FetchError describe a remote file and are "" for uploads.
+type File struct {
+	VersionID   string
+	Path        string
+	Size        int64
+	SHA256      string
+	MediaType   string
+	Origin      string
+	SourceURL   string
+	FetchStatus string
+	FetchError  string
+	// Pending is true while the bytes of an uploaded file of a pending
+	// version have not arrived. Files of ready versions are never pending.
+	Pending bool
+}
+
+// Grant is a row of the artifact_grant table.
+type Grant struct {
+	ID           string
+	ArtifactID   string
+	SubjectKind  string
+	SubjectRef   string
+	Permission   string
+	ExpiresAt    *time.Time
+	CreatedByRef string
+	CreatedAt    time.Time
+}
+
+// Store is the only access point to the artifact_* tables.
+//
+// The tables are created by Init with CREATE TABLE IF NOT EXISTS, outside
+// the hub's Ent migration graph, so the service owns its schema (design D3)
+// and can move to a standalone deployment with its data. Init creates every
+// table of the data model; later schema changes are recorded in the
+// artifact_migrations ledger.
+type Store interface {
+	// Init creates the artifact_* tables and indexes if they do not exist
+	// and records applied migrations. It is idempotent and safe to run on
+	// every hub start, including from several hubs at once on Postgres.
+	Init(ctx context.Context) error
+
+	// CreatePublished writes a new artifact together with its first,
+	// ready version, that version's files and the given grants, in one
+	// transaction. The artifact's CurrentSeq is set to v.Seq.
+	CreatePublished(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error
+
+	// CreatePending writes a new artifact together with its first version,
+	// which must be pending, that version's manifest and the given grants,
+	// in one transaction. The artifact has no current version until the
+	// version is finalized. When another live artifact already holds a's
+	// key for the same owner and scope, it returns ErrConflict.
+	CreatePending(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error
+
+	// CreateVersion appends the pending version v and its manifest to an
+	// existing artifact, assigning v.Seq (one above the artifact's highest
+	// seq). It returns ErrTooManyPending when the artifact already has
+	// maxPending pending versions, and ErrNotFound when the artifact is
+	// absent or deleted.
+	CreateVersion(ctx context.Context, v *Version, files []File, maxPending int) error
+
+	// GetArtifactByKey returns the live artifact with the given key, owner
+	// and scope, or ErrNotFound.
+	GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error)
+
+	// MarkReceived records, in one transaction, that the bytes of file path
+	// of the pending version versionID have arrived, with their media type,
+	// and that the files named in siblings (path -> media type), which have
+	// the same digest and share the stored object, have arrived too.
+	// Siblings that are not pending files of the version with that digest
+	// are left alone. It returns ErrNotFound when path is not in the
+	// manifest and ErrConflict when the version is no longer pending.
+	MarkReceived(ctx context.Context, versionID, path, mediaType string, siblings map[string]string) error
+
+	// ClaimFinalize moves the pending version seq of an artifact to
+	// finalizing, so that exactly one finalize request completes it. A
+	// version already finalizing is taken over when its claim is older
+	// than staleBefore (left behind by a request that never completed). It
+	// returns ErrConflict when the version cannot be claimed or a file of
+	// its manifest is still pending, and ErrNotFound when it does not
+	// exist.
+	// On success it returns the claim, which FinalizeVersion and
+	// ReleaseFinalize take to act only while that claim still holds.
+	ClaimFinalize(ctx context.Context, artifactID string, seq int, staleBefore time.Time) (time.Time, error)
+
+	// ReleaseFinalize returns a finalizing version to pending, for a
+	// finalize request that could not complete it, if the version still
+	// holds the given claim.
+	ReleaseFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error
+
+	// FinalizeVersion flips the claimed (finalizing) version seq of an
+	// artifact to ready, adds the extra manifest rows (files the hub produced, such as
+	// fetched remote images) and advances the artifact's current version to
+	// seq unless a later one is already current. It returns ErrConflict when
+	// the version is not finalizing under the given claim, and the updated
+	// artifact otherwise. When base is above 0, base must be below seq and
+	// still the artifact's current version (otherwise ErrStaleBase), and no
+	// publish version between base and seq may be pending or finalizing
+	// (otherwise ErrPendingNewer), all checked under the same lock that
+	// advances the current version; on either error nothing changes.
+	// Pending review versions do not count: a review never shadows another
+	// version, because its own base check refuses it.
+	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error)
+
+	// DiscardFinalize fails the claimed (finalizing) version seq of an
+	// artifact and drops its manifest, for a finalize that rejected the
+	// version, if the version still holds the given claim. The artifact's
+	// current version does not change. It returns ErrConflict when the
+	// claim no longer holds.
+	// reason (a FailReason constant) is recorded on the version.
+	DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time, reason string) error
+
+	// ListVersions returns up to limit ready versions of an artifact,
+	// newest first, with a seq below before (0 = from the newest).
+	ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
+
+	// ListVersionHistory returns up to limit versions of an artifact that
+	// are no longer pending (ready and failed), newest first, with a seq
+	// below before (0 = from the newest). A failed version carries its
+	// FailReason.
+	ListVersionHistory(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
+
+	// ReapPending marks every version still pending or finalizing that was
+	// created before cutoff as failed (reason FailReasonExpired) and drops
+	// its manifest, so its blobs are no longer referenced. An artifact left
+	// with neither a ready nor a pending version is soft-deleted, which
+	// frees its key. It handles at most limit versions per call and returns
+	// how many it reaped.
+	ReapPending(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
+	// TouchReviewSession records a heartbeat of review session rs
+	// (ptone/scion#6849): it inserts the row (started_at = now) or updates
+	// it, setting last_seen_at = now, base_seq and dirty from rs, and
+	// last_edit_at = now when edited. A beat that would create a new row
+	// while the principal already has maxPerPrincipal live sessions (seen
+	// within ReviewLiveWindow) on the artifact returns
+	// ErrTooManyReviewSessions and records nothing. A beat of an existing
+	// row is never refused, so a row that beats again after leaving the
+	// live window is not counted again.
+	TouchReviewSession(ctx context.Context, rs ReviewSession, edited bool, now time.Time, maxPerPrincipal int) error
+
+	// EndReviewSession deletes the caller's session and reports whether a
+	// row was deleted. It is idempotent: a missing row is not an error.
+	EndReviewSession(ctx context.Context, artifactID, kind, ref, sessionID string) (bool, error)
+
+	// ListOpenReviewSessions returns the sessions of the artifact seen at
+	// or after seenAfter, most recently seen first, at most
+	// maxListedReviewSessions of them.
+	ListOpenReviewSessions(ctx context.Context, artifactID string, seenAfter time.Time) ([]ReviewSession, error)
+
+	// ReapReviewSessions deletes at most limit sessions last seen before
+	// cutoff and returns how many it deleted.
+	ReapReviewSessions(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
+	// GetArtifact returns the artifact with id unless it is absent or
+	// soft-deleted, in which case it returns ErrNotFound.
+	GetArtifact(ctx context.Context, id string) (*Artifact, error)
+
+	// GetVersion returns version seq of the artifact, or ErrNotFound.
+	GetVersion(ctx context.Context, artifactID string, seq int) (*Version, error)
+
+	// ListFiles returns the manifest of a version ordered by path.
+	ListFiles(ctx context.Context, versionID string) ([]File, error)
+
+	// GetFile returns one file of a version's manifest, or ErrNotFound.
+	GetFile(ctx context.Context, versionID, path string) (*File, error)
+
+	// ListGrants returns every grant on an artifact, expired ones included,
+	// ordered by creation.
+	ListGrants(ctx context.Context, artifactID string) ([]Grant, error)
+
+	// ListGrantsFor returns every grant on each of the artifacts, expired
+	// ones included, keyed by artifact id and ordered by creation. At most
+	// MaxGrantsForIDs ids may be given.
+	ListGrantsFor(ctx context.Context, artifactIDs []string) (map[string][]Grant, error)
+
+	// ListCandidates returns live (not deleted, not expired) artifacts the
+	// query's principal owns, or that carry an unexpired read, write or
+	// admin grant naming the principal or one of the query's scopes,
+	// ordered by UpdatedAt then ID, both descending. It is a candidate
+	// query only: it decides nothing about access, and every row must
+	// still pass the service's read check before it is shown.
+	ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error)
+
+	// CreateLink adds the share link g (SubjectLink, GrantRead, a non-nil
+	// ExpiresAt, SubjectRef the token hash) to its artifact. In the same
+	// transaction it drops the artifact's link grants that expired at or
+	// before now, and it refuses with ErrTooManyLinks when maxLinks
+	// unexpired links remain. It returns ErrNotFound when the artifact is
+	// absent or deleted.
+	// It records a link_created event by actor (required) in the same
+	// transaction, with the link id and expiry, never the token or its hash.
+	CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time, actor *Actor) error
+
+	// ResolveLink returns the link grant whose subject ref is tokenHash
+	// together with its artifact, in one query, provided that at now the
+	// link is unexpired and the artifact is live (not deleted, not
+	// expired) with a current version. Every other case, a hash no link
+	// has included, returns ErrNotFound.
+	ResolveLink(ctx context.Context, tokenHash string, now time.Time) (*Artifact, *Grant, error)
+
+	// LinkActive reports whether link grant linkID of artifact artifactID
+	// exists and is unexpired at now.
+	LinkActive(ctx context.Context, artifactID, linkID string, now time.Time) (bool, error)
+
+	// RevokeLink deletes link grant linkID of the live artifact
+	// artifactID and records a link_revoked event by actor in the same
+	// transaction. It returns ErrNotFound when no such link grant exists.
+	RevokeLink(ctx context.Context, artifactID, linkID string, actor *Actor) error
+
+	// PutGrant adds the principal or scope grant g to its artifact, or,
+	// when the artifact already has a grant for the same subject, sets
+	// that grant's permission to g's (g.ID and g.CreatedAt then take the
+	// stored grant's). The GrantPut result reports which, or
+	// GrantPutUnchanged when the grant already had g's permission. Under
+	// the artifact's lock it reads the artifact's home scope and refuses an admin grant to it
+	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
+	// other scope (ErrCrossScopeDisabled). It
+	// refuses with ErrTooManyGrants when adding would exceed maxGrants
+	// principal and scope grants, and returns ErrNotFound when the artifact
+	// is absent or deleted.
+	// In the same transaction it records, by actor (required), a
+	// grant_created event, or a grant_changed event with the old and new
+	// permission when an existing grant's permission changes (none when
+	// it already had g's permission). An actor with a steward authority
+	// may not give admin (ErrStewardActionNotAllowed).
+	// It is PutGrantNotify with notify false.
+	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (GrantPut, error)
+
+	// PutGrantNotify is PutGrant for a grant whose subject may be told
+	// (Ask for review, ptone/scion#5145). With notify, under the artifact's
+	// lock it records "notified": true in the grant_created or
+	// grant_changed event's detail when the write raised the subject's
+	// level (grantRank; a created grant counts as a raise), and reports
+	// that in GrantPutResult.Notified. Without notify, or for a change that
+	// did not raise the level, it is exactly PutGrant.
+	PutGrantNotify(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool) (GrantPutResult, error)
+
+	// DeleteGrant deletes principal or scope grant grantID of artifact
+	// artifactID. It returns ErrNotFound when there is no such grant, and
+	// ErrConflict, deleting nothing, when the grant is the scope grant of
+	// the artifact's current home scope (checked under the artifact's
+	// lock, so a concurrent move cannot slip between check and delete).
+	// It records a grant_removed event by actor in the same transaction.
+	DeleteGrant(ctx context.Context, artifactID, grantID string, actor *Actor) error
+
+	// SetExpiry sets (or, with nil, clears) a live artifact's expiry,
+	// recording the change by actor, and returns the updated artifact, or
+	// ErrNotFound.
+	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time, actor *Actor) (*Artifact, error)
+
+	// UpdateArtifact applies u to a live artifact in one transaction under
+	// the artifact's lock and returns the updated artifact. It returns
+	// ErrNotFound when the artifact is absent or deleted, ErrConflict when
+	// a move would give the owner two live artifacts with the same key in
+	// the new scope, ErrTooManyGrants when a move would exceed u.MaxGrants
+	// principal and scope grants, and ErrHomeGrantAdmin when the new scope
+	// holds an admin grant on the artifact (lower it first). In the same
+	// transaction it records, by u.Actor (required), an expiry_set or
+	// expiry_cleared event for an expiry change and a moved event for a
+	// move.
+	UpdateArtifact(ctx context.Context, artifactID string, u ArtifactUpdate) (*Artifact, error)
+
+	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
+	// at or before now through DeleteArtifact (actor system, authority
+	// retention), and returns those it deleted, each with the home scope
+	// it had when the sweep found it.
+	SweepExpired(ctx context.Context, now time.Time, limit int) ([]ArtifactRef, error)
+
+	// DeleteArtifact is the one soft delete of an artifact. In one
+	// transaction it sets deleted_at, removes every grant and share link of
+	// the artifact, and records a deleted event by opts.Actor (required)
+	// with what it removed. Message references then resolve as
+	// unavailable, and the blob sweep reclaims the bytes after its grace
+	// period. It returns ErrNotFound when the artifact is absent, already
+	// deleted, (with opts.ExpiredAt) not expired at that instant, or (with
+	// opts.ScopeRef) no longer homed in that scope.
+	DeleteArtifact(ctx context.Context, artifactID string, opts DeleteOptions) (DeleteResult, error)
+
+	// ListLiveOwners returns up to limit distinct owners of live (not
+	// deleted) artifacts in (kind, ref) order, strictly after after (nil
+	// = from the start), each with how many of its live artifacts are and
+	// are not marked orphaned. The owner liveness reconciler pages through
+	// them.
+	ListLiveOwners(ctx context.Context, after *Owner, limit int) ([]Owner, error)
+
+	// CountLiveOwners counts the distinct owners ListLiveOwners would
+	// return after after, without a limit.
+	CountLiveOwners(ctx context.Context, after *Owner) (int, error)
+
+	// SetOwnerOrphaned sets (orphaned true) orphaned_at to now on up to
+	// limit live artifacts of owner that are not marked, or clears it
+	// (orphaned false) on up to limit that are, recording one orphaned or
+	// unorphaned event per artifact in the same transaction. It returns
+	// those it changed, each with its home scope; fewer than limit means none
+	// is left.
+	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error)
+
+	// SponsorBackfillDone reports whether the sponsor backfill
+	// (BackfillSponsors) has completed on this database: its ledger name,
+	// migrationSponsorBackfill, is recorded in artifact_migrations.
+	SponsorBackfillDone(ctx context.Context) (bool, error)
+
+	// ListUnsponsoredAgents returns up to limit distinct agent ids, in
+	// order and strictly greater than after ("" = from the start), that
+	// own a live artifact in a project scope with no recorded sponsor
+	// (sponsor_ref NULL).
+	ListUnsponsoredAgents(ctx context.Context, after string, limit int) ([]string, error)
+
+	// SetAgentSponsor records userID as the sponsor of every artifact of
+	// agent agentID in a project scope that has none recorded, and returns
+	// how many it changed. It never changes a recorded sponsor, and never
+	// touches a deleted artifact.
+	SetAgentSponsor(ctx context.Context, agentID, userID string) (int, error)
+
+	// MarkSponsorBackfillDone records migrationSponsorBackfill in
+	// artifact_migrations at now. Recording it again is not an error.
+	MarkSponsorBackfillDone(ctx context.Context, now time.Time) error
+
+	// ListEvents returns the artifact_event rows of an artifact, oldest
+	// first.
+	ListEvents(ctx context.Context, artifactID string) ([]Event, error)
+
+	// TouchBlob records that a write is about to store blob digest at now,
+	// so the blob sweep leaves the blob alone for the grace period. It
+	// waits for a sweep that holds the blob's state to finish.
+	TouchBlob(ctx context.Context, digest string, now time.Time) error
+
+	// MarkBlobs records, for each blob (at most MaxBlobBatch), whether a
+	// live artifact references it: a referenced blob's state is dropped;
+	// an unreferenced one is marked unreferenced since now unless it
+	// already is, and its listed generation is recorded.
+	MarkBlobs(ctx context.Context, blobs []BlobMark, now time.Time) error
+
+	// ReclaimBlobs deletes up to limit blobs marked unreferenced since at
+	// or before cutoff and not touched since cutoff. For each, in one
+	// transaction holding the blob's state row, it checks the mark, the
+	// touch and the references again, calls del
+	// with the digest and the generation recorded at marking (0 when
+	// unknown), which removes the bytes, and drops the row; a writer
+	// touching the blob meanwhile waits for that transaction. It returns
+	// how many blobs it deleted. An error from del keeps that blob and its
+	// mark and the pass goes on with the others; the pass then returns an
+	// error wrapping the first such failure. A del error that wraps
+	// context.DeadlineExceeded or context.Canceled, or a third del failure
+	// in a row (an unknown generation does not count), ends the pass, as
+	// does any other error.
+	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string, generation int64) error) (int, error)
+
+	// AddMessageRefs records that message messageID references refs, in the
+	// artifact_message_ref link table. A reference already recorded for the
+	// message and artifact is left as it is. The caller has already checked
+	// that every referenced artifact exists.
+	AddMessageRefs(ctx context.Context, messageID string, refs []MessageRef) error
+
+	// ListMessageRefs returns the references recorded for each of
+	// messageIDs, keyed by message id and ordered by artifact id. Messages
+	// without references are absent from the map.
+	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
+
+	// GetAttachment returns the live artifact of an attachment scope whose
+	// id or legacy_attachment_id is id, or ErrNotFound. It is the only
+	// lookup that returns attachment rows: GetArtifact never does.
+	GetAttachment(ctx context.Context, id string) (*Artifact, error)
+
+	// BindAttachment moves the upload artifactID to the message scope of
+	// messageID, under the artifact's row lock. It returns ErrNotFound when
+	// the artifact is absent, deleted or not an attachment,
+	// ErrAttachmentNotOwned when the upload is not scoped to
+	// PrincipalRef(ownerKind, ownerRef) or not owned by that principal, and
+	// ErrAttachmentBound when it is no longer an upload. The same statement
+	// that moves the scope sets message_project_id to messageProjectID (""
+	// is a value: the message has no project), so the project is never
+	// written without the bind, nor the bind without the project.
+	BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID, messageProjectID string, now time.Time) error
+
+	// ListMessageAttachments returns the live attachments bound to each of
+	// messageIDs, keyed by message id, each with its one file, ordered by
+	// creation. Messages without attachments are absent from the map.
+	ListMessageAttachments(ctx context.Context, messageIDs []string) (map[string][]AttachmentRow, error)
+
+	// RetireScope soft-deletes, through DeleteArtifact, every live artifact
+	// in the scope (kind, ref), up to limit, recording actor, and returns
+	// how many it deleted.
+	RetireScope(ctx context.Context, kind, ref string, actor *Actor, limit int) (int, error)
+
+	// RetireStaleUploads soft-deletes, through DeleteArtifact (actor
+	// system, authority attachment_unsent), up to limit live artifacts of
+	// the upload scope created before cutoff, and returns how many it
+	// deleted.
+	RetireStaleUploads(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
+	// RecordDeliveryRedemption records that the attachment delivery
+	// capability with nonce was redeemed at at (ptone/scion#4596). It
+	// reports true only for the first redemption of nonce: the insert does
+	// nothing on a conflict, so two concurrent redemptions record one.
+	RecordDeliveryRedemption(ctx context.Context, nonce string, at time.Time) (bool, error)
+
+	// SweepDeliveryRedemptions deletes redemption records older than
+	// before and returns how many it deleted.
+	SweepDeliveryRedemptions(ctx context.Context, before time.Time) (int, error)
+
+	// ListLiveScopeRefs returns up to limit distinct scope refs of live
+	// artifacts of scope kind, in ascending order, strictly after after
+	// ("" = from the start).
+	ListLiveScopeRefs(ctx context.Context, kind, after string, limit int) ([]string, error)
+}
+
+// AttachmentRow is one attachment ListMessageAttachments returns: the
+// artifact and the one file of its current version.
+type AttachmentRow struct {
+	Artifact Artifact
+	File     File
+}
+
+// BlobMark is one listed blob for MarkBlobs.
+type BlobMark struct {
+	Digest string
+	// Generation is the object generation the listing returned, or 0.
+	Generation int64
+}
+
+// ArtifactUpdate is a change UpdateArtifact applies.
+type ArtifactUpdate struct {
+	// HomeGrant, when set, moves the artifact to the scope it names
+	// (HomeGrant.SubjectRef). The old home scope's grant is removed; the
+	// new scope gets HomeGrant (a read grant) unless it already has a scope
+	// grant, which is kept as it is.
+	HomeGrant *Grant
+	// MaxGrants bounds the artifact's principal and scope grants after a
+	// move.
+	MaxGrants int
+	// SetExpiry applies ExpiresAt, which nil clears.
+	SetExpiry bool
+	ExpiresAt *time.Time
+	// Actor is who makes the change; required for any change.
+	Actor *Actor
+}
+
+// CandidateQuery selects rows for ListCandidates.
+type CandidateQuery struct {
+	// PrincipalKind and PrincipalRef identify the owner to match and the
+	// principal grant subject (PrincipalRef(kind, ref)). Both are required.
+	PrincipalKind string
+	PrincipalRef  string
+	// ScopeRefs are the scope grant subjects to match. Empty matches no
+	// scope grant.
+	ScopeRefs []string
+	// OwnedOnly keeps only rows the principal owns; grants are ignored.
+	OwnedOnly bool
+	// Search, when set, keeps rows whose title or key contains it,
+	// case-insensitively. It is matched literally (no wildcards).
+	Search string
+	// ReviewPending keeps only rows whose current version is a review.
+	ReviewPending bool
+	// HomeScope, when set, keeps only rows homed in this project, and
+	// with ScopeShares also those carrying an unexpired read, write or
+	// admin scope grant to it. It narrows the other conditions and never
+	// adds rows.
+	HomeScope string
+	// ScopeShares, with HomeScope, also keeps rows shared with HomeScope.
+	// Set it only for a caller authorized to read in HomeScope: which
+	// artifacts are shared with a project is that project's information.
+	ScopeShares bool
+	// SharedOnly, with HomeScope and ScopeShares, keeps only the rows
+	// homed elsewhere and shared with HomeScope.
+	SharedOnly bool
+	// After, when set, keeps rows strictly after this position in the
+	// result order.
+	After *Position
+	// Limit caps the rows returned; it must be positive.
+	Limit int
+	// Now is the instant expiry is judged at.
+	Now time.Time
+}
+
+// Position is a place in ListCandidates' order.
+type Position struct {
+	UpdatedAt time.Time
+	ID        string
+}
+
+// Candidate is one ListCandidates row: the artifact and the kind of its
+// current version ("" when it has none).
+type Candidate struct {
+	Artifact
+	CurrentKind string
+}
+
+// NewStore returns the Store for db. driverName selects the SQL dialect:
+// "postgres" or "pgx" for Postgres, anything else (including "" and
+// "sqlite") for SQLite, matching the hub's database driver names.
+func NewStore(db *sql.DB, driverName string) Store {
+	switch driverName {
+	case "postgres", "pgx":
+		return &sqlStore{db: db, dialect: dialectPostgres}
+	default:
+		return &sqlStore{db: db, dialect: dialectSQLite}
+	}
+}
+
+// GrantPut is what PutGrant did. Only GrantPutCreated and
+// GrantPutChanged changed anything, and only they record an event; the
+// decision log follows the same rule.
+type GrantPut int
+
+// GrantPutResult is what PutGrantNotify did: the GrantPut, and whether the
+// event it recorded says the subject is to be told.
+type GrantPutResult struct {
+	Put      GrantPut
+	Notified bool
+}
+
+const (
+	// GrantPutUnchanged: the subject already held the permission.
+	GrantPutUnchanged GrantPut = iota
+	// GrantPutChanged: an existing grant's permission was changed.
+	GrantPutChanged
+	// GrantPutCreated: a new grant was added.
+	GrantPutCreated
+)

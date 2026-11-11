@@ -51,9 +51,7 @@ func TemplateDomain() Domain[store.Template] {
 				Name:        fmt.Sprintf("Template %d", seq),
 				Slug:        fmt.Sprintf("template-%d-%s", seq, id[:8]),
 				Harness:     "claude",
-				Image:       "img:latest",
 				Scope:       store.TemplateScopeGlobal,
-				Visibility:  "private",
 				Status:      store.TemplateStatusActive,
 				ContentHash: fmt.Sprintf("hash-%d", seq),
 			}
@@ -76,16 +74,18 @@ func TemplateDomain() Domain[store.Template] {
 			assert.Equal(t, want.Scope, got.Scope)
 			assert.False(t, got.Created.IsZero(), "Created timestamp should be set")
 		},
+		// UpdateTemplate writes metadata only; Status and SourceURL are
+		// written by UpdateTemplateContent (ptone/scion#4967).
 		Mutate: func(e *store.Template) {
 			e.Name = "Renamed " + e.Name
-			e.Status = store.TemplateStatusArchived
+			e.Description = "changed"
 		},
 		Update: func(ctx context.Context, s store.Store, e *store.Template) error {
 			return s.UpdateTemplate(ctx, e)
 		},
 		VerifyMutated: func(t *testing.T, got *store.Template) {
 			assert.Contains(t, got.Name, "Renamed ")
-			assert.Equal(t, store.TemplateStatusArchived, got.Status)
+			assert.Equal(t, "changed", got.Description)
 		},
 		Delete: func(ctx context.Context, s store.Store, id string) error {
 			return s.DeleteTemplate(ctx, id)
@@ -124,7 +124,6 @@ func HarnessConfigDomain() Domain[store.HarnessConfig] {
 				Slug:        fmt.Sprintf("harness-%d-%s", seq, id[:8]),
 				Harness:     "claude",
 				Scope:       store.HarnessConfigScopeGlobal,
-				Visibility:  "private",
 				Status:      store.HarnessConfigStatusActive,
 				ContentHash: fmt.Sprintf("hash-%d", seq),
 			}
@@ -147,16 +146,18 @@ func HarnessConfigDomain() Domain[store.HarnessConfig] {
 			assert.Equal(t, want.Scope, got.Scope)
 			assert.False(t, got.Created.IsZero(), "Created timestamp should be set")
 		},
+		// UpdateHarnessConfig writes metadata only; Status is a content
+		// column written by UpdateHarnessConfigContent (ptone/scion#4219).
 		Mutate: func(e *store.HarnessConfig) {
 			e.Name = "Renamed " + e.Name
-			e.Status = store.HarnessConfigStatusArchived
+			e.Description = "changed"
 		},
 		Update: func(ctx context.Context, s store.Store, e *store.HarnessConfig) error {
 			return s.UpdateHarnessConfig(ctx, e)
 		},
 		VerifyMutated: func(t *testing.T, got *store.HarnessConfig) {
 			assert.Contains(t, got.Name, "Renamed ")
-			assert.Equal(t, store.HarnessConfigStatusArchived, got.Status)
+			assert.Equal(t, "changed", got.Description)
 		},
 		Delete: func(ctx context.Context, s store.Store, id string) error {
 			return s.DeleteHarnessConfig(ctx, id)

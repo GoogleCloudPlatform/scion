@@ -63,31 +63,25 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		return nil, fmt.Errorf("harness.Resolve requires a name")
 	}
 
-	var hcDir *config.HarnessConfigDir
-	var hcErr error
-	if opts.ConfigDirPath != "" {
-		hcDir, hcErr = config.LoadHarnessConfigDir(opts.ConfigDirPath)
-	} else {
-		hcDir, hcErr = config.FindHarnessConfigDir(opts.Name, opts.ProjectPath, opts.TemplatePaths...)
-	}
+	hcDir, hcErr := config.ResolveHarnessConfigDir(opts.ConfigDirPath, opts.Name, opts.ProjectPath, opts.TemplatePaths...)
 
-	entry := config.HarnessConfigEntry{Harness: opts.Name}
-	if hcDir != nil {
-		entry = hcDir.Config
-	}
-
-	// Settings overlay: profile-level overrides on top of the dir entry.
-	if opts.Settings != nil {
-		settingsEntry, _ := opts.Settings.ResolveHarnessConfig(opts.ProfileName, opts.Name)
-		entry = mergeHarnessConfigEntries(entry, settingsEntry)
-	}
-
-	if entry.Harness == "" {
-		entry.Harness = opts.Name
+	declared := declaredConfig(opts.Name, hcDir, opts.Settings, opts.ProfileName)
+	entry := withBundleReady(declared)
+	// config.yaml's agent-home path fields are checked when it is parsed;
+	// the merged entry (settings overlay applied) is checked again here so
+	// a future overlay field cannot bypass that check.
+	if err := config.ValidateHarnessHomePaths(entry); err != nil {
+		return nil, fmt.Errorf("harness-config %q: %w", opts.Name, err)
 	}
 
 	// 1. Container-script harness (provisioner block present)
 	if entry.Provisioner != nil {
+		// A provisioner that cannot run (legacy "builtin", or no command)
+		// would yield an agent without the provisioner's output; fail
+		// resolution instead (ptone/scion#611).
+		if ue := CheckProvisionerUsable(opts.Name, hcDir, entry); ue != nil {
+			return nil, ue
+		}
 		if hcDir == nil || hcDir.Path == "" {
 			return nil, fmt.Errorf("container-script harness %q requires an on-disk harness-config directory: %w", opts.Name, hcErr)
 		}
@@ -115,9 +109,11 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	}
 
 	// 2. Declarative generic. If config.yaml has declarative metadata
-	// (command/env_template/capabilities), use the declarative wrapper so
-	// callers get those fields. Otherwise fall back to the legacy Generic.
-	if hasDeclarativeMetadata(entry) {
+	// (command/env_template/capabilities/ready/delivery), use the
+	// declarative wrapper so callers get those fields. Otherwise fall back
+	// to the legacy Generic. The check reads the declared entry: a ready
+	// block filled in from the built-in bundle is not declared metadata.
+	if hasDeclarativeMetadata(declared) {
 		return &ResolvedHarness{
 			Harness:        NewDeclarativeGenericHarness(entry),
 			ConfigName:     opts.Name,
@@ -127,13 +123,87 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}, nil
 	}
 
+	// The plain Generic harness still carries the entry's ready spec (which
+	// withBundleReady fills from the built-in bundle when the entry has no
+	// block), so a built-in harness type keeps its readiness here too.
+	ready := entry.ResolvedReady()
 	return &ResolvedHarness{
-		Harness:        &Generic{},
+		Harness:        &Generic{ready: &ready},
 		ConfigName:     opts.Name,
 		ConfigDir:      hcDir,
 		Config:         entry,
 		Implementation: "generic",
 	}, nil
+}
+
+// GenericSkillsDir is the skills directory of the generic harnesses
+// (Generic, and DeclarativeGenericHarness when its entry names none).
+const GenericSkillsDir = ".scion/skills"
+
+// SkillsDirForEntry returns the skills directory of the harness Resolve
+// builds from the effective harness-config entry, without constructing a
+// harness. Resolve owns the rule; this function states it once so callers
+// that only hold an entry (such as pkg/agent's harness-config switch) do not
+// re-implement it:
+//
+//   - a provisioner block selects the container-script harness, which uses
+//     entry.SkillsDir as is (possibly empty);
+//   - otherwise a non-empty entry.SkillsDir selects the declarative generic
+//     harness, which uses it;
+//   - otherwise the generic harnesses use GenericSkillsDir.
+//
+// It does not check that the provisioner is usable: an entry whose
+// provisioner Resolve would reject still yields entry.SkillsDir.
+func SkillsDirForEntry(entry config.HarnessConfigEntry) string {
+	if entry.Provisioner != nil || entry.SkillsDir != "" {
+		return entry.SkillsDir
+	}
+	return GenericSkillsDir
+}
+
+// EffectiveConfig returns the harness-config entry a harness named name
+// runs with: hcDir's config.yaml (or a bare entry when hcDir is nil) with the
+// settings overlay for profile applied, and Harness defaulted to name. Resolve
+// builds harnesses from this entry, and pkg/agent evaluates harness-config
+// policy against it.
+func EffectiveConfig(name string, hcDir *config.HarnessConfigDir, settings *config.VersionedSettings, profile string) config.HarnessConfigEntry {
+	return withBundleReady(declaredConfig(name, hcDir, settings, profile))
+}
+
+// declaredConfig returns the entry EffectiveConfig starts from: hcDir's
+// config.yaml (or a bare entry when hcDir is nil) with the settings overlay
+// for profile applied and Harness defaulted to name, before any ready block
+// is taken from the built-in bundle.
+func declaredConfig(name string, hcDir *config.HarnessConfigDir, settings *config.VersionedSettings, profile string) config.HarnessConfigEntry {
+	entry := config.HarnessConfigEntry{Harness: name}
+	if hcDir != nil {
+		entry = hcDir.Config
+	}
+
+	// Settings overlay: profile-level overrides on top of the dir entry.
+	if settings != nil {
+		settingsEntry, _ := settings.ResolveHarnessConfig(profile, name)
+		entry = mergeHarnessConfigEntries(entry, settingsEntry)
+	}
+
+	if entry.Harness == "" {
+		entry.Harness = name
+	}
+	return entry
+}
+
+// withBundleReady returns entry with its ready block filled in from the
+// built-in bundle when it has none.
+func withBundleReady(entry config.HarnessConfigEntry) config.HarnessConfigEntry {
+	// A harness-config written before the ready block existed has none.
+	// Take the built-in bundle's block for the same harness, so the config
+	// keeps the readiness it had when readiness was keyed on the harness
+	// name. An explicit block, from the dir or an overlay, always wins; a
+	// harness with no built-in bundle keeps the delay default.
+	if entry.Ready == nil {
+		entry.Ready = embeddedReadyConfig(entry.Harness)
+	}
+	return entry
 }
 
 // mergeHarnessConfigEntries overlays settings overrides on top of the
@@ -175,6 +245,14 @@ func mergeHarnessConfigEntries(base, overlay config.HarnessConfigEntry) config.H
 	if len(overlay.Secrets) > 0 {
 		base.Secrets = overlay.Secrets
 	}
+	// Ready and delivery are replaced as whole blocks, never merged field
+	// by field: a half-merged readiness or delivery rule is confusing.
+	if overlay.Ready != nil {
+		base.Ready = overlay.Ready
+	}
+	if overlay.Delivery != nil {
+		base.Delivery = overlay.Delivery
+	}
 	return base
 }
 
@@ -189,6 +267,9 @@ func hasDeclarativeMetadata(entry config.HarnessConfigEntry) bool {
 		return true
 	}
 	if entry.ConfigDir != "" || entry.SkillsDir != "" {
+		return true
+	}
+	if entry.Ready != nil || entry.Delivery != nil {
 		return true
 	}
 	return false

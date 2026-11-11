@@ -1,0 +1,47 @@
+{
+  "profile_map": {
+    "scratch": "k8s-agents-scratch",
+    "shared": "k8s-agents-shared"
+  },
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "notice",
+      "path": "profiles.*",
+      "profiles": [
+        "scratch",
+        "shared"
+      ],
+      "message_contains": [
+        "profiles scratch, shared on target k8s-agents differ in shared_dir_size;",
+        "split into instances k8s-agents-scratch (scratch), k8s-agents-shared (shared)"
+      ]
+    },
+    {
+      "code": "legacy_field_removed",
+      "severity": "notice",
+      "path": "profiles.scratch.shared_dir_storage_backend",
+      "profiles": [
+        "scratch"
+      ],
+      "message_contains": [
+        "profiles.scratch.shared_dir_storage_backend is no longer supported",
+        "server.project_storage",
+        "volumes:"
+      ]
+    },
+    {
+      "code": "legacy_field_removed",
+      "severity": "notice",
+      "path": "profiles.shared.shared_dir_storage_backend",
+      "profiles": [
+        "shared"
+      ],
+      "message_contains": [
+        "profiles.shared.shared_dir_storage_backend is no longer supported",
+        "server.project_storage",
+        "volumes:"
+      ]
+    }
+  ]
+}

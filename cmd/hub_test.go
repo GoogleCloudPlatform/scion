@@ -15,12 +15,21 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetAuthInfo_NoAuth(t *testing.T) {
@@ -242,217 +251,62 @@ func TestIsLocalhostEndpoint(t *testing.T) {
 	assert.False(t, isLocalhostEndpoint(""))
 }
 
-func TestGetHubEnabledScope_GlobalScope(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SCION_HUB_ENDPOINT", "")
-
-	enabled := true
-	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Enabled: &enabled},
-	}
-
-	scope := getHubEnabledScope("/some/path", true, settings)
-	assert.Equal(t, "global", scope.Scope)
-	assert.False(t, scope.Inherited)
-	assert.True(t, scope.Enabled)
+// hubStatusScope returns hub status's endpoint scope for the current
+// invocation state, as runHubStatus computes it.
+func hubStatusScope(isGlobal bool) hubEndpointScope {
+	return getHubEndpointScope(isGlobal, describeUseTarget(&config.CLIContext{}))
 }
 
-func TestGetHubEnabledScope_ProjectHasOwnSetting(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+// A directory project's own hub.endpoint, and the global settings'
+// hub.endpoint, are not hub sources: hub status reports no hub.
+func TestGetHubEndpointScope_SettingsAreNotASource(t *testing.T) {
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://global-hub.example.com\n")
+	makeDirProject(t, "https://project-hub.example.com")
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman))
 
-	// Create project settings with hub.enabled
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
-		[]byte("hub:\n  enabled: true\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	enabled := true
-	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Enabled: &enabled},
-	}
-
-	scope := getHubEnabledScope(projectDir, false, settings)
-	assert.Equal(t, "project", scope.Scope)
+	scope := hubStatusScope(false)
+	assert.Equal(t, "none", scope.Source)
+	assert.Empty(t, scope.Endpoint)
 	assert.False(t, scope.Inherited)
-	assert.True(t, scope.Enabled)
 }
 
-func TestGetHubEnabledScope_InheritedFromGlobal(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+// In a directory project, the current hub is inherited (it does not come
+// from the project), as the global settings' endpoint used to be.
+func TestGetHubEndpointScope_InheritedFromContext(t *testing.T) {
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
+	saveTestContext(t, ctxTestHub, "")
+	makeDirProject(t, "")
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman))
 
-	// Create global settings with hub.enabled
-	globalDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(globalDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
-		[]byte("hub:\n  enabled: true\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create project settings WITHOUT hub.enabled
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
-		[]byte("runtime: docker\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	enabled := true
-	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Enabled: &enabled},
-	}
-
-	scope := getHubEnabledScope(projectDir, false, settings)
-	assert.Equal(t, "global", scope.Scope)
+	scope := hubStatusScope(false)
+	assert.Equal(t, "context", scope.Source)
+	assert.Equal(t, "current context", scope.Label)
 	assert.True(t, scope.Inherited)
-	assert.True(t, scope.Enabled)
-}
-
-func TestGetHubEnabledScope_DefaultWhenNothingSet(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("SCION_HUB_ENDPOINT", "")
-
-	// Create empty global dir
-	globalDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(globalDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create project settings WITHOUT hub.enabled
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	settings := &config.Settings{}
-
-	scope := getHubEnabledScope(projectDir, false, settings)
-	assert.Equal(t, "default", scope.Scope)
-	assert.False(t, scope.Inherited)
-	assert.False(t, scope.Enabled)
-}
-
-func TestGetHubEndpointScope_FromProject(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("SCION_HUB_ENDPOINT", "")
-
-	// Save original hubEndpoint and restore after test
-	origHubEndpoint := hubEndpoint
-	hubEndpoint = ""
-	defer func() { hubEndpoint = origHubEndpoint }()
-
-	// Create project settings with hub.endpoint
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
-		[]byte("hub:\n  endpoint: https://project-hub.example.com\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Endpoint: "https://project-hub.example.com"},
-	}
-
-	scope := getHubEndpointScope(projectDir, false, settings)
-	assert.Equal(t, "project", scope.Source)
-	assert.False(t, scope.Inherited)
-	assert.Equal(t, "https://project-hub.example.com", scope.Endpoint)
-}
-
-func TestGetHubEndpointScope_InheritedFromGlobal(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("SCION_HUB_ENDPOINT", "")
-
-	origHubEndpoint := hubEndpoint
-	hubEndpoint = ""
-	defer func() { hubEndpoint = origHubEndpoint }()
-
-	// Create global settings with hub.endpoint
-	globalDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(globalDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
-		[]byte("hub:\n  endpoint: https://global-hub.example.com\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create project settings WITHOUT hub.endpoint
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
-		[]byte("runtime: docker\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Endpoint: "https://global-hub.example.com"},
-	}
-
-	scope := getHubEndpointScope(projectDir, false, settings)
-	assert.Equal(t, "global", scope.Source)
-	assert.True(t, scope.Inherited)
-	assert.Equal(t, "https://global-hub.example.com", scope.Endpoint)
+	assert.Equal(t, ctxTestHub, scope.Endpoint)
 }
 
 func TestGetHubEndpointScope_FromEnv(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "https://env-hub.example.com")
+	makeDirProject(t, "")
 
-	origHubEndpoint := hubEndpoint
-	hubEndpoint = ""
-	defer func() { hubEndpoint = origHubEndpoint }()
-
-	// Create empty global dir
-	globalDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(globalDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create project settings WITHOUT hub.endpoint
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	settings := &config.Settings{}
-
-	scope := getHubEndpointScope(projectDir, false, settings)
+	scope := hubStatusScope(false)
 	assert.Equal(t, "env", scope.Source)
+	assert.Equal(t, "SCION_HUB_ENDPOINT", scope.Label)
 	assert.True(t, scope.Inherited)
 }
 
 func TestGetHubEndpointScope_FromFlag(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
-
-	origHubEndpoint := hubEndpoint
 	hubEndpoint = "https://flag-hub.example.com"
-	defer func() { hubEndpoint = origHubEndpoint }()
 
-	settings := &config.Settings{}
-
-	scope := getHubEndpointScope("/some/path", false, settings)
+	scope := hubStatusScope(false)
 	assert.Equal(t, "flag", scope.Source)
+	assert.Equal(t, "--hub flag", scope.Label)
 	assert.False(t, scope.Inherited)
 	assert.Equal(t, "https://flag-hub.example.com", scope.Endpoint)
 }
@@ -509,4 +363,278 @@ func TestParseDefaultBranch_NoMatch(t *testing.T) {
 func TestParseDefaultBranch_EmptyOutput(t *testing.T) {
 	result := parseDefaultBranch("")
 	assert.Equal(t, "", result)
+}
+
+// TestDefaultBranchProbeCmd_DisablesTerminalPrompt guards ptone/scion#3411:
+// the `hub project create` default-branch probe must never block on an
+// interactive git credential prompt, mirroring the sciontool init probe
+// (configureGitCommand).
+func TestDefaultBranchProbeCmd_DisablesTerminalPrompt(t *testing.T) {
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+
+	if !slices.Contains(cmd.Env, "GIT_TERMINAL_PROMPT=0") {
+		t.Fatal("expected GIT_TERMINAL_PROMPT=0 to be set")
+	}
+	assert.Equal(t, []string{"git", "ls-remote", "--symref", "https://example.com/org/repo.git", "HEAD"}, cmd.Args)
+}
+
+// TestDefaultBranchProbeCmd_PreservesEnvironment proves the probe keeps the
+// caller's environment (credential helpers, CA bundles) rather than replacing it.
+func TestDefaultBranchProbeCmd_PreservesEnvironment(t *testing.T) {
+	t.Setenv("GIT_SSL_CAINFO", "/tmp/trust-bundle.pem")
+
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+
+	if !slices.Contains(cmd.Env, "GIT_SSL_CAINFO=/tmp/trust-bundle.pem") {
+		t.Errorf("cmd.Env = %v, want it to contain GIT_SSL_CAINFO=/tmp/trust-bundle.pem", cmd.Env)
+	}
+}
+
+// TestDefaultBranchProbeCmd_HardBound proves the probe is tied to its context
+// and sets WaitDelay, so a killed git cannot leave Output() waiting on a pipe
+// still held by a git-remote-https child.
+func TestDefaultBranchProbeCmd_HardBound(t *testing.T) {
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+	require.NotNil(t, cmd.Cancel, "probe must be built with exec.CommandContext")
+	assert.Positive(t, cmd.WaitDelay, "probe must set WaitDelay so the timeout is a hard bound")
+}
+
+// installFakeGit puts an executable `git` shell script with the given body
+// first on PATH for the duration of the test.
+func installFakeGit(t *testing.T, body string) {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("fake git script requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\n"+body), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestDetectDefaultBranch_UsesNoPromptEnv runs detectDefaultBranch end to end
+// against a fake git and proves it reaches git with GIT_TERMINAL_PROMPT=0,
+// even when the caller exported GIT_TERMINAL_PROMPT=1 (ptone/scion#3411).
+func TestDetectDefaultBranch_UsesNoPromptEnv(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "env")
+	t.Setenv("FAKE_GIT_ENV_FILE", envFile)
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	installFakeGit(t, `printf '%s' "$GIT_TERMINAL_PROMPT" > "$FAKE_GIT_ENV_FILE"
+printf 'ref: refs/heads/develop\tHEAD\n0000000000000000000000000000000000000000\tHEAD\n'
+`)
+
+	assert.Equal(t, "develop", detectDefaultBranch("https://example.com/org/repo.git"))
+
+	got, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	assert.Equal(t, "0", string(got))
+}
+
+// TestDetectDefaultBranch_TimesOutWithStalledChild proves detectDefaultBranch
+// applies its timeout and that the bound holds when git leaves a child (like
+// git-remote-https stalled on the network) holding the output pipes.
+// Without WaitDelay this blocks until the child exits (30s here).
+func TestDetectDefaultBranch_TimesOutWithStalledChild(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("FAKE_GIT_PID_FILE", pidFile)
+	installFakeGit(t, `sleep 30 &
+echo $! > "$FAKE_GIT_PID_FILE"
+wait
+`)
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	})
+
+	// Long enough that a slow /bin/sh start on a loaded machine still spawns
+	// the child before the timeout kills git; the FileExists check below
+	// fails the test if it did not, rather than passing without a stall.
+	orig := defaultBranchProbeTimeout
+	defaultBranchProbeTimeout = 1 * time.Second
+	t.Cleanup(func() { defaultBranchProbeTimeout = orig })
+
+	start := time.Now()
+	got := detectDefaultBranch("https://example.com/org/repo.git")
+	elapsed := time.Since(start)
+
+	require.FileExists(t, pidFile, "fake git must spawn the pipe-holding child before the timeout, or the stall is not exercised")
+	assert.Equal(t, "", got)
+	assert.Less(t, elapsed, 10*time.Second, "probe must not wait for the stalled child to exit")
+}
+
+// TestHubUnknownSubcommand_RejectsRemovedGroveAlias is a regression test for
+// the removed "hub groves"/"hub grove" alias. hubCmd has no subcommand
+// named "groves", but before hubCmd was made Runnable, cobra silently fell
+// through to hub's own help with exit status 0 for any unrecognized hub
+// subcommand — including this one — instead of reporting an error. That
+// made a removed command indistinguishable from a typo and let old
+// scripts' error checks pass silently. This executes the real rootCmd,
+// since the behavior depends on cobra's command-resolution path through
+// the actual tree, not a synthetic one.
+func TestHubUnknownSubcommand_RejectsRemovedGroveAlias(t *testing.T) {
+	restoreAllSilenceUsage(t)
+	var buf bytes.Buffer
+	rootCmd.SetArgs([]string{"hub", "groves", "list"})
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	defer func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	}()
+
+	err := rootCmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown command "groves" for "scion hub"`)
+}
+
+// TestHubBareInvocation_PrintsHelpOutsideProject is a regression test for a
+// side effect of making hubCmd Runnable: once ValidateArgs runs for "hub",
+// execution would otherwise continue into root's PersistentPreRunE, which
+// requires an active scion project for "hub" (it is not in that hook's
+// exempt command list). A bare "scion hub" run outside any project would
+// then fail with "not in a scion project" instead of printing hub's help,
+// even though a plain "scion hub" never did anything project-specific
+// before. hubCmd's Args validator returns pflag.ErrHelp for zero args (and
+// for a leading "help" argument, since cobra only auto-registers a real
+// "help" subcommand on the root command) specifically to make cobra print
+// help and stop *before* that hook runs. This test runs both cases from a
+// temp directory that is not a scion project, with a clean HOME, so it
+// fails loudly if that short-circuit regresses for either one — a mutation
+// that only special-cases zero args (dropping the "help" branch) passes
+// unless the "help" sub-case below is present.
+func TestHubBareInvocation_PrintsHelpOutsideProject(t *testing.T) {
+	restoreAllSilenceUsage(t)
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "bare", args: []string{"hub"}},
+		{name: "help", args: []string{"hub", "help"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(t.TempDir())
+
+			var buf bytes.Buffer
+			rootCmd.SetArgs(tc.args)
+			rootCmd.SetOut(&buf)
+			rootCmd.SetErr(&buf)
+			defer func() {
+				rootCmd.SetArgs(nil)
+				rootCmd.SetOut(nil)
+				rootCmd.SetErr(nil)
+			}()
+
+			err := rootCmd.Execute()
+			require.NoError(t, err)
+			assert.Contains(t, buf.String(), "Commands for interacting with a remote Scion Hub")
+		})
+	}
+}
+
+// TestFormatProviderCapacity covers the display rules for a provider's
+// broker capacity (ptone/scion#2161): "count/limit" when the broker has an
+// effective limit, just the count when it's unlimited, and a dash when the
+// hub reports no capacity for this provider.
+func TestFormatProviderCapacity(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name string
+		p    hubclient.ProjectProvider
+		want string
+	}{
+		{
+			name: "count and limit known",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12)},
+			want: "12/12",
+		},
+		{
+			name: "count known, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil},
+			want: "5",
+		},
+		{
+			name: "count known and zero, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(0), AgentLimit: nil},
+			want: "0",
+		},
+		{
+			name: "neither known: no capacity reported",
+			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
+			want: "-",
+		},
+		{
+			name: "not enforced: count and limit known, suffix appended (Amendment A1)",
+			p:    hubclient.ProjectProvider{AgentCount: i64(7), AgentLimit: i64(30), AgentLimitSource: "not_enforced"},
+			want: "7/30 (not enforced)",
+		},
+		{
+			name: "not enforced and unlimited: suffix still appended for the count-only form",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil, AgentLimitSource: "not_enforced"},
+			want: "5 (not enforced)",
+		},
+		{
+			name: "enforced (source=broker): no suffix",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12), AgentLimitSource: "broker"},
+			want: "12/12",
+		},
+		{
+			name: "enforced (empty source, e.g. an older hub): no suffix",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12), AgentLimitSource: ""},
+			want: "12/12",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, formatProviderCapacity(tc.p))
+		})
+	}
+}
+
+// TestProviderCapacityIndicator covers the labeled, parenthesized suffix
+// `scion hub projects info` appends after a provider's status line (e.g.
+// " (agents: 12/12)"), so the value isn't shown as a bare, unlabeled number
+// next to the status and default indicators (ptone/scion#2161).
+func TestProviderCapacityIndicator(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name string
+		p    hubclient.ProjectProvider
+		want string
+	}{
+		{
+			name: "count and limit known",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12)},
+			want: " (agents: 12/12)",
+		},
+		{
+			name: "count known, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil},
+			want: " (agents: 5)",
+		},
+		{
+			name: "neither known: no capacity reported",
+			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
+			want: " (agents: -)",
+		},
+		{
+			name: "not enforced (Amendment A1): the switch-off suffix carries through",
+			p:    hubclient.ProjectProvider{AgentCount: i64(7), AgentLimit: i64(30), AgentLimitSource: "not_enforced"},
+			want: " (agents: 7/30 (not enforced))",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, providerCapacityIndicator(tc.p))
+		})
+	}
 }

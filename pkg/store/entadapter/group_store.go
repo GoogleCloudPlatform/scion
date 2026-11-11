@@ -17,7 +17,9 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,11 +38,43 @@ import (
 // GroupStore implements store.GroupStore using Ent ORM.
 type GroupStore struct {
 	client *ent.Client
+	// now is the clock membership expiry (group_memberships.expires_at)
+	// is evaluated against; tests replace it. A GroupStore built without
+	// NewGroupStore uses time.Now.
+	now func() time.Time
 }
 
 // NewGroupStore creates a new Ent-backed GroupStore.
 func NewGroupStore(client *ent.Client) *GroupStore {
-	return &GroupStore{client: client}
+	return &GroupStore{client: client, now: time.Now}
+}
+
+// clock returns the store's current time.
+func (s *GroupStore) clock() time.Time {
+	if s.now == nil {
+		return time.Now()
+	}
+	return s.now()
+}
+
+// groupMembershipActiveAt reports whether m is in force at now: it has no
+// expiry, or now is before it (the role binding rule: ExpiresAt is
+// exclusive). An expired membership confers nothing and is not read as a
+// membership by any read of this store (admin tier A3).
+func groupMembershipActiveAt(m *ent.GroupMembership, now time.Time) bool {
+	return m != nil && (m.ExpiresAt == nil || now.Before(*m.ExpiresAt))
+}
+
+// activeMemberships returns the memberships in ms that are in force now.
+func (s *GroupStore) activeMemberships(ms []*ent.GroupMembership) []*ent.GroupMembership {
+	now := s.clock()
+	out := make([]*ent.GroupMembership, 0, len(ms))
+	for _, m := range ms {
+		if groupMembershipActiveAt(m, now) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // parseUUID parses a string UUID, returning store.ErrInvalidInput on failure.
@@ -48,6 +82,17 @@ func parseUUID(s string) (uuid.UUID, error) {
 	uid, err := uuid.Parse(s)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("%w: invalid UUID %q", store.ErrInvalidInput, s)
+	}
+	return uid, nil
+}
+
+// parseCursorUUID parses an ID pagination cursor. A malformed one is
+// store.ErrInvalidCursor (which wraps store.ErrInvalidInput), so the hub
+// answers 400 invalid_cursor (ptone/scion#3062).
+func parseCursorUUID(s string) (uuid.UUID, error) {
+	uid, err := uuid.Parse(s)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("%w: invalid UUID %q", store.ErrInvalidCursor, s)
 	}
 	return uid, nil
 }
@@ -115,6 +160,7 @@ func entGroupToStore(g *ent.Group) *store.Group {
 		Created:     g.Created,
 		Updated:     g.Updated,
 		CreatedBy:   g.CreatedBy,
+		Fixture:     fixtureProvenanceFromColumns(g.FixtureRootID, g.FixtureIssuerID),
 	}
 	if g.ProjectID != nil {
 		sg.ProjectID = g.ProjectID.String()
@@ -128,10 +174,12 @@ func entGroupToStore(g *ent.Group) *store.Group {
 // entMembershipToStore converts an Ent GroupMembership entity to a store.GroupMember model.
 func entMembershipToStore(m *ent.GroupMembership) store.GroupMember {
 	gm := store.GroupMember{
-		GroupID: m.GroupID.String(),
-		Role:    string(m.Role),
-		AddedAt: m.AddedAt,
-		AddedBy: m.AddedBy,
+		GroupID:    m.GroupID.String(),
+		Role:       string(m.Role),
+		AddedAt:    m.AddedAt,
+		AddedBy:    m.AddedBy,
+		ExpiresAt:  m.ExpiresAt,
+		IssuanceID: m.IssuanceID,
 	}
 	if m.UserID != nil {
 		gm.MemberType = store.GroupMemberTypeUser
@@ -154,8 +202,15 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 		g.GroupType = store.GroupTypeExplicit
 	}
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(g.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Group.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetName(g.Name).
 		SetSlug(g.Slug).
 		SetDescription(g.Description).
@@ -185,9 +240,25 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 
 	// ParentID maps to parent_groups edge
 	if g.ParentID != "" {
+		// Project members groups are system-managed and cannot be created
+		// as a child of another group (see AddGroupMember).
+		if store.IsProjectMembersGroup(g) {
+			return fmt.Errorf("%w: group %s", store.ErrProjectMembersGroupPrincipal, g.ID)
+		}
 		parentUID, err := parseUUID(g.ParentID)
 		if err != nil {
 			return err
+		}
+		// Grant shaping (admin tier A3): the child-group edge has no
+		// expiry, so under an admin-kind test identity the new group must
+		// carry that identity's provenance stamp; its purge then removes
+		// the group and the edge together.
+		shaping, err := grantShapingFor(ctx, s.client, g.CreatedBy)
+		if err != nil {
+			return err
+		}
+		if shaping != nil && g.Fixture.RootID != shaping.IdentityID {
+			return store.ErrTestAdminGrantRefused
 		}
 		create.AddParentGroupIDs(parentUID)
 	}
@@ -428,34 +499,94 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
 	}
 
+	// Grant shaping (admin tier A3): a membership added for an admin-kind
+	// test identity expires no later than the identity and carries its
+	// issuance ID; one added by such an identity without the shaping is
+	// refused.
+	shaping, err := grantShapingFor(ctx, s.client, member.AddedBy)
+	if err != nil {
+		return err
+	}
+	expiresAt := member.ExpiresAt
+	if shaping != nil {
+		expiresAt = shaping.ClampExpiry(member.ExpiresAt)
+	}
+	if expiresAt != nil {
+		utc := expiresAt.UTC()
+		expiresAt = &utc
+	}
+
 	switch member.MemberType {
 	case store.GroupMemberTypeUser:
+		// A federated account is never a group member (including the
+		// canonical hub-members group).
+		federated, err := isFederatedUser(ctx, s.client, memberUID)
+		if err != nil {
+			return err
+		}
+		if federated {
+			return store.ErrFederatedAccountRefused
+		}
+		// An expired membership is no membership: it is replaced.
+		if err := s.deleteExpiredMembership(ctx, groupmembership.GroupIDEQ(groupUID), groupmembership.UserIDEQ(memberUID)); err != nil {
+			return err
+		}
 		create := s.client.GroupMembership.Create().
 			SetGroupID(groupUID).
 			SetUserID(memberUID).
 			SetRole(groupmembership.Role(member.Role)).
-			SetAddedBy(member.AddedBy)
+			SetAddedBy(member.AddedBy).
+			SetNillableExpiresAt(expiresAt).
+			SetNillableIssuanceID(issuanceStamp(shaping))
 		m, err := create.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
 		member.AddedAt = m.AddedAt
+		member.ExpiresAt = m.ExpiresAt
+		member.IssuanceID = m.IssuanceID
 
 	case store.GroupMemberTypeAgent:
+		if err := s.deleteExpiredMembership(ctx, groupmembership.GroupIDEQ(groupUID), groupmembership.AgentIDEQ(memberUID)); err != nil {
+			return err
+		}
 		create := s.client.GroupMembership.Create().
 			SetGroupID(groupUID).
 			SetAgentID(memberUID).
 			SetRole(groupmembership.Role(member.Role)).
-			SetAddedBy(member.AddedBy)
+			SetAddedBy(member.AddedBy).
+			SetNillableExpiresAt(expiresAt).
+			SetNillableIssuanceID(issuanceStamp(shaping))
 		m, err := create.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
 		member.AddedAt = m.AddedAt
+		member.ExpiresAt = m.ExpiresAt
+		member.IssuanceID = m.IssuanceID
 
 	case store.GroupMemberTypeGroup:
+		// Project members groups are system-managed and cannot be nested
+		// as a child of another group. This is the store backstop for every
+		// path that adds a group-in-group edge; CreateGroup applies the same
+		// rule when the new group is created with a ParentID.
+		child, err := s.client.Group.Get(ctx, memberUID)
+		if err != nil {
+			return mapError(err)
+		}
+		if store.IsProjectMembersGroup(entGroupToStore(child)) {
+			return fmt.Errorf("%w: group %s", store.ErrProjectMembersGroupPrincipal, member.MemberID)
+		}
+		// A child-group edge has no expiry. An admin-kind test identity
+		// nests only a group it created itself (stamped with it as the
+		// provenance root), which its purge removes together with the
+		// edge; nesting any other group could not be bounded by its
+		// expiry.
+		if shaping != nil && (child.FixtureRootID == nil || child.FixtureRootID.String() != shaping.IdentityID) {
+			return store.ErrTestAdminGrantRefused
+		}
 		// Group nesting uses the child_groups M2M edge
-		_, err := s.client.Group.UpdateOneID(groupUID).
+		_, err = s.client.Group.UpdateOneID(groupUID).
 			AddChildGroupIDs(memberUID).
 			Save(ctx)
 		if err != nil {
@@ -539,6 +670,10 @@ func (s *GroupStore) RemoveGroupMember(ctx context.Context, groupID, memberType,
 }
 
 // UpdateGroupMemberRole updates the role of an existing group member.
+//
+// An admin-kind test identity changes the role only of a membership it
+// added (the same issuance); any other change could not be bounded by its
+// expiry and is refused with store.ErrTestAdminGrantRefused.
 func (s *GroupStore) UpdateGroupMemberRole(ctx context.Context, groupID, memberType, memberID, newRole string) error {
 	groupUID, err := parseUUID(groupID)
 	if err != nil {
@@ -548,6 +683,30 @@ func (s *GroupStore) UpdateGroupMemberRole(ctx context.Context, groupID, memberT
 	memberUID, err := parseUUID(memberID)
 	if err != nil {
 		return err
+	}
+
+	shaping, err := grantShapingFor(ctx, s.client)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		var member predicate.GroupMembership
+		switch memberType {
+		case store.GroupMemberTypeUser:
+			member = groupmembership.UserIDEQ(memberUID)
+		case store.GroupMemberTypeAgent:
+			member = groupmembership.AgentIDEQ(memberUID)
+		default:
+			return fmt.Errorf("%w: unsupported member type %q for role update", store.ErrInvalidInput, memberType)
+		}
+		m, err := s.client.GroupMembership.Query().
+			Where(groupmembership.GroupIDEQ(groupUID), member).Only(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if !shapedByIssuance(shaping, m.IssuanceID) {
+			return store.ErrTestAdminGrantRefused
+		}
 	}
 
 	switch memberType {
@@ -629,14 +788,16 @@ func (s *GroupStore) GetGroupMembers(ctx context.Context, groupID string) ([]sto
 	var members []store.GroupMember
 
 	// Query GroupMembership records (user and agent members)
+	// Orphaned rows (principal deleted, both IDs NULL) are skipped so the
+	// listing never carries a blank member.
 	memberships, err := s.client.GroupMembership.Query().
-		Where(groupmembership.GroupIDEQ(groupUID)).
+		Where(groupmembership.GroupIDEQ(groupUID), liveGroupMembership()).
 		All(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, m := range memberships {
+	for _, m := range s.activeMemberships(memberships) {
 		members = append(members, entMembershipToStore(m))
 	}
 
@@ -676,7 +837,7 @@ func (s *GroupStore) GetUserGroups(ctx context.Context, userID string) ([]store.
 	}
 
 	members := make([]store.GroupMember, 0, len(memberships))
-	for _, m := range memberships {
+	for _, m := range s.activeMemberships(memberships) {
 		members = append(members, entMembershipToStore(m))
 	}
 
@@ -705,6 +866,9 @@ func (s *GroupStore) GetGroupMembership(ctx context.Context, groupID, memberType
 		if err != nil {
 			return nil, mapError(err)
 		}
+		if !groupMembershipActiveAt(m, s.clock()) {
+			return nil, store.ErrNotFound
+		}
 		gm := entMembershipToStore(m)
 		return &gm, nil
 
@@ -716,6 +880,9 @@ func (s *GroupStore) GetGroupMembership(ctx context.Context, groupID, memberType
 			).Only(ctx)
 		if err != nil {
 			return nil, mapError(err)
+		}
+		if !groupMembershipActiveAt(m, s.clock()) {
+			return nil, store.ErrNotFound
 		}
 		gm := entMembershipToStore(m)
 		return &gm, nil
@@ -774,7 +941,7 @@ func (s *GroupStore) hasPathDown(ctx context.Context, current, target uuid.UUID)
 	}
 
 	drv := s.client.Driver()
-	p1, p2 := sqlPh(drv.Dialect(), 1), sqlPh(drv.Dialect(), 2)
+	p1, p2 := sqlUUIDPh(drv.Dialect(), 1), sqlUUIDPh(drv.Dialect(), 2)
 
 	query := fmt.Sprintf(`WITH RECURSIVE descendants(id, depth) AS (
     SELECT parent_group_id, 1 FROM group_child_groups WHERE group_id = %s
@@ -799,53 +966,41 @@ SELECT 1 FROM descendants WHERE id = %s LIMIT 1`, p1, p2)
 }
 
 // GetEffectiveGroups returns all groups a user belongs to, including
-// transitive memberships through nested groups. It uses a single recursive
-// CTE: the seed selects direct group memberships from the group_memberships
-// table, and the recursive step walks the parent_groups edge upward.
+// transitive memberships through nested groups. The seed is the user's
+// direct memberships that are in force (an expired membership, admin tier
+// A3, seeds nothing); a recursive CTE then walks the parent_groups edge
+// upward (walkEffectiveGroups).
 func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	drv := s.client.Driver()
-	p1 := sqlPh(drv.Dialect(), 1)
-
-	query := fmt.Sprintf(`WITH RECURSIVE effective(id) AS (
-    SELECT group_id AS id FROM group_memberships WHERE user_id = %s
-    UNION
-    SELECT gc.group_id FROM group_child_groups gc
-    JOIN effective e ON gc.parent_group_id = e.id
-)
-SELECT id FROM effective`, p1)
-
-	rows := &entsql.Rows{}
-	if err := drv.Query(ctx, query, []any{uid}, rows); err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	ids, err := scanUUIDRows(rows)
+	memberships, err := s.client.GroupMembership.Query().
+		Where(groupmembership.UserIDEQ(uid)).
+		All(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]string, len(ids))
-	for i, id := range ids {
-		result[i] = id.String()
+	seen := make(map[uuid.UUID]struct{}, len(memberships))
+	seedIDs := make([]uuid.UUID, 0, len(memberships))
+	for _, m := range s.activeMemberships(memberships) {
+		if _, ok := seen[m.GroupID]; !ok {
+			seen[m.GroupID] = struct{}{}
+			seedIDs = append(seedIDs, m.GroupID)
+		}
 	}
-	return result, nil
+	if len(seedIDs) == 0 {
+		return []string{}, nil
+	}
+	return s.walkEffectiveGroups(ctx, seedIDs)
 }
-
-// maxParentGroupDepth caps the recursion depth of the ancestor CTE.
-// This is a safety limit to bound query cost in pathological hierarchies;
-// in practice group nesting should be shallow.
-const maxParentGroupDepth = 32
 
 // GetParentGroups returns all ancestor groups of the given group — groups that
 // transitively contain this group as a child — via a recursive CTE that walks
 // the parent_groups edge upward. The group itself is NOT included in the
-// result. Recursion depth is capped at maxParentGroupDepth levels.
+// result. The walk has no depth limit: it resolves the same closure that
+// GetEffectiveGroups resolves for a member, and UNION ends it on a cycle.
 func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
 	uid, err := parseUUID(groupID)
 	if err != nil {
@@ -853,16 +1008,15 @@ func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]str
 	}
 
 	drv := s.client.Driver()
-	p1 := sqlPh(drv.Dialect(), 1)
+	p1 := sqlUUIDPh(drv.Dialect(), 1)
 
-	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id, depth) AS (
-    SELECT group_id, 1 FROM group_child_groups WHERE parent_group_id = %s
-    UNION ALL
-    SELECT gc.group_id, a.depth + 1 FROM group_child_groups gc
+	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id) AS (
+    SELECT group_id FROM group_child_groups WHERE parent_group_id = %s
+    UNION
+    SELECT gc.group_id FROM group_child_groups gc
     JOIN ancestors a ON gc.parent_group_id = a.id
-    WHERE a.depth < %d
 )
-SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
+SELECT id FROM ancestors`, p1)
 
 	rows := &entsql.Rows{}
 	if err := drv.Query(ctx, query, []any{uid}, rows); err != nil {
@@ -882,6 +1036,79 @@ SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
 		}
 	}
 	return result, nil
+}
+
+// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+// given group as a direct child group, in one query on the child-group edge.
+// Unlike GetParentGroups it does not walk ancestors and does not exclude the
+// group itself, so a self-edge is reported.
+func (s *GroupStore) GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error) {
+	uid, err := parseUUID(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	ids, err := s.client.Group.Query().
+		Where(group.HasChildGroupsWith(group.IDEQ(uid))).
+		IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+// child group of parentGroupID. It shares only RemoveGroupMember's
+// project_agents guard. Unlike RemoveGroupMember's group branch, it deletes
+// the join-table row directly, returns store.ErrNotFound when no row was
+// deleted, and does not bump the parent group's updated timestamp. On
+// PostgreSQL a concurrent delete of the same row waits for the first
+// transaction and then deletes nothing, so exactly one caller sees success.
+func (s *GroupStore) RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error {
+	parentUID, err := parseUUID(parentGroupID)
+	if err != nil {
+		return err
+	}
+	childUID, err := parseUUID(childGroupID)
+	if err != nil {
+		return err
+	}
+
+	// Same guard as RemoveGroupMember.
+	g, err := s.client.Group.Get(ctx, parentUID)
+	if err != nil {
+		return mapError(err)
+	}
+	if g.GroupType == group.GroupTypeProjectAgents {
+		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
+	}
+
+	// In the child_groups join table, the first primary key column holds the
+	// parent group and the second the child group.
+	drv := s.client.Driver()
+	d := drv.Dialect()
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = %s AND %s = %s",
+		group.ChildGroupsTable,
+		group.ChildGroupsPrimaryKey[0], sqlUUIDPh(d, 1),
+		group.ChildGroupsPrimaryKey[1], sqlUUIDPh(d, 2))
+	var res sql.Result
+	if err := drv.Exec(ctx, query, []any{parentUID, childUID}, &res); err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // GetGroupByProjectID retrieves the project_agents group associated with a project.
@@ -931,7 +1158,7 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 	if err != nil {
 		return nil, err
 	}
-	for _, m := range memberships {
+	for _, m := range s.activeMemberships(memberships) {
 		seedIDs = append(seedIDs, m.GroupID)
 	}
 
@@ -964,14 +1191,26 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 	}
 
 	// 3. Walk parent_groups upward via recursive CTE from all seed IDs.
+	return s.walkEffectiveGroups(ctx, seedIDs)
+}
+
+// walkEffectiveGroups returns seedIDs and every group that transitively
+// contains one of them, through one recursive CTE that walks the
+// parent_groups edge upward. seedIDs must not be empty.
+func (s *GroupStore) walkEffectiveGroups(ctx context.Context, seedIDs []uuid.UUID) ([]string, error) {
 	drv := s.client.Driver()
 	d := drv.Dialect()
 
-	// Build seed clause: SELECT ? AS id UNION ALL SELECT ? AS id ...
+	// Build seed clause: SELECT $1::uuid AS id UNION ALL ... on Postgres.
+	// The CTE has no column type of its own. google/uuid.UUID's driver.Valuer
+	// returns a string, so database/sql/Ent may still bind text even after
+	// OpenPostgres registers uuid with pgx. An untyped `SELECT $1 AS id` then
+	// types e.id as text and `gc.parent_group_id = e.id` fails with SQLSTATE
+	// 42883 (uuid = text). Casting the seed parameter makes the CTE uuid.
 	parts := make([]string, len(seedIDs))
 	args := make([]any, len(seedIDs))
 	for i, id := range seedIDs {
-		parts[i] = fmt.Sprintf("SELECT %s AS id", sqlPh(d, i+1))
+		parts[i] = fmt.Sprintf("SELECT %s AS id", sqlUUIDPh(d, i+1))
 		args[i] = id
 	}
 	seed := strings.Join(parts, " UNION ALL ")
@@ -1009,17 +1248,120 @@ func (s *GroupStore) CountGroupMembersByRole(ctx context.Context, groupID, role 
 		return 0, err
 	}
 
-	count, err := s.client.GroupMembership.Query().
+	memberships, err := s.client.GroupMembership.Query().
 		Where(
 			groupmembership.GroupIDEQ(groupUID),
 			groupmembership.RoleEQ(groupmembership.Role(role)),
+			liveGroupMembership(),
 		).
-		Count(ctx)
+		All(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	return count, nil
+	return len(s.activeMemberships(memberships)), nil
+}
+
+// liveGroupMembership matches membership rows that still reference a user or
+// an agent. The user_id and agent_id FKs are ON DELETE SET NULL, so a row
+// whose principal was deleted keeps existing with both columns NULL; such a
+// row is always an orphan (ptone/scion#2769).
+func liveGroupMembership() predicate.GroupMembership {
+	return groupmembership.Or(
+		groupmembership.UserIDNotNil(),
+		groupmembership.AgentIDNotNil(),
+	)
+}
+
+// DeleteGroupMembershipsForUser removes every group membership of userID.
+//
+// On PostgreSQL it first locks the groups the user owns FOR NO KEY UPDATE,
+// in ascending group-ID order, so a user delete takes its locks in the same
+// order as before the explicit membership delete existed: owned group rows
+// (which the user-row delete's owner_id SET NULL updates), then membership
+// rows. Locking memberships first would invert that order against
+// ProjectDeletionService, which deletes a project group's row and then the
+// next group's memberships, and could deadlock (40P01) when the user owns
+// one project group and is a member of another (ptone/scion#2769). See
+// lockOwnedGroupIDs for why the strength is FOR NO KEY UPDATE. On SQLite
+// the lock is a plain read (writes are already serialized).
+func (s *GroupStore) DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return 0, err
+	}
+	if err := lockOwnedGroupIDs(ctx, s.client, uid); err != nil {
+		return 0, fmt.Errorf("lock owned groups: %w", mapError(err))
+	}
+	return s.client.GroupMembership.Delete().
+		Where(groupmembership.UserIDEQ(uid)).
+		Exec(ctx)
+}
+
+// lockOwnedGroupIDs locks the groups owned by userID FOR NO KEY UPDATE, in
+// ascending ID order, on PostgreSQL. On SQLite it is a plain read.
+//
+// FOR NO KEY UPDATE is exactly the lock the user-row delete's owner_id ON
+// DELETE SET NULL takes (an UPDATE of a non-key column), so the explicit lock
+// adds no wait edge that the user delete did not already have. It still
+// conflicts with a concurrent DELETE of the group row (the project-group
+// cascade), which is what the lock order needs. FOR UPDATE would be too
+// strong: it also conflicts with the FOR KEY SHARE lock PostgreSQL's FK check
+// takes on a group row when a membership, child-group edge or policy binding
+// referencing it is inserted, so a transaction that holds one of the user's
+// memberships and then inserts such a row into an owned group would deadlock
+// with the user delete (40P01).
+func lockOwnedGroupIDs(ctx context.Context, client *ent.Client, userID uuid.UUID) error {
+	q := client.Group.Query().
+		Where(group.OwnerIDEQ(userID)).
+		Order(ent.Asc(group.FieldID))
+	if client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate(func(o *entsql.LockOptions) { o.Strength = entsql.LockNoKeyUpdate })
+	}
+	_, err := q.IDs(ctx)
+	return err
+}
+
+// groupMembershipDeleteBatchSize caps the IN(...) list of one
+// DeleteGroupMembershipsForAgents statement.
+const groupMembershipDeleteBatchSize = 500
+
+// DeleteGroupMembershipsForAgents removes every group membership of the
+// given agents. An empty ids slice is a no-op.
+func (s *GroupStore) DeleteGroupMembershipsForAgents(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	uids := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return 0, err
+		}
+		uids = append(uids, uid)
+	}
+	var total int
+	for _, batch := range chunkUUIDs(uids, groupMembershipDeleteBatchSize) {
+		n, err := s.client.GroupMembership.Delete().
+			Where(groupmembership.AgentIDIn(batch...)).
+			Exec(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// DeleteOrphanedGroupMemberships removes membership rows whose user and agent
+// are both NULL.
+func (s *GroupStore) DeleteOrphanedGroupMemberships(ctx context.Context) (int, error) {
+	return s.client.GroupMembership.Delete().
+		Where(
+			groupmembership.UserIDIsNil(),
+			groupmembership.AgentIDIsNil(),
+		).
+		Exec(ctx)
 }
 
 // GetGroupsByIDs retrieves groups by a list of IDs.
@@ -1064,4 +1406,37 @@ func sqlPh(d string, pos int) string {
 		return fmt.Sprintf("$%d", pos)
 	}
 	return "?"
+}
+
+// sqlUUIDPh is sqlPh with an explicit uuid cast on Postgres. Use it for raw
+// SQL that compares a parameter to a uuid column (or that seeds a CTE whose
+// column type would otherwise be inferred from an untyped parameter).
+// SQLite stores UUIDs as text, so the placeholder is left uncast.
+func sqlUUIDPh(d string, pos int) string {
+	p := sqlPh(d, pos)
+	if d == dialect.Postgres {
+		return p + "::uuid"
+	}
+	return p
+}
+
+// deleteExpiredMembership removes the membership row matching preds when it
+// has expired, so a member can be added again: an expired membership is no
+// membership (admin tier A3), but its row still holds the (group, member)
+// unique key until the test identity purge removes it.
+func (s *GroupStore) deleteExpiredMembership(ctx context.Context, preds ...predicate.GroupMembership) error {
+	m, err := s.client.GroupMembership.Query().Where(preds...).Only(ctx)
+	if ent.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return mapError(err)
+	}
+	if groupMembershipActiveAt(m, s.clock()) {
+		return nil
+	}
+	if err := s.client.GroupMembership.DeleteOneID(m.ID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
 }

@@ -233,7 +233,7 @@ export class ScionDirBrowser extends LitElement {
   private navigateToBreadcrumb(index: number): void {
     const segments = this.currentPath.split('/').filter(Boolean);
     const subSegments = segments.slice(0, index + 1);
-    let path = '';
+    let path: string;
     if (subSegments[0] && /^[a-zA-Z]:$/.test(subSegments[0])) {
       path = subSegments.join('/');
       if (subSegments.length === 1) {

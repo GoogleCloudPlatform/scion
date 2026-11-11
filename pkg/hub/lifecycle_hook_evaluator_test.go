@@ -157,7 +157,7 @@ func (e *panicExecutor) Execute(_ context.Context, _ *store.LifecycleHook, _ *st
 // testEvaluatorStore creates a fresh in-memory store for evaluator tests.
 func testEvaluatorStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err, "failed to create test store")
 	return s
 }
@@ -180,15 +180,14 @@ func seedHookProject(t *testing.T, s store.Store, name string) string {
 func seedHookAgent(t *testing.T, s store.Store, projectID, template, phase string) *store.Agent {
 	t.Helper()
 	a := &store.Agent{
-		ID:         uuid.New().String(),
-		Slug:       "agent-" + uuid.New().String()[:8],
-		Name:       "Test Agent",
-		Template:   template,
-		ProjectID:  projectID,
-		Phase:      phase,
-		Visibility: "private",
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:        uuid.New().String(),
+		Slug:      "agent-" + uuid.New().String()[:8],
+		Name:      "Test Agent",
+		Template:  template,
+		ProjectID: projectID,
+		Phase:     phase,
+		Created:   time.Now(),
+		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), a))
 	return a

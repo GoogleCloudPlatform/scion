@@ -20,10 +20,12 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-
-	entsql "entgo.io/ent/dialect/sql"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 59
+const expectedTableCount = 97
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -42,6 +44,7 @@ func TestFixtureCoverage(t *testing.T) {
 
 	t.Logf("fixture covers %d domain tables", report.TotalTables())
 	for _, c := range report.Counts {
+		assert.NotEqual(t, "decision_audits", c.Table, "retired decision audit table must be absent")
 		t.Logf("  %-32s %d row(s)", c.Table, c.Count)
 	}
 
@@ -63,7 +66,7 @@ func TestFixtureLoadable(t *testing.T) {
 	client, err := entc.OpenSQLite("file:"+path, entc.PoolConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
-	db := client.Driver().(*entsql.Driver).DB()
+	db := entc.SQLDB(client.Driver())
 	require.NoError(t, db.PingContext(ctx))
 
 	var users int
@@ -75,6 +78,101 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM agents WHERE deleted_at IS NOT NULL").Scan(&deletedAgents))
 	assert.Positive(t, deletedAgents, "fixture should include a soft-deleted agent")
+
+	// The broker_settings row must be readable through the real store
+	// adapter, not just present as a row (ptone/scion#2061 P2 review round
+	// 3, F5): a value that satisfies the coverage count but fails to parse
+	// against its own schema's column type (field.UUID("id", ...)) would
+	// defeat the fixture's purpose as a representative, application-usable
+	// hub database.
+	settings, err := entadapter.NewBrokerSettingStore(client).GetBrokerSettings(ctx, brokerID)
+	require.NoError(t, err, "broker_settings fixture row must be readable via BrokerSettingStore")
+	require.NotNil(t, settings.Settings.MaxAgents)
+	assert.EqualValues(t, 5, *settings.Settings.MaxAgents)
+
+	// The agent_identity_keys and external_identities rows must likewise be
+	// readable through their real store adapters, not just present as rows:
+	// the same non-hex-id pitfall as above applies to these two tables'
+	// field.UUID("id", ...) columns.
+	keys, err := entadapter.NewAgentIdentityKeyStore(client).ListAgentIdentityKeys(ctx, projectID)
+	require.NoError(t, err, "agent_identity_keys fixture row must be readable via AgentIdentityKeyStore")
+	require.Len(t, keys, 1)
+	assert.Equal(t, "worker", keys[0].Key)
+
+	identity, err := entadapter.NewExternalIdentityStore(client).GetExternalIdentity(
+		ctx, "fixture-provider", "https://issuer.fixture.example", "fixture-subject-001")
+	require.NoError(t, err, "external_identities fixture row must be readable via ExternalIdentityStore")
+	assert.Equal(t, userID, identity.UserID)
+
+	// The user_terminal_workspaces row must likewise be readable through its
+	// real store adapter: the same non-hex-id pitfall as above applies to its
+	// field.UUID("id", ...) column.
+	workspace, err := entadapter.NewUserTerminalWorkspaceStore(client).GetUserTerminalWorkspace(ctx, userID)
+	require.NoError(t, err, "user_terminal_workspaces fixture row must be readable via UserTerminalWorkspaceStore")
+	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
+	assert.Equal(t, agentID, workspace.FrontmostAgentID)
+
+	// The thread group rows must be readable through the real store adapter
+	// (field.UUID ids, the stored name_key matching the Go helper, and the
+	// member's group conversation passing the live-conversation filter).
+	groups, err := entadapter.NewThreadGroupStore(client).ListThreadGroups(ctx, projectID)
+	require.NoError(t, err, "thread_groups fixture row must be readable via ThreadGroupStore")
+	require.Len(t, groups, 1)
+	assert.Equal(t, "Équipe Release", groups[0].Name)
+	assert.Equal(t, store.ThreadGroupNameKey(groups[0].Name), groups[0].NameKey)
+	require.Len(t, groups[0].Members, 1)
+	assert.Equal(t, groupConversationID, groups[0].Members[0].ConversationID)
+
+	// The conduit session rows must decode through the real registry store
+	// (capabilities JSON, NULL project/exec_scope, relay join).
+	conduit := entadapter.NewConduitRegistryStore(client)
+	ps, found, err := conduit.ListPrincipalSessionsBySession(ctx, "cs000000-0000-0000-0000-000000000001")
+	require.NoError(t, err, "conduit_sessions fixture row must be readable via ConduitRegistryStore")
+	require.True(t, found)
+	require.Len(t, ps.Sessions, 1)
+	assert.Equal(t, "launch_id", ps.Sessions[0].Session.Capabilities.IncarnationSource)
+	assert.Equal(t, int64(1), ps.CurrentEpoch)
+	require.NotNil(t, ps.Sessions[0].Relay)
+	ps, found, err = conduit.ListPrincipalSessionsBySession(ctx, "cs000000-0000-0000-0000-000000000002")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Empty(t, ps.Sessions[0].Session.ProjectID)
+	assert.Empty(t, ps.Sessions[0].Session.ExecScope)
+
+	// The project visitor rule, its role binding and the exclusion must be
+	// readable through the real store adapters (field.UUID ids and
+	// source_rule_id, the rule window, the seeded visitor role).
+	composite := entadapter.NewCompositeStore(client)
+	rules, err := composite.ListProjectVisitorRules(ctx, projectID)
+	require.NoError(t, err, "project_visitor_rules fixture row must be readable via the store")
+	require.Len(t, rules, 1)
+	assert.Equal(t, visitorRuleID, rules[0].ID)
+	assert.Equal(t, store.NormalizeFederatedIssuer(visitorIssuer), rules[0].Issuer)
+	assert.Equal(t, store.NormalizeVisitorRuleDomain(visitorDomain), rules[0].Domain)
+	assert.True(t, store.ValidVisitorRuleDomain(rules[0].Domain))
+	require.NotNil(t, rules[0].NotBefore)
+	require.NotNil(t, rules[0].ExpiresAt)
+	assert.True(t, rules[0].ActiveAt(baseTime))
+
+	open, err := composite.GetProjectVisitorRule(ctx, minimalVisitorRuleID)
+	require.NoError(t, err)
+	assert.Nil(t, open.NotBefore)
+	assert.Nil(t, open.ExpiresAt)
+	assert.Empty(t, open.CreatedBy)
+
+	bindings, err := entadapter.NewRoleStore(client).ListVisitorRoleBindings(ctx, projectID)
+	require.NoError(t, err, "project-visitor role binding fixture row must be readable via RoleStore")
+	require.Len(t, bindings, 1)
+	assert.Equal(t, federatedUserID, bindings[0].PrincipalID)
+	require.NotNil(t, bindings[0].SourceRuleID)
+	assert.Equal(t, visitorRuleID, *bindings[0].SourceRuleID)
+
+	excluded, err := composite.IsProjectVisitorExcluded(ctx, minimalVisitorRuleID, federatedUserID)
+	require.NoError(t, err, "project_visitor_exclusions fixture row must be readable via the store")
+	assert.True(t, excluded)
+	excluded, err = composite.IsProjectVisitorExcluded(ctx, visitorRuleID, federatedUserID)
+	require.NoError(t, err)
+	assert.False(t, excluded)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row
@@ -86,4 +184,50 @@ func TestFixtureDeterministic(t *testing.T) {
 	r2, err := Generate(ctx, filepath.Join(t.TempDir(), "b.db"))
 	require.NoError(t, err)
 	assert.Equal(t, r1.Counts, r2.Counts, "row counts should be identical across runs")
+}
+
+func TestAccessConstraintHistoryEventIDIsCanonical(t *testing.T) {
+	t.Parallel()
+
+	var history row
+	for _, fixture := range Spec() {
+		if fixture.Table == "access_constraint_history" {
+			require.Len(t, fixture.Rows, 1)
+			history = fixture.Rows[0]
+			break
+		}
+	}
+	require.NotNil(t, history, "fixture must include access_constraint_history")
+
+	event := auditevent.EnvelopeV1{
+		SchemaVersion: auditevent.SchemaVersion,
+		EventID:       history["event_id"].(string),
+		OccurredAt:    history["occurred_at"].(time.Time),
+		Family:        "access_boundary",
+		Action:        history["operation"].(string),
+		Phase:         auditevent.PhaseCommit,
+		Outcome:       auditevent.OutcomeSucceeded,
+		Severity:      auditevent.SeverityInfo,
+		CorrelationID: history["correlation_id"].(string),
+		Principal: &auditevent.IdentityRef{
+			Kind: auditevent.IdentityKind(history["actor_kind"].(string)),
+			ID:   history["actor_id"].(string),
+		},
+		Resource: &auditevent.ResourceRef{
+			Kind:  "access_constraint",
+			ID:    history["constraint_id"].(string),
+			Scope: auditevent.ResourceScopeSystem,
+		},
+		Payload: auditevent.AccessBoundaryPayload{
+			AfterRevision:  pointer(history["after_revision"].(int64)),
+			Classification: auditevent.BoundaryClassification(history["classification"].(string)),
+			ImpactCounts:   &auditevent.ImpactCounts{Agents: 1, Users: 1},
+			ChangedFields:  []string{"maximum_permissions"},
+		},
+	}
+	require.NoError(t, auditevent.Validate(event))
+}
+
+func pointer[T any](value T) *T {
+	return &value
 }

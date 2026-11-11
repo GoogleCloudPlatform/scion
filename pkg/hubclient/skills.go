@@ -91,7 +91,6 @@ type Skill struct {
 	OwnerID       string    `json:"ownerId,omitempty"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
 	UpdatedBy     string    `json:"updatedBy,omitempty"`
-	Visibility    string    `json:"visibility"`
 	Created       time.Time `json:"created"`
 	Updated       time.Time `json:"updated"`
 }
@@ -103,6 +102,7 @@ type SkillVersion struct {
 	Version            string         `json:"version"`
 	Status             string         `json:"status"`
 	ContentHash        string         `json:"contentHash,omitempty"`
+	ContentHashV2      string         `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935), set only while hub.skill_content_hash_v2 is on
 	Files              []TemplateFile `json:"files,omitempty"`
 	PublisherID        string         `json:"publisherId,omitempty"`
 	DeprecationMessage string         `json:"deprecationMessage,omitempty"`
@@ -141,7 +141,6 @@ type CreateSkillRequest struct {
 	Description string   `json:"description,omitempty"`
 	Scope       string   `json:"scope"`
 	ScopeID     string   `json:"scopeId,omitempty"`
-	Visibility  string   `json:"visibility,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 }
 
@@ -154,7 +153,6 @@ type CreateSkillResponse struct {
 type UpdateSkillRequest struct {
 	Name        string   `json:"name,omitempty"`
 	Description string   `json:"description,omitempty"`
-	Visibility  string   `json:"visibility,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 }
 
@@ -211,6 +209,7 @@ type ResolvedSkill struct {
 	Name               string            `json:"name"`
 	ResolvedVersion    string            `json:"resolvedVersion"`
 	ContentHash        string            `json:"contentHash"`
+	ContentHashV2      string            `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935), set only while hub.skill_content_hash_v2 is on
 	Files              []DownloadURLInfo `json:"files"`
 	Deprecated         bool              `json:"deprecated,omitempty"`
 	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
@@ -218,10 +217,16 @@ type ResolvedSkill struct {
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.
+// Message is the fixed reason phrase for Code. Status is the HTTP status of
+// the upstream response that failed the resolution, when one is known.
+// CorrelationID names the Hub's server-side log record that holds the full
+// error.
 type ResolveSkillError struct {
-	URI     string `json:"uri"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	URI           string `json:"uri"`
+	Code          string `json:"code"`
+	Message       string `json:"message"`
+	Status        int    `json:"status,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
 }
 
 // List returns skills matching the filter criteria.
@@ -263,7 +268,7 @@ func (s *skillService) List(ctx context.Context, opts *ListSkillsOptions) (*List
 		TotalCount int     `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -279,11 +284,11 @@ func (s *skillService) List(ctx context.Context, opts *ListSkillsOptions) (*List
 
 // Get returns a single skill by ID.
 func (s *skillService) Get(ctx context.Context, skillID string) (*Skill, error) {
-	resp, err := s.c.get(ctx, "/api/v1/skills/"+skillID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/skills/"+url.PathEscape(skillID), nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Skill](resp)
+	return apiclient.DecodeRequired[Skill](resp)
 }
 
 // Create creates a new skill.
@@ -292,21 +297,21 @@ func (s *skillService) Create(ctx context.Context, req *CreateSkillRequest) (*Cr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateSkillResponse](resp)
+	return apiclient.DecodeRequired[CreateSkillResponse](resp)
 }
 
 // Update updates specific skill fields.
 func (s *skillService) Update(ctx context.Context, skillID string, req *UpdateSkillRequest) (*Skill, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/skills/"+skillID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/skills/"+url.PathEscape(skillID), req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Skill](resp)
+	return apiclient.DecodeRequired[Skill](resp)
 }
 
 // Delete removes a skill (soft delete).
 func (s *skillService) Delete(ctx context.Context, skillID string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/skills/"+skillID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/skills/"+url.PathEscape(skillID), nil)
 	if err != nil {
 		return err
 	}
@@ -315,29 +320,29 @@ func (s *skillService) Delete(ctx context.Context, skillID string) error {
 
 // PublishVersion creates a draft version and returns upload URLs.
 func (s *skillService) PublishVersion(ctx context.Context, skillID string, req *PublishVersionRequest) (*PublishVersionResponse, error) {
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/versions", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/versions", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[PublishVersionResponse](resp)
+	return apiclient.DecodeRequired[PublishVersionResponse](resp)
 }
 
 // ListVersions returns versions for a skill.
 func (s *skillService) ListVersions(ctx context.Context, skillID string) (*ListSkillVersionsResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/skills/"+skillID+"/versions", nil)
+	resp, err := s.c.get(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/versions", nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListSkillVersionsResponse](resp)
+	return apiclient.DecodeRequired[ListSkillVersionsResponse](resp)
 }
 
 // FinalizeVersion verifies files and transitions a version from draft to published.
 func (s *skillService) FinalizeVersion(ctx context.Context, skillID string, req *FinalizeSkillVersionRequest) (*SkillVersion, error) {
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SkillVersion](resp)
+	return apiclient.DecodeRequired[SkillVersion](resp)
 }
 
 // RequestUploadURLs requests signed upload URLs for a skill version's files.
@@ -349,11 +354,11 @@ func (s *skillService) RequestUploadURLs(ctx context.Context, skillID string, ve
 		Version: version,
 		Files:   files,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/upload", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/upload", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[UploadResponse](resp)
+	return apiclient.DecodeRequired[UploadResponse](resp)
 }
 
 // UploadFile uploads a file to the given signed URL.
@@ -370,11 +375,11 @@ func (s *skillService) DownloadFile(ctx context.Context, signedURL string) ([]by
 
 // DeprecateVersion marks a published version as deprecated.
 func (s *skillService) DeprecateVersion(ctx context.Context, skillID, versionID string, req *DeprecateVersionRequest) (*SkillVersion, error) {
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/versions/"+versionID+"/deprecate", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/versions/"+url.PathEscape(versionID)+"/deprecate", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SkillVersion](resp)
+	return apiclient.DecodeRequired[SkillVersion](resp)
 }
 
 // Resolve performs batch skill resolution.
@@ -383,6 +388,7 @@ func (s *skillService) Resolve(ctx context.Context, req *ResolveSkillsRequest) (
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: callers treat a missing body as nothing resolved.
 	return apiclient.DecodeResponse[ResolveSkillsResponse](resp)
 }
 

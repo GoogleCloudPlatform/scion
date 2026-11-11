@@ -73,9 +73,14 @@ uptimeChecks:
       useSsl: true
       validateSsl: true
       requestMethod: GET
+    # Match the top-level "status" field exactly. A substring match on
+    # "ready" would also succeed against "not_ready", the failure value.
     contentMatchers:
       - content: "ready"
-        matcher: CONTAINS_STRING
+        matcher: MATCHES_JSON_PATH
+        jsonPathMatcher:
+          jsonPath: "$.status"
+          jsonMatcher: EXACT_MATCH
     period: "60s"              # Check every 1 minute
     timeout: "10s"
     notificationChannels:
@@ -141,9 +146,14 @@ uptimeChecks:
       port: 8080
       useSsl: false
       requestMethod: GET
+    # Match the top-level "status" field exactly. See the Hub /readyz note
+    # above: a substring match on "ready" also succeeds against "not_ready".
     contentMatchers:
       - content: "ready"
-        matcher: CONTAINS_STRING
+        matcher: MATCHES_JSON_PATH
+        jsonPathMatcher:
+          jsonPath: "$.status"
+          jsonMatcher: EXACT_MATCH
     period: "300s"             # Check every 5 minutes
     timeout: "10s"
     internalCheckers:

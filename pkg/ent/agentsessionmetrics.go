@@ -21,8 +21,8 @@ type AgentSessionMetrics struct {
 	ID uuid.UUID `json:"id,omitempty"`
 	// AgentID holds the value of the "agent_id" field.
 	AgentID string `json:"agent_id,omitempty"`
-	// GroveID holds the value of the "grove_id" field.
-	GroveID string `json:"grove_id,omitempty"`
+	// ProjectID holds the value of the "project_id" field.
+	ProjectID string `json:"project_id,omitempty"`
 	// SessionID holds the value of the "session_id" field.
 	SessionID string `json:"session_id,omitempty"`
 	// StartedAt holds the value of the "started_at" field.
@@ -61,7 +61,7 @@ func (*AgentSessionMetrics) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case agentsessionmetrics.FieldTurnCount, agentsessionmetrics.FieldTokensInput, agentsessionmetrics.FieldTokensOutput, agentsessionmetrics.FieldTokensCached, agentsessionmetrics.FieldTokensReasoning:
 			values[i] = new(sql.NullInt64)
-		case agentsessionmetrics.FieldAgentID, agentsessionmetrics.FieldGroveID, agentsessionmetrics.FieldSessionID, agentsessionmetrics.FieldStatus, agentsessionmetrics.FieldModel:
+		case agentsessionmetrics.FieldAgentID, agentsessionmetrics.FieldProjectID, agentsessionmetrics.FieldSessionID, agentsessionmetrics.FieldStatus, agentsessionmetrics.FieldModel:
 			values[i] = new(sql.NullString)
 		case agentsessionmetrics.FieldStartedAt, agentsessionmetrics.FieldEndedAt, agentsessionmetrics.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -94,11 +94,11 @@ func (_m *AgentSessionMetrics) assignValues(columns []string, values []any) erro
 			} else if value.Valid {
 				_m.AgentID = value.String
 			}
-		case agentsessionmetrics.FieldGroveID:
+		case agentsessionmetrics.FieldProjectID:
 			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field grove_id", values[i])
+				return fmt.Errorf("unexpected type %T for field project_id", values[i])
 			} else if value.Valid {
-				_m.GroveID = value.String
+				_m.ProjectID = value.String
 			}
 		case agentsessionmetrics.FieldSessionID:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -222,8 +222,8 @@ func (_m *AgentSessionMetrics) String() string {
 	builder.WriteString("agent_id=")
 	builder.WriteString(_m.AgentID)
 	builder.WriteString(", ")
-	builder.WriteString("grove_id=")
-	builder.WriteString(_m.GroveID)
+	builder.WriteString("project_id=")
+	builder.WriteString(_m.ProjectID)
 	builder.WriteString(", ")
 	builder.WriteString("session_id=")
 	builder.WriteString(_m.SessionID)

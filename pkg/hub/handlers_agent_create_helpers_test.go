@@ -34,7 +34,7 @@ import (
 )
 
 func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
-	// Set up a temp HOME so hubManagedProjectPath can resolve.
+	// Set up a temp HOME so the hub-managed workspace path can resolve.
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -59,7 +59,7 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 			},
 		}
 
-		srv.populateAgentConfig(context.Background(), agent, project, nil)
+		require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 		assert.Equal(t, "packages/web", agent.AppliedConfig.Workspace,
 			"relative workspace should not be overwritten by hub-managed path")
@@ -73,7 +73,7 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 			},
 		}
 
-		srv.populateAgentConfig(context.Background(), agent, project, nil)
+		require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 		assert.Equal(t, "/absolute/path", agent.AppliedConfig.Workspace,
 			"absolute workspace should be preserved as user override")
@@ -87,9 +87,9 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 			},
 		}
 
-		srv.populateAgentConfig(context.Background(), agent, project, nil)
+		require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-		expectedPath, err := hubManagedProjectPath(slug)
+		expectedPath, err := localProjectPath(slug)
 		require.NoError(t, err)
 		assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 			"empty workspace should be overwritten with hub-managed path")
@@ -415,7 +415,7 @@ func TestMergeInjectedSkills_ProgenyDeduplication(t *testing.T) {
 	// Count how many times the base URI appears — should be exactly 1.
 	count := 0
 	for _, ref := range agent.AppliedConfig.InlineConfig.Skills {
-		if skillBaseURI(ref.URI) == "scion://shared-skill" {
+		if api.SkillBaseURI(ref.URI) == "scion://shared-skill" {
 			count++
 		}
 	}
@@ -494,29 +494,28 @@ func TestMergeSkillRefs_VersionConflictWarnAndWin(t *testing.T) {
 }
 
 // =============================================================================
-// skillBaseURI unit tests
+// api.SkillBaseURI keying in the hub
 // =============================================================================
 
-func TestSkillBaseURI_StripVersion(t *testing.T) {
-	cases := []struct {
-		uri      string
-		expected string
-	}{
-		{"scion://my-skill@1.0", "scion://my-skill"},
-		{"scion://my-skill@2.3.4", "scion://my-skill"},
-		{"scion://my-skill", "scion://my-skill"},
-		{"scion://org/my-skill@1.0", "scion://org/my-skill"},
-		{"https://example.com/skills/my-skill@1.0", "https://example.com/skills/my-skill"},
-		{"https://example.com/skills/my-skill", "https://example.com/skills/my-skill"},
-		{"scion://my-skill@latest", "scion://my-skill"},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.uri, func(t *testing.T) {
-			got := skillBaseURI(tc.uri)
-			assert.Equal(t, tc.expected, got)
-		})
-	}
+// TestMergeSkillRefs_KeysLikeBroker checks that the hub keys skill URIs with
+// userinfo or a query by the same rule as the runtime broker (ptone/scion#4179):
+// an "@" outside the last path segment is not a version specifier.
+func TestMergeSkillRefs_KeysLikeBroker(t *testing.T) {
+	// Two different skills on the same host with userinfo stay separate.
+	result := mergeSkillRefs(
+		[]api.SkillReference{{URI: "skill://u@host/a"}},
+		[]api.SkillReference{{URI: "skill://u@host/b"}},
+	)
+	require.Len(t, result, 2, "skills behind the same userinfo must not share a key")
+
+	// Two versions of one skill whose query holds an "@" collapse to one entry,
+	// and the higher-precedence version wins.
+	result = mergeSkillRefs(
+		[]api.SkillReference{{URI: "gh://o/r/s@v1?token=a@b"}},
+		[]api.SkillReference{{URI: "gh://o/r/s@v2?token=a@b"}},
+	)
+	require.Len(t, result, 1, "versions of one skill must share a key despite '@' in the query")
+	assert.Equal(t, "gh://o/r/s@v2?token=a@b", result[0].URI)
 }
 
 // =============================================================================
@@ -577,7 +576,7 @@ func TestPopulateAgentConfig_PreStartHook_HubFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, hubHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho hub\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -604,7 +603,7 @@ func TestPopulateAgentConfig_PreStartHook_ProjectOverridesHub(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, projectHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho project\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -624,7 +623,7 @@ func TestPopulateAgentConfig_PreStartHook_ProjectOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, projectHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho project\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -635,7 +634,7 @@ func TestPopulateAgentConfig_PreStartHook_NoneStagesNothing(t *testing.T) {
 	srv, _, project := setupPreStartHookStampingTest(t)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookScript)
@@ -665,7 +664,7 @@ func TestPopulateAgentConfig_PreStartHook_ArchivedProjectHookFallsBackToHub(t *t
 	require.NoError(t, s.DeleteProjectPreStartHook(t.Context(), projectHook.ID, project.ID))
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, hubHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho hub\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -701,7 +700,7 @@ func TestPopulateAgentConfig_PreStartHook_ProjectLookupErrorStagesNothing(t *tes
 	srv.store = &failingProjectHookStore{Store: s, err: errors.New("database is locked")}
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookID,
 		"an ambiguous project lookup error must not fall back to the hub hook")
@@ -745,7 +744,7 @@ func TestPopulateAgentConfig_ProjectHookArchivedBySecondCreate_FallsBackToHub(t 
 
 	// The live project hook wins; the archived one is never staged.
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 	assert.Equal(t, second.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho second\n", agent.AppliedConfig.ProjectPreStartHookScript)
 
@@ -756,7 +755,7 @@ func TestPopulateAgentConfig_ProjectHookArchivedBySecondCreate_FallsBackToHub(t 
 
 	// With no project hook left, the hub fallback resumes.
 	next := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), next, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), next, project, nil))
 	assert.Equal(t, hubHook.ID, next.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho hub\n", next.AppliedConfig.ProjectPreStartHookScript)
 	assert.NotContains(t, next.AppliedConfig.ProjectPreStartHookScript, "echo first")
@@ -778,7 +777,7 @@ func TestPopulateAgentConfig_PreStartHook_PreStampedIDPreserved(t *testing.T) {
 	agent.AppliedConfig.ProjectPreStartHookID = "preset-hook-id"
 	agent.AppliedConfig.ProjectPreStartHookScript = "#!/bin/sh\necho preset\n"
 
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, "preset-hook-id", agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho preset\n", agent.AppliedConfig.ProjectPreStartHookScript)

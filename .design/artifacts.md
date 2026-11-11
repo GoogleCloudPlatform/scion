@@ -1,0 +1,335 @@
+# Artifact system
+
+Status: design accepted (decisions D1–D21); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
+
+The feature is behind the `hub.artifacts` experiment (default off).
+
+## Decisions referenced below
+
+| # | Decision |
+|---|---|
+| D1 | An artifact is a published file or folder with a stable, versioned reference. Shared dirs remain for raw file sharing. |
+| D2 | The artifact service owns the bytes. It is a net-new service built into the hub binary, designed so it can be split into a standalone server. |
+| D3 | Decoupling: own package, own tables, own route prefix, own auth seam; no shared tables with the rest of the hub. |
+| D4 | Review starts with CriticMarkup in-document; the core leaves room for deeper edit tracking later. |
+| D5 | Share links and retention exist in the schema; artifacts are the collaboration medium for cross-project messaging. |
+| D6 | An artifact is a bundle (1..n files, one entry file); a single file is the degenerate case; a version snapshots the manifest. |
+| D7 | Principal-owned, home scope, ACL (scope / principal / link grants) with a neutral scope column. |
+| D8 | HTML renders in a sandboxed iframe (strict CSP, no same-origin) served by the hub. The hub's sandboxing is best effort; a secondary origin that routes back to the same hub is an operator best practice, not a precondition (ptone, 2026-11-02). When an operator sets one, the Hub-wide content host (`server.hub.content_url`, ptone/scion#7107 phase A), share links are offered on it and the hub confines it to the share and view routes. |
+| D9 | Publish uploads through the service, with a two-step `create version → upload files → finalize` contract so direct-to-object-store upload is additive later. |
+| D10 | Message refs: structured ref in message metadata plus the `scion://artifact/<id>[@<seq>]` URL in the body; refs carry ids only, never a title; access is checked at read time, per reader. |
+| D11 | A review is a new version (`kind: review`) carrying CriticMarkup; no overlay object. |
+| D12 | Retention: hub setting `artifacts.default_retention_days` (0 = never) plus a per-artifact override; share links always expire. |
+| D13 | Standalone auth seam: v1 defines only the Go `Host` interface, constrained to be remotable (strings in, strings and bools out). |
+| D14 | The chat `AttachmentStore` coexists in v1; a follow-on moves attachments onto artifacts. |
+| D15 | CLI `scion artifact publish/get/list/versions/share`; all agent-callable except `share`. Web: artifact page plus chat chips. |
+| D16 | Deleting a project does not delete its artifacts; the home-scope grant may dangle. |
+| D17 | Web users can publish, edit and review. |
+| D18 | `current_seq` is the latest version of any kind. |
+| D19 | Default limits: 32 MiB/file, 256 MiB/bundle, 200 files/bundle, share-link TTL 7 days (max 30; a longer request is rejected with `400 ttl_too_long`, not shortened; a link never outlives its artifact's own expiry, to which it is cut). |
+| D20 | A review version that changes text outside CriticMarkup is rejected at finalize (`422 unmarked_changes`). |
+| D21 | A hub-level *Artifacts* item in the management sidebar, beside *Skills*, ships as phase P1c and lists the artifacts the user owns or holds grants on; the project *Artifacts* tab stays in P2. Artifacts are principal-owned (D7), so the primary list is per user. |
+| D25 | Stewards (ptone/scion#5121, ptone/scion#5144): on an artifact owned by an agent, the owners of its home project (`artifact.steward`, in the project-owner role and super-admin only) and the agent's delegating user (root of the live recorded chain, who also reads in the current home through a role) may share it within bounds: grants up to write and review, links, expiry, delete; never an admin grant or a move (`403 steward_action_not_allowed`). Computed per request from the current home and owner, never stored; user-owned artifacts have none. Amended by ptone/scion#6028: the delegating user is recorded on the artifact at creation (`sponsor_ref`, from the agent's provenance root, never from the request) and the delegator clause decides from it: the recorded user, while active, admitted to the current home for `artifact.manage` (dev user only with dev-local authority) and, for the steward clause, reading there through a role; checked per request, failing closed. So the delegating user stays a steward after the agent is soft-deleted or purged, and the creation-time value stands through re-delegation (no live fallback when a value is recorded). After a move the recorded clause follows the new home (admission and role there), not the origin or agent project. Artifacts with nothing recorded (before this change, not backfilled) keep the live-chain clause. Steward store writes carry the decision-time home and owner (`Actor.Expect`), checked under the row lock. Amends D7 for agent-owned artifacts only. D24 is removed with the grant ladder (ptone/scion#5145). |
+| D24 | REMOVED (ptone/scion#5145): superseded by D25 (stewards) and the grant ladder. It let the agent's delegating user and an admin of the home project give a user review access on an artifact owned by an agent (ptone/scion#4014), as a `review` grant (ptone/scion#4538) that counted only together with the holder's own read. Its review-only path, its refusal codes and `canGrantReview` are gone; migration 0014_review_ladder converts the write grants it stored before the review level existed to review. |
+| D23 | Artifact chips and linkified `scion://artifact/` URLs in chat open an in-place preview dialog (as chat attachments do) with an *Open in artifact viewer* button; no side panel. |
+
+## 5. Proposed design
+
+### 5.1 Shape in one paragraph
+
+A self-contained Go package, **`pkg/artifacts`**, compiled into the hub binary and mounted at **`/api/v1/artifacts/`**. It owns its tables (`artifact`, `artifact_version`, `artifact_file`, `artifact_grant`, `artifact_message_ref`) and nothing else in the hub schema; it stores bytes through `pkg/storage.Storage` under a namespace it alone writes (`hubs/{hub-id}/artifacts/...`); it asks the host three questions through a narrow, string-only interface — *who is this caller?*, *does the caller's credential allow X in scope S at all?* and *may this caller do X in scope S?* — and the hub answers them from its identity context and its existing authz engine. The same package, behind the same interface, can be linked into a standalone server later (D2); nothing in v1 exercises that, but the seam is the design.
+
+```
+                 ┌──────────────── hub binary ─────────────────┐
+  CLI / agent ──►│  /api/v1/artifacts/*  ──► pkg/artifacts     │
+  (REST)         │                            │  Host seam:    │
+  web UI ───────►│  (hub auth middleware) ─────┤  Principal()   │──► AuthzService.CheckAccess
+                 │                            │  Permits()     │
+                 │                            │  Authorize()   │
+                 │                            ▼                │
+                 │              artifact_* tables   pkg/storage.Storage
+                 └──────────────────────────────────┬──────────┘
+                                                    ▼
+                                      object store  or  local disk (single node)
+```
+
+### 5.2 Core concepts
+
+- **Artifact** — a named bundle with a stable id, an owner principal, a home scope (a scion project in v1), an optional publisher-chosen `key` (unique per owner + scope, so re-publishing under the same key appends a version), a title, and a current version pointer.
+- **Version** — an immutable snapshot: a manifest of files, each `{path, size, sha256, media_type}`, one designated `entry` path, `kind` (`publish` | `review`), an optional `note`, and `created_by`. Versions are append-only; `seq` is monotonic per artifact. Content is content-addressed, so republishing an unchanged file is a metadata-only write.
+- **Grant** — an ACL row `(artifact_id, subject_kind, subject_ref, permission)` with `subject_kind ∈ {scope, principal, link}`. The home scope's members get read through a synthetic grant written at create time, so visibility is always explicit in the table and a standalone deployment needs no scion knowledge to evaluate it. A `link` grant is a share link: a random capability token, stored only as a hash, with its own `expires_at`.
+- **Reference** — the string form that travels in messages and docs: `scion://artifact/<id>` or `scion://artifact/<id>@<seq>`. The web page for an artifact is `/projects/<project-id>/artifacts/<id>`.
+
+### 5.3 What stays outside the service
+
+Chat attachments (`AttachmentStore`) keep working unchanged in v1 (D14). Shared dirs are untouched (D1). The service never reads a shared directory: publishing is the client sending bytes.
+
+### 5.4 Host integration points
+
+| Concern | Precedent | How `pkg/artifacts` uses it |
+|---|---|---|
+| **Own tables (D3)** | The web chat sub-store (`pkg/hub/webchannel_store.go` and its Postgres twin): tables created with `CREATE TABLE IF NOT EXISTS` at `Init`, not Ent entities, with a `webchat_migrations` ledger; the `*sql.DB` comes from the composite store and the store is wired after Ent `AutoMigrate` in `cmd/server_foreground.go`. | `artifacts.NewStore(db, driverName)` with `Init()` running dialect DDL and an `artifact_migrations` ledger. Ent entities in the shared schema are rejected: they would put artifact tables in the hub's migration graph. |
+| **Bytes** | `pkg/storage.Storage` (`Upload`, `Download`, `GenerateSignedURL`, `Exists`); the hub's instance always exists (local fallback). | Object store: `GET …/files/{path}` answers `302` to a signed GET. Local provider: the service streams via `Download`. No new storage backend. |
+| **Identity** | The hub's `Identity` / `AgentIdentity` from the request context; agent tokens arrive as `X-Scion-Agent-Token` or Bearer. | `Host.Principal(ctx) (kind, ref, homeScope string, ok bool)`. The hub adapter maps the identity to `(owner_kind, owner_ref)` and an agent's project to its home scope. **Owner refs are stable ids (agent UUID, user id), never names.** |
+| **Authorization** | `AuthzService.CheckAccess` with capabilities derived from the permission registry. | Registry rows `artifact.read / create / update / delete / manage`. `Host.Authorize(ctx, scopeRef, permission)` is answered by the hub adapter (which alone knows agent token scopes) with `CheckAccess` on the scope's project. The service consults its own `artifact_grant` rows for everything else: the host says "may act in this scope" **or** a grant row says "this principal/link may" — either suffices for read; write/admin need the owner or an explicit grant. Agents use dedicated agent scopes: `project:artifact:read` for `artifact.read`, `project:artifact:write` for `artifact.create` / `artifact.update` (baseline and full agent roles; readonly agents read only). The agent scope is checked before any grant: it decides whether an agent may use the artifact API at all, grants decide which artifacts, so an agent without `project:artifact:read` gets 404 even with an explicit grant. |
+| **Routes** | `registerRoutes()` with `guarded(pattern, h)`, which fails closed unless the pattern has a route metadata row. | `/api/v1/artifacts` and `/api/v1/artifacts/` are policy-classified; fine-grained checks happen inside the service. The share-link route `/api/v1/artifacts/shared/` is public and authenticates by token only. The service exposes `http.Handler` + `RegisterRoutes(mux, guard)` so a standalone binary mounts the same handler. |
+| **Capability downloads** | The skill download signer is route-specific. | Share links do not reuse it: a `link` grant stores `sha256(token)`; `GET /shared/{token}` looks it up and checks `expires_at`. Sub-resource loads inside a rendered bundle use a short-lived per-view capability minted by the service with its own key. |
+| **Cross-project** | Setting `messaging.cross_project_messaging_enabled` (default false, fail closed). | Granting an artifact to another project (`subject_kind: scope`) is allowed only when that setting is on; the grant check at read time does not depend on messaging. |
+| **Settings** | Operational settings sections (`pkg/config/opsettings`). | Section `artifacts`: `enabled` (hub-level switch on top of the experiment; a malformed section fails closed), `max_file_bytes` (32 MiB), `max_bundle_bytes` (256 MiB), `max_files` (200), `default_retention_days` (0), `link_default_ttl_hours` (168), `link_max_ttl_hours` (720). |
+| **Experiment** | `pkg/experiments/registry.go`. | `hub.artifacts`, web and server layers, default off. Checked on every request (no restart needed): while the experiment is off, or the `artifacts` settings section is disabled or malformed, every artifact route answers 404. The web checks `isFeatureEnabled("hub.artifacts")`. |
+| **Message refs (D10)** | Message metadata and the server-built chat attachment map. | Refs travel in the hub-owned metadata key `artifacts`: a JSON array of canonical reference strings `scion://artifact/<id>[@<seq>]`, ids only, at most 10, never a title. The hub admits only refs the sender can read at send time (other send paths strip the key) and persists them in `artifact_message_ref(message_id, artifact_id, seq)` so chat history can render chips. Titles, versions and owners are resolved per reader, under the reader's own credential; an unreadable ref shows the same content as a missing one (see 5.5). |
+| **CLI** | `cmd/cli_mode.go` `agentAllowed` (dotted paths, parents not implicit). | `scion artifact publish|get|list|versions|share`; all but `share` agent-callable (D15). |
+| **Web** | The pluggable file browser / editor and `markdown-preview.ts`, `code-editor.ts`. | An artifact page hosts the entry file (markdown via `markdown-preview.ts`, HTML in a sandboxed iframe per D8); a bundle data source renders a version's manifest in the file browser. |
+
+### 5.5 Security notes
+
+- **Response equivalence covers content.** For a reader who may not read an artifact, the artifact routes, message reference views and send-time warnings return the same content as for an artifact that does not exist. Response time may differ between an existing but unreadable artifact and a missing one; that can reveal existence only to someone who already holds the artifact id, and `GET /api/v1/artifacts/{id}` behaves the same way. Timing equivalence is not a goal in v1.
+- **Artifact references resolve only for request-authenticated callers.** The hub resolves message references (send-time admission, chat views) through the artifact service in process, but only when the identity in the request context is the one the authentication middleware derived from the request's credentials. A context the hub builds for its own decisions resolves nothing, so the service's `Host` only ever sees request-derived identities.
+
+## 6. Data model
+
+```sql
+artifact (
+  id            text PK,                -- UUID assigned by the service
+  scope_kind    text NOT NULL,          -- 'project' in v1 (D7)
+  scope_ref     text NOT NULL,          -- project id, never the slug
+  owner_kind    text NOT NULL,          -- 'agent' | 'user'
+  owner_ref     text NOT NULL,          -- agent id / user id (stable ids, not names)
+  key           text NULL,              -- publisher-chosen stable key
+  title         text NOT NULL,
+  current_seq   int  NULL,
+  expires_at    timestamptz NULL,       -- retention (D12)
+  created_at, updated_at, deleted_at,
+  UNIQUE (scope_kind, scope_ref, owner_kind, owner_ref, key) WHERE key IS NOT NULL AND deleted_at IS NULL
+)
+artifact_version (
+  id text PK, artifact_id FK,
+  seq int NOT NULL, kind text NOT NULL,  -- 'publish' | 'review'
+  entry_path text NOT NULL,
+  note text NULL,
+  total_bytes bigint NOT NULL, file_count int NOT NULL,
+  created_by_kind text, created_by_ref text, created_at,
+  state text NOT NULL,                   -- 'pending' | 'ready' | 'failed' (two-step publish, D9)
+  UNIQUE (artifact_id, seq)
+)
+artifact_file (
+  version_id FK, path text,              -- relative path inside the bundle
+  size bigint, sha256 text NULL,         -- NULL only for a remote fetch that failed
+  media_type text,
+  origin text NOT NULL DEFAULT 'upload', -- 'upload' | 'remote' (fetched by the hub at publish time)
+  source_url text NULL, fetch_status text NULL, fetch_error text NULL,   -- remote files only
+  PRIMARY KEY (version_id, path)
+)
+artifact_grant (
+  id text PK, artifact_id FK,
+  subject_kind text,                     -- 'scope' | 'principal' | 'link'
+  subject_ref  text,                     -- scope ref / 'kind:ref' principal / link token hash
+  permission   text,                     -- 'read' | 'write' | 'admin'
+  expires_at timestamptz NULL, created_by_ref text, created_at,
+  UNIQUE (artifact_id, subject_kind, subject_ref)
+)
+artifact_message_ref (                   -- D10: refs only, no title
+  message_id text, artifact_id FK, seq int NULL,   -- seq NULL = current version
+  PRIMARY KEY (message_id, artifact_id)            -- one ref per artifact per message
+)
+artifact_migrations (name text PK, applied_at)   -- ledger, as webchat_migrations
+```
+
+Ids are `TEXT` in both dialects, so a malformed id from a request path simply matches nothing. SQLite stores timestamps as fixed-width RFC 3339 UTC text, Postgres as `TIMESTAMPTZ`; both keep microsecond precision.
+
+Blob layout: `hubs/{hub-id}/artifacts/blobs/sha256/<aa>/<bb>/<hex>` — content-addressed, immutable, shared across versions and artifacts within one hub. `artifact_file.sha256` is the pointer. Deleting a version marks rows; a periodic sweep removes unreferenced blobs after a grace period.
+
+**Deleted home scope (D16).** When the project behind `scope_ref` no longer exists, the synthetic home-scope grant matches nobody; the owner (implicit admin), principal grants and link grants keep working, and the artifact still appears in the owner's listing and a hub-level *Artifacts* view. The service never joins to the project table. A later "move to scope" (`PATCH /{id}` with a new `scope_ref`, admin-only) re-homes an orphaned artifact.
+
+Permission semantics: `read` = fetch metadata, versions, files; `write` = append versions (including reviews), edit title/key; `admin` = grants, delete. The owner holds admin implicitly. The home-scope default grant is read; scope admins may raise it.
+
+## 7. API surface (REST + JSON, under `/api/v1/artifacts`)
+
+| Method & path | Purpose | Permission |
+|---|---|---|
+| `POST /` | create artifact (title, key?, scope, entry_path, files manifest) → `{artifact, version(pending), upload: {...}}` | caller may create in scope |
+| `POST /?name=<file>[&title=][&scope=]` | **single-file fast path**: the raw body is the only file; creates artifact + v1 `ready` in one request | caller may create in scope |
+| `PUT /{id}/versions/{seq}/files/{path}` | upload one file (raw body, `Content-Length`, `X-Content-SHA256`) while the version is `pending` | write |
+| `POST /{id}/versions/{seq}/finalize` | verify manifest vs received files, flip to `ready`, advance `current_seq` | write |
+| `POST /{id}/versions` | start a new version (same two-step); `kind: publish\|review` | write |
+| `GET /{id}` · `GET /{id}/versions` · `GET /{id}/versions/{seq}` | metadata | read |
+| `GET /{id}/files/{path}` · `GET /{id}/versions/{seq}/files/{path}` | bytes: streamed on the local provider, otherwise `302` to a signed URL; `?stream=1` makes the hub serve the bytes on any provider. `Content-Disposition`, `X-Content-Type-Options: nosniff` and sandbox headers per D8. `?resolve=clean\|accept` applies the CriticMarkup projection to text files (implies stream, since it is a transform) | read |
+| `GET /?scope=…&owner=…&q=…` | list / search | read (filtered) |
+| `PATCH /{id}` · `DELETE /{id}` | title/key/expiry; soft delete | write / admin |
+| `GET/POST/DELETE /{id}/grants` | ACL, including `POST /{id}/links` to mint a share link | admin |
+| `GET /shared/{token}[/files/{path}]` | share-link read; no session required | link grant |
+
+Unauthorized and absent artifacts both answer `404` with the same status and body; nothing distinguishes an absent artifact from an unreadable one. Publishing into a scope the caller may not create in answers `403`.
+
+### Phase P1 implementation notes
+
+- **Fast-path discriminator.** The presence of `?name=` selects the single-file publish, leaving `POST /` with a JSON body free for the two-step create. `name` must be a plain file name; it becomes the entry path. `title` defaults to the name. `scope` defaults to the caller's home scope (an agent's project); users must pass it. An optional `X-Content-SHA256` header is verified against the body.
+- **Limits.** `max_file_bytes` comes from the `artifacts` settings section on every request. A declared `Content-Length` over the limit is rejected with `413` before the body is read; an undeclared length is cut off at limit + 1 byte while spooling, and nothing over the limit reaches storage.
+- **Agent scopes before grants.** For an agent, the hub adapter requires `project:artifact:read` (reads) or `project:artifact:write` (publish) before the service looks at any grant; agents created from a credential issued before artifacts existed need to be recreated from a current credential before they can use artifacts.
+- **Evaluation order.** Every artifact read runs three steps in this order. (1) The credential check (`Host.Permits`): the caller's credential itself must allow the permission in the artifact's home scope. For a user access token that means its permissions and project boundary; for an agent, its dedicated agent scope and, at use time, its delegation chain in its own project (so an agent whose chain no longer allows the permission is refused even for what it owns or was granted). This step is necessary on every path and fails closed. (2) The owner (implicit admin), or host policy for `artifact.read` in the home scope (`Host.Authorize`). (3) An unexpired `artifact_grant` row: a principal grant matching the caller, or a scope grant for a scope the host authorizes. Ownership and grants never reach past step 1. The credential check is the token's project boundary and permissions (and, for an agent, its dedicated scope), not the holder's current project membership, because owner and principal-grant access is designed to survive loss of the home scope. As a consequence, removing a user's project membership does not by itself stop reads through an outstanding access token of artifacts the user owns or was granted; revoke the token for an immediate cut-off. Publishing runs the credential check and host policy for `artifact.create` in the target scope. Share-link reads (a later phase) authenticate by link token instead. Expired (`expires_at`) and soft-deleted artifacts are unreadable to everyone.
+- **Delivery.** These are the rules of the file routes (downloads, `<img>` and `?stream=1`); HTML is rendered through the view route instead (see *Renderers* in 8.3), which is why it is an `attachment` here and still renders on the page. One code path sets the safety headers for both deliveries: `Content-Disposition` is `inline` only for script-free types (plain text, markdown, CSV, TSV, JSON, YAML, TOML, PNG, JPEG, GIF, WebP) and `attachment` for everything else (HTML, SVG, PDF, unknown); `X-Content-Type-Options: nosniff`; private caching. Streamed responses add `Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox` and an `ETag` of the digest. Redirects carry the content type and disposition into the signed URL as response-header overrides.
+- **`?stream=1`.** The general "hub serves the bytes" mode. The web page uses it to read text (a cross-origin redirect to the object store would be blocked by `fetch()`); `<img>` and the CLI keep the redirect. On the local provider it changes nothing.
+- **Clients follow redirects without credentials.** The CLI fetches the signed URL with a client that carries no hub token or transport credentials.
+- **Media type.** Chosen from the file extension first, then a specific declared `Content-Type`, then content sniffing.
+
+## 8. UX
+
+### 8.1 Agent flow (CLI, hub REST)
+
+```
+scion artifact publish design.md --title "Artifact system design"
+  → scion://artifact/5f1c…  (v1)
+    https://<hub>/projects/<project-id>/artifacts/5f1c…
+scion artifact publish design.md --key artifacts/design --note "round 4"   # same key → v2
+scion artifact publish ./report --entry index.html --title "Q3 report"     # bundle
+scion artifact get scion://artifact/5f1c…            # prints the entry file to stdout, or writes it with --out
+scion artifact get scion://artifact/5f1c…@2 --out ./v2/
+scion artifact versions scion://artifact/5f1c…
+scion message @someone "Design ready" --artifact scion://artifact/5f1c…
+```
+
+`publish` streams the file(s) to the hub (D9); the hub reads nothing from shared directories. `get` works from any broker and any project the caller has a grant in (D5, D10). Agent-callable verbs are listed in `cmd/cli_mode.go` `agentAllowed`; `artifact.share` is not (D15). Phase P1 ships `publish <file> [--title]` and `get <ref> [--out]`.
+
+**Delivery envelope.** A message with an artifact ref renders to the agent as today's envelope plus the `artifacts` metadata entry and one fetch hint per ref in the body footer, built from the ref alone: `Artifact: v2 - scion artifact get scion://artifact/5f1c…@2`, or `Artifact: current - scion artifact get scion://artifact/5f1c…` for an unpinned ref. The hint carries no title and involves no lookup at delivery; whether the recipient may read the artifact is decided when it runs `get`. This keeps the agent's path to the bytes one command long and visible in the envelope.
+
+### 8.2 Review flow (D4, D11)
+
+1. A human opens the artifact page and clicks **Review**. The entry markdown opens in the file editor with a CriticMarkup toolbar: select text → *Comment* inserts `{>>…<<}`, *Suggest* inserts `{~~old~>new~~}`, plus `{++…++}` / `{--…--}`. The preview renders the marks.
+2. **Save review** publishes version N+1 with `kind: review`, `created_by` = the user. The page shows a *review pending* badge; the owning agent receives a system message with the ref and fetch hint (`type: artifact_review`).
+3. The agent runs `scion artifact get <ref>` (latest version, i.e. the review), applies or answers the marks, and publishes version N+2 (`kind: publish`). The badge clears. History shows `publish → review → publish`.
+
+**Review access (the grant ladder).** The grant levels form a ladder, read, review, write and admin, and each includes the ones before it (`grantsForRead` covers review). A reviewer is anyone with write access or a user with a `review` grant; the review grant reads on its own and allows appending versions of kind review only. A user has one principal grant per artifact, and moving it between read, review, write and admin is an ordinary level change with a `grant_changed` event. The write decision (`canWritePermittedErr`) reports how the caller writes (owner, write grant, review grant), and each of the three version steps accepts a review grantee for versions of kind review; it keeps the `canReadWith` check, which still applies the credential's `artifact.read` and the "no finalized version yet" rule. Owners, admin grantees and D25 stewards give review through the grant route. The automatic review grant (ptone/scion#7134) keeps its role-gated read while in its automatic form. Responses carry `canReview` beside `canPublish`, and the web page offers that caller **Review**. Migration 0014_review_ladder changes the legacy D24 write grants (user write grants on live agent-owned artifacts that no grant event names) to review; on an unreadable grant event it changes nothing, logs a warning and is retried at the next start.
+
+**Review versions are complete copies.** A review version holds the full content of the entry file (and the whole bundle manifest) with CriticMarkup inline, not a delta, so `get` of any version is self-contained.
+
+**Resolving marks (the `resolve` transform).** A pure Go package `pkg/artifacts/critic` implements CriticMarkup parsing and three deterministic projections:
+
+| mode | `{++ins++}` | `{--del--}` | `{~~old~>new~~}` | `{>>comment<<}` / `{==hl==}` |
+|---|---|---|---|---|
+| `raw` (default) | unchanged | unchanged | unchanged | unchanged |
+| `clean` — reject all | removed | `del` kept | `old` | removed (highlight text kept, braces removed) |
+| `accept` — accept all | `ins` kept | removed | `new` | removed |
+
+Exposed in three places sharing one implementation: API `GET …/files/{path}?resolve=clean|accept` (text media types only), CLI `scion artifact get <ref> --clean | --accept`, and the web preview toggle (*Marks · Clean · Accepted*).
+
+**Code is literal text.** Markdown code (inline code spans and fenced code blocks) holds no marks: its text is kept, projected and compared exactly as written, by the Go package, its web twin, the preview renderer and the Review toolbar alike. Detection follows CommonMark for code spans and fenced code blocks: a span opens at a backtick run and closes at the next run of the same length within a run of consecutive non-blank, non-fence lines (a backslash escapes an opening backtick); a fence is a line of three or more backticks or tildes indented at most three spaces, with an info string, closed by a line of the same character at least as long followed only by spaces or tabs, or else running to the end. A mark may contain code; code never contains a mark. Indented code blocks, fences inside block quotes or nested list items, the precedence of HTML tags and autolinks over backticks, and block boundaries other than blank lines and fences (headings, list items and table rows do not end a run of lines) are read as ordinary text. A reviewer suggests a code change by marking around the code (`` {--`old`--}{++`new`++} ``, `` {~~`old`~>`new`~~} ``, or a comment beside it); text typed inside code is an unmarked change, so the finalize check below stays byte-exact. The toolbar accepts a whole inline code span as a selection and refuses one that starts or ends inside a span. It does not mark fenced code blocks: any selection or insertion point that touches a fence line or falls inside the block is refused with one hint (type the marks in the editor, or comment beside the block), so it never moves where a block starts or ends; the lines before and after a block are marked as usual. Any other mark that would change which text is code is refused too. Go and TypeScript read one shared corpus that pins each rule, including the forms read as ordinary text.
+
+**Unmarked edits are rejected (D20).** On finalize of a review version the service checks `clean(review.<text file>) == parent.<same file>` for every text file (byte comparison after NFC + LF normalisation; files absent from the parent, or non-text files that differ, also count). Any mismatch fails finalize with `422 {reason: "unmarked_changes", files: [{path, hunks: [...]}]}`; the pending version is discarded. Invariant: **`clean(review) == its parent`, always.**
+
+Rule (D18): **`current_seq` is the latest version of any kind.** `get --clean` or `get --kind publish` serve consumers who want the baseline.
+
+### Phase P4 implementation notes
+
+- **Parsing rules.** Marks do not nest: a mark ends at the first closing token of its kind. An opening token with no closing token of its kind, or a substitution with no `~>` before its closing token, is literal text. The first `~>` separates a substitution's sides; either side may be empty. Marks may span lines. Tokens inside Markdown code spans and fenced code blocks are literal text (see *Code is literal text* above). Tokens are ASCII, so projections are byte-exact outside marks and keep CRLF.
+- **Linear parse.** `critic.Parse` makes one forward pass to find the code and one to find the marks. Code spans are paired through per-length lists of backtick runs with forward-only pointers. Each closing-token search keeps a cursor that only moves forward and remembers a failed search, and each cursor and the opener scan step over code through their own forward-only index into the code ranges, so the work is linear in the input whatever mix of unterminated or malformed marks, or code, it holds; a test counts the work on adversarial inputs.
+- **Base of a review.** A review is checked against the version it was made against, its base, which the client names when it finalizes (`{"base": <seq>}`, required for a review: `400 base_required` without it). The base's baseline text is its content for a `publish` version and its clean projection for a `review` version, so a review of a review is checked against the published text and `clean(review)` always equals the last published baseline. A file byte-identical to the base's passes; the entry may not move and the file set must match. The hub's own manifest rows (fetched remote images) are not compared. The base must be the current version when the check starts, and `FinalizeVersion` re-checks under the artifact row lock that advances `current_seq` that it still is and that no `publish` version between the base and the review is pending or finalizing (pending reviews do not count: a review never shadows another version, because its own base check refuses it). The store also refuses a base at or above the review's own seq. Otherwise finalize answers `409 stale_review` and discards the review, so a review is never compared with a version its reviewer did not start from and never becomes current over a newer version. A document whose text already contains complete CriticMarkup marks outside code refuses a review that adds marks while the document's own marks are left as they are (D20); a review that wraps each of them in a deletion (`{--{++ins++}--}`) passes, as does an identical review, and a lone opening token stays literal.
+- **Rejection shape.** `422` with the hub's error envelope: code `unmarked_changes`, `details.files` (at most 20, each `{path, change, hunks}` with `change` one of `modified`, `added`, `removed`, `entry`), `details.truncated`, `details.base`. Hunks come from a linear line comparison (common prefix and suffix trimmed; equal-length middles report each differing run, others one hunk), at most 20 per file with at most 256 bytes quoted per side. The check stops reading files once it has 20 to report. Only a caller who can read the artifact reaches finalize (the read check runs before the write check), so the quoted base text is already readable to it. A read failure releases the finalize claim and answers `500`; the review is neither accepted nor discarded.
+- **`?resolve=`.** Validated before the artifact is looked up. Text files are read whole (bounded by the file limit they were published under) and streamed with `X-Artifact-Resolve` and an `ETag` of `sha256:<digest>;<mode>`; other files ignore it. The CLI fetches the stored bytes, verifies their digest, and applies the same `critic` projection locally.
+- **Review notice.** The service reports each finalized review not authored by the owner to a host notifier. The hub sends an agent owner a `system` message with category `artifact-review` (event type `artifact.review`) whose body holds the reference and fetch commands; it is the hub's own message and does not use the admitted `artifacts` metadata key. A user owner sees the review-pending state in the web UI.
+
+### 8.3 Web
+
+- **Artifact page** `/projects/<project-id>/artifacts/<id>[/v/<seq>]`: title, owner, version selector, rendered entry, *Files* (file browser over the version manifest), *Edit* (saves a `kind: publish` version by the user, D17), *Review* (D11), *Share* (links and grants, user-only), *History*. The project *Artifacts* tab has *New artifact* (upload through the two-step API). A hub-level `/artifacts` view (management sidebar item beside *Skills*, phase P1c, D21) lists artifacts the user owns, holds a principal grant on, or that are homed in or shared to a project the user is a member of, including owned ones whose home project is gone (D16); an "Owned by me" filter narrows it to owned artifacts. It is backed by `GET /api/v1/artifacts?mine=1` (cursor paginated, `q`, `review_pending`, `owner=me`). Membership only bounds the candidate set; every row passes the same read check as `GET /api/v1/artifacts/{id}`.
+- **Renderers** by entry media type: markdown → `markdown-preview.ts` (later with a CriticMarkup extension); text/code → `code-editor.ts` read-only; raster images → `<img>`; HTML bundles → sandboxed iframe whose `src` is the **view route**, `/api/v1/artifacts/view/<capability>/<entry>` (`RouteView`), not the file route: a reader is issued a view URL with a per-view capability for one version, relative sub-resources resolve under it, and every view response carries its own `Content-Security-Policy` with a `sandbox` directive (D8); CSV/JSON → code view in v1. Phase P1 shipped the page with the markdown, text and image renderers and offered other types as a download; HTML has since been rendered through the view route, so that note no longer applies to HTML.
+- **Chat**: chat history and send responses carry each message's refs resolved for the viewer (`messageArtifacts`); a readable ref renders a chip (title · vN · owner), an unreadable or missing one only as unavailable, with no title. Clicking a chip or a linkified `scion://artifact/` URL opens an in-place preview dialog with the same renderer and an *Open in artifact viewer* button (D23; no side panel). Composer: *Attach artifact* picker; drag-drop in the composer still creates a chat attachment in v1 (D14).
+- **Project → Artifacts tab**: list with search, owner, updated, review-pending filter.
+- Everything is behind experiment `hub.artifacts`.
+
+### 8.4 Images in markdown
+
+- **Fetched at publish, never on open.** When a version whose entry is markdown is published (single-file publish, or finalize of a two-step publish), the hub fetches the absolute https images the entry references inline (`![alt](url)` and `<img src>`) once (an `http` image gets a failed row), through `pkg/artifacts/remotefetch`, under the `remote_image_*` settings (on by default; count cap, per-image size, per-image timeout, total budget). Each becomes a manifest row at `_remote/<sha256(url)>` with `origin = remote`, `source_url` and `fetch_status`; a fetched image is a normal content-addressed blob stored with its detected type. A fetch that fails leaves a `failed` row with a generic error and never fails the publish; the response and the CLI list one generic warning per such image. A later version fetches again. `_remote/` is reserved: uploads may not use it.
+- **Finding the images.** Image URLs are taken from the first 2 MiB of the entry, a fixed window; an entry larger than that gets one warning, and images past the window get no rows. Extraction is bounded in time and memory by construction. It reads the window in one forward pass in which each byte is examined a fixed, small number of times. It treats each candidate URL as a substring of the window, accepted only if a byte-level check passes, and stops once it holds four times the per-version image cap of distinct candidates. Only those candidates are copied, decoded and normalized, and only the URLs the fetcher fetches are parsed. Tests check the work per byte and that allocation besides the window depends on the number of candidates kept, not on the size of the entry. Candidates are decoded as the browser reads them: an `<img src>` with HTML attribute rules for character references, then tabs and line breaks removed, slashes after the scheme read as `//` and a backslash before the query read as `/`; a markdown destination with `&amp;` decoded. A URL is kept only in a plain form both the browser and Go's URL parser read the same way (http or https, a host name of letters, digits, `.` and `-`, an optional port, no userinfo, no parentheses or spaces); anything else shows the "not fetched" placeholder. Reference-style images (`![alt][label]`, with a definition elsewhere) are not fetched yet (ptone/scion#3678); they show the "not fetched" placeholder. Image URLs written in code are fetched too; they are not shown.
+- **Served like any file.** `_remote/` files use the existing file route and the same evaluation order (credential check, then owner or host policy, then grants). A fetched image streams with a long-lived private cache header when requested by an explicit version, and `private, no-cache` through the current-version URL; a failed one answers `404` with `X-Artifact-Remote-Status: failed`. The manifest exposes `origin`, `sourceUrl` and `fetchStatus`.
+- **Fetcher.** `https` on port 443 only, no userinfo, every redirect hop checked the same way (at most three); every resolved address must be public, and the connection goes to the checked address; no proxy, cookies or credentials; connect, per-fetch and total time limits; a streaming size cap; only PNG, JPEG, GIF and WebP, decided from the bytes. Failure reasons are logged on the server only. Refused and unresolvable image fetches complete no sooner than a fixed floor tied to the connect timeout, once per publish, within the fetch budget.
+- **Preview.** The artifact page renders markdown in a sandboxed `srcdoc` frame with `allow-same-origin` (plus `allow-popups` and `allow-popups-to-escape-sandbox`, so links open in a new tab) and never `allow-scripts`, whose document carries `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'`. Relative image paths resolve against the entry's folder in the version's files; absolute http(s) URLs load their `_remote/` copy, matched through the manifest: the renderer compares the browser's parsed form (`new URL(...).href`) of each remote row's `sourceUrl` with that of the image's `src`, so it does not reproduce the hub's normalization (the accepted forms and their normalized URLs are listed in `pkg/artifacts/testdata/remote_image_urls.json`, shared by the Go and web tests); anything else becomes a placeholder ("not fetched" without a row, "could not be fetched" for a failed row). Every image request uses `?stream=1`. A relative link to a file of the version opens that file; other relative links are made plain text.
+
+## 9. Retirement and orphans (ptone/scion#4465)
+
+Nobody could retire an artifact whose owner is an agent, and once that agent was deleted no owner was left at all. The approved design (Option A, custodians, extended with a super-admin transfer) keeps ownership where it is (D7): accountable humans, the *custodians*, can retire an artifact and narrow access to it, but cannot share it; only a super-admin can hand an artifact to a user. It ships in phases, each one PR: phase 1 ptone/scion#4529 (this slice), then transfer ptone/scion#4530, custodians ptone/scion#4531, bulk retire and transfer ptone/scion#4532, live-agent expiry ptone/scion#4533, the web mock and UI ptone/scion#4534 and ptone/scion#4535, and the opt-in orphan policy ptone/scion#4536.
+
+### 9.1 What phase 1 ships
+
+- **Schema** (migration `0007_orphans`, both dialects, every column nullable, no backfill). On `artifact`: `orphaned_at` (set and cleared by the reconciler), `sponsor_ref` (delegating user of the publishing agent; written at creation and by a one-time backfill since ptone/scion#6028, see 9.3), `expiry_source` (`retention`, `manual` or `orphan_policy`; orphan-policy phase), and the transfer record `former_owner_kind`, `former_owner_ref`, `transferred_at`, `former_key` (transfer phase). Columns for later phases are added now so the schema changes once; phase 1 neither reads nor writes them. The unique key index is unchanged. New append-only table `artifact_event (id, artifact_id, at, action, actor_kind, actor_ref, authority, detail)` with an index on `(artifact_id, at)`.
+- **One soft delete.** `Store.DeleteArtifact` sets `deleted_at` and removes every grant and share link in one transaction, and records a `deleted` event with the counts. `DELETE /{id}` and the expiry sweep both use it (the sweep re-checks the expiry under the same transaction, as before).
+- **Events.** Every store write that changes an artifact's lifetime, home or access takes a required `Actor` (kind, ref, authority) and records its event in the same transaction, so no such change commits without its row: `expiry_set`, `expiry_cleared` (PATCH), `moved` (PATCH with `scopeRef`; detail names the old and new home and the id of the old home's scope grant the move dropped), `grant_removed`, `link_revoked`, `deleted`, `orphaned`, `unorphaned`. Actor kinds are `user`, `agent` and `system`; authorities in phase 1 are `owner`, `admin_grant`, `custodian_project_admin`, `retention` (the expiry sweep) and `reconciler`. `moved` is a deliberate addition to the design's action list: a move takes access away from the old home's members, and the table exists to audit every change of access. Reading events through the API (`GET /{id}/events`) comes with the custodians phase.
+- **Owner liveness reconciler.** A new optional host extension, `PrincipalChecker.PrincipalsExist(ctx, refs) (map[string]bool, error)`, on the pattern of `ScopeChecker.ScopesExist`: strings in, bools out (D13). A live principal is an agent row that exists and is not soft-deleted, or an active user; a ref missing from the answer counts as live. `ReconcileOwners` runs in the hub's maintenance pass (`reapArtifactVersions`) after the pending reap and before the expiry sweep. It pages through the distinct owners of live artifacts (`GROUP BY owner_kind, owner_ref` on `idx_artifact_owner`, 100 per page, each with its marked and unmarked counts), asks the host once per page, and sets `orphaned_at` where the owner is gone and clears it where the owner is back, 500 artifacts per transaction, writing only where the mark must change. The hub's adapter answers a page with at most two store queries: `ListAgents` by id (soft-deleted rows excluded) and `GetUsersByIDs`. Refs of other kinds or with non-UUID ids are left out (live). Nothing depends on agent lifecycle hooks, so all four ways an agent stops existing are covered: soft delete, hard delete, `PurgeDeletedAgents` and the project cascade (the last two run no hooks; D3 keeps the artifact tables outside the hub's transactions anyway). On a checker error the failing page and every owner after it are left unchanged, the error carries the count of unprocessed owners, the hub logs it once, and the rest of the maintenance pass (expiry sweep, blob GC) still runs; the next pass retries. Pages before the failure keep their (correct) marks.
+- **`DELETE /api/v1/artifacts/{id}`.** Order of checks: the read check (`readableArtifact`), so a non-reader gets the byte-identical `404` of a missing artifact; then the authority check, where a reader without authority gets `403` with one fixed body for every reason; then the soft delete, `204`. The soft delete is conditional on the artifact still being homed where the authority was decided (`DeleteOptions.ScopeRef`); if it was moved in the meantime, the route answers `404` and changes nothing. Authority: the caller is a user whose credential `Permits` `artifact.manage` in the home project, and is the owner, holds an unexpired admin grant, or holds `project.manage` on the current home (the first custodian clause: the project owners and admins of the artifact's home project, and super-admins; the hub-admin system role does not include `project.manage`), answered by a new optional host extension `ScopeAdministrator.AdministersScope` (the same `CheckAccess` that `MayGrantReview` makes, which now shares it). A host without the extension allows no one by that clause. Agents are refused (`403` as readers). The reserved `artifact.delete` registry row stays reserved: the route checks `artifact.manage`.
+- **Responses.** `ArtifactInfo.ownerDeleted` (from `orphaned_at`) on GET, list and PATCH responses.
+- **CLI.** `scion artifact delete <ref>` asks for confirmation (`--yes` skips it), human mode only (not on the agent allow-list in `cmd/cli_mode.go`).
+
+### 9.2 Lifecycle
+
+| Event | Effect in phase 1 |
+|---|---|
+| Agent deleted (any of the four paths) | The next pass sets `orphaned_at`. Owners, admin grantees and home-project admins can delete. |
+| Agent restored | The next pass clears `orphaned_at`. |
+| User deleted or no longer active | The next pass marks that user's artifacts; made active again, the mark clears. |
+| Project deleted | Artifacts survive (D16); their agents are gone, so they are marked. Owners and admin grantees can still delete them. The project-admin clause still reaches super-admins, whose system role holds `project.manage` for every project id, the deleted home included (pinned by `TestArtifactDeleteWhenHomeProjectDeleted`). Project admins of the deleted home are gone with it, and hub-admins wait for clause 3 in the custodians phase. |
+| Re-home | Delete authority by the custodian clause follows the current home at once. |
+
+### 9.3 Invariants for later phases
+
+- **`orphaned_at` means "owner removed", not "owner unreachable".** It is set only when the owner's row is gone (an agent hard-deleted, purged or soft-deleted; a user deleted or no longer active), never because a credential lapsed. An idle agent without a token keeps a live row and is not orphaned. A missing mark does not mean the owner is reachable.
+- **Fail open to live.** In phase 1 the mark is inert: it grants nothing and changes no expiry, grant or link. Any later phase that acts on it (the orphan policy, bulk retire) must keep the reconciler's direction. An unanswered ref, a lookup error or an unknown kind counts as live, so a transient lookup gap never retires anything.
+- **Owner refs are UUIDs.** Owner refs are stable store ids, and the hub adapter treats a non-UUID ref as live (it is never marked). A future principal kind whose ids are not UUIDs must extend `PrincipalsExist` before it can own artifacts, or it can never be orphaned.
+- **`sponsor_ref` (ptone/scion#6028).** Written only from the host's resolution of the owning agent's provenance root: at creation (`SponsorRecorder.DelegatingUser`, agent owners in a project scope only) and by the one-time backfill (`BackfillSponsors`, ledger name `0012_sponsor_backfill`, NULL rows of live agents only). Never from a request, never updated once set. It is read only for an artifact owned by an agent: the `owner_kind == agent` gate in `stewardAuthority` and `reviewGrantCaller` is pinned by a test. A phase that changes an artifact's owner (transfer, ptone/scion#4530) must keep that gate or clear `sponsor_ref` in the same transaction, and update the writer guard if it clears it. It never gives read access by itself.
+- **Recorded delegator residual.** The recorded clause ends only on loss of standing (user inactive, no admission to or role read in the current home, home deleted), checked per request. No operation today revokes an agent's provenance edge deliberately: edge deactivations record agent deletion, purge, reincarnation, scope re-issue, create compensation or adoption causes, none of which is a revocation, and deleting the agent deliberately keeps the clause. Any future deliberate revocation of a provenance edge must record its own deactivation cause, and the recorded-delegator path must then deny for artifacts whose agent's sponsor-rooted edge carries it.
+- **No retry for later NULLs.** An agent-owned artifact created with nothing recorded after the backfill completed (a lookup fault at publish) is not retried; the live-chain fallback decides for it. A bounded retry sweep can be added later without a schema change.
+- **`ownerDeleted` is read-gated.** It is shown only on responses the caller can already read (GET, PATCH, and list rows, each of which passes the GET read check). A future enumeration that surfaces it must gate it per row the same way, or it becomes an "owner gone" oracle across unreadable artifacts.
+
+Not in phase 1: custodian clauses 2 (the delegating user, live or recorded sponsor) and 3 (hub-admins when the home is deleted; super-admins are already reached through clause 1), custodians on PATCH and grant or link removal, metadata-only answers for custodians who cannot read, transfer, bulk retire, live-agent expiry, the web UI, and the orphan policy.
+
+## 10. Attachments (ptone/scion#4594)
+
+Design decision D14 kept the chat `AttachmentStore` beside the artifact service in v1 and planned a follow-on that moves attachments onto artifacts. The approved plan (ptone/scion#4594, Option B) stores each web-chat attachment as an artifact whose scope is the message it was sent in. It ships in phases; phase 1, ptone/scion#4595, is the vertical slice described here. Everything is behind the experiment `hub.attachment_artifacts` (server and web layers, default off).
+
+### 10.1 Scope kinds and the read rule
+
+- **Two scope kinds.** `upload` holds a file uploaded and not yet sent; its `scope_ref` is the uploader as `kind:id`. `message` holds a file sent in a message; its `scope_ref` is the message id. The scope columns are free text, so the kinds need no DDL.
+- **One read decision.** `canReadWith` (`pkg/artifacts/read.go`) stays the only read decision. For an attachment scope it applies `canReadAttachmentScope`, in this order: the host implements `MessageScopeHost`; `PermitsMessageRead` (the credential allows reading messages at all); the attachment has a ready version; then, for an upload, the caller is its uploader, and for a message attachment, `MayReadMessage(scope_ref)`. Project permissions and grants never apply to these rows.
+- **`MessageScopeHost`** is an optional, string-only host extension on the pattern of `ScopeChecker` (D13). A host without it makes every attachment unreadable. The hub's adapter answers for the identity of the request only: `PermitsMessageRead` is true for a session of a user or the dev user only; user access tokens and agents get false (token access and agent fetch are ptone/scion#4596). `MayReadMessage` requires a stored message that is not deleted, then `canReadNativeMessage` (DM participants, project readers for a project thread, current participants of a group without a project), or the caller among the message's addressees (`ListAddressees`). Every lookup failure answers false.
+- **The result.** An attachment is exactly as readable as its message, at the moment it is read. A participant who leaves a group without a project loses its attachments on the next request; a new participant gains them. One copy follows a different rule in this phase: a file sent to an agent is also staged into the project's shared directory (§10.3), where project access applies, until ptone/scion#4597.
+- **Credentials.** `PermitsMessageRead` classifies the caller the way the inbox and conversation routes do (`inboxCredentialOf`) and admits only a session of a user or the dev user. User access tokens are refused (fail closed, the same answer as an unknown id): a token read rule for message-scoped attachments has to answer for the message's project, which the attachment does not record, so it is left to its own design (ptone/scion#4596). The same check gates the other paths a token could reach: the send validation looks up an artifact attachment only for a caller `PermitsMessageRead` admits (any other caller's id goes to the AttachmentStore lookup and gets the unknown-id answer), and history merges artifact attachments only for such a caller. Events follow one rule at the single fan-out (`PublishUserMessage`): attachments stored as artifacts go only on the chat subjects, which reach sessions only (the web `/events` stream); `agent.<id>.message`, `user.<id>.message` and `project.<id>.user.message` carry the AttachmentStore's attachments only, so the hub's agent messages stream, which a user access token may open, never lists one. Sessions are unchanged; `inbox_scope.go` is not changed.
+- **Uploads.** An upload goes to the artifact service only when the experiment is on, the service is ready, and the caller is one the service lets read attachments (`attachmentUploadsToArtifacts(ctx)` = `PermitsMessageRead`: a session of a user or the dev user). A user access token and a federated user upload to the AttachmentStore as with the experiment off, and keep reading what they upload under its rules.
+
+### 10.2 What attachment rows never do
+
+- **Artifact routes and lists.** `Store.GetArtifact` excludes attachment scopes, so every artifact route, message reference resolution and the recipient check answer for an attachment id with the same `404` as for an unknown id, including to a reader of the message, and including grant and link creation. The list candidate filter (`writeCandidateFilters`) excludes them, and so does share-link resolution. `Store.GetAttachment` is the only lookup that returns them, by artifact id or `legacy_attachment_id`.
+- **Store refusals.** `PutGrant`, `PutReviewGrant`, `CreateLink`, `CreateVersion`, `UpdateArtifact` and `SetExpiry` read the row's scope kind under its lock and refuse with `ErrAttachmentNotShareable`, which the routes map to `409 attachment_not_shareable`. With the route lookup above, a request reaches that refusal only for a row that became an attachment after the route read it.
+- **Orphans.** The owner liveness reconciler (§9) skips attachment rows: the message is their custodian, and the sender is recorded as owner for provenance only.
+
+### 10.3 Lifecycle
+
+| Event | Effect |
+|---|---|
+| Upload (`POST /api/v1/chat/attachments`, experiment on) | Request and response contract unchanged. Each file passes the existing deny-list and markup classifier, then becomes an `upload`-scoped artifact with one ready version of kind `attachment` (`Service.CreateAttachment`). Limits: `artifacts.max_file_bytes` per file, 10 per message. |
+| Send (web chat) | Validation accepts an attachment of the artifact service only as an unsent upload of the sender (`UsableAttachment`), in any conversation the sender may post to; anything else is refused with the existing "not available in this conversation" error. After the message is stored, `BindAttachment` moves each upload to `message:<id>` under the row lock. A bind lost to a concurrent send is logged and the attachment is left out of the message. |
+| Download (`GET /api/v1/chat/attachments/{id}`) | Resolved in the artifact service first, whether or not the experiment is on now, then in the legacy store. A readable attachment is delivered through `serveFile`: the artifact file headers, `inline` only for safe types, `302` to a signed URL on an object store, streamed with `?stream=1`. An unreadable one gets the route's single not-found answer and is not looked up in the legacy store. |
+| History | `messageAttachments` merges both stores, with the same `{id, name, mime, size}` shape. |
+| Agent recipients | Each attachment is staged into the project scratchpad from its stored bytes through `Service.OpenBoundAttachment` (so that copy is readable under project access), which checks no caller and requires the attachment to be bound to the message being sent. It is called only from the send path after persistence (pinned by `TestOpenBoundAttachmentReachableOnlyFromSendPath`); ptone/scion#4597 replaces it. |
+| Message deleted (`handleMessageDelete`) | `Service.RetireScope("message", id)` soft-deletes its attachments at once (actor `system`, authority `message_deleted`). |
+| Maintenance pass | `AttachmentRetirer.Retire` retires uploads older than `UploadTTL` (24 hours; authority `attachment_unsent`) and the attachments of every message `ScopeChecker.ScopesExist` reports gone; message refs are passed as `message:<id>`, at most ten pages of 100 per pass, from where the last pass stopped (a position each hub keeps in memory, wrapping at the end). This covers messages removed without the delete hook. Bytes follow the blob sweep, by reference, after `gc_grace_hours`. |
+
+### 10.4 Schema
+
+Migration `0009_attachments`, both dialects, nullable columns, no backfill: `artifact.legacy_attachment_id` (unique where set; the backfill phase fills it so legacy ids keep resolving), `artifact_version.source_attachment_id` and `source_message_id` (written from publish by reference, ptone/scion#4599), and an index on `artifact (scope_kind, created_at)` for live rows.
+
+### 10.5 Invariants for later phases
+
+- **One read rule.** Any new path that serves an attachment's bytes on behalf of a request goes through `canReadWith`. `OpenBoundAttachment` is the one exception, and it stays reachable from the send path only.
+- **Fail closed.** For the attachment scopes, a host without `MessageScopeHost`, an unanswered lookup and any store error refuse. (A scope kind that is not an attachment kind is read as a project scope.)
+- **Experiment off means today's behaviour** for new uploads, while attachments stored when it was on stay readable.
+
+### 10.6 Phase 2: agents send and receive attachments (ptone/scion#4596)
+
+Phase 2 lets agents send attachments as bytes and receive them as files in their home. It keeps the one read rule of 10.1 and adds an agent class to it. Delivery was folded in from ptone/scion#4597. Everything stays behind `hub.attachment_artifacts`.
+
+- **Stored project.** Migration `0010_attachment_project` adds the nullable `artifact.message_project_id`. `BindAttachment` writes it in the same statement as the scope move. The hub derives it from the stored message and its conversation (`messageProjectForBind`), never from a request field. The host question carries it (`MayReadMessage(ctx, messageID, messageProjectID *string)`): nil means unknown and the empty string means no project. Sessions and agents do not read it; it is there for the token rule.
+- **Agent class.** `PermitsMessageRead` admits an agent in good standing (`agentStanding`). The agent branch of `MayReadMessage` admits a reader of the message's conversation, or an addressee: the row's recipient, or an addressee row written by `recordAttachmentAddressee` before a mention copy, a default-agent wake or a web mention copy is dispatched, pending until it is delivered. A failed row grants nothing. `Service.MayReadAttachments` serves the list paths. History asks once per message.
+- **Agent upload and sends.** `agentMaySend` gates agent uploads (`POST /api/v1/chat/attachments`, agents on the collection only) and agent sends. `GET /api/v1/chat/attachments` is a capability probe: `{"uploads": "artifact", "delivery_max_bytes": n}` or `{"uploads": "legacy"}`. Sends name uploads in `attachment_ids`. A send is refused when two attachment names collide, compared case-insensitively after `SanitizeFilename` and, for artifact attachments, after the delivery reduction. It is also refused, when it can reach an agent, if the total exceeds `messaging.attachment_delivery_max_bytes`. On the broker path the handler stores the message before it publishes (D2).
+- **Delivery plan.** At every render site, `attachmentDelivery.Plan` decides each attachment once per recipient. It asks the read rule for the recipient on a fresh context (`attachmentDecisionForRecipient`), never with the sender's credential. An entry is `deliverable`; `undeliverable_runtime` when the broker does not advertise `attachmentDelivery` (the hub renders the not-delivered line itself); or `withheld`, which is never mentioned. Envelope paths are `~/.scion/inbox/<message-id>/<reduced name>`, with names reduced to `[A-Za-z0-9._-]` and at most 120 runes. Under the legacy envelope, the dispatcher applies the plan to the copy it sends. Observer copies clear the plan.
+- **Capabilities.** At each dispatch attempt, `Issue` asks the decision again and signs one capability per deliverable entry with `attachment_delivery_signing_key`. The MAC is HMAC-SHA256 over a domain prefix and the encoded payload bytes. A capability names the attachment, message, agent and broker, expires after 15 minutes and carries a nonce. `GET /api/v1/attachment-deliveries/<token>` takes the broker HMAC credential and checks, in order: broker identity equal to the capability's broker, MAC, expiry, the nonce recorded atomically in `artifact_delivery_redemption` (migration `0011`; swept after 24 hours), a live message, and the attachment still bound (`ServeBoundAttachment`, with a 60-second object-store redirect). Every refusal is one 404.
+- **Broker inbox writer.** The broker redeems at receipt, on a detached context bounded to 60 seconds, into a private spool. It verifies size and sha256. Just before the message text is delivered (`agent.WithPreDelivery`), it writes the files with one exec as the agent user: a tar into a temporary directory, then a move under an atomic `mkdir` claim. It appends one not-delivered line per file that did not land, prunes old inbox directories at most hourly after a write, and reports per-file outcomes on the message-failures report.
+- **User access tokens.** `PermitsMessageRead` admits a token whose `inbox:read` is eligible for its boundary (clause 1). The token branch of `MayReadMessage` then requires, in order: the holder reads the message (its conversation, with the token identity, or a user addressee); the recorded project is not nil and passes the token's `inbox:read` self-scope check; and, for a direct conversation, `agent:read` on every agent party of the key (`dmAgentParties`), never only the caller-relative peer. `MessageScopeHost.PermitsUploadRead` (clause 0) is asked after the uploader matches an unsent upload. A token answers it only with a hub boundary. A token uploads to the artifact service. It names ids on a chat send only where `chatTokenMaySend` allows, and at the human CLI site only with `inbox:write` for the target agent's project.
+
+**Invariants added.** `attachmentDecisionForRecipient` is called only from the delivery component, and `ServeBoundAttachment` only from the redemption route (source pins). A capability is issued only after the decision for that recipient, at that dispatch. The broker never edits the hub's text.

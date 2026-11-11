@@ -54,9 +54,10 @@ import (
 )
 
 // TestListProjects_NoUnconditionalFilter_DEF112 reads project_store.go
-// from disk, locates the ListProjects function body, and asserts that no
-// query.Where() call appears at the function body's base indentation
-// (one tab). gofmt guarantees that all conditional query.Where() calls
+// from disk, locates the body of every function on the ListProjects path
+// (ListProjects, ListProjectSummaries and the shared listProjects), and
+// asserts that no query.Where() call appears at a function body's base
+// indentation (one tab). gofmt guarantees that all conditional query.Where() calls
 // sit inside if/switch/for blocks at two or more tabs.
 //
 // The discriminator:
@@ -78,54 +79,26 @@ func TestListProjects_NoUnconditionalFilter_DEF112(t *testing.T) {
 
 	lines := strings.Split(string(src), "\n")
 
-	// Locate the ListProjects function body by matching the signature
-	// line and tracking brace depth.
-	inFunction := false
-	braceDepth := 0
-	funcStartLine := 0
-	var violations []string
-
-	// Matches query.Where( or query = query.Where( at exactly one tab.
-	// Two+ tabs do not match, so conditional calls inside if/switch/for
-	// are not flagged. gofmt guarantees the indentation.
-	unconditionalWhere := regexp.MustCompile(
-		`^\tquery(\.Where\(|\s*=\s*query\.Where\()`)
-
-	for i, line := range lines {
-		if !inFunction {
-			if strings.Contains(line, "func (s *ProjectStore) ListProjects(") {
-				inFunction = true
-				funcStartLine = i + 1
-				braceDepth = strings.Count(line, "{") - strings.Count(line, "}")
-			}
-			continue
-		}
-
-		braceDepth += strings.Count(line, "{") - strings.Count(line, "}")
-
-		// Skip comment-only lines.
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-
-		if unconditionalWhere.MatchString(line) {
-			violations = append(violations, fmt.Sprintf(
-				"  line %d: %s", i+1, trimmed))
-		}
-
-		if braceDepth <= 0 {
-			break // end of function body
-		}
+	// Every function on the ListProjects path is scanned: the exported
+	// methods and the shared body that builds the query. If one is
+	// renamed or removed the guard fails rather than silently scanning
+	// less code; update this list together with project_store.go.
+	scanned := []string{
+		"func (s *ProjectStore) ListProjects(",
+		"func (s *ProjectStore) ListProjectSummaries(",
+		"func (s *ProjectStore) listProjects(",
 	}
 
-	if !inFunction {
-		t.Fatal("ListProjects function not found in project_store.go; " +
-			"has the method been renamed or moved?")
+	var violations []string
+	for _, sig := range scanned {
+		if !scanUnconditionalWhere(lines, sig, &violations) {
+			t.Fatalf("%q not found in project_store.go; has the method "+
+				"been renamed or moved? Update the scanned list.", sig)
+		}
 	}
 
 	if len(violations) > 0 {
-		t.Errorf("DEF-112: ListProjects (starting at line %d) contains "+
+		t.Errorf("DEF-112: the ListProjects path contains "+
 			"unconditional query.Where() call(s):\n\n%s\n\n"+
 			"An unconditional filter causes ListProjects to return fewer "+
 			"projects than the table contains, which breaks the reachable/"+
@@ -143,6 +116,48 @@ func TestListProjects_NoUnconditionalFilter_DEF112(t *testing.T) {
 			"CountUnreachableUnbackfilledMessages to exclude the same "+
 			"projects, and verify that TestReachableCountConsistency_DEF112 "+
 			"(in cmd/) still passes.",
-			funcStartLine, strings.Join(violations, "\n"))
+			strings.Join(violations, "\n"))
 	}
+}
+
+// scanUnconditionalWhere locates the function whose signature line
+// contains sig, tracking brace depth to find its body, and appends every
+// query.Where() call at the body's base indentation (one tab) to
+// violations. It reports whether the function was found.
+func scanUnconditionalWhere(lines []string, sig string, violations *[]string) bool {
+	// Matches query.Where( or query = query.Where( at exactly one tab.
+	// Two+ tabs do not match, so conditional calls inside if/switch/for
+	// are not flagged. gofmt guarantees the indentation.
+	unconditionalWhere := regexp.MustCompile(
+		`^\tquery(\.Where\(|\s*=\s*query\.Where\()`)
+
+	inFunction := false
+	braceDepth := 0
+	for i, line := range lines {
+		if !inFunction {
+			if strings.Contains(line, sig) {
+				inFunction = true
+				braceDepth = strings.Count(line, "{") - strings.Count(line, "}")
+			}
+			continue
+		}
+
+		braceDepth += strings.Count(line, "{") - strings.Count(line, "}")
+
+		// Skip comment-only lines.
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+
+		if unconditionalWhere.MatchString(line) {
+			*violations = append(*violations, fmt.Sprintf(
+				"  line %d: %s", i+1, trimmed))
+		}
+
+		if braceDepth <= 0 {
+			break // end of function body
+		}
+	}
+	return inFunction
 }

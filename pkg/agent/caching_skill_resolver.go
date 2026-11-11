@@ -57,10 +57,10 @@ func (r *CachingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 		if skill.Hash == "" {
 			continue
 		}
-		if _, hit := r.cache.Get(skill.Hash); hit {
-			util.Debugf("skill cache hit: %s@%s (%s)", skill.Name, skill.Version, truncHash(skill.Hash))
+		if _, hit := r.cache.Get(skillCacheKey(skill)); hit {
+			util.Debugf("skill cache hit: %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, truncHash(skill.Hash))
 		} else {
-			util.Debugf("skill cache miss: %s@%s (%s)", skill.Name, skill.Version, truncHash(skill.Hash))
+			util.Debugf("skill cache miss: %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, truncHash(skill.Hash))
 		}
 	}
 

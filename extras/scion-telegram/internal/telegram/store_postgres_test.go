@@ -18,7 +18,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,7 +58,7 @@ func cleanPostgresTables(t *testing.T, dbURL string) {
 	tables := []string{
 		"telegram_group_links",
 		"telegram_conversation_context",
-		"telegram_project_agents",
+		"telegram_user_project_agents",
 		"telegram_user_mappings",
 		"telegram_pending_ask_users",
 		"telegram_callback_lookups",
@@ -75,17 +77,16 @@ func TestPostgres_GroupLink_SaveAndGet(t *testing.T) {
 	ctx := context.Background()
 
 	link := &GroupLink{
-		ChatID:             -100123,
-		ChatTitle:          "Test Group",
-		ProjectID:          "proj-1",
-		ProjectSlug:        "my-project",
-		DefaultAgent:       "coder",
-		LinkedBy:           "456",
-		LinkedAt:           time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
-		Active:             true,
-		ShowAgentToAgent:   false,
-		NotifyInGroup:      true,
-		ShowAssistantReply: true,
+		ChatID:           -100123,
+		ChatTitle:        "Test Group",
+		ProjectID:        "proj-1",
+		ProjectSlug:      "my-project",
+		DefaultAgent:     "coder",
+		LinkedBy:         "456",
+		LinkedAt:         time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		Active:           true,
+		ShowAgentToAgent: false,
+		NotifyInGroup:    true,
 	}
 
 	require.NoError(t, store.SaveGroupLink(ctx, link))
@@ -102,7 +103,6 @@ func TestPostgres_GroupLink_SaveAndGet(t *testing.T) {
 	assert.True(t, got.Active)
 	assert.False(t, got.ShowAgentToAgent)
 	assert.True(t, got.NotifyInGroup)
-	assert.True(t, got.ShowAssistantReply)
 }
 
 func TestPostgres_GroupLink_GetNotFound(t *testing.T) {
@@ -299,17 +299,57 @@ func TestPostgres_ProjectAgents_SaveAndGet(t *testing.T) {
 	ctx := context.Background()
 
 	pa := &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer"}},
-		RefreshedAt: time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC),
+		RefreshedAt: time.Now().UTC(),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	got, err := store.GetProjectAgents(ctx, "proj-1")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Len(t, got.Agents, 2)
 	assert.Equal(t, "coder", got.Agents[0].Slug)
+}
+
+func TestPostgres_ProjectAgents_PerUser(t *testing.T) {
+	testProjectAgentsPerUser(t, newPostgresTestStore(t))
+}
+
+func TestPostgres_ProjectAgents_EvictsExpiredEntries(t *testing.T) {
+	testProjectAgentsEviction(t, newPostgresTestStore(t))
+}
+
+func TestPostgres_ProjectAgents_EmptyUserNotServed(t *testing.T) {
+	testProjectAgentsEmptyUserNotServed(t, newPostgresTestStore(t))
+}
+
+func TestPostgres_ProjectAgents_ExpiredEntryNotServed(t *testing.T) {
+	testProjectAgentsExpiredNotServed(t, newPostgresTestStore(t))
+}
+
+func TestPostgres_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
+	dbURL := os.Getenv("TELEGRAM_TEST_POSTGRES_URL")
+	if dbURL == "" {
+		t.Skip("TELEGRAM_TEST_POSTGRES_URL not set, skipping Postgres store tests")
+	}
+	db, err := sql.Open("pgx", dbURL)
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`DROP TABLE IF EXISTS telegram_project_agents`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE telegram_project_agents (project_id TEXT PRIMARY KEY, agent_slugs TEXT NOT NULL DEFAULT '[]', refreshed_at TIMESTAMPTZ NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO telegram_project_agents VALUES ('proj-1', '[{"slug":"coder"}]', $1)`, time.Now().UTC())
+	require.NoError(t, err)
+
+	store := newPostgresTestStore(t)
+
+	var oldTables int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'telegram_project_agents'`).Scan(&oldTables))
+	assert.Zero(t, oldTables, "the project-keyed cache table is dropped")
+	testProjectAgentsDropsProjectKeyedCache(t, store)
 }
 
 // --- Postgres UserMapping ---
@@ -692,4 +732,56 @@ func TestPostgres_AdvisoryLock_SecondInstanceBlocked(t *testing.T) {
 	assert.True(t, acquired2, "second instance should acquire after first releases")
 	require.NotNil(t, handle2)
 	require.NoError(t, handle2.Release())
+}
+
+// TestPostgres_CreateSchema_Concurrent starts several stores against an
+// empty schema at the same time, as replicas sharing one database do on
+// first start, and expects every one of them to succeed.
+func TestPostgres_CreateSchema_Concurrent(t *testing.T) {
+	dbURL := os.Getenv("TELEGRAM_TEST_POSTGRES_URL")
+	if dbURL == "" {
+		t.Skip("TELEGRAM_TEST_POSTGRES_URL not set, skipping Postgres store tests")
+	}
+
+	admin, err := sql.Open("pgx", dbURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+
+	const rounds = 5
+	const replicas = 8
+	for round := 0; round < rounds; round++ {
+		schema := fmt.Sprintf("tg_schema_concurrent_%d_%d", time.Now().UnixNano(), round)
+		_, err := admin.Exec("CREATE SCHEMA " + schema)
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
+
+		u, err := url.Parse(dbURL)
+		require.NoError(t, err)
+		q := u.Query()
+		q.Set("search_path", schema)
+		u.RawQuery = q.Encode()
+		schemaURL := u.String()
+
+		start := make(chan struct{})
+		errs := make([]error, replicas)
+		var wg sync.WaitGroup
+		for i := 0; i < replicas; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				s, err := NewPostgresStore(schemaURL)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				errs[i] = s.Close()
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			assert.NoError(t, err, "round %d replica %d", round, i)
+		}
+	}
 }

@@ -18,6 +18,48 @@ type DelegationEdge struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
+	// ProvenanceVersion holds the value of the "provenance_version" field.
+	ProvenanceVersion int `json:"provenance_version,omitempty"`
+	// SourcePrincipalKind holds the value of the "source_principal_kind" field.
+	SourcePrincipalKind string `json:"source_principal_kind,omitempty"`
+	// SourcePrincipalID holds the value of the "source_principal_id" field.
+	SourcePrincipalID string `json:"source_principal_id,omitempty"`
+	// SourceCredentialKind holds the value of the "source_credential_kind" field.
+	SourceCredentialKind string `json:"source_credential_kind,omitempty"`
+	// SourceCredentialID holds the value of the "source_credential_id" field.
+	SourceCredentialID string `json:"source_credential_id,omitempty"`
+	// SourceEventID holds the value of the "source_event_id" field.
+	SourceEventID string `json:"source_event_id,omitempty"`
+	// SourceScheduleID holds the value of the "source_schedule_id" field.
+	SourceScheduleID *string `json:"source_schedule_id,omitempty"`
+	// SourceAuthorizationRevision holds the value of the "source_authorization_revision" field.
+	SourceAuthorizationRevision int `json:"source_authorization_revision,omitempty"`
+	// InitiatorPrincipalKind holds the value of the "initiator_principal_kind" field.
+	InitiatorPrincipalKind string `json:"initiator_principal_kind,omitempty"`
+	// InitiatorPrincipalID holds the value of the "initiator_principal_id" field.
+	InitiatorPrincipalID string `json:"initiator_principal_id,omitempty"`
+	// InitiatorCredentialKind holds the value of the "initiator_credential_kind" field.
+	InitiatorCredentialKind string `json:"initiator_credential_kind,omitempty"`
+	// InitiatorCredentialID holds the value of the "initiator_credential_id" field.
+	InitiatorCredentialID string `json:"initiator_credential_id,omitempty"`
+	// CeilingKind holds the value of the "ceiling_kind" field.
+	CeilingKind string `json:"ceiling_kind,omitempty"`
+	// CeilingVersion holds the value of the "ceiling_version" field.
+	CeilingVersion int32 `json:"ceiling_version,omitempty"`
+	// CeilingPermissionIds holds the value of the "ceiling_permission_ids" field.
+	CeilingPermissionIds *string `json:"ceiling_permission_ids,omitempty"`
+	// CeilingBoundaryKind holds the value of the "ceiling_boundary_kind" field.
+	CeilingBoundaryKind string `json:"ceiling_boundary_kind,omitempty"`
+	// CeilingBoundaryProjectID holds the value of the "ceiling_boundary_project_id" field.
+	CeilingBoundaryProjectID string `json:"ceiling_boundary_project_id,omitempty"`
+	// CeilingSourceExpiresAt holds the value of the "ceiling_source_expires_at" field.
+	CeilingSourceExpiresAt *time.Time `json:"ceiling_source_expires_at,omitempty"`
+	// DeactivationCause holds the value of the "deactivation_cause" field.
+	DeactivationCause string `json:"deactivation_cause,omitempty"`
+	// DeactivatedAt holds the value of the "deactivated_at" field.
+	DeactivatedAt *time.Time `json:"deactivated_at,omitempty"`
+	// DeactivationOpID holds the value of the "deactivation_op_id" field.
+	DeactivationOpID string `json:"deactivation_op_id,omitempty"`
 	// DelegatorType holds the value of the "delegator_type" field.
 	DelegatorType delegationedge.DelegatorType `json:"delegator_type,omitempty"`
 	// DelegatorID holds the value of the "delegator_id" field.
@@ -50,9 +92,11 @@ func (*DelegationEdge) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case delegationedge.FieldActive, delegationedge.FieldGrandfathered:
 			values[i] = new(sql.NullBool)
-		case delegationedge.FieldDelegatorType, delegationedge.FieldDelegatorID, delegationedge.FieldDelegateType, delegationedge.FieldDelegateID, delegationedge.FieldScopeType, delegationedge.FieldScopeID, delegationedge.FieldRole:
+		case delegationedge.FieldProvenanceVersion, delegationedge.FieldSourceAuthorizationRevision, delegationedge.FieldCeilingVersion:
+			values[i] = new(sql.NullInt64)
+		case delegationedge.FieldSourcePrincipalKind, delegationedge.FieldSourcePrincipalID, delegationedge.FieldSourceCredentialKind, delegationedge.FieldSourceCredentialID, delegationedge.FieldSourceEventID, delegationedge.FieldSourceScheduleID, delegationedge.FieldInitiatorPrincipalKind, delegationedge.FieldInitiatorPrincipalID, delegationedge.FieldInitiatorCredentialKind, delegationedge.FieldInitiatorCredentialID, delegationedge.FieldCeilingKind, delegationedge.FieldCeilingPermissionIds, delegationedge.FieldCeilingBoundaryKind, delegationedge.FieldCeilingBoundaryProjectID, delegationedge.FieldDeactivationCause, delegationedge.FieldDeactivationOpID, delegationedge.FieldDelegatorType, delegationedge.FieldDelegatorID, delegationedge.FieldDelegateType, delegationedge.FieldDelegateID, delegationedge.FieldScopeType, delegationedge.FieldScopeID, delegationedge.FieldRole:
 			values[i] = new(sql.NullString)
-		case delegationedge.FieldCreated, delegationedge.FieldUpdated:
+		case delegationedge.FieldCeilingSourceExpiresAt, delegationedge.FieldDeactivatedAt, delegationedge.FieldCreated, delegationedge.FieldUpdated:
 			values[i] = new(sql.NullTime)
 		case delegationedge.FieldID:
 			values[i] = new(uuid.UUID)
@@ -76,6 +120,136 @@ func (_m *DelegationEdge) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field id", values[i])
 			} else if value != nil {
 				_m.ID = *value
+			}
+		case delegationedge.FieldProvenanceVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field provenance_version", values[i])
+			} else if value.Valid {
+				_m.ProvenanceVersion = int(value.Int64)
+			}
+		case delegationedge.FieldSourcePrincipalKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_principal_kind", values[i])
+			} else if value.Valid {
+				_m.SourcePrincipalKind = value.String
+			}
+		case delegationedge.FieldSourcePrincipalID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_principal_id", values[i])
+			} else if value.Valid {
+				_m.SourcePrincipalID = value.String
+			}
+		case delegationedge.FieldSourceCredentialKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_credential_kind", values[i])
+			} else if value.Valid {
+				_m.SourceCredentialKind = value.String
+			}
+		case delegationedge.FieldSourceCredentialID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_credential_id", values[i])
+			} else if value.Valid {
+				_m.SourceCredentialID = value.String
+			}
+		case delegationedge.FieldSourceEventID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_event_id", values[i])
+			} else if value.Valid {
+				_m.SourceEventID = value.String
+			}
+		case delegationedge.FieldSourceScheduleID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_schedule_id", values[i])
+			} else if value.Valid {
+				_m.SourceScheduleID = new(string)
+				*_m.SourceScheduleID = value.String
+			}
+		case delegationedge.FieldSourceAuthorizationRevision:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field source_authorization_revision", values[i])
+			} else if value.Valid {
+				_m.SourceAuthorizationRevision = int(value.Int64)
+			}
+		case delegationedge.FieldInitiatorPrincipalKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_principal_kind", values[i])
+			} else if value.Valid {
+				_m.InitiatorPrincipalKind = value.String
+			}
+		case delegationedge.FieldInitiatorPrincipalID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_principal_id", values[i])
+			} else if value.Valid {
+				_m.InitiatorPrincipalID = value.String
+			}
+		case delegationedge.FieldInitiatorCredentialKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_credential_kind", values[i])
+			} else if value.Valid {
+				_m.InitiatorCredentialKind = value.String
+			}
+		case delegationedge.FieldInitiatorCredentialID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_credential_id", values[i])
+			} else if value.Valid {
+				_m.InitiatorCredentialID = value.String
+			}
+		case delegationedge.FieldCeilingKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_kind", values[i])
+			} else if value.Valid {
+				_m.CeilingKind = value.String
+			}
+		case delegationedge.FieldCeilingVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_version", values[i])
+			} else if value.Valid {
+				_m.CeilingVersion = int32(value.Int64)
+			}
+		case delegationedge.FieldCeilingPermissionIds:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_permission_ids", values[i])
+			} else if value.Valid {
+				_m.CeilingPermissionIds = new(string)
+				*_m.CeilingPermissionIds = value.String
+			}
+		case delegationedge.FieldCeilingBoundaryKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_boundary_kind", values[i])
+			} else if value.Valid {
+				_m.CeilingBoundaryKind = value.String
+			}
+		case delegationedge.FieldCeilingBoundaryProjectID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_boundary_project_id", values[i])
+			} else if value.Valid {
+				_m.CeilingBoundaryProjectID = value.String
+			}
+		case delegationedge.FieldCeilingSourceExpiresAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_source_expires_at", values[i])
+			} else if value.Valid {
+				_m.CeilingSourceExpiresAt = new(time.Time)
+				*_m.CeilingSourceExpiresAt = value.Time
+			}
+		case delegationedge.FieldDeactivationCause:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deactivation_cause", values[i])
+			} else if value.Valid {
+				_m.DeactivationCause = value.String
+			}
+		case delegationedge.FieldDeactivatedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deactivated_at", values[i])
+			} else if value.Valid {
+				_m.DeactivatedAt = new(time.Time)
+				*_m.DeactivatedAt = value.Time
+			}
+		case delegationedge.FieldDeactivationOpID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deactivation_op_id", values[i])
+			} else if value.Valid {
+				_m.DeactivationOpID = value.String
 			}
 		case delegationedge.FieldDelegatorType:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -179,6 +353,77 @@ func (_m *DelegationEdge) String() string {
 	var builder strings.Builder
 	builder.WriteString("DelegationEdge(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
+	builder.WriteString("provenance_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ProvenanceVersion))
+	builder.WriteString(", ")
+	builder.WriteString("source_principal_kind=")
+	builder.WriteString(_m.SourcePrincipalKind)
+	builder.WriteString(", ")
+	builder.WriteString("source_principal_id=")
+	builder.WriteString(_m.SourcePrincipalID)
+	builder.WriteString(", ")
+	builder.WriteString("source_credential_kind=")
+	builder.WriteString(_m.SourceCredentialKind)
+	builder.WriteString(", ")
+	builder.WriteString("source_credential_id=")
+	builder.WriteString(_m.SourceCredentialID)
+	builder.WriteString(", ")
+	builder.WriteString("source_event_id=")
+	builder.WriteString(_m.SourceEventID)
+	builder.WriteString(", ")
+	if v := _m.SourceScheduleID; v != nil {
+		builder.WriteString("source_schedule_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("source_authorization_revision=")
+	builder.WriteString(fmt.Sprintf("%v", _m.SourceAuthorizationRevision))
+	builder.WriteString(", ")
+	builder.WriteString("initiator_principal_kind=")
+	builder.WriteString(_m.InitiatorPrincipalKind)
+	builder.WriteString(", ")
+	builder.WriteString("initiator_principal_id=")
+	builder.WriteString(_m.InitiatorPrincipalID)
+	builder.WriteString(", ")
+	builder.WriteString("initiator_credential_kind=")
+	builder.WriteString(_m.InitiatorCredentialKind)
+	builder.WriteString(", ")
+	builder.WriteString("initiator_credential_id=")
+	builder.WriteString(_m.InitiatorCredentialID)
+	builder.WriteString(", ")
+	builder.WriteString("ceiling_kind=")
+	builder.WriteString(_m.CeilingKind)
+	builder.WriteString(", ")
+	builder.WriteString("ceiling_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CeilingVersion))
+	builder.WriteString(", ")
+	if v := _m.CeilingPermissionIds; v != nil {
+		builder.WriteString("ceiling_permission_ids=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("ceiling_boundary_kind=")
+	builder.WriteString(_m.CeilingBoundaryKind)
+	builder.WriteString(", ")
+	builder.WriteString("ceiling_boundary_project_id=")
+	builder.WriteString(_m.CeilingBoundaryProjectID)
+	builder.WriteString(", ")
+	if v := _m.CeilingSourceExpiresAt; v != nil {
+		builder.WriteString("ceiling_source_expires_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("deactivation_cause=")
+	builder.WriteString(_m.DeactivationCause)
+	builder.WriteString(", ")
+	if v := _m.DeactivatedAt; v != nil {
+		builder.WriteString("deactivated_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("deactivation_op_id=")
+	builder.WriteString(_m.DeactivationOpID)
+	builder.WriteString(", ")
 	builder.WriteString("delegator_type=")
 	builder.WriteString(fmt.Sprintf("%v", _m.DelegatorType))
 	builder.WriteString(", ")

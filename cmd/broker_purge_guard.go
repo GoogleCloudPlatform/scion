@@ -1,0 +1,300 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
+)
+
+// brokerStateEntryKind is the kind of a broker-local state entry that
+// 'runtime-broker deregister --purge-local' handles (brokerLocalStatePaths).
+type brokerStateEntryKind int
+
+const (
+	// stateEntryDaemonLog is the standalone broker daemon log,
+	// daemon.GetLogPath(Root) with Root the global directory.
+	stateEntryDaemonLog brokerStateEntryKind = iota
+	// stateEntryStateDir is the broker's state directory,
+	// <Root>/<BrokerID> with Root the state root.
+	stateEntryStateDir
+	// stateEntryTemplateCache is the broker template cache,
+	// <Root>/cache/templates with Root the scion home.
+	stateEntryTemplateCache
+)
+
+func (k brokerStateEntryKind) String() string {
+	switch k {
+	case stateEntryDaemonLog:
+		return "broker daemon log"
+	case stateEntryStateDir:
+		return "broker state directory"
+	case stateEntryTemplateCache:
+		return "broker template cache"
+	}
+	return "unknown entry"
+}
+
+// brokerLocalStateEntry is one broker-local state entry: its kind, its
+// path, the root it is expected under, and (state directory only) the
+// broker ID that names it and the scion home it must not cover.
+type brokerLocalStateEntry struct {
+	Kind      brokerStateEntryKind
+	Path      string
+	Root      string
+	BrokerID  string
+	ScionHome string
+}
+
+// entryPaths returns the paths of entries, in order.
+func entryPaths(entries []brokerLocalStateEntry) []string {
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		paths = append(paths, e.Path)
+	}
+	return paths
+}
+
+// existingEntries returns the entries whose path exists.
+func existingEntries(entries []brokerLocalStateEntry) []brokerLocalStateEntry {
+	var out []brokerLocalStateEntry
+	for _, e := range entries {
+		if _, err := os.Lstat(e.Path); err == nil {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// checkPurgeEntry reports why e is not at the location its kind expects,
+// or nil when it is. Every entry must be an absolute, clean path that is
+// neither, nor resolves to, the filesystem root or the user's home
+// directory (os.UserHomeDir, the home the scion home is derived from).
+// Then, by kind:
+//   - daemon log: exactly daemon.GetLogPath(Root), and not a directory;
+//   - state directory: BrokerID is a single path element, Path is exactly
+//     <Root>/<BrokerID>, and Root is absolute and neither is, nor resolves
+//     to, the filesystem root or the home directory;
+//   - template cache: Path is exactly <Root>/cache/templates, with Root
+//     checked as for the state directory.
+func checkPurgeEntry(e brokerLocalStateEntry) error {
+	if err := checkPurgeLocation(e.Path); err != nil {
+		return err
+	}
+	switch e.Kind {
+	case stateEntryDaemonLog:
+		if e.Path != daemon.GetLogPath(e.Root) {
+			return fmt.Errorf("not the broker daemon log %s", daemon.GetLogPath(e.Root))
+		}
+		if fi, err := os.Lstat(e.Path); err == nil && fi.IsDir() {
+			return errors.New("the broker daemon log path is a directory")
+		}
+		return checkResolvesUnderRoot(e.Path, e.Root)
+	case stateEntryStateDir:
+		if err := brokercredentials.ValidateBrokerIDPathElement(e.BrokerID); err != nil {
+			return err
+		}
+		if e.Path != filepath.Join(e.Root, e.BrokerID) {
+			return fmt.Errorf("not <state root>/<broker-id> under %s", e.Root)
+		}
+		if err := checkPurgeRoot(e.Root, "state root"); err != nil {
+			return err
+		}
+		if err := checkStateRootScope(e.Root, e.ScionHome); err != nil {
+			return err
+		}
+		return checkResolvesUnderRoot(e.Path, e.Root)
+	case stateEntryTemplateCache:
+		if e.Path != filepath.Join(e.Root, "cache", "templates") {
+			return fmt.Errorf("not <scion home>/cache/templates under %s", e.Root)
+		}
+		if err := checkPurgeRoot(e.Root, "scion home"); err != nil {
+			return err
+		}
+		return checkResolvesUnderRoot(e.Path, e.Root)
+	}
+	return fmt.Errorf("unknown entry kind %d", e.Kind)
+}
+
+// checkStateRootScope refuses a state root that, raw or resolved, is the
+// scion home, or is the home directory, the scion home or one of their
+// parents: a state root holds only broker state directories.
+func checkStateRootScope(root, scionHome string) error {
+	if scionHome == "" {
+		return errors.New("no scion home recorded for the state root")
+	}
+	roots := resolvedForms(root)
+	homes := []string{}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		homes = resolvedForms(filepath.Clean(home))
+	}
+	scionHomes := resolvedForms(filepath.Clean(scionHome))
+	for _, r := range roots {
+		for _, s := range scionHomes {
+			if r == s {
+				return fmt.Errorf("the state root %s is the scion home", root)
+			}
+			if isSameOrAncestor(r, s) {
+				return fmt.Errorf("the state root %s is the scion home or one of its parents", root)
+			}
+		}
+		for _, h := range homes {
+			if isSameOrAncestor(r, h) {
+				return fmt.Errorf("the state root %s is the home directory or one of its parents", root)
+			}
+		}
+	}
+	return nil
+}
+
+// checkResolvesUnderRoot refuses a path whose parent directory, resolved
+// (symlinks of its deepest existing ancestor resolved), is not the
+// resolved root or under it, so a symlinked intermediate directory cannot
+// redirect the removal elsewhere. The leaf itself is not resolved: when it
+// is a symlink, RemoveAll removes only the link. The caller has already
+// checked the leaf's name (the exact expected path).
+func checkResolvesUnderRoot(path, root string) error {
+	rd, err := resolveExistingPrefix(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("cannot resolve %s: %v", filepath.Dir(path), err)
+	}
+	rr, err := resolveExistingPrefix(root)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %s: %v", root, err)
+	}
+	if !isSameOrAncestor(rr, rd) {
+		return fmt.Errorf("its directory resolves to %s, outside %s", rd, rr)
+	}
+	return nil
+}
+
+// resolvedForms returns path and, when it differs, its resolved form.
+func resolvedForms(path string) []string {
+	forms := []string{path}
+	if r, err := resolveExistingPrefix(path); err == nil && r != path {
+		forms = append(forms, r)
+	}
+	return forms
+}
+
+// isSameOrAncestor reports whether dir is p or one of p's parents.
+func isSameOrAncestor(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// checkPurgeRoot refuses a root that is not absolute or that is, or
+// resolves to, the filesystem root or the home directory.
+func checkPurgeRoot(root, what string) error {
+	if !filepath.IsAbs(root) {
+		return fmt.Errorf("the %s %q is not absolute", what, root)
+	}
+	if err := checkPurgeLocation(root); err != nil {
+		return fmt.Errorf("the %s %s", what, err)
+	}
+	return nil
+}
+
+// checkPurgeLocation refuses a path that is not absolute and clean, or
+// that is, or resolves to, the filesystem root or the home directory.
+func checkPurgeLocation(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("%q is not an absolute, clean path", path)
+	}
+	resolved, err := resolveExistingPrefix(path)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %s: %v", path, err)
+	}
+	if path == string(filepath.Separator) || resolved == string(filepath.Separator) {
+		return errors.New("is the filesystem root")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		home = filepath.Clean(home)
+		resolvedHome, _ := resolveExistingPrefix(home)
+		if path == home || resolved == home || (resolvedHome != "" && resolved == resolvedHome) {
+			return errors.New("is the home directory")
+		}
+	}
+	return nil
+}
+
+// resolveExistingPrefix returns path with the symlinks of its deepest
+// existing ancestor resolved and the missing tail rejoined.
+func resolveExistingPrefix(path string) (string, error) {
+	dir := filepath.Clean(path)
+	var tail []string
+	for {
+		if _, err := os.Lstat(dir); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		tail = append([]string{filepath.Base(dir)}, tail...)
+		dir = parent
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(append([]string{resolved}, tail...)...), nil
+}
+
+// purgeBrokerLocalState removes the entries that exist, after checking
+// every entry against the location its kind expects (checkPurgeEntry).
+// When any entry fails, nothing is removed: each refused entry is printed
+// with its reason and an error is returned (a non-zero exit).
+func purgeBrokerLocalState(entries []brokerLocalStateEntry, out io.Writer) error {
+	var refused []string
+	for _, e := range entries {
+		if err := checkPurgeEntry(e); err != nil {
+			refused = append(refused, fmt.Sprintf("%s (%s: %v)", e.Path, e.Kind, err))
+		}
+	}
+	if len(refused) > 0 {
+		_, _ = fmt.Fprintln(out, "Not an expected broker state location, not removed:")
+		for _, r := range refused {
+			_, _ = fmt.Fprintf(out, "  %s\n", r)
+		}
+		return fmt.Errorf("--purge-local skipped: %d entr%s not at an expected broker state location; nothing was removed", len(refused), pluralY(len(refused)))
+	}
+	var errs []error
+	for _, e := range existingEntries(entries) {
+		if err := os.RemoveAll(e.Path); err != nil {
+			errs = append(errs, fmt.Errorf("failed to remove %s: %w", e.Path, err))
+			continue
+		}
+		_, _ = fmt.Fprintf(out, "Removed %s\n", e.Path)
+	}
+	return errors.Join(errs...)
+}
+
+func pluralY(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
+}

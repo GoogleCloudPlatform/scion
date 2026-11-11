@@ -240,7 +240,7 @@ This is useful for operators who want to immediately purge a specific agent.
 
 When the Hub dispatches a soft-delete to the runtime broker, the broker must update the local `agent-info.json` to reflect the deleted state before performing container cleanup. This ensures that the broker's local filesystem is consistent with the Hub even if the broker later loses connectivity.
 
-**Why this matters:** When the Hub's purge loop permanently removes the agent record from the database, it does not contact the broker—the purge is a Hub-internal DB operation. If the broker retained an `agent-info.json` with a non-deleted status, local CLI listing (`scion ls` in local/no-hub mode) would show a stale agent that no longer exists on the Hub.
+**Why this matters:** If the broker retained an `agent-info.json` with a non-deleted status, local CLI listing (`scion ls` in local/no-hub mode) would show a stale agent that no longer exists on the Hub. The mark is also what lets the broker tell retained files apart from a live agent's when the purge later asks it to remove them (Section 4.4).
 
 **Broker delete handler changes** (`pkg/runtimebroker/handlers.go`):
 
@@ -283,15 +283,27 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 }
 ```
 
-### 4.4 Purge and Disconnected Brokers
+### 4.4 Purge, Retained Files and Disconnected Brokers
 
-The Hub purge loop (Section 7) only deletes records from the Hub database. It does not contact brokers. This is safe because:
+A soft delete with `soft_delete_retain_files` leaves the agent's files on the broker. When the retention window passes, the Hub purge loop (Section 7) asks the broker to remove them before it removes the agent record (ptone/scion#4744):
 
-1. **Broker was online at soft-delete time**: The broker already received the delete dispatch, cleaned up the container, and (if `deleteFiles=false`) marked `agent-info.json` as deleted. No further broker action is needed at purge time.
+```
+DELETE /api/v1/agents/{id}?deleteFiles=true&removeBranch=false&projectId=<project>&runId=<run>&purgeRetained=true
+```
 
-2. **Broker was offline at soft-delete time**: The Hub's `checkBrokerAvailability` would have rejected the delete request entirely (HTTP 503). The agent remains in its previous state—soft-delete never occurred.
+- **Which agents:** a soft-deleted row does not record whether its files were kept, so every expired soft-deleted agent with a broker and a run ID gets this dispatch. For an agent whose files were deleted, the broker finds nothing and answers 404. A row with no run ID (created before run IDs) is purged without a dispatch, and a warning says any retained files were left: its delete could not be fenced to its run, and a broker without these checks would remove by name alone, possibly taking the files of a newer agent with the same name.
+- **What the broker removes:** only the files of an agent whose `agent-info.json` carries the soft-delete mark, with no runtime entry and no start, restart or create of the agent in flight, and no symlinked agent directory. Otherwise it answers 409 `retained_files_refused` and removes nothing. While the removal runs, the broker refuses a start, restart or create of that agent with a retryable 409 `retained_purge_in_progress`. The request must carry `projectId` (400 otherwise).
+- **Restore safety:** before dispatching, the Hub claims the row with the delete marker (`deletion_state` deleting under a 5-minute lease), so a restore or start is refused while the broker removes the files, and it purges the record right after the broker answers, while the claim is still live. A restore that landed first makes the claim match nothing, and the record stays. If the Hub stops mid-dispatch, the lease lapses: a restore is allowed again (and clears the lapsed marker), and the next purge run re-claims the row.
+- **Outcomes:**
+  - The record is purged when the broker removed the files or had none (204/404), another run holds the agent's name there, the broker refused (`retained_files_refused`, logged with its reason), or the request was rejected as invalid (400).
+  - The record is kept (any claim released) when the broker is offline or unreachable, or the dispatch fails or times out. The next run retries.
+  - A soft-deleted row left `finalizing` by a permanent delete that stopped after its teardown is purged without a dispatch, as before.
+  - A broker that no longer exists: the record is purged, and a warning says any retained files were left on it.
+  - A broker that stays registered but unreachable: the record is kept until 30 days past the retention window (`retainedPurgeGiveUp`). It is then purged, and a warning says the retained files were left on that broker.
 
-If a broker reconnects after a purge and attempts to sync agents, agents that were purged from the Hub will not be found. The broker should handle "not found" responses gracefully during sync (the agent was already cleaned up locally at soft-delete time).
+A broker that was offline at soft-delete time never soft-deleted the agent: the Hub's `checkBrokerAvailability` rejected the delete (HTTP 503), and the agent stays in its previous state.
+
+If a broker reconnects after a purge and attempts to sync agents, agents that were purged from the Hub will not be found. The broker should handle "not found" responses gracefully during sync.
 
 ---
 
@@ -457,6 +469,8 @@ func (s *Server) startPurgeLoop(ctx context.Context) {
 ```
 
 ### 7.2 Purge Logic
+
+The purge first settles each expired agent's retained files on its broker (Section 4.4, `pkg/hub/retained_files_purge.go`): it pages through `ListSoftDeletedAgentsBefore(cutoff)`, dispatches the `purgeRetained` delete under a claim, and purges the settled records with `PurgeDeletedAgentsByID(ids, cutoff)`, which keeps `PurgeDeletedAgents`' transaction, restore re-check and cascade. The sketch below is the original, broker-free form.
 
 ```go
 func (s *Server) purgeExpiredAgents(ctx context.Context) {

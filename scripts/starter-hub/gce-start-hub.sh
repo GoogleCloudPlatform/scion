@@ -15,12 +15,37 @@
 
 # scripts/starter-hub/gce-start-hub.sh - Build and start Scion Hub on GCE with Caddy Reverse Proxy
 #
-# Usage: scripts/starter-hub/gce-start-hub.sh [--full] [--reset-db] [--branch <branch>]
+# Usage: scripts/starter-hub/gce-start-hub.sh [--full] [--no-tls] [--reset-db]
+#            [--branch <branch>] [--insecure-health-check]
 #
 #   Default (fast): pull → build → restart → health check
-#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy
+#   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy.
+#                   The settings.yaml it writes sets image_registry to
+#                   IMAGE_REGISTRY (default localhost/scion, see hub-config.sh);
+#                   SCION_IMAGE_REGISTRY in hub.env takes precedence. This
+#                   script does not build agent images (see hub-config.sh).
+#                   With ENABLE_GKE=true a loopback registry is refused.
+#   --no-tls:       Skip the Caddy/TLS step, for a hub behind an upstream TLS
+#                   terminator (env: SKIP_TLS=true). The base URL that takes
+#                   effect (SCION_SERVER_BASE_URL in hub.env if it sets one,
+#                   which must then agree with HUB_BASE_URL if that is set,
+#                   else HUB_BASE_URL) must be that terminator's https:// URL;
+#                   the script stops before doing anything otherwise, because
+#                   the hub refuses to start
+#                   with an http base URL on a non-loopback listener (OAuth
+#                   callbacks and session cookies would cross the network
+#                   unencrypted). No Caddyfile is written, Caddy is not
+#                   installed or restarted, and the HTTPS health check is
+#                   skipped; the on-VM check still runs. gce-certs.sh is not
+#                   run in this mode, so nothing creates a DNS record for the
+#                   terminator's name.
 #   --reset-db:     Deletes the hub database before starting (works in both modes)
 #   --branch <b>:   Checkout and build from a specific branch (default: current branch)
+#   --insecure-health-check:
+#                   Do not verify the TLS certificate in the final HTTPS health
+#                   check (env: HEALTH_CHECK_INSECURE=true). Only for a
+#                   self-signed or test certificate. By default the check
+#                   verifies the certificate and fails if it is not valid.
 
 set -euo pipefail
 
@@ -32,6 +57,8 @@ DOMAIN="${HUB_DOMAIN}"
 RESET_DB=false
 FULL_DEPLOY=false
 BRANCH=""
+HEALTH_CHECK_INSECURE="${HEALTH_CHECK_INSECURE:-false}"
+USAGE="Usage: $0 [--full] [--no-tls] [--reset-db] [--branch <branch>] [--insecure-health-check]"
 
 # --- Timing & Reporting Helpers ---
 
@@ -84,21 +111,54 @@ while [[ $# -gt 0 ]]; do
             FULL_DEPLOY=true
             shift
             ;;
+        --no-tls)
+            SKIP_TLS=true
+            shift
+            ;;
+        --insecure-health-check)
+            HEALTH_CHECK_INSECURE=true
+            shift
+            ;;
         --branch)
             BRANCH="$2"
             shift 2
             ;;
+        -h|--help)
+            sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--full] [--reset-db] [--branch <branch>]"
+            echo "$USAGE"
             exit 1
             ;;
     esac
 done
 
+# Public base URL (SCION_SERVER_BASE_URL in the unit): the OAuth redirect
+# base and the URL dispatched to agents.
+if [[ "${SKIP_TLS}" == "true" ]]; then
+    # Without Caddy the hub needs the https:// URL of an upstream TLS
+    # terminator; checks the value that takes effect (hub.env included).
+    require_no_tls_https_base_url
+else
+    HUB_BASE_URL="${HUB_BASE_URL:-https://${HUB_DOMAIN}}"
+fi
+
 if [[ -z "$PROJECT_ID" ]]; then
     echo "Error: PROJECT_ID is not set and could not be determined from gcloud config."
     exit 1
+fi
+
+# IMAGE_REGISTRY (hub-config.sh) is written into settings.yaml (--full) as a
+# quoted YAML string, so it must be a plain registry path. With ENABLE_GKE=true
+# the registry that takes effect must not be a loopback address.
+if $FULL_DEPLOY; then
+    if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+        echo "Error: IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path (for example localhost/scion or us-docker.pkg.dev/<project>/<repo>)." >&2
+        exit 1
+    fi
+    require_gke_reachable_registry
 fi
 
 # Compute total steps based on mode
@@ -136,6 +196,9 @@ if $FULL_DEPLOY; then
     cat <<SETTINGS_EOF > "$UPLOAD_DIR/scion-settings.yaml"
 schema_version: "1"
 active_profile: ${ACTIVE_PROFILE}
+# Registry the runtime broker pulls agent images from; the Hub does not start
+# its broker without one. SCION_IMAGE_REGISTRY in hub.env takes precedence.
+image_registry: "${IMAGE_REGISTRY}"
 server:
   mode: production
 telemetry:
@@ -143,6 +206,8 @@ telemetry:
   cloud:
     enabled: true
     provider: "gcp"
+    # Project the hub queries for the metrics dashboard
+    gcp_project_id: "${PROJECT_ID}"
     endpoint: "cloudtrace.googleapis.com:443"
     protocol: "grpc"
     batch:
@@ -164,54 +229,41 @@ telemetry:
         - "session_id"
 SETTINGS_EOF
     substep "Prepared settings.yaml"
+    if registry_is_loopback "$(effective_image_registry)"; then
+        substep "Note: agent images come from $(effective_image_registry) on the VM. This script does not build them; see image-build/README.md, or set SCION_IMAGE_REGISTRY in hub.env."
+    fi
 
     # Merge helper, run right before the file is installed. Uploaded next to
     # the other config files and lands in /tmp on the instance.
     cp "${SCRIPT_DIR}/merge-settings.py" "$UPLOAD_DIR/scion-merge-settings.py"
 
-    # systemd service file
-    # Always enable the runtime broker for combo hub-broker mode.
-    # The runtime (docker vs kubernetes) is controlled by settings.yaml, not this flag.
-    BROKER_FLAGS=" --enable-runtime-broker --runtime-broker-port 9800"
-    printf "[Unit]
-Description=Scion Hub API Server
-After=network.target
-
-[Service]
-User=scion
-Group=scion
-WorkingDirectory=%s
-EnvironmentFile=/home/scion/.scion/hub.env
-Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/google-cloud-sdk/bin\"
-Environment=\"HOME=/home/scion\"
-Environment=\"USE_GKE_GCLOUD_AUTH_PLUGIN=True\"
-# Public base URL dispatched to agents. This makes the broker route colocated
-# Docker agents through Caddy on the public domain so each runs under bridge
-# networking (own netns) instead of host networking, avoiding metadata-server
-# and telemetry port collisions between concurrent agents.
-Environment=\"SCION_SERVER_BASE_URL=https://${HUB_DOMAIN}\"
-# Use journald for log management
-StandardOutput=journal
-StandardError=journal
-ExecStartPre=/usr/bin/env
-ExecStart=%s --global server start --foreground --hosted --debug --enable-hub%s --enable-web --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-" "${REPO_DIR}" "${SCION_BIN}" "${BROKER_FLAGS}" > "$UPLOAD_DIR/scion-hub.service"
+    # systemd service file, rendered from scion-hub.service.tmpl. Rebuild
+    # from git compares the installed unit against that template, so the
+    # unit text lives only there. Lines starting with ## are template notes.
+    # The runtime broker is always enabled for combo hub-broker mode; the
+    # runtime (docker vs kubernetes) is controlled by settings.yaml.
+    # Replacements are quoted so "&" in a value stays literal under bash
+    # 5.2 patsub_replacement; keep this unquoted-assignment form.
+    UNIT_TEXT="$(grep -v '^##' "${SCRIPT_DIR}/scion-hub.service.tmpl")"
+    UNIT_TEXT=${UNIT_TEXT//@REPO_DIR@/"${REPO_DIR}"}
+    UNIT_TEXT=${UNIT_TEXT//@SCION_BIN@/"${SCION_BIN}"}
+    UNIT_TEXT=${UNIT_TEXT//@HUB_BASE_URL@/"${HUB_BASE_URL}"}
+    printf '%s\n' "${UNIT_TEXT}" > "$UPLOAD_DIR/scion-hub.service"
     substep "Prepared systemd unit file"
 
     # Caddyfile
-    cat <<EOF > "$UPLOAD_DIR/Caddyfile"
+    if [[ "${SKIP_TLS}" == "true" ]]; then
+        substep "Skipping Caddyfile (--no-tls)"
+    else
+        cat <<EOF > "$UPLOAD_DIR/Caddyfile"
 ${HUB_DOMAIN} {
     # In combined mode, Hub API and Web UI are served on a single port
     reverse_proxy localhost:8080
     tls /etc/letsencrypt/live/${CERT_DOMAIN}/fullchain.pem /etc/letsencrypt/live/${CERT_DOMAIN}/privkey.pem
 }
 EOF
-    substep "Prepared Caddyfile"
+        substep "Prepared Caddyfile"
+    fi
 
     # Upload all config files to /tmp/ on the instance; they are placed into
     # their final locations at the start of the main remote SSH session.
@@ -318,8 +370,10 @@ if $FULL_DEPLOY; then
         fi
     fi
 
-    # Install Caddy if missing
-    if ! command -v caddy &>/dev/null; then
+    # Install Caddy if missing (skipped with --no-tls)
+    if [ "$SKIP_TLS" = "true" ]; then
+        echo "  -> Skipping Caddy install (--no-tls)"
+    elif ! command -v caddy &>/dev/null; then
         echo "  -> Installing Caddy..."
         sudo apt-get install -y apt-transport-https curl
         if [ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]; then
@@ -381,7 +435,9 @@ SUDOERS_EOF
     fi
 
     # Fix certificate permissions for Caddy (only if certs exist)
-    if [ -d /etc/letsencrypt/live ]; then
+    if [ "$SKIP_TLS" = "true" ]; then
+        echo "  -> Skipping certificate and Caddyfile setup (--no-tls)"
+    elif [ -d /etc/letsencrypt/live ]; then
         echo "  -> Fixing certificate permissions..."
         sudo chown -R root:caddy /etc/letsencrypt/live
         sudo chown -R root:caddy /etc/letsencrypt/archive
@@ -392,8 +448,10 @@ SUDOERS_EOF
         echo "     Run gce-certs.sh first to obtain certificates"
     fi
 
-    # Update Caddyfile if changed
-    if ! diff -q /tmp/Caddyfile /etc/caddy/Caddyfile >/dev/null 2>&1; then
+    # Update Caddyfile if changed (skipped with --no-tls)
+    if [ "$SKIP_TLS" = "true" ]; then
+        :
+    elif ! diff -q /tmp/Caddyfile /etc/caddy/Caddyfile >/dev/null 2>&1; then
         sudo mv /tmp/Caddyfile /etc/caddy/Caddyfile
         sudo chown caddy:caddy /etc/caddy/Caddyfile
         sudo chmod 644 /etc/caddy/Caddyfile
@@ -419,6 +477,7 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
     RESET_DB='"${RESET_DB}"'
     FULL_DEPLOY='"${FULL_DEPLOY}"'
     ENABLE_GKE='"${ENABLE_GKE}"'
+    SKIP_TLS='"${SKIP_TLS}"'
     REMOTE_START=$SECONDS
 
     '"${FULL_REMOTE_COMMANDS}"'
@@ -505,21 +564,30 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
         exit 1
     fi
 
-    # Local health check
+    # Local health check. Match the top-level status only (the body starts
+    # with it; nested hub/broker objects carry their own). Prefer healthy
+    # while waiting; a server still "degraded" at the end is up with a
+    # non-critical problem (e.g. colocated_broker), so warn and continue.
+    # "unhealthy" (a critical check such as the database failed) fails.
     echo ""
     echo "==> Local health check..."
     for i in {1..10}; do
         HEALTH_RESP=$(curl -s http://localhost:8080/healthz || true)
-        if echo "$HEALTH_RESP" | grep -q "\"status\":\"healthy\""; then
+        if echo "$HEALTH_RESP" | grep -q "^{\"status\":\"healthy\""; then
             echo "  -> Local health check passed: $HEALTH_RESP"
             break
         fi
+        if [ "$i" -eq 10 ]; then
+            if echo "$HEALTH_RESP" | grep -q "^{\"status\":\"degraded\""; then
+                echo "  -> WARNING: hub is up but DEGRADED; non-healthy checks are in the response below. See: sudo journalctl -u scion-hub"
+                echo "     $HEALTH_RESP"
+                break
+            fi
+            echo "Error: Local health check failed. Last response: ${HEALTH_RESP:-<none>}"
+            exit 1
+        fi
         echo "  -> Waiting for health check... (${i}/10)"
         sleep 2
-        if [ "$i" -eq 10 ]; then
-             echo "Error: Local health check failed."
-             exit 1
-        fi
     done
 
     echo ""
@@ -529,11 +597,33 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
 # --- Step: Remote Health Check ---
 
 step "Remote health check..."
+if [[ "${SKIP_TLS}" == "true" ]]; then
+    echo "  -> Skipping the HTTPS health check (--no-tls); the on-VM health check above passed."
+    echo ""
+    print_summary
+    exit 0
+fi
 echo "  -> Checking https://${DOMAIN}/healthz..."
+# The check verifies the TLS certificate unless --insecure-health-check
+# (HEALTH_CHECK_INSECURE=true) is given.
+CURL_TLS_ARGS=()
+if [[ "${HEALTH_CHECK_INSECURE}" == "true" ]]; then
+    CURL_TLS_ARGS=(-k)
+    echo "  -> WARNING: --insecure-health-check: the TLS certificate is NOT verified."
+    echo "     A passing check does not show that the certificate is valid."
+fi
+# Same severity rules as the local check: prefer healthy while waiting,
+# accept a still-degraded hub at the end with a visible warning, fail on
+# unhealthy or no answer. Match the top-level status only.
+REMOTE_HEALTH=""
+CURL_RC=0
 for i in {1..12}; do
-    if curl -s -k "https://${DOMAIN}/healthz" | grep -q '"status":"healthy"'; then
+    CURL_RC=0
+    # Runs on the operator workstation; macOS bash 3.2 errors on an empty "${arr[@]}" under set -u, hence the ${arr[@]+...} form.
+    REMOTE_HEALTH=$(curl -s ${CURL_TLS_ARGS[@]+"${CURL_TLS_ARGS[@]}"} "https://${DOMAIN}/healthz") || CURL_RC=$?
+    if echo "$REMOTE_HEALTH" | grep -q '^{"status":"healthy"'; then
         echo "  -> Hub is healthy!"
-        curl -s -k "https://${DOMAIN}/healthz"
+        echo "$REMOTE_HEALTH"
         echo ""
         print_summary
         exit 0
@@ -542,5 +632,24 @@ for i in {1..12}; do
     sleep 5
 done
 
-echo "Error: Remote health check failed after 60 seconds."
+if echo "$REMOTE_HEALTH" | grep -q '^{"status":"degraded"'; then
+    echo ""
+    echo "WARNING: Hub is up but DEGRADED after 60 seconds. Non-healthy checks:"
+    echo "$REMOTE_HEALTH"
+    echo "  -> Investigate with: gcloud compute ssh \"${INSTANCE_NAME}\" --zone=\"${ZONE}\" --command \"sudo journalctl -u scion-hub -n 50\""
+    echo ""
+    print_summary
+    exit 0
+fi
+
+echo "Error: Remote health check failed after 60 seconds. Last response: ${REMOTE_HEALTH:-<none>}"
+# curl exit codes for TLS failures: 35 handshake, 51/60 certificate
+# verification, 58/59 client certificate or cipher, 77 CA bundle.
+case "${CURL_RC}" in
+    35|51|58|59|60|77)
+        echo "  -> TLS is not valid for https://${DOMAIN} (curl exit code ${CURL_RC})."
+        echo "     Check that gce-certs.sh obtained a certificate for ${CERT_DOMAIN} and that Caddy serves it."
+        echo "     For a self-signed or test certificate only, rerun with --insecure-health-check."
+        ;;
+esac
 exit 1

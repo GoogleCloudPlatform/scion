@@ -28,10 +28,15 @@ import { can } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
+import '../shared/detail-header.js';
 import '../shared/hash-display.js';
 import '../shared/skill-publish-dialog.js';
 import { showToast } from '../../utils/toast.js';
+import { copyWithToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 
 @customElement('scion-page-skill-detail')
 export class ScionPageSkillDetail extends LitElement {
@@ -46,7 +51,6 @@ export class ScionPageSkillDetail extends LitElement {
   @state() private editForm: Partial<{
     name: string;
     description: string;
-    visibility: string;
     tags: string;
   }> = {};
   @state() private saving = false;
@@ -71,55 +75,11 @@ export class ScionPageSkillDetail extends LitElement {
       display: block;
     }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-    .header-info {
-      flex: 1;
-    }
-    .header-title {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 0.5rem;
-    }
-    .header-title sl-icon {
-      color: var(--scion-primary, #3b82f6);
-      font-size: 1.5rem;
-    }
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
     .header-meta {
       display: flex;
       align-items: center;
       gap: 0.75rem;
       margin-top: 0.5rem;
-    }
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
     }
 
     sl-tab-group {
@@ -191,24 +151,13 @@ export class ScionPageSkillDetail extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .scope-badge,
-    .visibility-badge {
+    .scope-badge {
       display: inline-flex;
       align-items: center;
       padding: 0.125rem 0.5rem;
       border-radius: 9999px;
       font-size: 0.8125rem;
       font-weight: 500;
-    }
-    .scope-badge {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
-    .visibility-badge.public {
-      background: var(--sl-color-success-100, #dcfce7);
-      color: var(--sl-color-success-700, #15803d);
-    }
-    .visibility-badge.private {
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
     }
@@ -375,7 +324,7 @@ export class ScionPageSkillDetail extends LitElement {
     }
   `;
 
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -384,15 +333,13 @@ export class ScionPageSkillDetail extends LitElement {
       if (match) this.skillId = match[1];
     }
     void this.loadData();
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
   }
 
   private async loadData(): Promise<void> {
@@ -431,22 +378,11 @@ export class ScionPageSkillDetail extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '—';
-      const diffMs = Date.now() - date.getTime();
-      if (diffMs < 0) return 'just now';
-      const seconds = Math.floor(diffMs / 1000);
-      if (seconds < 60) return 'just now';
-      const minutes = Math.floor(seconds / 60);
-      if (minutes < 60) return `${minutes}m ago`;
-      const hours = Math.floor(minutes / 60);
-      if (hours < 24) return `${hours}h ago`;
-      const days = Math.floor(hours / 24);
-      return `${days}d ago`;
-    } catch {
-      return dateString;
-    }
+    const ms = new Date(dateString).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(dateString, { style: 'narrow' });
   }
 
   private formatFileSize(bytes: number): string {
@@ -458,11 +394,11 @@ export class ScionPageSkillDetail extends LitElement {
   private versionStatusType(status: string): StatusType {
     switch (status) {
       case 'published':
-        return 'success' as StatusType;
+        return 'success';
       case 'deprecated':
-        return 'warning' as StatusType;
+        return 'warning';
       case 'archived':
-        return 'danger' as StatusType;
+        return 'danger';
       default:
         return 'default' as StatusType;
     }
@@ -477,11 +413,7 @@ export class ScionPageSkillDetail extends LitElement {
   }
 
   private async copyUri(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(this.getSkillUri());
-    } catch {
-      /* ignore */
-    }
+    await copyWithToast(this.getSkillUri());
   }
 
   // -- Edit mode --
@@ -491,7 +423,6 @@ export class ScionPageSkillDetail extends LitElement {
     this.editForm = {
       name: this.skill.name,
       description: this.skill.description || '',
-      visibility: this.skill.visibility,
       tags: this.skill.tags?.join(', ') || '',
     };
     this.editing = true;
@@ -513,12 +444,6 @@ export class ScionPageSkillDetail extends LitElement {
       }
       if (this.editForm.description !== undefined) {
         body.description = this.editForm.description;
-      }
-      if (
-        this.editForm.visibility !== undefined &&
-        this.editForm.visibility !== this.skill.visibility
-      ) {
-        body.visibility = this.editForm.visibility;
       }
       if (this.editForm.tags !== undefined) {
         body.tags = this.editForm.tags
@@ -562,8 +487,7 @@ export class ScionPageSkillDetail extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to archive skill'));
       }
-      window.history.pushState({}, '', '/skills');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/skills');
     } catch (err) {
       console.error('Failed to archive skill:', err);
       showToast(err instanceof Error ? err.message : 'Failed to archive skill');
@@ -661,11 +585,6 @@ export class ScionPageSkillDetail extends LitElement {
     if (this.error || !this.skill) return this.renderError();
 
     return html`
-      <a href="/skills" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Skills
-      </a>
-
       ${this.renderHeader()}
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
@@ -684,67 +603,69 @@ export class ScionPageSkillDetail extends LitElement {
 
   private renderHeader() {
     const skill = this.skill!;
+    const canUpdate = can(skill._capabilities, 'update');
+    const canDelete = can(skill._capabilities, 'delete');
+    // prettier-ignore
     return html`
-      <div class="header">
-        <div class="header-info">
-          <div class="header-title">
-            <sl-icon name="lightning-charge"></sl-icon>
-            <h1>${skill.name}</h1>
-            <scion-status-badge
-              status=${skill.status as StatusType}
-              label=${skill.status}
-            ></scion-status-badge>
-          </div>
-          <div class="header-meta">
-            <span class="scope-badge">${skill.scope}</span>
-            <span class="visibility-badge ${skill.visibility}">${skill.visibility}</span>
-          </div>
+      <scion-detail-header heading=${skill.name}>
+        <scion-back-link slot="back" href="/skills">Back to Skills</scion-back-link>
+        <sl-icon slot="icon" name="lightning-charge"></sl-icon>
+        <scion-status-badge
+          status=${skill.status}
+          label=${skill.status}
+        ></scion-status-badge>
+        <div slot="meta" class="header-meta">
+          <span class="scope-badge">${skill.scope}</span>
         </div>
-        <div class="header-actions">
-          ${can(skill._capabilities, 'update')
-            ? html`
-                <sl-button
-                  variant="default"
-                  size="small"
-                  outline
-                  @click=${() => this.startEditing()}
-                >
-                  <sl-icon slot="prefix" name="pencil"></sl-icon>
-                  Edit
-                </sl-button>
-              `
-            : nothing}
-          ${can(skill._capabilities, 'update')
-            ? html`
-                <sl-button
-                  variant="primary"
-                  size="small"
-                  @click=${() => {
-                    this.publishDialogOpen = true;
-                  }}
-                >
-                  <sl-icon slot="prefix" name="upload"></sl-icon>
-                  Publish Version
-                </sl-button>
-              `
-            : nothing}
-          ${can(skill._capabilities, 'delete')
-            ? html`
-                <sl-button
-                  variant="danger"
-                  size="small"
-                  outline
-                  ?loading=${this.actionLoading['archive']}
-                  ?disabled=${this.actionLoading['archive']}
-                  @click=${() => this.handleArchive()}
-                >
-                  <sl-icon slot="prefix" name="trash"></sl-icon>
-                  Archive
-                </sl-button>
-              `
-            : nothing}
-        </div>
-      </div>
+        ${canUpdate || canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${canUpdate
+                  ? html`
+                      <sl-button
+                        variant="default"
+                        size="small"
+                        outline
+                        @click=${() => this.startEditing()}
+                      >
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canUpdate
+                  ? html`
+                      <sl-button
+                        variant="primary"
+                        size="small"
+                        @click=${() => {
+                          this.publishDialogOpen = true;
+                        }}
+                      >
+                        <sl-icon slot="prefix" name="upload"></sl-icon>
+                        Publish Version
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canDelete
+                  ? html`
+                      <sl-button
+                        variant="danger"
+                        size="small"
+                        outline
+                        ?loading=${this.actionLoading['archive']}
+                        ?disabled=${this.actionLoading['archive']}
+                        @click=${() => this.handleArchive()}
+                      >
+                        <sl-icon slot="prefix" name="trash"></sl-icon>
+                        Archive
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
   }
 
@@ -795,12 +716,6 @@ export class ScionPageSkillDetail extends LitElement {
                 </div>
               `
             : nothing}
-          <div class="info-item">
-            <span class="info-label">Visibility</span>
-            <span class="info-value"
-              ><span class="visibility-badge ${skill.visibility}">${skill.visibility}</span></span
-            >
-          </div>
           ${skill.ownerId
             ? html`
                 <div class="info-item">
@@ -823,7 +738,7 @@ export class ScionPageSkillDetail extends LitElement {
             <span class="info-label">Status</span>
             <span class="info-value">
               <scion-status-badge
-                status=${skill.status as StatusType}
+                status=${skill.status}
                 label=${skill.status}
                 size="small"
               ></scion-status-badge>
@@ -871,21 +786,6 @@ export class ScionPageSkillDetail extends LitElement {
             rows="3"
             help-text="Once set, this field cannot be cleared."
           ></sl-textarea>
-        </div>
-        <div class="edit-field">
-          <label>Visibility</label>
-          <sl-radio-group
-            .value=${this.editForm.visibility || 'private'}
-            @sl-change=${(e: Event) => {
-              this.editForm = {
-                ...this.editForm,
-                visibility: (e.target as HTMLElement & { value: string }).value,
-              };
-            }}
-          >
-            <sl-radio-button value="private">Private</sl-radio-button>
-            <sl-radio-button value="public">Public</sl-radio-button>
-          </sl-radio-group>
         </div>
         <div class="edit-field">
           <label>Tags</label>
@@ -1175,10 +1075,7 @@ export class ScionPageSkillDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="/skills" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Skills
-      </a>
+      <scion-back-link href="/skills">Back to Skills</scion-back-link>
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
         <h2>Failed to Load Skill</h2>

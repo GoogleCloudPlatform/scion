@@ -29,17 +29,17 @@ func TestStopProjectContainers_StopsMatchingContainers(t *testing.T) {
 		{
 			ContainerID: "container-1",
 			Name:        "agent-a",
-			Labels:      map[string]string{"scion.name": "agent-a", "scion.grove": "myproject"},
+			Labels:      map[string]string{"scion.name": "agent-a", "scion.project": "myproject"},
 		},
 		{
 			ContainerID: "container-2",
 			Name:        "agent-b",
-			Labels:      map[string]string{"scion.name": "agent-b", "scion.grove": "myproject"},
+			Labels:      map[string]string{"scion.name": "agent-b", "scion.project": "myproject"},
 		},
 		{
 			ContainerID: "container-3",
 			Name:        "other-agent",
-			Labels:      map[string]string{"scion.name": "other-agent", "scion.grove": "myproject"},
+			Labels:      map[string]string{"scion.name": "other-agent", "scion.project": "myproject"},
 		},
 	}
 
@@ -57,8 +57,8 @@ func TestStopProjectContainers_StopsMatchingContainers(t *testing.T) {
 			}
 			return allContainers, nil
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
-			deletedIDs = append(deletedIDs, id)
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			deletedIDs = append(deletedIDs, ref.ID)
 			return nil
 		},
 	}
@@ -108,7 +108,7 @@ func TestStopProjectContainers_SkipsEmptyContainerID(t *testing.T) {
 				},
 			}, nil
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
 			deleteCount++
 			return nil
 		},

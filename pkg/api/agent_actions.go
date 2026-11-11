@@ -39,6 +39,32 @@ const (
 	AgentActionResetAuth         = "reset-auth"
 	AgentActionMetrics           = "metrics"
 	AgentActionSetMessageMode    = "set_message_mode"
+	AgentActionReincarnate       = "reincarnate"
+
+	// AgentActionKeys names the dedicated terminal-keystroke-injection route
+	// (POST /api/v1/agents/{id}/keys and the project-scoped equivalent),
+	// frozen by the agent-keys contract (.design/agent-keys-contract.md,
+	// ptone/scion#2191). It is a route/action name, not an independently
+	// grantable authorization permission — see agentActionPermission in
+	// pkg/hub/authorize.go, which maps it explicitly to ActionAttach.
+	//
+	// Added to RuntimeBrokerAgentActionMethod below by task 1.1, which wires
+	// the runtime broker's own dedicated keys handler
+	// (pkg/runtimebroker/handlers.go), with the Hub-to-broker route reachable
+	// via the Dispatcher/BrokerClient task 1.2 added. On the Hub side, both
+	// action-dispatch functions (handlers_agents_core.go's
+	// handleAgentAction, handlers_projects_core.go's
+	// handleProjectAgentAction) route this action early, straight to
+	// authorizeAgentKeys, the same way they already do for message/
+	// reincarnate/set_message_mode — a live POST /api/v1/agents/{id}/keys
+	// request no longer falls through to the generic authz block that
+	// resolves agentActionPermission for other actions. Neither
+	// action-dispatch switch has a case that calls a real keys handler yet
+	// (task 2.2 adds one), so an authorized call still 404s, not because it
+	// was denied. This constant exists so every task that touches the keys
+	// route (1.1, 1.2, 2.1, 2.2) references a single frozen action name
+	// rather than each inventing their own string.
+	AgentActionKeys = "keys"
 )
 
 // RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed
@@ -48,9 +74,65 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth, AgentActionKeys:
 		return http.MethodPost, true
 	default:
 		return "", false
 	}
 }
+
+// ProvisionFailedWarningPrefix starts the warning a Hub adds to a
+// provision-only create when the runtime broker could not provision the
+// agent. Clients use it to tell that the agent record exists but was not
+// provisioned.
+const ProvisionFailedWarningPrefix = "Failed to provision on runtime broker: "
+
+// RecordedRuntimeQueryParam is the query parameter the hub sets on runtime
+// broker requests for an existing agent (every action except start, plus the
+// bare GET and DELETE) to the runtime type it recorded for that agent
+// (ptone/scion#2748). The broker looks for the agent only in runtimes of that
+// type and returns a retryable 503 when none is registered. Absent or empty
+// means the hub has no recorded type: the broker searches every registered
+// runtime, as before.
+const RecordedRuntimeQueryParam = "runtime"
+
+// AgentIDQueryParam is the query parameter on a hub-to-broker stop or delete
+// of an existing agent that carries the hub's ID of the agent
+// (ptone/scion#2632). The path names the agent by slug only; the broker
+// compares this ID with the agent ID an in-flight start of that name was
+// registered with, so a late stop or delete for an old agent does not cancel
+// the start of a newer agent recreated under the same name. A broker that
+// does not read it, or a request without it, matches by name.
+const AgentIDQueryParam = "agentId"
+
+// PurgeRetainedQueryParam is the query parameter ("true") on a hub-to-broker
+// delete that removes the retained files of a soft-deleted agent once the
+// soft-delete retention window has passed (ptone/scion#4744). The broker
+// treats the delete as a files delete (deleteFiles=true, never soft) and
+// removes the files only when no runtime entry holds the agent, no start,
+// restart or create of the agent is in flight on the broker, and its
+// agent-info.json carries the soft-delete mark; otherwise it answers 409
+// with BrokerErrCodeRetainedFilesRefused and removes nothing (it does not
+// cancel an in-flight start either). While the removal runs, the broker
+// refuses a start, restart or create of the agent with a retryable 409,
+// BrokerErrCodeRetainedPurgeInProgress. The delete must carry the agent's
+// projectId (the broker answers 400 otherwise), and cannot be combined with
+// localOnly.
+//
+// Caller contract (defence in depth beside the broker's own checks): a hub
+// restore does not clear the broker's soft-delete mark (only a later start
+// rewrites agent-info.json), so the mark alone does not prove the agent is
+// still deleted. The caller must send this only for an agent record that is
+// still soft-deleted, and past its retention window, when the delete is
+// dispatched.
+const PurgeRetainedQueryParam = "purgeRetained"
+
+// MoveReincarnationIDQueryParam, on an agent files delete, is a forced
+// move's reincarnation ID: the rollback delete of what the move created on
+// its target broker (ptone/scion#5441). The broker removes the agent's
+// directories only when every one that exists carries that move's marker,
+// and otherwise answers 409 with BrokerErrCodeMoveMarkerMismatch and
+// removes nothing (not even the runtime entry). A directory that does not
+// exist is fine. The delete must carry projectId and deleteFiles, and
+// cannot be combined with localOnly, softDelete or purgeRetained.
+const MoveReincarnationIDQueryParam = "moveReincarnationId"

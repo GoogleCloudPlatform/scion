@@ -7,34 +7,67 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
+// hubCallTimeout caps a single Hub call made by a HubHandler.
+const hubCallTimeout = 5 * time.Second
+
 // HubHandler sends status updates to the Scion Hub.
 type HubHandler struct {
 	client *hub.Client
+	// budget, when set, bounds every call this handler makes: each call's
+	// context is derived from it, so a call gets min(hubCallTimeout, time
+	// left in budget). A hook process sets one budget for all of its Hub
+	// calls so they cannot add up past the harness's hook timeout.
+	budget context.Context
 }
 
 // NewHubHandler creates a new hub handler.
 // Returns nil if the Hub client is not configured.
 func NewHubHandler() *HubHandler {
-	client := hub.NewClient()
+	return NewHubHandlerForClient(hub.NewClient())
+}
+
+// NewHubHandlerForClient creates a hub handler that uses client, so callers
+// can share one client between handlers. Returns nil if client is nil or not
+// configured.
+func NewHubHandlerForClient(client *hub.Client) *HubHandler {
 	if client == nil || !client.IsConfigured() {
 		return nil
 	}
-	return &HubHandler{
-		client: client,
+	return &HubHandler{client: client}
+}
+
+// WithBudget makes every later call on h derive its context from budget, so
+// all calls share budget's deadline. It returns h and is safe on a nil h.
+func (h *HubHandler) WithBudget(budget context.Context) *HubHandler {
+	if h != nil {
+		h.budget = budget
 	}
+	return h
+}
+
+// callContext returns the context for one Hub call: hubCallTimeout, cut
+// short by the handler's budget when one is set.
+func (h *HubHandler) callContext() (context.Context, context.CancelFunc) {
+	parent := h.budget
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, hubCallTimeout)
 }
 
 // Handle processes an event and sends a status update to the Hub.
@@ -45,13 +78,53 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
+
+	// callStart times the hub call this event triggers (if any), for
+	// start-time attribution of hook-driven status updates. Observability
+	// only: outcome and elapsed_ms, never the request body.
+	callStart := time.Now()
+
+	// A codex or claude sub-agent's new-work or tool-start event must not
+	// clear a status the parent agent holds. The StatusHandler runs first in
+	// the same hook process and keeps a held status locally; the Hub follows
+	// it. The guard runs before the switch, so a held sub-agent session-start
+	// skips its ReportState call too.
+	if isHeldSubagentEvent(event) && h.isLocalActivitySticky() {
+		log.Debug("Hub: Skipping %s from sub-agent (local activity is sticky)", event.Name)
+		return nil
+	}
 
 	var err error
 	switch event.Name {
 	case hooks.EventSessionStart:
-		// Session starting - report running phase with working activity (clears any sticky)
+		// A clear or compact restarts the session inside the running
+		// harness. Working is reported only when the StatusHandler wrote
+		// it, on one of two paths:
+		//   - the parent's restart released a notification-set wait to
+		//     working and marked that write (session-restart); any other
+		//     state it kept, so nothing is sent. A wait that also records
+		//     the parent's own question became that agent-set wait without
+		//     the marker, so nothing is sent for it either. The marker
+		//     stays until the next local write, so a second restart before
+		//     then re-sends working, which is harmless.
+		//   - a sub-agent's restart took the held sub-agent path, which
+		//     writes working unless the local activity stays sticky. The
+		//     guard above returned when it stayed sticky, so local is the
+		//     working just written.
+		// "Session started" is never sent for a restart: the Hub's
+		// harness-ready attribution counts only new sessions.
+		if isInPlaceSessionStart(event) {
+			if !isLocalSessionRestartRelease() && !isHeldSubagentEvent(event) {
+				return nil
+			}
+			source := strings.ToLower(strings.TrimSpace(event.Data.Source))
+			log.Debug("Hub: Reporting running/working (session restarted in place)")
+			err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session restarted ("+source+")")
+			break
+		}
+		// New session - report running phase with working activity (clears any sticky)
 		log.Debug("Hub: Reporting running/working (session start)")
 		err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session started")
 
@@ -89,8 +162,28 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 
 	case hooks.EventToolStart:
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
-		if event.Dialect == "claude" && (event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion") {
-			message := "Waiting for input"
+		if isClaudeUserWaitTool(event) {
+			// A sub-agent's question during a wait the agent set itself
+			// keeps that wait locally (recorded as parentWaitAgent next
+			// to the sub-agent's entry); sending a new waiting_for_input
+			// would replace the agent's own message.
+			if isSubagentEvent(event) && h.isLocalWaitAgentSet() {
+				log.Debug("Hub: Skipping waiting_for_input from sub-agent (agent-set wait kept)")
+				return nil
+			}
+			// It also leaves blocked, completed, limits_exceeded and
+			// crashed in place locally; the Hub follows.
+			if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
+				log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+				return nil
+			}
+			// The parent's own question leaves limits_exceeded and
+			// crashed in place locally; the Hub follows.
+			if h.isLocalTerminal() {
+				log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
+				return nil
+			}
+			message := "Waiting on parent"
 			if event.Data.ToolName == "ExitPlanMode" {
 				message = "Waiting for plan approval"
 			}
@@ -104,11 +197,13 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			break
 		}
 
-		// Tool-start clears waiting_for_input (user has responded) but
-		// preserves completed (tools may fire after task_completed as wrap-up).
-		localActivity := readLocalActivity()
-		if localActivity == string(state.ActivityCompleted) || localActivity == string(state.ActivityLimitsExceeded) {
-			log.Debug("Hub: Skipping executing (completed is sticky, post-completion tool)")
+		// The Hub follows the local result. The StatusHandler has already
+		// replaced a waiting_for_input (the user has responded) and kept
+		// every other held status: completed (tools may fire after
+		// task_completed as wrap-up), blocked, limits_exceeded and crashed.
+		// A held local status means no executing update.
+		if h.isLocalActivitySticky() {
+			log.Debug("Hub: Skipping executing (local activity is sticky)")
 			return nil
 		}
 
@@ -127,40 +222,10 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		})
 
 	case hooks.EventToolEnd, hooks.EventAgentEnd, hooks.EventModelEnd:
-		// Forward assistant text (when the dialect extracted it — e.g.
-		// Claude's Stop hook via transcript_path) to the hub message
-		// store as an outbound agent→user reply. This is what makes
-		// assistant responses show up in the Messages tab. Best-effort:
-		// failure here must not break the status update flow below.
-		//
-		// Content-type filtering: AssistantText is pre-filtered by the
-		// dialect layer (thinking/reasoning blocks stripped).
-		if event.Name == hooks.EventAgentEnd && event.Data.AssistantText != "" {
-			text := truncateAssistantText(event.Data.AssistantText)
-
-			// Build metadata tags for content classification.
-			metadata := map[string]string{
-				"source": "hook",
-			}
-			if event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking() {
-				metadata["has_thinking"] = "true"
-			}
-
-			msgCtx, msgCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer msgCancel()
-			if msgErr := h.client.SendOutboundMessage(msgCtx, hub.OutboundMessage{
-				Msg:      text,
-				Type:     "assistant-reply",
-				Metadata: metadata,
-			}); msgErr != nil {
-				log.Error("Hub: outbound assistant reply failed: %v", msgErr)
-			} else {
-				log.Debug("Hub: Forwarded assistant reply to message store (%d bytes, thinking_filtered=%v)",
-					len(text), event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking())
-			}
-		}
-
-		// Check if local activity is sticky before sending working
+		// Check if local activity is sticky before sending working. The
+		// StatusHandler runs first in the same hook process, so a
+		// waiting_for_input that a Notification set has already been
+		// replaced locally on tool-end/agent-end; this mirrors that result.
 		if h.isLocalActivitySticky() {
 			log.Debug("Hub: Skipping working (local activity is sticky)")
 			return nil
@@ -173,9 +238,46 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			Message:  "Ready",
 		})
 
+	case hooks.EventSubagentEnd:
+		// The StatusHandler cleared a sub-agent-held wait to working when
+		// this SubagentStop was its last owner, and marked that write. Any
+		// other SubagentStop, and any parent event, changed nothing the Hub
+		// shows, so nothing is sent. The marker stays until the next local
+		// write, so a second SubagentStop before then re-sends working,
+		// which is harmless.
+		if !isSubagentEvent(event) || !isLocalSubagentEndRelease() {
+			return nil
+		}
+		log.Debug("Hub: Reporting working (sub-agent wait released)")
+		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+		err = h.client.UpdateStatus(ctx, hub.StatusUpdate{
+			Activity: state.ActivityWorking,
+			Status:   as.DisplayStatus(),
+			Message:  "Ready",
+		})
+
 	case hooks.EventNotification:
+		// A Notification during a wait the agent set itself leaves that
+		// wait in place locally; sending a new waiting_for_input would
+		// replace the agent's own message.
+		if h.isLocalWaitAgentSet() {
+			log.Debug("Hub: Skipping waiting_for_input (agent-set wait kept)")
+			return nil
+		}
+		// A sub-agent's Notification leaves blocked, completed,
+		// limits_exceeded and crashed in place locally; the Hub follows.
+		if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
+			log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+			return nil
+		}
+		// Any Notification, the parent's included, leaves limits_exceeded
+		// and crashed in place locally; the Hub follows.
+		if h.isLocalTerminal() {
+			log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
+			return nil
+		}
 		// Agent is waiting for input
-		message := "Waiting for input"
+		message := "Waiting on parent"
 		if event.Data.Message != "" {
 			message = truncateMessage(event.Data.Message, 100)
 		}
@@ -215,11 +317,27 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		return nil
 	}
 
+	elapsedMs := time.Since(callStart).Milliseconds()
 	if err != nil {
-		log.Error("Hub status update failed: %v", err)
+		// One structured line, not two: slog.Default() routes through this
+		// package's own log handler (see pkg/sciontool/log), so this already
+		// reaches agent.log and stderr exactly like the former log.Error call
+		// did — adding a second line here would double-log every failure,
+		// and hook events can fire once per tool call while the hub is down.
 		// Don't return error - we don't want Hub failures to break the hook chain
+		slog.Error("hub status update failed", "event", event.Name, "elapsed_ms", elapsedMs, "error", err)
 	} else {
 		log.Debug("Hub status update sent successfully")
+		// SessionStart is the one event currently used for start-time
+		// attribution (see pkg/hub's since_create_ms), so it logs at Info
+		// with its source; only a new-session source counts there, since a
+		// clear or compact restart can only follow the first start. Every
+		// other event logs the same shape at Debug.
+		if event.Name == hooks.EventSessionStart {
+			slog.Info("hub status update sent", "event", event.Name, "source", event.Data.Source, "elapsed_ms", elapsedMs)
+		} else {
+			slog.Debug("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
+		}
 	}
 
 	return nil
@@ -232,26 +350,86 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 	return isStickyActivity(activity)
 }
 
-// readLocalActivity reads the current activity from the local agent-info.json file.
+// isLocalWaitAgentSet reports whether the local agent-info.json holds a
+// waiting_for_input that the agent set itself: with no notification marker,
+// or recorded as the parent's own question inside a wait that sub-agents
+// hold (parentWaitAgent). Either way the Hub already shows the agent's own
+// message, which a later waiting_for_input must not replace.
+func (h *HubHandler) isLocalWaitAgentSet() bool {
+	info := readLocalAgentInfo()
+	return isAgentSetWaiting(info) || (isNotificationWaiting(info) && parentWaitOf(info) == parentWaitAgent)
+}
+
+// isLocalSubagentEndRelease reports whether the local agent-info.json holds
+// the working activity that the last owner's SubagentStop wrote when it
+// released a sub-agent-held wait.
+func isLocalSubagentEndRelease() bool {
+	info := readLocalAgentInfo()
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWorking) && source == activitySourceSubagentEnd
+}
+
+// isLocalSessionRestartRelease reports whether the local agent-info.json
+// holds the working activity that a clear or compact session-start wrote
+// when it released a notification-set wait.
+func isLocalSessionRestartRelease() bool {
+	info := readLocalAgentInfo()
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWorking) && source == activitySourceSessionRestart
+}
+
+// isLocalHeldNonWaiting reports whether the local agent-info.json holds
+// blocked, completed, limits_exceeded or crashed.
+func (h *HubHandler) isLocalHeldNonWaiting() bool {
+	return isHeldNonWaitingActivity(readLocalActivity())
+}
+
+// isLocalTerminal reports whether the local agent-info.json holds a
+// terminal activity: limits_exceeded or crashed (state.Activity.IsTerminal).
+func (h *HubHandler) isLocalTerminal() bool {
+	return state.Activity(readLocalActivity()).IsTerminal()
+}
+
+// readLocalActivity returns the activity recorded in the local
+// agent-info.json, or "" when it cannot be read (see readLocalAgentInfo).
 func readLocalActivity() string {
+	activity, _ := readLocalAgentInfo()["activity"].(string)
+	return activity
+}
+
+// readLocalAgentInfo reads the local agent-info.json into a map.
+//
+// The read goes through dirfd.ReadFileNoFollow with agentInfoMaxBytes, the
+// same bounded, no-follow read StatusHandler.readAgentInfoMap uses on this
+// file: a symlink at any path component, a FIFO, a hardlinked file, or a
+// file over the size cap is refused rather than followed or read in full.
+// A missing file returns an empty map silently. A refusal or invalid JSON
+// also returns an empty map (activity "", not sticky), the same fail-open
+// result an unreadable file always gave, and a refusal logs only the reason
+// at debug level, never the file's contents.
+func readLocalAgentInfo() map[string]interface{} {
+	info := map[string]interface{}{}
 	home := os.Getenv("HOME")
 	if home == "" {
 		home = "/home/scion"
 	}
 	statusPath := filepath.Join(home, "agent-info.json")
 
-	data, err := os.ReadFile(statusPath)
+	data, err := dirfd.ReadFileNoFollow(statusPath, agentInfoMaxBytes)
 	if err != nil {
-		return ""
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Debug("Hub: not reading local agent-info: %v", err)
+		}
+		return info
 	}
 
-	var info map[string]interface{}
-	if err := json.Unmarshal(data, &info); err != nil {
-		return ""
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil || parsed == nil {
+		return info
 	}
-
-	activity, _ := info["activity"].(string)
-	return activity
+	return parsed
 }
 
 // ReportWaitingForInput sends a waiting-for-input status to the Hub.
@@ -260,7 +438,7 @@ func (h *HubHandler) ReportWaitingForInput(message string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting waiting_for_input (ask_user: %s)", truncateMessage(message, 50))
@@ -278,7 +456,7 @@ func (h *HubHandler) ReportTaskCompleted(taskSummary string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting task completed: %s", truncateMessage(taskSummary, 50))
@@ -296,7 +474,7 @@ func (h *HubHandler) ReportLimitsExceeded(message string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting limits_exceeded: %s", truncateMessage(message, 50))
@@ -314,7 +492,7 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting counts (turns=%d, model_calls=%d)", turnCount, modelCallCount)
@@ -324,32 +502,15 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 	})
 }
 
-// truncateAssistantText caps an assistant reply at the hub's message-length
-// limit, measured in runes as the hub measures it, keeping the start of the
-// reply and reserving room for a marker reporting how many were dropped.
-func truncateAssistantText(text string) string {
-	total := utf8.RuneCountInString(text)
-	if total <= messages.MaxMessageLength {
-		return text
-	}
-
-	marker := func(dropped int) string {
-		return fmt.Sprintf("\n[truncated, %d characters omitted]", dropped)
-	}
-	// Sized against the worst case: the dropped count can only shrink the marker.
-	keep := messages.MaxMessageLength - utf8.RuneCountInString(marker(total))
-	if keep <= 0 {
-		// Defensive: unreachable at the current limit, but a negative slice
-		// would panic and no caller up to dispatchEvent recovers.
-		return string([]rune(text)[:messages.MaxMessageLength])
-	}
-	return string([]rune(text)[:keep]) + marker(total-keep)
-}
-
-// truncateMessage truncates a message to the specified length.
+// truncateMessage truncates a message to at most maxLen bytes, ending in
+// "...". It cuts on a rune boundary so a multibyte character is never split.
 func truncateMessage(msg string, maxLen int) string {
 	if len(msg) <= maxLen {
 		return msg
 	}
-	return msg[:maxLen-3] + "..."
+	cut := maxLen - 3
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "..."
 }

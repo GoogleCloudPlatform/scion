@@ -206,8 +206,9 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	ctx := context.Background()
 
 	// The setup already created tid("agent-watched") with user notifications for DevUserID.
-	// Create a second agent that watches tid("agent-watched"), so tid("agent-watched") is the
-	// subscriber (simulating notifications sent TO the watched agent).
+	// Create a second agent, and a subscription in which the watched agent,
+	// keyed by its slug "watched-agent", is the subscriber (simulating
+	// notifications sent TO the watched agent).
 	agent2 := &store.Agent{
 		ID:        tid("agent-other"),
 		Slug:      tid("other-agent"),
@@ -217,13 +218,14 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Create subscription: agent-watched subscribes to agent-other
+	// Create subscription: agent-watched subscribes to agent-other. Agent
+	// subscribers are keyed by slug.
 	sub2 := &store.NotificationSubscription{
 		ID:                api.NewUUID(),
 		Scope:             store.SubscriptionScopeAgent,
 		AgentID:           tid("agent-other"),
 		SubscriberType:    store.SubscriberTypeAgent,
-		SubscriberID:      tid("agent-watched"),
+		SubscriberID:      "watched-agent",
 		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
@@ -238,7 +240,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 		AgentID:        tid("agent-other"),
 		ProjectID:      tid("project-notif-handler"),
 		SubscriberType: store.SubscriberTypeAgent,
-		SubscriberID:   tid("agent-watched"),
+		SubscriberID:   "watched-agent",
 		Status:         "COMPLETED",
 		Message:        "agent-other completed (to agent-watched)",
 		Dispatched:     true,
@@ -263,7 +265,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 
 	// Agent notifications: notifications sent TO agent-watched
 	require.Len(t, resp.AgentNotifications, 1)
-	assert.Equal(t, tid("agent-watched"), resp.AgentNotifications[0].SubscriberID)
+	assert.Equal(t, "watched-agent", resp.AgentNotifications[0].SubscriberID)
 }
 
 func TestHandleNotifications_FilterByAgent_NoResults(t *testing.T) {
@@ -292,38 +294,6 @@ func TestHandleNotifications_EmptyList(t *testing.T) {
 	var notifs []store.Notification
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&notifs))
 	assert.Empty(t, notifs)
-}
-
-// setupProjectWithBroker creates a project with a registered runtime broker for
-// agent creation tests.
-func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName string) *store.Project {
-	t.Helper()
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-" + projectID),
-		Name:   "Test Broker",
-		Slug:   "test-broker-" + projectID,
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	project := &store.Project{
-		ID:   tid(projectID),
-		Name: projectName,
-		Slug: projectID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	provider := &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.AddProjectProvider(ctx, provider))
-
-	return project
 }
 
 func TestCreateProjectAgent_NotifyCreatesSubscription(t *testing.T) {
@@ -484,6 +454,34 @@ func TestHandleSubscriptions_List(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&projectSubs))
 	assert.Len(t, projectSubs, 1)
 	assert.Equal(t, "project", projectSubs[0].Scope)
+
+	// Filter by canonical projectId query param: both the setup's agent-scoped
+	// subscription and the project-scoped one just created belong to this
+	// project, so both come back.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/notifications/subscriptions?projectId="+tid("project-notif-handler"), nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var byProjectID []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&byProjectID))
+	assert.GreaterOrEqual(t, len(byProjectID), 2)
+	for _, s := range byProjectID {
+		assert.Equal(t, tid("project-notif-handler"), s.ProjectID)
+	}
+
+	// A projectId for a different (nonexistent) project excludes them all,
+	// proving the canonical filter is actually applied.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/notifications/subscriptions?projectId="+tid("project-notif-handler-other"), nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var otherProjectSubs []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&otherProjectSubs))
+	assert.Empty(t, otherProjectSubs)
+
+	// groveId is no longer a recognized filter alias: it is ignored, not
+	// treated as a projectId filter, so it returns the unfiltered list.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/notifications/subscriptions?groveId="+tid("project-notif-handler"), nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var ignoredGroveID []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&ignoredGroveID))
+	assert.GreaterOrEqual(t, len(ignoredGroveID), 2)
 }
 
 func TestHandleSubscriptions_Delete(t *testing.T) {
@@ -849,6 +847,53 @@ func TestHandleSubscriptionTemplates_RejectsAgents(t *testing.T) {
 
 	_, err := s.GetSubscriptionTemplate(ctx, tmpl.ID)
 	assert.NoError(t, err)
+}
+
+// TestCreateNotificationSubscriptionTemplate_ScopeValidation verifies that
+// creating a notification subscription template accepts only "" (defaults
+// to project), "project" or "agent" per
+// store.SubscriptionScope*, and rejects anything else — including the
+// removed legacy "grove" scope — with 400, echoing the rejected value.
+func TestCreateNotificationSubscriptionTemplate_ScopeValidation(t *testing.T) {
+	srv, s := testServer(t)
+	// A template filed under a project needs read access to it.
+	require.NoError(t, s.CreateProject(context.Background(), &store.Project{ID: tid("project-notif-handler"), Name: "Notif Handler", Slug: "notif-handler"}))
+
+	valid := []struct {
+		name  string
+		scope string
+	}{
+		{"empty defaults to project", ""},
+		{"project", store.SubscriptionScopeProject},
+		{"agent", store.SubscriptionScopeAgent},
+	}
+	for _, tt := range valid {
+		t.Run("accepts/"+tt.name, func(t *testing.T) {
+			createReq := createTemplateRequest{
+				Name:              "subtmpl-" + tt.name,
+				Scope:             tt.scope,
+				TriggerActivities: []string{"COMPLETED"},
+				ProjectID:         tid("project-notif-handler"),
+			}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/templates", createReq)
+			require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+
+	invalid := []string{"grove", "bogus"}
+	for _, scope := range invalid {
+		t.Run("rejects/"+scope, func(t *testing.T) {
+			createReq := createTemplateRequest{
+				Name:              "subtmpl-invalid-" + scope,
+				Scope:             scope,
+				TriggerActivities: []string{"COMPLETED"},
+				ProjectID:         tid("project-notif-handler"),
+			}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/templates", createReq)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "invalid scope", "body: %s", rec.Body.String())
+		})
+	}
 }
 
 func TestHandleSubscriptions_AgentCreateAndList(t *testing.T) {

@@ -18,7 +18,9 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -30,10 +32,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testStoreSeq makes each test store's in-memory database name unique
+// per run, so repeated runs of one test (-count) never share a database.
+var testStoreSeq atomic.Int64
+
 func newTestStore(t *testing.T) store.Store {
 	t.Helper()
-	dbName := strings.ReplaceAll(t.Name(), "/", "_")
-	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{})
+	dbName := fmt.Sprintf("%s_%d", strings.ReplaceAll(t.Name(), "/", "_"), testStoreSeq.Add(1))
+	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	s := entadapter.NewCompositeStore(client)
@@ -41,13 +47,13 @@ func newTestStore(t *testing.T) store.Store {
 	return s
 }
 
-func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_DedupByName(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
 
 	// First registration: creates broker with ID tid("broker-1") and name "test-broker"
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -59,7 +65,7 @@ func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
 
 	// Second registration with a DIFFERENT ID but SAME name.
 	// This simulates a restart where the broker ID was lost/regenerated.
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Should return the original broker-1 ID (dedup by name)
@@ -76,18 +82,18 @@ func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
 	assert.Equal(t, store.BrokerStatusOnline, broker.Status)
 }
 
-func TestRegisterGlobalGroveAndBroker_SameIDNoDedup(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_SameIDNoDedup(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
 
 	// First registration
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
 	// Second registration with the same ID (normal restart case)
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, false, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, false, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -98,18 +104,18 @@ func TestRegisterGlobalGroveAndBroker_SameIDNoDedup(t *testing.T) {
 	assert.Equal(t, false, broker.AutoProvide, "auto-provide should be updated to false")
 }
 
-func TestRegisterGlobalGroveAndBroker_NewBrokerNewName(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_NewBrokerNewName(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
 
 	// Register first broker
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "broker-alpha", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "broker-alpha", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
 	// Register a genuinely different broker (different ID AND different name)
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "broker-beta", "http://localhost:9801", nil, true, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "broker-beta", "http://localhost:9801", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-2"), effectiveID)
 
@@ -120,19 +126,19 @@ func TestRegisterGlobalGroveAndBroker_NewBrokerNewName(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestRegisterGlobalGroveAndBroker_DedupCaseInsensitive(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_DedupCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
 
 	// Register broker with lowercase name
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "scion-demo", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "scion-demo", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
 	// Register with different ID and mixed-case name
 	// GetRuntimeBrokerByName uses LOWER() for case-insensitive match
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "Scion-Demo", "http://localhost:9800", nil, true, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "Scion-Demo", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID, "should match case-insensitively")
 }
@@ -143,7 +149,7 @@ func TestRegisterGlobalProjectAndBroker_SetsEmbeddedLabel(t *testing.T) {
 	settings := &config.Settings{}
 
 	// Register a new co-located broker
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -159,7 +165,7 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnReregistration(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Manually add a user-set label to simulate prior customization
@@ -169,7 +175,7 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnReregistration(t *testing.T) {
 	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
 
 	// Re-register (same ID, same name)
-	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Verify the embedded label is set AND the custom label is preserved
@@ -185,11 +191,11 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnDedupByName(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Second registration with different ID but same name (dedup path)
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -198,6 +204,64 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnDedupByName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "embedded", broker.Labels["scion.io/broker-role"])
 }
+
+// TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile covers the hub's
+// side of resolving an agent dispatch with no explicit profile: the broker
+// record must carry the same active profile the broker itself would use
+// locally, so it survives create, re-registration (when settings change),
+// and the stock two-profile default settings shape.
+func TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{
+		ActiveProfile: "local",
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "local", broker.DefaultProfile,
+		"the broker record must carry the same active profile the broker resolves an empty profile to locally")
+
+	// Re-registration with a different active profile (e.g. settings.yaml
+	// edited and the broker restarted) must update the stored value, not
+	// leave the stale one in place.
+	settings.ActiveProfile = "remote"
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
+	require.NoError(t, err)
+
+	broker, err = s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "remote", broker.DefaultProfile)
+}
+
+// TestRegisterGlobalProjectAndBroker_NoActiveProfileLeavesDefaultProfileEmpty
+// covers the case buildStoreBrokerProfiles itself falls back on: settings
+// with no profiles defined at all produce a single implicit "default"
+// profile, and there is no active-profile setting to record. An empty
+// DefaultProfile is correct here — the hub resolves this broker's single
+// profile without needing it (resolveAgentRuntimeProfileType,
+// pkg/hub/default_gcp_identity.go).
+func TestRegisterGlobalProjectAndBroker_NoActiveProfileLeavesDefaultProfileEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Empty(t, broker.DefaultProfile)
+	require.Len(t, broker.Profiles, 1, "settings with no profiles defined fall back to a single implicit profile")
+}
+
 func TestBuildStoreBrokerProfiles_CloudRunFiltersLocalRuntimes(t *testing.T) {
 	settings := &config.Settings{
 		Profiles: map[string]config.ProfileConfig{
@@ -206,7 +270,7 @@ func TestBuildStoreBrokerProfiles_CloudRunFiltersLocalRuntimes(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "cloudrun")
+	profiles := buildStoreBrokerProfiles(settings, nil, "cloudrun", nil)
 
 	assert.Len(t, profiles, 1, "Cloud Run should filter out docker profile")
 	assert.Equal(t, "kubernetes", profiles[0].Type)
@@ -221,7 +285,7 @@ func TestBuildStoreBrokerProfiles_DockerDefaultKeepsAllProfiles(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "docker")
+	profiles := buildStoreBrokerProfiles(settings, nil, "docker", nil)
 
 	assert.Len(t, profiles, 2, "docker default should keep all profiles")
 	types := map[string]bool{}
@@ -239,7 +303,7 @@ func TestBuildStoreBrokerProfiles_EmptyAfterFilterFallsBackToDefault(t *testing.
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "cloudrun")
+	profiles := buildStoreBrokerProfiles(settings, nil, "cloudrun", nil)
 
 	assert.Len(t, profiles, 1, "should fall back to default profile when all are filtered")
 	assert.Equal(t, "default", profiles[0].Name)
@@ -255,7 +319,7 @@ func TestBuildStoreBrokerProfiles_StarterHubKeepsDockerProfiles(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "docker")
+	profiles := buildStoreBrokerProfiles(settings, nil, "docker", nil)
 
 	assert.Len(t, profiles, 2, "starter hub (docker default) should keep docker profiles")
 	types := map[string]bool{}
@@ -266,7 +330,7 @@ func TestBuildStoreBrokerProfiles_StarterHubKeepsDockerProfiles(t *testing.T) {
 	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
 }
 
-func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_CloudRunSuppressesDockerProfile(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{
@@ -277,7 +341,7 @@ func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "hosted-broker", "http://localhost:9800", rt, true, settings)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "hosted-broker", "http://localhost:9800", rt, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
@@ -290,7 +354,7 @@ func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing
 	assert.Equal(t, "kubernetes", broker.Profiles[0].Type)
 }
 
-func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_StarterHubKeepsDockerProfile(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{
@@ -301,7 +365,7 @@ func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T)
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "starter-hub", "http://localhost:9800", rt, true, settings)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "starter-hub", "http://localhost:9800", rt, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
@@ -314,4 +378,107 @@ func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T)
 	}
 	assert.True(t, types["docker"], "docker profile should be present on starter hub")
 	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
+}
+
+// optOutRuntime is a MockRuntime that also implements the optional
+// runtime.AttachCapableRuntime capability, always reporting false.
+type optOutRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (r *optOutRuntime) SupportsAttach() bool { return false }
+
+// noEmptyPerAgentRuntime is a MockRuntime that opts out of the optional
+// runtime.EmptyPerAgentCapableRuntime capability, as Cloud Run does.
+type noEmptyPerAgentRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (r *noEmptyPerAgentRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
+// TestRegisterGlobalProjectAndBroker_EmptyPerAgentFollowsDefaultRuntime pins
+// that the embedded broker's EmptyPerAgentWorkspace capability reflects its
+// default runtime on both the create and the re-register branch (design
+// #2703 P2): false for one that opts out, as Cloud Run does.
+func TestRegisterGlobalProjectAndBroker_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	rt := &noEmptyPerAgentRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}}
+	brokerID := tid("broker-no-empty")
+
+	for _, branch := range []string{"create", "re-register"} {
+		_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "no-empty-broker", "http://localhost:9800", rt, true, settings, nil, nil)
+		require.NoError(t, err, branch)
+		broker, err := s.GetRuntimeBroker(ctx, brokerID)
+		require.NoError(t, err, branch)
+		require.NotNil(t, broker.Capabilities, branch)
+		assert.False(t, broker.Capabilities.EmptyPerAgentWorkspace, "%s: EmptyPerAgentWorkspace must be false for an opted-out default runtime", branch)
+	}
+}
+
+// TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalse is the
+// producer-path integration test: a broker whose default runtime opts out
+// of attach registers through the real production path
+// (registerGlobalProjectAndBroker -> buildStoreBrokerProfiles), and the
+// stored record ends up with Attach=false on both the default profile and
+// the broker-wide capability. The Hub reads this record to choose the PTY
+// path (and to refuse the attach preflight when there is none); the CLI no
+// longer reads it.
+func TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalse(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
+	brokerID := tid("broker-optout")
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-broker", "http://localhost:9800", rt, true, settings, nil, nil)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	require.NotNil(t, broker.Capabilities)
+	assert.False(t, broker.Capabilities.Attach, "broker-wide Capabilities.Attach must be false for an opted-out default runtime")
+	require.Len(t, broker.Profiles, 1)
+	require.NotNil(t, broker.Profiles[0].Attach, "the default profile's Attach must be explicitly set, not left unknown")
+	assert.False(t, *broker.Profiles[0].Attach)
+}
+
+// TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability is the
+// design §3.4 Amendment A2.2(b) regression test: the update
+// branch (an existing broker record, re-registering) must refresh
+// Capabilities to include Reprovision:true, not just the create branch. A
+// broker registered before the reincarnate feature existed would otherwise
+// keep Capabilities.Reprovision unset forever, since CompleteBrokerJoin (the
+// remote-broker capability path) never runs for the embedded broker.
+func TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	brokerID := tid("broker-preexisting")
+
+	// Simulate a broker record from before the Reprovision capability
+	// existed: created directly, with the old capability set.
+	pre := &store.RuntimeBroker{
+		ID:           brokerID,
+		Name:         "pre-existing-broker",
+		Slug:         "pre-existing-broker",
+		Status:       store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{Sync: true, Attach: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, pre))
+
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "pre-existing-broker", "http://localhost:9800", nil, true, settings, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, brokerID, effectiveID)
+
+	updated, err := s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Capabilities)
+	assert.True(t, updated.Capabilities.Reprovision,
+		"re-registering an existing broker must refresh Capabilities.Reprovision to true")
+	assert.True(t, updated.Capabilities.EmptyPerAgentWorkspace,
+		"re-registering an existing broker must refresh Capabilities.EmptyPerAgentWorkspace to true")
+	assert.True(t, updated.Capabilities.Sync)
+	assert.True(t, updated.Capabilities.Attach)
 }

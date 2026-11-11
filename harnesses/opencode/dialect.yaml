@@ -15,21 +15,64 @@
 # Scion data-driven dialect spec for OpenCode hook events.
 # Staged to $HOME/.scion/harness/dialect.yaml at agent start.
 #
+# Every raw event name below is emitted by
+# home/.config/opencode/plugins/scion-bridge.js, which subscribes through
+# OpenCode's single generic `event` plugin hook (bus events, not keyed
+# hooks — see that file's header comment) plus the two real keyed hooks,
+# tool.execute.before/after.
+#
 # Event coverage analysis against the full scion event grammar:
-#   session-start    <- session.created       (direct match)
-#   session-end      <- session.error         (error-path only; no clean-exit hook)
-#   agent-end        <- session.idle          (agent turn completed)
-#   tool-start       <- tool.execute.before   (direct match)
-#   tool-end         <- tool.execute.after    (direct match)
-#   prompt-submit    <- permission.replied    (user responded to permission prompt)
-#   notification     <- permission.asked      (waiting for user input)
-#   model-end        <- message.updated       (proxy; no explicit model-start/model-end)
+#   session-start    <- session.created                    (direct match)
+#   agent-end        <- session.idle                        (gated on a prior
+#                                                             session.status
+#                                                             busy/retry; see
+#                                                             scion-bridge.js's
+#                                                             routeSessionIdle;
+#                                                             carries a failed
+#                                                             turn's error)
+#   tool-start       <- tool.execute.before                 (direct match)
+#   tool-end         <- tool.execute.after                  (direct match; fires on success only)
+#   prompt-submit    <- permission.replied                  (user/auto responded to a permission prompt)
+#   notification     <- permission.asked                    (waiting for user input)
+#   model-end        <- message.part.updated.step-finish     (one per completed LLM step; see below)
 #
 # Unmapped scion events (no OpenCode hook available):
 #   agent-start      - no hook fires when an agent turn begins
 #   subagent-end     - OpenCode has no subagent lifecycle concept
+#   session-end      - opencode has no clean-exit hook, so this dialect never
+#                      emits session-end
 #   response-complete - no direct equivalent; session.idle covers turn end
 #   model-start      - no hook fires at model invocation start
+#
+# session.error is never a raw event name here: scion-bridge.js's route()
+# emits nothing for it (see routeSessionError). A turn ends exactly once, on
+# session.idle, which always follows a session.error in a real capture;
+# routing session.error to any lifecycle event here would count that same
+# turn a second time (a real capture shows session.idle firing twice for one
+# failed prompt, so mapping session.error to anything -- even a non-terminal
+# event -- double-counts a turn against hooks/handlers/limits.go's
+# max_turns). Instead the bridge remembers the error's name and HTTP status
+# only (e.g. "APIError (status 429)"; see scion-bridge.js's
+# sessionErrorText) for the armed session and attaches it, as `error`, to
+# that turn's one gated session.idle emission, which the mapping below
+# carries onto the agent-end event (span status and log). A user abort
+# (MessageAbortedError) is not recorded, and a run that goes busy again
+# after the error (e.g. context-overflow auto-compaction) clears it.
+#
+# "message.part.updated.step-finish" is not an OpenCode wire event name; it
+# is scion-bridge.js's own key for a `message.part.updated` bus event whose
+# `part.type` is `"step-finish"` (the bridge filters every other part type,
+# including per-chunk `message.part.delta` streams, before ever invoking
+# sciontool). The bridge has already summed reasoning into output_tokens,
+# excluded fork replays, and deduped on (sessionID, messageID, part.id), so
+# no further token math or dedupe happens here. cache_write_tokens and
+# reasoning_tokens use the explicit `fields:` mapping added for hook token
+# plumbing; input_tokens/output_tokens/cached_tokens are read by the shared
+# extractTokens fallback (dialects/common.go) from their identically-named
+# top-level keys, deliberately with no `fields:` entry for them here, so
+# there is exactly one place that sets each of those three -- extractTokens
+# runs after this file's `fields:` mapping and would silently override a
+# second, conflicting value.
 dialect: opencode
 
 event_name_field: hook_event_name
@@ -41,15 +84,16 @@ mappings:
     fields:
       session_id: session_id
 
-  session.error:
-    event: session-end
-    fields:
-      error: error
-      reason: reason
-
-  # Agent turn completion.
+  # Agent turn completion. session.error is deliberately absent from this
+  # file -- see the note above the mappings block; its error name/status
+  # arrives on session.idle instead. The `error: error` field below is
+  # redundant with MappingDialect's default top-level `error` extraction (so
+  # no test can tell it apart from its absence); it is kept to document that
+  # session.idle carries a failed turn's error.
   session.idle:
     event: agent-end
+    fields:
+      error: error
 
   # Tool lifecycle.
   tool.execute.before:
@@ -63,13 +107,16 @@ mappings:
     fields:
       tool_name: tool_name
       success: success
-      error: error
 
-  # Model response (proxy for model-end; no explicit model-start available).
-  message.updated:
+  # Model usage: one per completed LLM step (design §3.7, §9 phase 3b).
+  # model is the bridge's joined provider/model for the step's parent
+  # message; it takes precedence over SCION_MODEL (design §3.2).
+  message.part.updated.step-finish:
     event: model-end
     fields:
-      assistant_text: assistant_text
+      model: model
+      cache_write_tokens: cache_write_tokens
+      reasoning_tokens: reasoning_tokens
 
   # User interaction.
   permission.asked:

@@ -42,6 +42,20 @@ func (_c *AgentCredentialCreate) SetTokenJtiHash(v string) *AgentCredentialCreat
 	return _c
 }
 
+// SetRunID sets the "run_id" field.
+func (_c *AgentCredentialCreate) SetRunID(v string) *AgentCredentialCreate {
+	_c.mutation.SetRunID(v)
+	return _c
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_c *AgentCredentialCreate) SetNillableRunID(v *string) *AgentCredentialCreate {
+	if v != nil {
+		_c.SetRunID(*v)
+	}
+	return _c
+}
+
 // SetIssuedAt sets the "issued_at" field.
 func (_c *AgentCredentialCreate) SetIssuedAt(v time.Time) *AgentCredentialCreate {
 	_c.mutation.SetIssuedAt(v)
@@ -167,6 +181,10 @@ func (_c *AgentCredentialCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *AgentCredentialCreate) defaults() {
+	if _, ok := _c.mutation.RunID(); !ok {
+		v := agentcredential.DefaultRunID
+		_c.mutation.SetRunID(v)
+	}
 	if _, ok := _c.mutation.IssuedAt(); !ok {
 		v := agentcredential.DefaultIssuedAt()
 		_c.mutation.SetIssuedAt(v)
@@ -256,6 +274,10 @@ func (_c *AgentCredentialCreate) createSpec() (*AgentCredential, *sqlgraph.Creat
 	if value, ok := _c.mutation.TokenJtiHash(); ok {
 		_spec.SetField(agentcredential.FieldTokenJtiHash, field.TypeString, value)
 		_node.TokenJtiHash = value
+	}
+	if value, ok := _c.mutation.RunID(); ok {
+		_spec.SetField(agentcredential.FieldRunID, field.TypeString, value)
+		_node.RunID = value
 	}
 	if value, ok := _c.mutation.IssuedAt(); ok {
 		_spec.SetField(agentcredential.FieldIssuedAt, field.TypeTime, value)
@@ -366,6 +388,24 @@ func (u *AgentCredentialUpsert) SetTokenJtiHash(v string) *AgentCredentialUpsert
 // UpdateTokenJtiHash sets the "token_jti_hash" field to the value that was provided on create.
 func (u *AgentCredentialUpsert) UpdateTokenJtiHash() *AgentCredentialUpsert {
 	u.SetExcluded(agentcredential.FieldTokenJtiHash)
+	return u
+}
+
+// SetRunID sets the "run_id" field.
+func (u *AgentCredentialUpsert) SetRunID(v string) *AgentCredentialUpsert {
+	u.Set(agentcredential.FieldRunID, v)
+	return u
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentCredentialUpsert) UpdateRunID() *AgentCredentialUpsert {
+	u.SetExcluded(agentcredential.FieldRunID)
+	return u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentCredentialUpsert) ClearRunID() *AgentCredentialUpsert {
+	u.SetNull(agentcredential.FieldRunID)
 	return u
 }
 
@@ -543,6 +583,27 @@ func (u *AgentCredentialUpsertOne) SetTokenJtiHash(v string) *AgentCredentialUps
 func (u *AgentCredentialUpsertOne) UpdateTokenJtiHash() *AgentCredentialUpsertOne {
 	return u.Update(func(s *AgentCredentialUpsert) {
 		s.UpdateTokenJtiHash()
+	})
+}
+
+// SetRunID sets the "run_id" field.
+func (u *AgentCredentialUpsertOne) SetRunID(v string) *AgentCredentialUpsertOne {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.SetRunID(v)
+	})
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentCredentialUpsertOne) UpdateRunID() *AgentCredentialUpsertOne {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.UpdateRunID()
+	})
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentCredentialUpsertOne) ClearRunID() *AgentCredentialUpsertOne {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.ClearRunID()
 	})
 }
 
@@ -901,6 +962,27 @@ func (u *AgentCredentialUpsertBulk) SetTokenJtiHash(v string) *AgentCredentialUp
 func (u *AgentCredentialUpsertBulk) UpdateTokenJtiHash() *AgentCredentialUpsertBulk {
 	return u.Update(func(s *AgentCredentialUpsert) {
 		s.UpdateTokenJtiHash()
+	})
+}
+
+// SetRunID sets the "run_id" field.
+func (u *AgentCredentialUpsertBulk) SetRunID(v string) *AgentCredentialUpsertBulk {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.SetRunID(v)
+	})
+}
+
+// UpdateRunID sets the "run_id" field to the value that was provided on create.
+func (u *AgentCredentialUpsertBulk) UpdateRunID() *AgentCredentialUpsertBulk {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.UpdateRunID()
+	})
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (u *AgentCredentialUpsertBulk) ClearRunID() *AgentCredentialUpsertBulk {
+	return u.Update(func(s *AgentCredentialUpsert) {
+		s.ClearRunID()
 	})
 }
 

@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ProjectDomain describes the project (grove) entity for the CRUD-parity oracle.
+// ProjectDomain describes the project entity for the CRUD-parity oracle.
 func ProjectDomain() Domain[store.Project] {
 	return Domain[store.Project]{
 		Name: "project",

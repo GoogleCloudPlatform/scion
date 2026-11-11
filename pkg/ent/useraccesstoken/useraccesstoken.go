@@ -24,8 +24,14 @@ const (
 	FieldKeyHash = "key_hash"
 	// FieldProjectID holds the string denoting the project_id field in the database.
 	FieldProjectID = "project_id"
+	// FieldBoundaryKind holds the string denoting the boundary_kind field in the database.
+	FieldBoundaryKind = "boundary_kind"
 	// FieldScopes holds the string denoting the scopes field in the database.
 	FieldScopes = "scopes"
+	// FieldCeilingVersion holds the string denoting the ceiling_version field in the database.
+	FieldCeilingVersion = "ceiling_version"
+	// FieldCeilingPermissionIds holds the string denoting the ceiling_permission_ids field in the database.
+	FieldCeilingPermissionIds = "ceiling_permission_ids"
 	// FieldRevoked holds the string denoting the revoked field in the database.
 	FieldRevoked = "revoked"
 	// FieldExpiresAt holds the string denoting the expires_at field in the database.
@@ -34,6 +40,10 @@ const (
 	FieldLastUsed = "last_used"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
+	// FieldPurpose holds the string denoting the purpose field in the database.
+	FieldPurpose = "purpose"
+	// FieldLabels holds the string denoting the labels field in the database.
+	FieldLabels = "labels"
 	// Table holds the table name of the useraccesstoken in the database.
 	Table = "user_access_tokens"
 )
@@ -46,11 +56,16 @@ var Columns = []string{
 	FieldPrefix,
 	FieldKeyHash,
 	FieldProjectID,
+	FieldBoundaryKind,
 	FieldScopes,
+	FieldCeilingVersion,
+	FieldCeilingPermissionIds,
 	FieldRevoked,
 	FieldExpiresAt,
 	FieldLastUsed,
 	FieldCreated,
+	FieldPurpose,
+	FieldLabels,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -70,8 +85,14 @@ var (
 	PrefixValidator func(string) error
 	// KeyHashValidator is a validator for the "key_hash" field. It is called by the builders before save.
 	KeyHashValidator func(string) error
+	// DefaultBoundaryKind holds the default value on creation for the "boundary_kind" field.
+	DefaultBoundaryKind string
+	// BoundaryKindValidator is a validator for the "boundary_kind" field. It is called by the builders before save.
+	BoundaryKindValidator func(string) error
 	// ScopesValidator is a validator for the "scopes" field. It is called by the builders before save.
 	ScopesValidator func(string) error
+	// DefaultCeilingVersion holds the default value on creation for the "ceiling_version" field.
+	DefaultCeilingVersion int32
 	// DefaultRevoked holds the default value on creation for the "revoked" field.
 	DefaultRevoked bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -113,9 +134,24 @@ func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldProjectID, opts...).ToFunc()
 }
 
+// ByBoundaryKind orders the results by the boundary_kind field.
+func ByBoundaryKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBoundaryKind, opts...).ToFunc()
+}
+
 // ByScopes orders the results by the scopes field.
 func ByScopes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldScopes, opts...).ToFunc()
+}
+
+// ByCeilingVersion orders the results by the ceiling_version field.
+func ByCeilingVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingVersion, opts...).ToFunc()
+}
+
+// ByCeilingPermissionIds orders the results by the ceiling_permission_ids field.
+func ByCeilingPermissionIds(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingPermissionIds, opts...).ToFunc()
 }
 
 // ByRevoked orders the results by the revoked field.
@@ -136,4 +172,14 @@ func ByLastUsed(opts ...sql.OrderTermOption) OrderOption {
 // ByCreated orders the results by the created field.
 func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+}
+
+// ByPurpose orders the results by the purpose field.
+func ByPurpose(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPurpose, opts...).ToFunc()
+}
+
+// ByLabels orders the results by the labels field.
+func ByLabels(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLabels, opts...).ToFunc()
 }

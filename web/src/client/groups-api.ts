@@ -21,9 +21,10 @@
  * endpoint. Backend error messages are string-matched HERE and nowhere else;
  * consumers switch on {@link GroupsApiError.kind} only.
  *
- * `deleteGroup` and `removeMember` use raw `fetch(credentials:'include')`
- * instead of `apiFetch` to bypass the global `scion:access-denied` 403 toast,
- * since both have purpose-built 403 UX.
+ * `deleteGroup` and `removeMember` call `apiFetch` with `authErrors:
+ * 'caller'`, which skips the global 401/403 handling (the
+ * `scion:access-denied` 403 toast included), since both have purpose-built
+ * 403 UX.
  */
 
 import { apiFetch, parseApiError } from './api.js';
@@ -215,13 +216,13 @@ export async function updateGroup(id: string, patch: UpdateGroupRequest): Promis
 /**
  * Delete a group.
  *
- * Uses raw `fetch` (not `apiFetch`) to bypass the global 403 toast —
- * the delete confirmation dialog provides its own constraint-gate UX.
+ * Skips the global 401/403 handling (`authErrors: 'caller'`) — the delete
+ * confirmation dialog provides its own constraint-gate UX.
  */
 export async function deleteGroup(id: string): Promise<void> {
-  const res = await fetch(`${BASE_PATH}/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`${BASE_PATH}/${encodeURIComponent(id)}`, {
     method: 'DELETE',
-    credentials: 'include',
+    authErrors: 'caller',
   });
   if (!res.ok) throw await classifyError(res);
 }
@@ -256,8 +257,8 @@ export async function addMember(groupId: string, req: AddMemberRequest): Promise
 /**
  * Remove a member from a group.
  *
- * Uses raw `fetch` (not `apiFetch`) to bypass the global 403 toast —
- * the remove-member flow provides its own constraint-gate UX.
+ * Skips the global 401/403 handling (`authErrors: 'caller'`) — the
+ * remove-member flow provides its own constraint-gate UX.
  *
  * Returns a discriminated result: `ok`, `security_review`, or `lockout`.
  */
@@ -266,11 +267,11 @@ export async function removeMember(
   type: string,
   id: string
 ): Promise<RemoveMemberResult> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${BASE_PATH}/${encodeURIComponent(groupId)}/members/${encodeURIComponent(type)}/${encodeURIComponent(id)}`,
     {
       method: 'DELETE',
-      credentials: 'include',
+      authErrors: 'caller',
     }
   );
 

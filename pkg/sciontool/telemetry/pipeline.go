@@ -49,7 +49,12 @@ type metricAdmission struct {
 
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
-	config           *Config
+	config *Config
+	// loopbackConfig is a copy of config whose GRPCPort/HTTPPort are the
+	// ports the receiver actually bound (they differ when config asks for
+	// port 0). Set by Start once the receiver listens; config itself is
+	// never mutated so a restart re-binds against the configured ports.
+	loopbackConfig   atomic.Pointer[Config]
 	receiver         *Receiver
 	exporter         *CloudExporter
 	policy           *receiverPolicy
@@ -65,6 +70,10 @@ type Pipeline struct {
 	exportErrors     otelmetric.Int64Counter
 	meter            otelmetric.Meter
 	retryConfig      RetryConfig
+	usageDeriver     atomic.Pointer[UsageDeriver]
+	analytics        analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
+	health           healthEmitter  // telemetry.health events (health.go)
+	sessionUsageSink atomic.Pointer[SessionUsageSink]
 	intakeMu         sync.Mutex
 	intakeClosed     bool
 	intakeActive     int
@@ -133,6 +142,102 @@ func NewWithConfig(config *Config) *Pipeline {
 	}
 }
 
+// UsageActivation is the outcome of Pipeline.ActivateUsageSource. Every
+// value other than UsageActivated names the reason activation was skipped,
+// so callers can explain to operators why native usage stayed off.
+type UsageActivation string
+
+const (
+	// UsageActivated means a native deriver was built and stored.
+	UsageActivated UsageActivation = "activated"
+	// UsageActivationNotNative means the requested source is not
+	// UsageSourceNative, so there is nothing for the receiver to do.
+	UsageActivationNotNative UsageActivation = "source is not native"
+	// UsageActivationRuntimeEnvPrecedence means SCION_USAGE_SOURCE is
+	// present in this process's environment (even if empty), and so wins.
+	UsageActivationRuntimeEnvPrecedence UsageActivation = "runtime SCION_USAGE_SOURCE takes precedence"
+	// UsageActivationNotRunning is returned when the pipeline is nil, has
+	// not been started, has been stopped, or has no bound loopback config
+	// (which cannot happen once Start has succeeded).
+	UsageActivationNotRunning UsageActivation = "telemetry pipeline is not running"
+	// UsageActivationAlreadyActive means a deriver with rules is already in
+	// place and is left untouched.
+	UsageActivationAlreadyActive UsageActivation = "native usage derivation is already active"
+	// UsageActivationNoHarnessRule means SCION_HARNESS has no native rule.
+	UsageActivationNoHarnessRule UsageActivation = "harness has no native usage rule"
+)
+
+// ActivateUsageSource enables native usage derivation on an already-running
+// pipeline when the usage source is selected after Start, e.g. by a
+// container-script provisioner's env overlay, which sciontool init loads only
+// after the receiver is up (ptone/scion#3391). Without this, Start's
+// environment-only check sees the source unset and the deriver stays a no-op
+// for the lifetime of the process.
+//
+// It is deliberately narrow:
+//   - only UsageSourceNative activates anything; every other value
+//     (including "hooks", which the hook subprocess handles on its own) is
+//     ignored;
+//   - if SCION_USAGE_SOURCE is present in this process's environment, even
+//     with an empty value, it wins. This matches the additive overlay merge,
+//     which keeps any existing key for the harness child, so Start has
+//     already made the authoritative choice;
+//   - an already-active deriver is left untouched, so usage is never counted
+//     twice;
+//   - SCION_HARNESS gating still applies: a harness with no native rule stays
+//     a no-op;
+//   - activation is refused before Start and after Stop (this assumes Stop
+//     completed; sciontool init activates once, before any Stop).
+//
+// It returns UsageActivated when a new deriver was stored, and otherwise the
+// reason it was skipped.
+func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (UsageActivation, error) {
+	if source != UsageSourceNative {
+		return UsageActivationNotNative, nil
+	}
+	// Known limitation (predates ptone/scion#3391): the supervisor applies
+	// fetched hub secret overrides after the overlay merge, replacing the
+	// empty runtime placeholders. A secret named SCION_USAGE_SOURCE would
+	// therefore reach the child while this check sees only the empty
+	// placeholder and keeps native usage off. Usage sources are not secrets,
+	// so this is not supported.
+	if _, ok := os.LookupEnv("SCION_USAGE_SOURCE"); ok {
+		return UsageActivationRuntimeEnvPrecedence, nil
+	}
+	if p == nil {
+		return UsageActivationNotRunning, nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.running {
+		return UsageActivationNotRunning, nil
+	}
+	if current := p.usageDeriver.Load(); current != nil && len(current.rules) > 0 {
+		return UsageActivationAlreadyActive, nil
+	}
+	loopbackConfig := p.loopbackConfig.Load()
+	if loopbackConfig == nil {
+		return UsageActivationNotRunning, nil
+	}
+	deriver, err := newUsageDeriverForSource(ctx, loopbackConfig, source)
+	if err != nil {
+		return "", fmt.Errorf("creating usage deriver: %w", err)
+	}
+	deriver.sessionUsage = p.forwardSessionUsage
+	deriver.analytics = p.analytics.native
+	if len(deriver.rules) == 0 {
+		return UsageActivationNoHarnessRule, nil
+	}
+	// p.mu serializes this with Start and Stop, the only other writers, so
+	// a plain Store cannot overwrite a deriver activated concurrently.
+	// handleLogs and handleMetrics Load the pointer per request; an
+	// in-flight request that loaded the old no-op deriver derives nothing.
+	p.usageDeriver.Store(deriver)
+	return UsageActivated, nil
+}
+
 // Start starts the telemetry pipeline.
 func (p *Pipeline) Start(ctx context.Context) error {
 	if p == nil {
@@ -199,6 +304,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 					p.markDeliveryDegraded()
 				}
 			}
+			p.analytics.start(ctx, exporter.gcpExporter)
 			mode := "OTLP"
 			if p.config.IsGCP() {
 				mode = "GCP-native"
@@ -209,15 +315,33 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Info("Cloud exporter initialized (%s, project: %s)", mode, p.config.ProjectID)
 		}
 	} else {
-		if p.config.CloudEnabled {
+		switch {
+		case p.config.CloudEnabled && p.config.CloudEnabledExplicit:
+			// Cloud export was asked for explicitly but has nowhere to go:
+			// a real misconfiguration, so the pipeline refuses to start.
 			p.deliveryState.Store("failed")
 			p.logDeliverySnapshot(true)
 			if p.config.IsGCP() && p.config.ProjectID == "" {
 				slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
 			}
 			return fmt.Errorf("cloud telemetry enabled but destination is not configured")
+		case p.config.CloudEnabled:
+			// Cloud export is on only by default and no destination is
+			// configured: leave it off and run the local pipeline, the
+			// same as with cloud export disabled (ptone/scion#7104).
+			// CloudEnabled is cleared so intake, delivery state and Stop
+			// all behave exactly as they do with cloud export disabled;
+			// left set, intake would reject every batch as "cloud
+			// exporter unavailable".
+			p.config.CloudEnabled = false
+			if p.config.IsGCP() && p.config.ProjectID == "" {
+				slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
+			} else {
+				slog.Info("telemetry cloud export disabled: no destination configured")
+			}
+		default:
+			slog.Info("telemetry cloud export disabled")
 		}
-		slog.Info("telemetry cloud export disabled")
 	}
 
 	// Create receiver with span and metric handlers
@@ -231,15 +355,49 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	if err := p.receiver.Start(ctx); err != nil {
 		p.deliveryState.Store("failed")
 		p.logDeliverySnapshot(true)
+		p.analytics.stop(ctx)
 		if p.exporter != nil {
 			_ = p.exporter.Shutdown(ctx)
 		}
 		return fmt.Errorf("failed to start receiver: %w", err)
 	}
 
+	// Construct the usage deriver after the receiver is listening, since it
+	// exports over loopback back into this same receiver (design §3.3). A
+	// harness with no matching rule, or SCION_USAGE_SOURCE unset, yields a
+	// cheap no-op deriver (D4/D10); only a construction failure is logged.
+	// Start is not the only decision point: when SCION_USAGE_SOURCE is absent
+	// from this process's environment (a present key wins even when empty),
+	// init can later activate native usage from the provisioner's env overlay
+	// via ActivateUsageSource (ptone/scion#3391).
+	// p.usageDeriver is an atomic.Pointer: a log request can arrive
+	// concurrently with this Store, between receiver.Start returning above
+	// and this assignment running, and handleLogs's Load must never race it.
+	// In-process loopback producers (this deriver, initSelfMetrics, and
+	// init.go's lifecycle providers via Config) dial the receiver's bound
+	// gRPC port, not the configured one: with SCION_OTEL_GRPC_PORT=0 the
+	// configured port is 0 and the receiver listens on an ephemeral port.
+	grpcPort, httpPort := p.receiver.BoundPorts()
+	loopbackConfig := *p.config
+	loopbackConfig.GRPCPort, loopbackConfig.HTTPPort = grpcPort, httpPort
+	p.loopbackConfig.Store(&loopbackConfig)
+	if deriver, err := NewUsageDeriver(ctx, &loopbackConfig); err != nil {
+		log.Error("Failed to create usage deriver: %v", err)
+	} else {
+		deriver.sessionUsage = p.forwardSessionUsage
+		deriver.analytics = p.analytics.native
+		p.usageDeriver.Store(deriver)
+	}
+
 	p.running = true
 	p.deliveryState.Store("running")
 	p.startDiagnosticSnapshots(ctx)
+	var gcpExporter *GCPExporter
+	if p.exporter != nil {
+		gcpExporter = p.exporter.gcpExporter
+	}
+	p.startHealth(ctx, gcpExporter, p.analytics.handles())
+	// After startHealth, so the first snapshot shows this run's analytics.
 	p.logDeliverySnapshot(true)
 
 	// Start metric flush goroutine for batching exports to Cloud Monitoring.
@@ -258,7 +416,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		p.initSelfMetrics(ctx)
 	}
 
-	log.Info("Telemetry pipeline started (gRPC: %d, HTTP: %d)", p.config.GRPCPort, p.config.HTTPPort)
+	log.Info("Telemetry pipeline started (gRPC: %d, HTTP: %d)", grpcPort, httpPort)
 
 	return nil
 }
@@ -274,6 +432,28 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 
 	if !p.running {
 		return nil
+	}
+
+	// Shut the usage deriver down first, before intake/receiver close (R-2):
+	// its Shutdown does a final ForceFlush over its loopback connection back
+	// into this same receiver, which must still be listening for that flush
+	// to land in the still-open pipeline and reach the exporter via
+	// flushMetricsOnStop below. Shutting it down after the receiver closes
+	// (as an earlier version of this fix did) makes that flush retry against
+	// a dead loopback for its own timeout — measured at 10s — and loses the
+	// final increment entirely. This also runs ahead of every early-return
+	// branch further down in Stop, so a slow or incomplete pipeline shutdown
+	// never skips it.
+	// Stop periodic health snapshots first, so none observes the deriver
+	// between its release and captureFinalUsage below.
+	p.stopHealthLoop()
+	if deriver := p.usageDeriver.Swap(nil); deriver != nil {
+		deriverCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+		if err := deriver.Shutdown(deriverCtx); err != nil {
+			log.Error("Usage deriver shutdown error: %v", err)
+		}
+		cancel()
+		p.captureFinalUsage(deriver)
 	}
 
 	var errs []error
@@ -361,6 +541,7 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	if residualPending != 0 || residualDirty != 0 || p.metricPendingEntries+p.metricDirtyEntries != 0 {
 		forcedRecords := p.metricPendingRecords + p.metricDirtyRecords
 		p.metricDiagnostics.terminal(forcedRecords, terminalCanceled, 0)
+		p.recordFinalResidual(forcedRecords)
 		log.Error("Telemetry metric shutdown residual: %d pending streams, %d newer dirty streams, %d terminal unconfirmed admitted points", residualPending, residualDirty, forcedRecords)
 		errs = append(errs, fmt.Errorf("metric shutdown residual: pending=%d dirty=%d", residualPending, residualDirty))
 	}
@@ -376,6 +557,16 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	if unconfirmed := p.spanDiagnostics.unconfirmed.Load() + p.metricDiagnostics.unconfirmed.Load() + p.logDiagnostics.unconfirmed.Load(); unconfirmed > 0 {
 		errs = append(errs, fmt.Errorf("telemetry delivery unconfirmed for %d admitted records", unconfirmed))
 	}
+
+	// Final bounded analytics drain while the exporter is still open.
+	p.analytics.stop(ctx)
+	// Final health snapshot: after the final metric flush and analytics
+	// drain (it reports their outcome), before the exporter closes. A stop
+	// that already has errors is reported as degraded (set again below).
+	if len(errs) > 0 {
+		p.deliveryState.Store("degraded")
+	}
+	p.emitFinalHealth(ctx)
 
 	// Shutdown exporter to flush any buffered spans
 	if p.exporter != nil {
@@ -509,10 +700,16 @@ func (p *Pipeline) IsRunning() bool {
 	return p.running
 }
 
-// Config returns the pipeline configuration.
+// Config returns the pipeline configuration. Once Start has bound the
+// receiver, the returned copy carries the bound GRPCPort and HTTPPort, so
+// loopback providers built from it dial the live receiver even when the
+// configured ports were 0. Callers must not mutate the result.
 func (p *Pipeline) Config() *Config {
 	if p == nil {
 		return nil
+	}
+	if cfg := p.loopbackConfig.Load(); cfg != nil {
+		return cfg
 	}
 	return p.config
 }
@@ -565,10 +762,9 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	// context; this count is not a network-attempt guarantee.
 	if p.exporter != nil {
 		p.spanDiagnostics.queued.Add(int64(spanCount))
-		err := retryExport(ctx, p.retryConfig, "spans", func() error {
-			p.spanDiagnostics.attempts.Add(1)
+		err := retryExport(ctx, p.retryConfig, "spans", p.spanDiagnostics.countedAttempt(func() error {
 			return p.exporter.ExportProtoSpans(ctx, filtered)
-		})
+		}))
 		if err != nil {
 			p.spanDiagnostics.failed.Add(1)
 			reason, rejected := terminalExportReason(err)
@@ -620,6 +816,20 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	if records == 0 {
 		return nil
 	}
+	// The usage deriver sees every request whose wire format is valid, on the
+	// raw pre-policy input — mirroring handleLogs's validateLogs guard, even
+	// though processMetrics has no per-metric filter to route around (design
+	// §3.3). Matched metric names are consumed below, after policy
+	// processing, on the GCP path only. Gated on HasMetricRule so a harness
+	// with no metric-sourced rule (every one except copilot today) pays
+	// neither this extra validateMetrics pass nor ProcessResourceMetrics's
+	// walk over the batch.
+	var matchedUsageMetrics map[string]bool
+	if deriver := p.usageDeriver.Load(); deriver.HasMetricRule() {
+		if err := validateMetrics(resourceMetrics); err == nil {
+			matchedUsageMetrics = deriver.ProcessResourceMetrics(ctx, resourceMetrics)
+		}
+	}
 	if err := p.budget.reserve(bytes, records); err != nil {
 		p.metricDiagnostics.rejected.Add(int64(records))
 		return err
@@ -640,6 +850,15 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	}
 	processed := decision.Data
 	p.metricDiagnostics.filtered.Add(decision.Filtered)
+	if len(matchedUsageMetrics) > 0 && p.config.IsGCP() {
+		// Design §3.3 "Consume semantics for metric-sourced rules": on GCP,
+		// matched native metrics are removed here, before metricStreams.add,
+		// so they are neither rejected (which would fail the whole request)
+		// nor admitted. Generic OTLP leaves processed untouched, so they are
+		// forwarded as-is alongside the canonical counters the deriver just
+		// emitted over loopback.
+		processed = stripMatchedUsageMetrics(processed, matchedUsageMetrics)
+	}
 	if len(processed) == 0 {
 		return nil
 	}
@@ -655,11 +874,7 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		}
 		bytes, records = processedBytes, processedRecords
 		p.metricStateMu.Lock()
-		if p.metricStreams == nil {
-			p.metricStreams = newMetricStreams()
-			p.metricStreams.gcp = p.config.IsGCP()
-			p.metricStreams.now = p.now
-		}
+		p.ensureMetricStreamsLocked()
 		candidate := p.metricStreams.clone()
 		if err := candidate.add(processed); err != nil {
 			p.metricDiagnostics.rejected.Add(int64(records))
@@ -840,6 +1055,22 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 	}
 }
 
+// ensureMetricStreamsLocked lazily creates the cumulative stream state with
+// the provider mode and clock this pipeline uses. Both the admission path
+// and the flush loop may be first to need it — the flush loop ticks every
+// second from Start, so it usually wins — and whichever creates it must set
+// gcp, or every later stream is admitted without the GCP-only guards and
+// hook counters get no collector epoch (a zero cumulative start time that
+// Cloud Monitoring rejects). Caller holds metricStateMu.
+func (p *Pipeline) ensureMetricStreamsLocked() {
+	if p.metricStreams != nil {
+		return
+	}
+	p.metricStreams = newMetricStreams()
+	p.metricStreams.gcp = p.config.IsGCP()
+	p.metricStreams.now = p.now
+}
+
 // flushMetricBuffer exports one immutable cumulative snapshot at a time.
 //
 // Cloud Monitoring requires at least five seconds between point end times in
@@ -857,9 +1088,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		log.Debug("Skipping metric flush — last export was %v ago (minimum %v)", sinceLastFlush.Round(time.Millisecond), metricFlushInterval)
 		return false
 	}
-	if p.metricStreams == nil {
-		p.metricStreams = newMetricStreams()
-	}
+	p.ensureMetricStreamsLocked()
 	if len(p.metricPending) == 0 {
 		if p.config.IsGCP() {
 			batch, ends, eligible := p.metricStreams.snapshotGCP(p.now(), p.metricPossibleEnds)
@@ -924,6 +1153,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		remaining = p.metricPendingAdmissions[0].at.Add(metricMaxAge).Sub(p.now())
 	}
 	p.metricPendingAttempts++
+	retry := p.metricPendingAttempts > 1
 	p.metricStateMu.Unlock()
 	if remaining <= 0 {
 		p.metricStateMu.Lock()
@@ -934,6 +1164,9 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, remaining)
 	p.metricDiagnostics.attempts.Add(1)
+	if retry {
+		p.metricDiagnostics.retries.Add(1)
+	}
 	err := p.exporter.ExportProtoMetrics(attemptCtx, batch)
 	cancel()
 	p.metricStateMu.Lock()
@@ -1037,6 +1270,16 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	if logCount == 0 {
 		return nil
 	}
+	// The usage deriver sees every request the policy admits, before its
+	// event filter can drop a record (design §3.3, AC-1.4): it must not
+	// depend on Filter.Include, and derivation happens independently of
+	// whether the raw logs go on to export successfully. It runs after
+	// validateLogs so a request the policy would reject outright is never
+	// derived from — policy.processLogs re-validates below, which is
+	// deterministic and cheap on typical log batch sizes.
+	if err := validateLogs(resourceLogs); err == nil {
+		p.usageDeriver.Load().ProcessResourceLogs(ctx, resourceLogs)
+	}
 	if err := p.budget.reserve(bytes, logCount); err != nil {
 		p.logDiagnostics.rejected.Add(int64(logCount))
 		return err
@@ -1073,10 +1316,9 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
 		p.logDiagnostics.queued.Add(int64(logCount))
-		err := retryExport(ctx, p.retryConfig, "logs", func() error {
-			p.logDiagnostics.attempts.Add(1)
+		err := retryExport(ctx, p.retryConfig, "logs", p.logDiagnostics.countedAttempt(func() error {
 			return p.exporter.ExportProtoLogs(ctx, processed)
-		})
+		}))
 		if err != nil {
 			p.logDiagnostics.failed.Add(1)
 			reason, rejected := terminalExportReason(err)
@@ -1100,7 +1342,7 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 // initSelfMetrics creates a minimal MeterProvider for self-monitoring metrics
 // (pipeline health gauge and export error counter) and starts the health ticker.
 func (p *Pipeline) initSelfMetrics(ctx context.Context) {
-	providers, err := NewProviders(ctx, p.config, true)
+	providers, err := NewProviders(ctx, p.Config(), true)
 	if err != nil || providers == nil || providers.MeterProvider == nil {
 		log.Debug("Could not create MeterProvider for pipeline self-metrics: %v", err)
 		p.meter = noop.Meter{}

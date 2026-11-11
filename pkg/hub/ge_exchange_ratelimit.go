@@ -82,6 +82,12 @@ type geExchangeRateLimiter struct {
 	maxEntries int
 	maxAge     time.Duration
 	nowFunc    func() time.Time
+	// cleanupInterval is how often StartCleanup's background goroutine
+	// sweeps stale entries. Defaults to geExchangeCleanupInterval in
+	// newGEExchangeRateLimiter; overridable (same package only) so a test can
+	// observe the cleanup goroutine actually running without waiting on the
+	// production interval.
+	cleanupInterval time.Duration
 }
 
 type geExchangeBucket struct {
@@ -92,12 +98,13 @@ type geExchangeBucket struct {
 // newGEExchangeRateLimiter creates a new rate limiter with production defaults.
 func newGEExchangeRateLimiter() *geExchangeRateLimiter {
 	return &geExchangeRateLimiter{
-		buckets:    make(map[string]*geExchangeBucket),
-		rate:       geExchangeRatePerSecond,
-		burst:      geExchangeBurst,
-		maxEntries: geExchangeLimiterMaxEntries,
-		maxAge:     geExchangeLimiterMaxAge,
-		nowFunc:    time.Now,
+		buckets:         make(map[string]*geExchangeBucket),
+		rate:            geExchangeRatePerSecond,
+		burst:           geExchangeBurst,
+		maxEntries:      geExchangeLimiterMaxEntries,
+		maxAge:          geExchangeLimiterMaxAge,
+		nowFunc:         time.Now,
+		cleanupInterval: geExchangeCleanupInterval,
 	}
 }
 
@@ -170,7 +177,7 @@ func (l *geExchangeRateLimiter) Len() int {
 // cancelled. Call this once during server startup.
 func (l *geExchangeRateLimiter) StartCleanup(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(geExchangeCleanupInterval)
+		ticker := time.NewTicker(l.cleanupInterval)
 		defer ticker.Stop()
 		for {
 			select {

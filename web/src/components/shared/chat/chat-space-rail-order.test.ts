@@ -24,10 +24,9 @@
  * order, and either one switches the rail to custom sort.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
+import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -54,6 +53,9 @@ function createRail(): any {
   el.threadsBySpace = new Map();
   el.collapsedSpaces = new Set<string>();
   el.loading = false;
+  // As after a successful loadPrefs: the rail never saves preferences it
+  // has not read (see savePrefs).
+  el._prefsLoaded = true;
   return el;
 }
 
@@ -67,7 +69,7 @@ function serveUserPrefs(stored: Record<string, string> = {}): void {
       return Promise.resolve(new Response('{}', { status: 200 }));
     }
     if (init?.method === 'PUT') {
-      const body = JSON.parse(String(init.body)) as Record<string, string>;
+      const body = JSON.parse(requestBodyText(init.body)) as Record<string, string>;
       stored = {
         spaceSortMode: body.spaceSortMode || 'activity',
         threadSortMode: body.threadSortMode || 'activity',
@@ -145,6 +147,86 @@ describe('space rail — prefs round trip', () => {
 
     expect(el.prefs.spaceSortMode).toBe('custom');
     expect(el.prefs.spaceOrder).toBeUndefined();
+  });
+
+  it('derives alpha thread sort from an alpha space sort even though the hub always sends threadSortMode: activity', async () => {
+    const el = createRail();
+    serveUserPrefs({ spaceSortMode: 'alpha', threadSortMode: 'activity' });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.spaceSortMode).toBe('alpha');
+    expect(el.prefs.threadSortMode).toBe('alpha');
+  });
+
+  it('does not derive alpha thread sort when the space sort is not alpha', async () => {
+    const el = createRail();
+    serveUserPrefs({ spaceSortMode: 'custom', threadSortMode: 'activity' });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.threadSortMode).toBe('activity');
+  });
+
+  it("migrates a legacy threadSortMode: 'custom' to alpha when the space sort is alpha, keeping threadOrder", async () => {
+    const el = createRail();
+    serveUserPrefs({
+      spaceSortMode: 'alpha',
+      threadSortMode: 'custom',
+      threadOrder: JSON.stringify({ 'p-a': ['t-1', 't-2'] }),
+    });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.threadSortMode).toBe('alpha');
+    expect(el.prefs.threadOrder).toEqual({ 'p-a': ['t-1', 't-2'] });
+  });
+
+  it("migrates a legacy threadSortMode: 'custom' to activity when the space sort is not alpha, keeping threadOrder", async () => {
+    const el = createRail();
+    serveUserPrefs({
+      spaceSortMode: 'activity',
+      threadSortMode: 'custom',
+      threadOrder: JSON.stringify({ 'p-a': ['t-1', 't-2'] }),
+    });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.threadSortMode).toBe('activity');
+    expect(el.prefs.threadOrder).toEqual({ 'p-a': ['t-1', 't-2'] });
+  });
+
+  it('a saved thread order survives a cold reload, and a later save elsewhere keeps it', async () => {
+    const el = createRail();
+    serveUserPrefs();
+
+    await el.savePrefs({
+      spaceSortMode: 'alpha',
+      threadSortMode: 'alpha',
+      threadOrder: { 'p-a': ['t-2', 't-1'] },
+    });
+
+    // A fresh rail and a fresh load, the way a page reload would see it.
+    const reloaded = createRail();
+    await reloaded.loadPrefs();
+    expect(reloaded.prefs.threadOrder).toEqual({ 'p-a': ['t-2', 't-1'] });
+
+    // A save that touches a different space must not erase it.
+    await reloaded.savePrefs({ spaceOrder: ['p-b', 'p-a', 'p-c'] });
+    expect(reloaded.prefs.threadOrder).toEqual({ 'p-a': ['t-2', 't-1'] });
+  });
+
+  it('keeps threadOrder when reconciling its own save echo', async () => {
+    const el = createRail();
+    serveUserPrefs();
+
+    await el.savePrefs({
+      spaceSortMode: 'alpha',
+      threadSortMode: 'alpha',
+      threadOrder: { 'p-a': ['t-1', 't-2'] },
+    });
+
+    expect(el.prefs.threadOrder).toEqual({ 'p-a': ['t-1', 't-2'] });
   });
 
   it('writes the order as a JSON array string', async () => {
@@ -368,7 +450,9 @@ describe('space rail — sort menu and space menu rendering', () => {
     el.prefs = { spaceSortMode: 'custom', threadSortMode: 'activity', spaceOrder: undefined };
     await el.updateComplete;
 
-    const items = [...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item')];
+    const items = [
+      ...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item[type="checkbox"]'),
+    ];
     expect(items.map((i: any) => i.getAttribute('value'))).toEqual(['activity', 'alpha', 'custom']);
     const checked = items.filter((i: any) => i.hasAttribute('checked'));
     expect(checked).toHaveLength(1);

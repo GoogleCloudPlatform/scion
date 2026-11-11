@@ -44,10 +44,11 @@ type BrokerServer struct {
 	configured    bool
 
 	// Admin config management fields (Phase 3).
-	baseConfig *Config             // base YAML config loaded at boot (immutable after init)
-	snapshot   *SnapshotHolder     // atomic snapshot of effective config
-	stateDir   string              // directory for admin-overlay.json persistence
-	geOpts     []GEValidatorOption // forwarded to BuildSnapshot for geGoogle auth (e.g. transport auth)
+	baseConfig     *Config               // base YAML config loaded at boot (immutable after init)
+	snapshot       *SnapshotHolder       // atomic snapshot of effective config
+	stateDir       string                // directory for admin-overlay.json persistence
+	geOpts         []GEValidatorOption   // forwarded to BuildSnapshot for geGoogle auth (e.g. transport auth)
+	authWarnDedupe *AuthSchemeWarnDedupe // dedupes the pinned-auth-scheme warning across repeated pushes
 }
 
 var _ plugin.MessageBrokerPluginInterface = (*BrokerServer)(nil)
@@ -56,10 +57,11 @@ var _ plugin.HostCallbacksAware = (*BrokerServer)(nil)
 // NewBrokerServer creates a new broker plugin server.
 func NewBrokerServer(handler MessageHandler, log *slog.Logger, shutdownCtx context.Context) *BrokerServer {
 	return &BrokerServer{
-		handler:       handler,
-		log:           log,
-		shutdownCtx:   shutdownCtx,
-		subscriptions: make(map[string]bool),
+		handler:        handler,
+		log:            log,
+		shutdownCtx:    shutdownCtx,
+		subscriptions:  make(map[string]bool),
+		authWarnDedupe: NewAuthSchemeWarnDedupe(),
 	}
 }
 
@@ -103,7 +105,7 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 		return err // Hub surfaces this error to the admin UI
 	}
 
-	effective := ApplyOverlay(*b.baseConfig, overlay)
+	effective := ApplyOverlay(*b.baseConfig, overlay, b.log, b.authWarnDedupe)
 	if err := ValidateConfig(&effective); err != nil {
 		b.log.Error("rejected admin config push due to validation failure", "error", err)
 		return err
@@ -130,7 +132,7 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 // applyOverlay merges the overlay onto the base config and swaps the snapshot.
 // Must be called with b.mu held.
 func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
-	effective := ApplyOverlay(*b.baseConfig, overlay)
+	effective := ApplyOverlay(*b.baseConfig, overlay, b.log, b.authWarnDedupe)
 	snap := BuildSnapshot(effective, b.geOpts...)
 
 	// Preserve the JWT validator from the current snapshot if the scheme
@@ -147,8 +149,8 @@ func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
 // Publish receives a message from the Hub and routes it to the handler.
 func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.log.Debug("received message via broker",
-		"topic", topic,
-		"sender", msg.Sender,
+		"topic_kind", topicKindLabel(topic),
+		"sender_kind", senderKindLabel(msg.Sender),
 		"type", msg.Type,
 	)
 	b.mu.RLock()
@@ -165,7 +167,7 @@ func (b *BrokerServer) Subscribe(pattern string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.subscriptions[pattern] = true
-	b.log.Info("subscribed to pattern", "pattern", pattern)
+	b.log.Info("subscribed to pattern", "pattern_kind", topicKindLabel(pattern))
 	return nil
 }
 
@@ -174,7 +176,7 @@ func (b *BrokerServer) Unsubscribe(pattern string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.subscriptions, pattern)
-	b.log.Info("unsubscribed from pattern", "pattern", pattern)
+	b.log.Info("unsubscribed from pattern", "pattern_kind", topicKindLabel(pattern))
 	return nil
 }
 
@@ -246,18 +248,18 @@ func (b *BrokerServer) SetHostCallbacks(hc plugin.HostCallbacks) {
 			for i := 0; i < 10; i++ {
 				err := hc.RequestSubscription(pattern)
 				if err == nil {
-					b.log.Info("subscribed to deferred pattern", "pattern", pattern)
+					b.log.Info("subscribed to deferred pattern", "pattern_kind", topicKindLabel(pattern))
 					break
 				}
 				if err.Error() == "host callbacks not yet available" {
-					b.log.Debug("host callbacks not ready yet, retrying...", "pattern", pattern, "attempt", i+1)
+					b.log.Debug("host callbacks not ready yet, retrying...", "pattern_kind", topicKindLabel(pattern), "attempt", i+1)
 					select {
 					case <-time.After(time.Second):
 					case <-b.shutdownCtx.Done():
 						return
 					}
 				} else {
-					b.log.Error("failed to request deferred subscription", "pattern", pattern, "error", err)
+					b.log.Error("failed to request deferred subscription", "pattern_kind", topicKindLabel(pattern), "error", err)
 					break
 				}
 			}

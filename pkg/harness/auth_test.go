@@ -68,6 +68,11 @@ func TestGatherAuth_GCPSharedFields(t *testing.T) {
 	// GatherAuth() with nil authMeta only populates GCP shared fields.
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
 	t.Setenv("GOOGLE_CLOUD_REGION", "us-central1")
+	// GOOGLE_CLOUD_LOCATION takes precedence over GOOGLE_CLOUD_REGION, and
+	// CLOUD_ML_REGION is the last fallback; clear both so an ambient value
+	// (agent containers export them) does not change the result.
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("CLOUD_ML_REGION", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json")
 
 	auth := GatherAuth()
@@ -101,6 +106,11 @@ func TestGatherAuthWithEnv_ConfigDrivenEnvVarsFromProcess(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "codex-key")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
 	t.Setenv("GOOGLE_CLOUD_REGION", "us-central1")
+	// GOOGLE_CLOUD_LOCATION takes precedence over GOOGLE_CLOUD_REGION, and
+	// CLOUD_ML_REGION is the last fallback; clear both so an ambient value
+	// (agent containers export them) does not change the result.
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("CLOUD_ML_REGION", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json")
 
 	meta := testMultiHarnessAuthMeta()
@@ -1142,5 +1152,21 @@ func TestGatherAuthWithEnv_BrokerModeConfigDriven(t *testing.T) {
 
 	if auth.EnvVars["COPILOT_GITHUB_TOKEN"] != "broker-token" {
 		t.Errorf("COPILOT_GITHUB_TOKEN = %q, want overlay value %q", auth.EnvVars["COPILOT_GITHUB_TOKEN"], "broker-token")
+	}
+}
+
+// TestOverlaySettings_IgnoresNoAuthSentinel: agents created in no-auth mode
+// persist auth_selectedType "none" (ptone/scion#2561). It is not an auth
+// type and must not be overlaid as the selected type.
+func TestOverlaySettings_IgnoresNoAuthSentinel(t *testing.T) {
+	tmpDir := t.TempDir()
+	scionAgentPath := filepath.Join(tmpDir, "scion-agent.json")
+	_ = os.WriteFile(scionAgentPath, []byte(`{"auth_selectedType": "none"}`), 0644)
+
+	auth := api.AuthConfig{}
+	OverlaySettings(&auth, New("gemini"), tmpDir)
+
+	if auth.SelectedType != "" {
+		t.Errorf("SelectedType = %q, want empty (\"none\" is not an auth type)", auth.SelectedType)
 	}
 }

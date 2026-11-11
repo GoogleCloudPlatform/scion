@@ -155,11 +155,18 @@ func (s SubjectSelector) MatchesPrincipalClosure(
 // through the same paths as their base types and must be treated identically
 // for constraint matching.
 //
-// This is the single canonical normalization — both Decide and ResolveListScopes
-// must call this before comparing against constraint subjects.
+// This is the canonical normalization for the flat/constraint paths — Decide,
+// ResolveListScopes, principalClosure, the flat mint-eligibility path
+// (projectScopedPermissionsStrict, authz_boundary.go) and its
+// getProjectScopedPermissions counterpart (authz.go) all call this before
+// comparing against constraint subjects or scope-type strings.
+// permissions.RelationshipPrincipalKind is the relationship mint path's
+// separate implementation of the same mapping (permissions cannot import
+// hub, so it cannot call this function directly); TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind
+// (authz_boundary_test.go) pins that the two never diverge.
 func NormalizePrincipalType(t string) string {
 	switch t {
-	case "user", "dev", "federated_user":
+	case "user", "dev", "federated_user", "visitor":
 		return "user"
 	case "agent", "federated_agent":
 		return "agent"
@@ -879,6 +886,10 @@ const (
 
 	// ErrCodePreviewOperationMismatch is returned when the operation does not match.
 	ErrCodePreviewOperationMismatch = "preview_operation_mismatch"
+
+	// ErrCodePreviewConstraintMismatch is returned when an update or delete
+	// targets a constraint other than the one the token was issued for.
+	ErrCodePreviewConstraintMismatch = "preview_constraint_mismatch"
 
 	// ErrCodePreviewDraftModified is returned when the draft hash does not match.
 	ErrCodePreviewDraftModified = "preview_draft_modified"

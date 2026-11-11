@@ -29,29 +29,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// nullSpokeEventBus is a no-op EventBus used as a non-inprocess spoke in the
-// FanOutEventBus so that ListChannels() returns "web" without triggering
-// handler panics. It accepts nil handlers and discards published messages.
-type nullSpokeEventBus struct{}
-
-func (nullSpokeEventBus) Publish(context.Context, string, *messages.StructuredMessage) error {
-	return nil
-}
-func (nullSpokeEventBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
-	return nullSub{}, nil
-}
-func (nullSpokeEventBus) Close() error { return nil }
-
-type nullSub struct{}
-
-func (nullSub) Unsubscribe() error { return nil }
 
 // TestDMKeyIngress_UnauthorizedAgentCanInjectIntoForeignDM reproduces a
 // security defect: message ingress validates DM key format but never checks

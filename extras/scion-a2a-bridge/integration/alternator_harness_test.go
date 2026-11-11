@@ -84,6 +84,8 @@ func TestHarnessHelperProcess(t *testing.T) {
 		serveAuthBridgeProcess(t, address, os.Getenv(helperReplicaIDEnv))
 	case "full-bridge":
 		serveFullBridgeProcess(t, address, os.Getenv(helperReplicaIDEnv))
+	case "hub-bearer-bridge":
+		serveHubBearerBridgeProcess(t, address, os.Getenv(helperReplicaIDEnv))
 	case "ha-bridge":
 		serveHABridgeProcess(t, address, os.Getenv(helperReplicaIDEnv))
 	case "grpc-control":

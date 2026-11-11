@@ -76,7 +76,21 @@ func ValidateSkillName(name string) error {
 //   - Bare:        scion
 //
 // Returns an error for invalid URIs (empty name, invalid scope, bad chars).
+//
+// skill:// URIs and bare names take no query and no fragment, so any input
+// containing a '?' or '#' is rejected before it is parsed: otherwise text
+// after it could be carried onward inside a parsed field (an "@1.0?..." or
+// "@1.0#..." version is not validated). The error quotes raw only up to the
+// first '?' or '#' and gives no detail, so whatever the caller put after it
+// is never echoed.
 func ParseSkillURI(raw string) (*SkillURI, error) {
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		return nil, fmt.Errorf("invalid skill URI %q: not a valid skill:// URI or bare skill name (the text from the first '?' or '#' on is not shown)", raw[:i])
+	}
+	return parseSkillURI(raw)
+}
+
+func parseSkillURI(raw string) (*SkillURI, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("skill URI must not be empty")
 	}
@@ -241,6 +255,30 @@ func parseScopedPath(raw string, uri *SkillURI, segments []string, version strin
 		uri.Version = version
 	}
 	return uri, nil
+}
+
+// SkillBaseURI strips a trailing version specifier from a skill URI, giving
+// the key the Hub and the runtime broker both use to match references to the
+// same skill: "scion://my-skill@1.0" becomes "scion://my-skill". It follows
+// the rule ParseSkillURI uses for skill:// URIs: the version is an "@" in the
+// last path segment, so an "@" in the authority ("skill://user@host/a") is not
+// a version specifier. A query or fragment ("?token=...") is not part of the
+// path: it is set aside before the version is found and kept in the result,
+// so "gh://o/r/s@v1?token=X" and "gh://o/r/s?token=X" share a key.
+func SkillBaseURI(uri string) string {
+	prefix, rest := "", uri
+	if i := strings.Index(uri, "://"); i >= 0 {
+		prefix, rest = uri[:i+3], uri[i+3:]
+	}
+	suffix := ""
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest, suffix = rest[:i], rest[i:]
+	}
+	tailStart := strings.LastIndex(rest, "/") + 1
+	if i := strings.LastIndex(rest[tailStart:], "@"); i >= 0 {
+		rest = rest[:tailStart+i]
+	}
+	return prefix + rest + suffix
 }
 
 // SkillURIScheme returns the raw scheme prefix of a skill URI.

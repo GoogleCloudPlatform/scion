@@ -168,6 +168,20 @@ func (_c *HarnessConfigCreate) SetNillableStoragePath(v *string) *HarnessConfigC
 	return _c
 }
 
+// SetLayout sets the "layout" field.
+func (_c *HarnessConfigCreate) SetLayout(v string) *HarnessConfigCreate {
+	_c.mutation.SetLayout(v)
+	return _c
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_c *HarnessConfigCreate) SetNillableLayout(v *string) *HarnessConfigCreate {
+	if v != nil {
+		_c.SetLayout(*v)
+	}
+	return _c
+}
+
 // SetFiles sets the "files" field.
 func (_c *HarnessConfigCreate) SetFiles(v string) *HarnessConfigCreate {
 	_c.mutation.SetFiles(v)
@@ -224,6 +238,20 @@ func (_c *HarnessConfigCreate) SetNillableImageStatusCheckedAt(v *time.Time) *Ha
 	return _c
 }
 
+// SetBuiltImage sets the "built_image" field.
+func (_c *HarnessConfigCreate) SetBuiltImage(v string) *HarnessConfigCreate {
+	_c.mutation.SetBuiltImage(v)
+	return _c
+}
+
+// SetNillableBuiltImage sets the "built_image" field if the given value is not nil.
+func (_c *HarnessConfigCreate) SetNillableBuiltImage(v *string) *HarnessConfigCreate {
+	if v != nil {
+		_c.SetBuiltImage(*v)
+	}
+	return _c
+}
+
 // SetOwnerID sets the "owner_id" field.
 func (_c *HarnessConfigCreate) SetOwnerID(v string) *HarnessConfigCreate {
 	_c.mutation.SetOwnerID(v)
@@ -276,20 +304,6 @@ func (_c *HarnessConfigCreate) SetSourceURL(v string) *HarnessConfigCreate {
 func (_c *HarnessConfigCreate) SetNillableSourceURL(v *string) *HarnessConfigCreate {
 	if v != nil {
 		_c.SetSourceURL(*v)
-	}
-	return _c
-}
-
-// SetVisibility sets the "visibility" field.
-func (_c *HarnessConfigCreate) SetVisibility(v string) *HarnessConfigCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *HarnessConfigCreate) SetNillableVisibility(v *string) *HarnessConfigCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
 	}
 	return _c
 }
@@ -375,6 +389,10 @@ func (_c *HarnessConfigCreate) defaults() {
 		v := harnessconfig.DefaultScope
 		_c.mutation.SetScope(v)
 	}
+	if _, ok := _c.mutation.Layout(); !ok {
+		v := harnessconfig.DefaultLayout
+		_c.mutation.SetLayout(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := harnessconfig.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -383,9 +401,9 @@ func (_c *HarnessConfigCreate) defaults() {
 		v := harnessconfig.DefaultImageStatus
 		_c.mutation.SetImageStatus(v)
 	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		v := harnessconfig.DefaultVisibility
-		_c.mutation.SetVisibility(v)
+	if _, ok := _c.mutation.BuiltImage(); !ok {
+		v := harnessconfig.DefaultBuiltImage
+		_c.mutation.SetBuiltImage(v)
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := harnessconfig.DefaultCreated()
@@ -445,9 +463,6 @@ func (_c *HarnessConfigCreate) check() error {
 		if err := harnessconfig.ImageStatusValidator(v); err != nil {
 			return &ValidationError{Name: "image_status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.image_status": %w`, err)}
 		}
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "HarnessConfig.visibility"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "HarnessConfig.created"`)}
@@ -539,6 +554,10 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 		_spec.SetField(harnessconfig.FieldStoragePath, field.TypeString, value)
 		_node.StoragePath = value
 	}
+	if value, ok := _c.mutation.Layout(); ok {
+		_spec.SetField(harnessconfig.FieldLayout, field.TypeString, value)
+		_node.Layout = value
+	}
 	if value, ok := _c.mutation.Files(); ok {
 		_spec.SetField(harnessconfig.FieldFiles, field.TypeString, value)
 		_node.Files = value
@@ -555,6 +574,10 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 		_spec.SetField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime, value)
 		_node.ImageStatusCheckedAt = &value
 	}
+	if value, ok := _c.mutation.BuiltImage(); ok {
+		_spec.SetField(harnessconfig.FieldBuiltImage, field.TypeString, value)
+		_node.BuiltImage = value
+	}
 	if value, ok := _c.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
 		_node.OwnerID = value
@@ -570,10 +593,6 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.SourceURL(); ok {
 		_spec.SetField(harnessconfig.FieldSourceURL, field.TypeString, value)
 		_node.SourceURL = value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(harnessconfig.FieldCreated, field.TypeTime, value)
@@ -827,6 +846,24 @@ func (u *HarnessConfigUpsert) ClearStoragePath() *HarnessConfigUpsert {
 	return u
 }
 
+// SetLayout sets the "layout" field.
+func (u *HarnessConfigUpsert) SetLayout(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldLayout, v)
+	return u
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateLayout() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldLayout)
+	return u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *HarnessConfigUpsert) ClearLayout() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldLayout)
+	return u
+}
+
 // SetFiles sets the "files" field.
 func (u *HarnessConfigUpsert) SetFiles(v string) *HarnessConfigUpsert {
 	u.Set(harnessconfig.FieldFiles, v)
@@ -884,6 +921,24 @@ func (u *HarnessConfigUpsert) UpdateImageStatusCheckedAt() *HarnessConfigUpsert 
 // ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
 func (u *HarnessConfigUpsert) ClearImageStatusCheckedAt() *HarnessConfigUpsert {
 	u.SetNull(harnessconfig.FieldImageStatusCheckedAt)
+	return u
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (u *HarnessConfigUpsert) SetBuiltImage(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldBuiltImage, v)
+	return u
+}
+
+// UpdateBuiltImage sets the "built_image" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateBuiltImage() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldBuiltImage)
+	return u
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (u *HarnessConfigUpsert) ClearBuiltImage() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldBuiltImage)
 	return u
 }
 
@@ -956,18 +1011,6 @@ func (u *HarnessConfigUpsert) UpdateSourceURL() *HarnessConfigUpsert {
 // ClearSourceURL clears the value of the "source_url" field.
 func (u *HarnessConfigUpsert) ClearSourceURL() *HarnessConfigUpsert {
 	u.SetNull(harnessconfig.FieldSourceURL)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *HarnessConfigUpsert) SetVisibility(v string) *HarnessConfigUpsert {
-	u.Set(harnessconfig.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *HarnessConfigUpsert) UpdateVisibility() *HarnessConfigUpsert {
-	u.SetExcluded(harnessconfig.FieldVisibility)
 	return u
 }
 
@@ -1258,6 +1301,27 @@ func (u *HarnessConfigUpsertOne) ClearStoragePath() *HarnessConfigUpsertOne {
 	})
 }
 
+// SetLayout sets the "layout" field.
+func (u *HarnessConfigUpsertOne) SetLayout(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateLayout() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *HarnessConfigUpsertOne) ClearLayout() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearLayout()
+	})
+}
+
 // SetFiles sets the "files" field.
 func (u *HarnessConfigUpsertOne) SetFiles(v string) *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
@@ -1325,6 +1389,27 @@ func (u *HarnessConfigUpsertOne) UpdateImageStatusCheckedAt() *HarnessConfigUpse
 func (u *HarnessConfigUpsertOne) ClearImageStatusCheckedAt() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearImageStatusCheckedAt()
+	})
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (u *HarnessConfigUpsertOne) SetBuiltImage(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetBuiltImage(v)
+	})
+}
+
+// UpdateBuiltImage sets the "built_image" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateBuiltImage() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateBuiltImage()
+	})
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (u *HarnessConfigUpsertOne) ClearBuiltImage() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearBuiltImage()
 	})
 }
 
@@ -1409,20 +1494,6 @@ func (u *HarnessConfigUpsertOne) UpdateSourceURL() *HarnessConfigUpsertOne {
 func (u *HarnessConfigUpsertOne) ClearSourceURL() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *HarnessConfigUpsertOne) SetVisibility(v string) *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *HarnessConfigUpsertOne) UpdateVisibility() *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateVisibility()
 	})
 }
 
@@ -1882,6 +1953,27 @@ func (u *HarnessConfigUpsertBulk) ClearStoragePath() *HarnessConfigUpsertBulk {
 	})
 }
 
+// SetLayout sets the "layout" field.
+func (u *HarnessConfigUpsertBulk) SetLayout(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateLayout() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *HarnessConfigUpsertBulk) ClearLayout() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearLayout()
+	})
+}
+
 // SetFiles sets the "files" field.
 func (u *HarnessConfigUpsertBulk) SetFiles(v string) *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
@@ -1949,6 +2041,27 @@ func (u *HarnessConfigUpsertBulk) UpdateImageStatusCheckedAt() *HarnessConfigUps
 func (u *HarnessConfigUpsertBulk) ClearImageStatusCheckedAt() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearImageStatusCheckedAt()
+	})
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (u *HarnessConfigUpsertBulk) SetBuiltImage(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetBuiltImage(v)
+	})
+}
+
+// UpdateBuiltImage sets the "built_image" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateBuiltImage() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateBuiltImage()
+	})
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (u *HarnessConfigUpsertBulk) ClearBuiltImage() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearBuiltImage()
 	})
 }
 
@@ -2033,20 +2146,6 @@ func (u *HarnessConfigUpsertBulk) UpdateSourceURL() *HarnessConfigUpsertBulk {
 func (u *HarnessConfigUpsertBulk) ClearSourceURL() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *HarnessConfigUpsertBulk) SetVisibility(v string) *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *HarnessConfigUpsertBulk) UpdateVisibility() *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateVisibility()
 	})
 }
 

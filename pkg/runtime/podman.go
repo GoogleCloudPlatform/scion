@@ -18,13 +18,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -136,6 +139,15 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			"use rootful Docker or Podman for NFS-backed projects")
 	}
 
+	// Rootless Podman runs PID 1 as the keep-id user (SCION_KEEPID_UID below),
+	// which drops privileges before the metadata server starts, so the
+	// in-container interception cannot be installed. Do not grant NET_ADMIN
+	// or mark the interception required there; the metadata env vars remain
+	// the mechanism.
+	if r.Rootless {
+		config.MetadataInterception = false
+	}
+
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}
@@ -187,20 +199,78 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 
+	newArgs = appendSharedDirGroupArgs(newArgs, config, podmanRuntimeName(r.Rootless), !r.Rootless)
+
 	newArgs = append(newArgs, args[1:]...)
+
+	// Secret values go to podman through its environment, not argv
+	// (moveSecretEnvOutOfArgv).
+	newArgs, secretEnv, err := moveSecretEnvOutOfArgv(newArgs, config.Image, podmanSecretEnvNames(config), os.LookupEnv)
+	if err != nil {
+		return "", err
+	}
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
-	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
+	// Rootless podman that starts its user namespace's pause process
+	// (catatonit -P) hands it its own environment, and the pause process
+	// outlives the run: the secret values would stay in its
+	// /proc/<pid>/environ. An env-free "podman unshare true" first starts
+	// the pause process if none runs, and "run" then joins it. A remote
+	// client has no "unshare", and its pause process belongs to the podman
+	// service, not to this environment, so a failure is logged at debug
+	// level only.
+	if r.Rootless && len(secretEnv) > 0 {
+		if uout, uerr := runSimpleCommand(ctx, r.Command, "unshare", "true"); uerr != nil && ctx.Err() == nil {
+			runtimeLog().Debug("podman unshare before a launch with secret env failed; a pause process this run starts keeps podman's environment",
+				"error", uerr, "output", strings.TrimSpace(uout))
+		}
+	}
+	out, err := runSimpleCommandWithEnv(ctx, secretEnv, r.Command, newArgs...)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller gave up while the daemon may still have been
+			// creating/starting the container. Clean up any partial result
+			// instead of leaking it. See ptone/scion#1886.
+			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
-	return strings.TrimSpace(out), nil
+	// "podman run -d" prints the full container ID, and only that, on
+	// stdout (runSimpleCommand keeps stderr out of it). Anything else is
+	// not an ID callers may address the container by: refuse it, and
+	// remove what this run may have created, as for a cancelled create.
+	id := strings.TrimSpace(out)
+	if !podmanContainerIDPattern.MatchString(id) {
+		err := fmt.Errorf("container run printed no container ID: got %q, want 64 lowercase hex characters", truncateForError(id))
+		// The run exited 0, so a container almost certainly exists: say so
+		// when it could not be removed.
+		if rbErr := rollbackCreate(r.Command, config.Name, config.Labels[api.LabelRunID]); rbErr != nil {
+			return "", fmt.Errorf("%w; a container from this run may still exist: %v", err, rbErr)
+		}
+		return "", err
+	}
+	reportContainerCreated(hooks, config.Name, id)
+	return id, nil
 }
 
-func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// podmanContainerIDPattern matches the full container ID "podman run -d"
+// prints: 64 lowercase hex characters.
+var podmanContainerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// Stop stops the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Stop(ctx context.Context, ref RunRef) error {
+	args := append([]string{"stop"}, stopTimeoutArgs(ref)...)
+	out, err := runSimpleCommand(ctx, r.Command, append(args, ref.ID)...)
 	if err != nil && out != "" {
 		// Include podman's stderr output in the error so callers can match
 		// on messages like "not running" (which runSimpleCommand's error
@@ -210,8 +280,10 @@ func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *PodmanRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -256,24 +328,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 		}
 
 		// Filter by labels if requested
-		match := true
-		for k, v := range labelFilter {
-			actual := labels[k]
-			if actual == "" {
-				switch k {
-				case projectcompat.LabelProject:
-					actual = projectcompat.ProjectNameFromLabels(labels)
-				case projectcompat.LabelProjectID:
-					actual = projectcompat.ProjectIDFromLabels(labels)
-				case projectcompat.LabelProjectPath:
-					actual = projectcompat.ProjectPathFromLabels(labels)
-				}
-			}
-			if actual != v {
-				match = false
-				break
-			}
-		}
+		match := LabelsMatchFilter(labels, labelFilter)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Podman container name,
@@ -286,6 +341,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 			info := api.AgentInfo{
 				ContainerID:     c.Id,
+				RunID:           labels[api.LabelRunID],
 				Name:            name,
 				ContainerStatus: c.Status,
 				Phase:           phaseFromContainerStatus(c.Status),
@@ -295,9 +351,9 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Project:         projectcompat.ProjectNameFromLabels(labels),
-				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
-				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
+				Project:         projectkeys.ProjectNameFromLabels(labels),
+				ProjectID:       projectkeys.ProjectIDFromLabels(labels),
+				ProjectPath:     projectkeys.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
 			}
 			if code, ok := ExitCodeFromContainerStatus(c.Status); ok {
@@ -315,7 +371,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 }
 
 func (r *PodmanRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return runSimpleCommand(ctx, r.Command, "logs", id)
+	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
 func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
@@ -341,7 +397,8 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", r.ExecUser(),
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")...)
 }
 
 func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -413,7 +470,21 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
-	return runSimpleCommand(ctx, r.Command, args...)
+	out, err := runCombinedCommand(ctx, r.Command, args...)
+	// A container removed after the lookup above must surface as
+	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
+	return out, podmanExecNotFound.classifyExecErr(ctx, err, out, id, r.List)
+}
+
+// ExecWithStdin runs cmd inside the container with stdin piped from the
+// given reader. The -i flag is required for `podman exec` to attach stdin.
+// See #1355.
+func (r *PodmanRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if agents, err := r.List(ctx, nil); err == nil {
+		id = resolveContainerID(agents, id)
+	}
+	args := append([]string{"exec", "-i", "--user", r.ExecUser(), id}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
 }
 
 // GetWorkspacePath returns the host path to the container's /workspace mount.
@@ -443,4 +514,12 @@ func (r *PodmanRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
+}
+
+// podmanRuntimeName names the Podman mode in shared-dir group warnings.
+func podmanRuntimeName(rootless bool) string {
+	if rootless {
+		return "podman (rootless)"
+	}
+	return "podman"
 }

@@ -38,7 +38,6 @@ import (
 type saCLITestState struct {
 	home        string
 	globalMode  bool
-	noHub       bool
 	projectPath string
 	outputJSON  bool
 	assignable  bool
@@ -49,7 +48,6 @@ func saveSACLIState() saCLITestState {
 	return saCLITestState{
 		home:        os.Getenv("HOME"),
 		globalMode:  globalMode,
-		noHub:       noHub,
 		projectPath: projectPath,
 		outputJSON:  saOutputJSON,
 		assignable:  saGlobalListAssignable,
@@ -60,7 +58,6 @@ func saveSACLIState() saCLITestState {
 func (s saCLITestState) restore() {
 	_ = os.Setenv("HOME", s.home)
 	globalMode = s.globalMode
-	noHub = s.noHub
 	projectPath = s.projectPath
 	saOutputJSON = s.outputJSON
 	saGlobalListAssignable = s.assignable
@@ -89,7 +86,6 @@ func saCLIHub(t *testing.T, body string) *url.Values {
 	// SCION_HUB_ENDPOINT would override the settings file via the koanf env
 	// provider and silently send these requests somewhere real.
 	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
-	noHub = false
 
 	projectDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -105,6 +101,7 @@ func saCLIHub(t *testing.T, body string) *url.Values {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, srv.URL)
 
 	return seen
 }
@@ -217,7 +214,6 @@ func TestSAScopedList_AssignableWithGlobalIsRefusedLocally(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
-	noHub = false
 	projectDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	data, err := json.Marshal(map[string]interface{}{
@@ -227,6 +223,7 @@ func TestSAScopedList_AssignableWithGlobalIsRefusedLocally(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, srv.URL)
 
 	globalMode = true
 	saGlobalListAssignable = true
@@ -286,7 +283,6 @@ func TestSAScopedShow_GlobalUsesTheFlatRoute(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
-	noHub = false
 	projectDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	data, err := json.Marshal(map[string]interface{}{
@@ -296,6 +292,7 @@ func TestSAScopedShow_GlobalUsesTheFlatRoute(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, srv.URL)
 
 	globalMode = true
 	saOutputJSON = false
@@ -315,7 +312,6 @@ func TestResolveSAScope_HubScopeNeedsNoLinkedProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
-	noHub = false
 
 	projectDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -327,6 +323,7 @@ func TestResolveSAScope_HubScopeNeedsNoLinkedProject(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, "http://127.0.0.1:1")
 
 	globalMode = true
 	sc, err := resolveSAScope()

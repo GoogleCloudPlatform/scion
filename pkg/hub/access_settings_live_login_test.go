@@ -1,0 +1,163 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+// These tests change user_access_mode at runtime (via ApplySnapshot, the
+// same entry point the settings-propagation path uses) and then drive a
+// fresh browser login on each login path. Each path must honour the new
+// mode on the very next login, without rebuilding the Server or WebServer.
+//
+// Login paths covered:
+//   - WebServer OAuth callback       (GET /auth/callback/{provider})
+//   - WebServer proxy-auth middleware (IAP / proxy assertion, new session)
+//   - Server.provisionUser — the shared decision point for
+//     POST /api/v1/auth/login, /api/v1/auth/token, /api/v1/auth/cli/token,
+//     /api/v1/auth/cli/device/token and the proxy user provisioner.
+//
+// Only new logins are checked. Established sessions (an existing session
+// cookie or a hub token refresh) are not re-checked against the access
+// mode, so these tests do not expect an existing session to be denied.
+//
+// The tightening step always uses an email that has never signed in
+// (second@other.example): invite_only admits any email with an invited
+// or active user row, so the user who signed in while the mode was open
+// is still admitted after switching back.
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func setLiveAccessMode(t *testing.T, srv *Server, mode string) {
+	t.Helper()
+	ApplySnapshot(srv, Layer1Snapshot{UserAccessMode: mode})
+	require.Equal(t, mode, srv.UserAccessMode())
+}
+
+func TestOAuthCallback_HonoursRuntimeUserAccessModeChange(t *testing.T) {
+	// liveModeStore: the WebServer login path also needs GetUser and the
+	// role-binding lookups, which newInviteFlowStore does not provide.
+	st := newLiveModeStore()
+	srv := newLiveModeServer(st, "invite_only")
+	ctx := context.Background()
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: "test-session-secret-for-live-mode-oauth-1234567890",
+		BaseURL:       "http://localhost:8080",
+	})
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{ClientID: "test-client-id", ClientSecret: "test-client-secret"},
+		},
+	}, nil)
+	ws.store = st
+	ws.SetAccessSettingsProvider(srv)
+
+	// invite_only denials carry their own error code (ptone/scion#3330).
+	const deniedLocation = "/login?error=invite_only"
+
+	// invite_only at startup: an uninvited user is turned away.
+	assert.Equal(t, deniedLocation, oauthCallbackLogin(t, ws, "first@other.example"))
+	_, err := st.GetUserByEmail(ctx, "first@other.example")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	// Loosen to open at runtime: the same user now signs in.
+	setLiveAccessMode(t, srv, "open")
+	assert.Equal(t, "/", oauthCallbackLogin(t, ws, "first@other.example"),
+		"OAuth callback must honour user_access_mode=open set after startup")
+	_, err = st.GetUserByEmail(ctx, "first@other.example")
+	require.NoError(t, err)
+
+	// Tighten back to invite_only at runtime: a different uninvited user is
+	// turned away on their next login. This email has never signed in,
+	// because invite_only still admits the user who became active above.
+	setLiveAccessMode(t, srv, "invite_only")
+	assert.Equal(t, deniedLocation, oauthCallbackLogin(t, ws, "second@other.example"),
+		"OAuth callback must honour user_access_mode=invite_only set after startup")
+	_, err = st.GetUserByEmail(ctx, "second@other.example")
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestProxyAuthMiddleware_HonoursRuntimeUserAccessModeChange(t *testing.T) {
+	// liveModeStore: the proxy-auth middleware also needs GetUser and the
+	// role-binding lookups, which newInviteFlowStore does not provide.
+	st := newLiveModeStore()
+	srv := newLiveModeServer(st, "invite_only")
+	ctx := context.Background()
+
+	mockAuth := &mockProxyAuthenticator{}
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetStore(st)
+	ws.SetAccessSettingsProvider(srv)
+
+	// proxyLogin sends one request with no session cookie, so the proxy
+	// assertion is evaluated as a fresh login.
+	proxyLogin := func(email string) int {
+		mockAuth.user = &ProxyUserInfo{Subject: "sub-" + email, Email: email, Domain: "other.example"}
+		req := httptest.NewRequest(http.MethodGet, "/projects", nil)
+		req.Header.Set("Accept", "text/html")
+		rec := httptest.NewRecorder()
+		ws.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	assert.Equal(t, http.StatusForbidden, proxyLogin("first@other.example"))
+	_, err := st.GetUserByEmail(ctx, "first@other.example")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	setLiveAccessMode(t, srv, "open")
+	assert.Equal(t, http.StatusOK, proxyLogin("first@other.example"),
+		"proxy login must honour user_access_mode=open set after startup")
+	_, err = st.GetUserByEmail(ctx, "first@other.example")
+	require.NoError(t, err)
+
+	setLiveAccessMode(t, srv, "invite_only")
+	assert.Equal(t, http.StatusForbidden, proxyLogin("second@other.example"),
+		"proxy login must honour user_access_mode=invite_only set after startup")
+	_, err = st.GetUserByEmail(ctx, "second@other.example")
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestProvisionUser_HonoursRuntimeUserAccessModeChange(t *testing.T) {
+	// newInviteFlowStore: provisionUser only needs the user and invite
+	// lookups, so the smaller existing store is enough.
+	st := newInviteFlowStore()
+	srv := newLiveModeServer(st, "invite_only")
+	ctx := context.Background()
+
+	_, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "first@other.example"})
+	require.ErrorIs(t, err, ErrAccessDenied)
+	require.ErrorIs(t, err, ErrInviteRequired)
+
+	setLiveAccessMode(t, srv, "open")
+	user, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "first@other.example"})
+	require.NoError(t, err, "provisionUser must honour user_access_mode=open set after startup")
+	require.NotNil(t, user)
+
+	setLiveAccessMode(t, srv, "invite_only")
+	_, err = srv.provisionUser(ctx, &ExternalUserInfo{Email: "second@other.example"})
+	require.ErrorIs(t, err, ErrAccessDenied,
+		"provisionUser must honour user_access_mode=invite_only set after startup")
+	require.ErrorIs(t, err, ErrInviteRequired)
+}

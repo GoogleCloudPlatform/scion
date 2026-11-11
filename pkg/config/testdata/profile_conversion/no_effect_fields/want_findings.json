@@ -1,0 +1,51 @@
+{
+  "profile_map": {
+    "dev": "docker"
+  },
+  "findings": [
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "profiles.dev.default_template",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "profiles.dev.default_template has no effect today"
+      ]
+    },
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "runtimes.local.env",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "runtimes.local.env has no effect today"
+      ]
+    },
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "runtimes.local.host",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "runtimes.local.host has no effect today"
+      ]
+    },
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "runtimes.local.sync",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "runtimes.local.sync has no effect today"
+      ]
+    }
+  ]
+}

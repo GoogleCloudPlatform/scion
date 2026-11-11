@@ -1,0 +1,115 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package runtime
+
+import (
+	"fmt"
+	"path"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+)
+
+// NFSProvisionStateMountPath is where the workspace-provision init container
+// mounts the project's provisioning state directory (shared-plain and
+// worktree-per-agent modes on the NFS workspace backend). The agent
+// container never mounts it.
+const NFSProvisionStateMountPath = "/scion-provision"
+
+// NFSProvisionStateEnv tells `sciontool provision` where the provisioning
+// state directory is mounted. An environment variable rather than a flag,
+// so an older sciontool ignores it and keeps its sentinel and lock in the
+// workspace.
+const NFSProvisionStateEnv = "SCION_PROVISION_STATE_DIR"
+
+// NFSProvisionStateSubPath returns the export-relative path of a project's
+// provisioning state directory, <subPathRoot>/<projectID>/provision: a
+// sibling of the project's workspace path workspaceSubPath
+// (<subPathRoot>/<projectID>/workspace). It holds the provisioning sentinel
+// and the provisioning lock, so neither is visible in the workspace.
+//
+// It fails closed. workspaceSubPath must be a clean, relative path (no "..",
+// no "." components, no leading, trailing or doubled slashes) whose last
+// element is "workspace" and that has a parent. When projectID is not
+// empty, the parent's last element must be projectID. The result is derived
+// only from workspaceSubPath and is checked to be a direct child of the
+// same parent. Kubernetes subPaths use forward slashes whatever the OS.
+func NFSProvisionStateSubPath(workspaceSubPath, projectID string) (string, error) {
+	if !isLocalSlashPath(workspaceSubPath) || path.Clean(workspaceSubPath) != workspaceSubPath ||
+		path.Base(workspaceSubPath) != "workspace" || path.Dir(workspaceSubPath) == "." {
+		return "", fmt.Errorf("provisioning state: unexpected NFS workspace subPath %q", workspaceSubPath)
+	}
+	projectDir := path.Dir(workspaceSubPath)
+	if projectID != "" && path.Base(projectDir) != projectID {
+		return "", fmt.Errorf("provisioning state: NFS workspace subPath %q is not under project %q", workspaceSubPath, projectID)
+	}
+	stateSubPath := path.Join(projectDir, provision.ProvisionStateDirName)
+	if path.Clean(stateSubPath) != stateSubPath || !isLocalSlashPath(stateSubPath) || path.Dir(stateSubPath) != projectDir {
+		return "", fmt.Errorf("provisioning state: resolved subPath %q escapes %q", stateSubPath, projectDir)
+	}
+	return stateSubPath, nil
+}
+
+// isLocalSlashPath reports whether p is a usable relative Kubernetes subPath,
+// with forward slashes whatever the OS: not empty, not absolute, no NUL
+// byte, and no ".." component once cleaned. Components are compared whole,
+// so a name such as "..foo" is allowed.
+func isLocalSlashPath(p string) bool {
+	if p == "" || path.IsAbs(p) || strings.ContainsRune(p, 0) {
+		return false
+	}
+	for _, elem := range strings.Split(path.Clean(p), "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// nfsProvisionStateInitMount returns the workspace-provision init
+// container's mount of the project's provisioning state directory and the
+// environment variable that names it, for shared-plain and
+// worktree-per-agent pods on the NFS workspace backend. It returns nil, nil,
+// nil when the pod has no provisioning init container, and for the
+// agent-directory modes (clone-per-agent and empty-per-agent), whose init
+// container mounts the agent's directory and keeps its sentinel there. Any
+// other NFSSubPath that is not <subPathRoot>/<projectID>/workspace is an
+// error (see NFSProvisionStateSubPath), so the pod is not created.
+//
+// Only the provisioning init container gets it. The agent container never
+// gets it, and the project directory itself is never mounted (it holds every
+// agent's directory).
+func nfsProvisionStateInitMount(config RunConfig, nfsAgentDir bool, vols *nfsPodVolumes) (*corev1.VolumeMount, *corev1.EnvVar, error) {
+	// An empty NFSSubPath mounts the claim's root as the workspace: there is
+	// no project directory to put a sibling in, so the pod gets no state
+	// directory, and a shared-mode provisioning init container fails (the
+	// sentinel is never kept in the workspace). No workspace backend
+	// produces this shape; the nfs backend always mounts
+	// <subPathRoot>/<projectID>/workspace.
+	if !nfsInitContainerInjected(config) || nfsAgentDir || config.NFSSubPath == "" {
+		return nil, nil, nil
+	}
+	subPath, err := NFSProvisionStateSubPath(config.NFSSubPath, config.ProjectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	m, err := vols.mount(nfsVolProvisionState, subPath, NFSProvisionStateMountPath, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &m, &corev1.EnvVar{Name: NFSProvisionStateEnv, Value: NFSProvisionStateMountPath}, nil
+}

@@ -17,6 +17,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"mime"
 	"os"
@@ -25,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // Agents attach files by path: `scion message --attach` copies each file into
@@ -99,27 +103,28 @@ func attachmentMimeForName(name string) string {
 	return "application/octet-stream"
 }
 
-// agentAttachmentHostPath maps a container-visible attachment path to its
-// location on the hub host, given the host directory backing the project's
-// scratchpad shared dir.
+// agentAttachmentRelPath maps a container-visible attachment path to its path
+// relative to the host directory backing the project's scratchpad shared dir.
 //
 // Only paths inside that shared dir are accepted. An agent names the files it
 // attaches, so anything else would let it have the hub read arbitrary files
 // off its own disk and publish them into a chat.
-func agentAttachmentHostPath(agentPath, sharedHostDir string) (string, bool) {
-	if sharedHostDir == "" || agentPath == "" {
+//
+// The result is relative, and deliberately not joined onto the host dir here:
+// the agent owns every component of it, so it has to be resolved against an
+// os.Root rather than handed to a path-based os call. IsLocal below rules out
+// a lexical escape; only the root rules out a symlinked component.
+func agentAttachmentRelPath(agentPath string) (string, bool) {
+	if agentPath == "" {
 		return "", false
 	}
 	clean := path.Clean(agentPath)
 	// Shared dirs mount at /scion-volumes/<name>, or under the workspace when
-	// declared in-workspace. Both forms are accepted regardless of how the
-	// project declares the dir: the sending CLI hardcodes the first.
-	prefixes := []string{
-		"/scion-volumes/" + attachmentSharedDirName + "/",
-		"/workspace/.scion-volumes/" + attachmentSharedDirName + "/",
-	}
-	for _, prefix := range prefixes {
-		rel, ok := strings.CutPrefix(clean, prefix)
+	// declared in-workspace. Both targets the layout authority computes are
+	// accepted regardless of how the project declares the dir: the sending
+	// CLI probes them in this order.
+	for _, target := range projectfs.SharedDirTargets(attachmentSharedDirName, "") {
+		rel, ok := strings.CutPrefix(clean, target+"/")
 		if !ok || rel == "" {
 			continue
 		}
@@ -128,18 +133,77 @@ func agentAttachmentHostPath(agentPath, sharedHostDir string) (string, bool) {
 		if !filepath.IsLocal(rel) {
 			return "", false
 		}
-		return filepath.Join(sharedHostDir, filepath.FromSlash(rel)), true
+		return rel, true
 	}
 	return "", false
 }
 
+// AttachmentWarning names one attachment the hub could not record on an
+// agent's outbound message. The send itself still goes ahead; the warning is
+// returned to the sender so the drop is not silent (ptone/scion#3667).
+type AttachmentWarning struct {
+	// Path is the attachment path exactly as the sender supplied it.
+	Path string `json:"path"`
+	// Reason is a short, host-independent explanation. It never contains the
+	// hub's own filesystem paths.
+	Reason string `json:"reason"`
+}
+
+// Reasons reported in AttachmentWarning. The not-found reason is the common
+// one: the sending CLI staged the file on its own broker, and the hub reads
+// the scratchpad shared dir on the hub host, where the file does not exist.
+const (
+	attachmentWarnNotFound    = "file not found on the hub host; the attachment may have been staged on a different broker than the hub"
+	attachmentWarnNoSharedDir = "the scratchpad shared dir is not available on the hub host"
+	attachmentWarnTooMany     = "too many attachments; only the first entries were recorded"
+	attachmentWarnPermission  = "permission denied reading the file on the hub host"
+	attachmentWarnStoreFailed = "the hub failed to store the attachment"
+	attachmentWarnBadFilename = "the file name is not allowed"
+	attachmentWarnUnreadable  = "the file could not be read on the hub host"
+)
+
+// attachmentWarningReason maps a storeAgentAttachment error to a warning
+// reason. Raw errors are not passed through: os errors embed paths, and the
+// hub's host layout is none of the sender's business.
+func attachmentWarningReason(err error) string {
+	var skip attachmentSkipError
+	switch {
+	case errors.As(err, &skip):
+		return string(skip)
+	case errors.Is(err, fs.ErrNotExist):
+		return attachmentWarnNotFound
+	case errors.Is(err, fs.ErrPermission):
+		return attachmentWarnPermission
+	case errors.Is(err, errAttachmentStore):
+		return attachmentWarnStoreFailed
+	case errors.Is(err, errAttachmentFilename):
+		return attachmentWarnBadFilename
+	default:
+		return attachmentWarnUnreadable
+	}
+}
+
+// warnAll returns one warning per path with the same reason.
+func warnAll(paths []string, reason string) []AttachmentWarning {
+	out := make([]AttachmentWarning, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, AttachmentWarning{Path: p, Reason: reason})
+	}
+	return out
+}
+
 // ingestAgentAttachments records the files an agent attached to an outbound
 // message as chat attachments and returns their refs. Files that cannot be
-// read or are not allowed are skipped with a log line rather than failing the
-// message — an agent's reply is worth delivering without its attachment.
-func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID string, paths []string) []AttachmentRef {
+// read or are not allowed are skipped rather than failing the message — an
+// agent's reply is worth delivering without its attachment — but every skip
+// is returned as an AttachmentWarning so the caller can tell the sender.
+//
+// A hub with no chat or attachment store records nothing and warns about
+// nothing: there the paths still travel on the message itself, and nothing
+// was attempted that could fail.
+func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID string, paths []string) ([]AttachmentRef, []AttachmentWarning) {
 	if len(paths) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	s.mu.RLock()
@@ -147,48 +211,70 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 	as := s.attachmentStore
 	s.mu.RUnlock()
 	if wcs == nil || as == nil {
-		return nil
+		return nil, nil
 	}
 
-	sharedHostDir, _ := s.sharedDirHostPath(ctx, projectID, attachmentSharedDirName)
-	if sharedHostDir == "" {
+	sp := s.resolveScratchpad(ctx, projectID)
+	if sp == nil {
 		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: no scratchpad shared dir on this host",
 			"project_id", projectID, "count", len(paths), "paths", paths)
-		return nil
+		return nil, warnAll(paths, attachmentWarnNoSharedDir)
 	}
 
+	var warnings []AttachmentWarning
 	if len(paths) > MaxAttachmentsPerMessage {
 		s.messageLog.Warn("Agent attachments truncated",
 			"project_id", projectID, "count", len(paths), "max", MaxAttachmentsPerMessage)
+		warnings = append(warnings, warnAll(paths[MaxAttachmentsPerMessage:], attachmentWarnTooMany)...)
 		paths = paths[:MaxAttachmentsPerMessage]
 	}
 
+	// One root for the batch, opened through the layout authority
+	// (Resolved.Open; on a shared backend pkg/shareddirs' anchored O_NOFOLLOW
+	// walk): agents mount this dir read-write, so the path under it is
+	// attacker-controlled and has to be resolved per component. Nothing is
+	// created: a missing scratchpad holds no file to attach.
+	root, err := sp.resolution.Resolved.Open(false)
+	if err != nil {
+		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: cannot open scratchpad shared dir",
+			"project_id", projectID, "count", len(paths), "error", err)
+		return nil, append(warnAll(paths, attachmentWarnNoSharedDir), warnings...)
+	}
+	defer func() { _ = root.Close() }()
+
 	refs := make([]AttachmentRef, 0, len(paths))
+	var skipped []AttachmentWarning
 	for _, p := range paths {
-		ref, err := s.storeAgentAttachment(ctx, wcs, as, projectID, senderID, sharedHostDir, p)
+		ref, err := s.storeAgentAttachment(ctx, wcs, as, root, projectID, senderID, p)
 		if err != nil {
 			s.messageLog.Warn("Failed to record agent attachment",
 				"project_id", projectID, "path", p, "error", err)
+			skipped = append(skipped, AttachmentWarning{Path: p, Reason: attachmentWarningReason(err)})
 			continue
 		}
 		refs = append(refs, ref)
 	}
-	return refs
+	// Keep warnings in the order the sender listed the paths.
+	return refs, append(skipped, warnings...)
 }
 
 // storeAgentAttachment copies one agent-attached file into the attachment
 // store and writes its metadata row.
+//
+// root is anchored on the project's scratchpad shared dir; rel is resolved
+// through it, so a symlink at any component is refused rather than followed.
 func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as AttachmentStore,
-	projectID, senderID, sharedHostDir, agentPath string) (AttachmentRef, error) {
+	root *os.Root, projectID, senderID, agentPath string) (AttachmentRef, error) {
 
-	hostPath, ok := agentAttachmentHostPath(agentPath, sharedHostDir)
+	rel, ok := agentAttachmentRelPath(agentPath)
 	if !ok {
 		return AttachmentRef{}, errAttachmentOutsideSharedDir
 	}
 
 	// Lstat, not Stat: an agent writes into the same shared dir, so a symlink
-	// planted there would otherwise hand it any file the hub can read.
-	info, err := os.Lstat(hostPath)
+	// at the final component would otherwise hand it any file the hub can read.
+	// The root covers the components above it, which Lstat does follow.
+	info, err := root.Lstat(rel)
 	if err != nil {
 		return AttachmentRef{}, err
 	}
@@ -199,12 +285,12 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 		return AttachmentRef{}, errAttachmentTooLarge
 	}
 
-	name, err := SanitizeFilename(filepath.Base(hostPath))
+	name, err := SanitizeFilename(path.Base(rel))
 	if err != nil {
-		return AttachmentRef{}, err
+		return AttachmentRef{}, fmt.Errorf("%w: %w", errAttachmentFilename, err)
 	}
 
-	f, err := os.Open(hostPath)
+	f, err := root.Open(rel)
 	if err != nil {
 		return AttachmentRef{}, err
 	}
@@ -217,7 +303,7 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 	mimeType := attachmentMimeForName(name)
 	meta, err := as.Save(ctx, projectID, name, f, info.Size(), mimeType)
 	if err != nil {
-		return AttachmentRef{}, err
+		return AttachmentRef{}, fmt.Errorf("%w: %w", errAttachmentStore, err)
 	}
 	meta.UploadedBy = senderID
 
@@ -228,7 +314,7 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 			s.messageLog.Error("Failed to delete orphaned attachment blob",
 				"project_id", projectID, "attachment", meta.ID, "error", delErr)
 		}
-		return AttachmentRef{}, err
+		return AttachmentRef{}, fmt.Errorf("%w: %w", errAttachmentStore, err)
 	}
 
 	return AttachmentRef{
@@ -265,21 +351,71 @@ func parseAttachmentRefs(metadata map[string]string) []AttachmentRef {
 	return refs
 }
 
-// linkAttachmentRefs attaches recorded files to a persisted message. Failures
+// linkAttachmentRefs attaches recorded files to a persisted message and
+// returns the refs it linked, the ones the message's history lists. Failures
 // are logged, not returned: the message itself is already delivered.
-func linkAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID string, refs []AttachmentRef, log *slog.Logger) {
+func linkAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID string, refs []AttachmentRef, log *slog.Logger) []AttachmentRef {
 	if wcs == nil || messageID == "" {
-		return
+		return nil
 	}
+	var linked []AttachmentRef
 	for _, ref := range refs {
 		if ref.ID == "" {
 			continue
 		}
-		if err := wcs.LinkAttachmentToMessage(ctx, messageID, ref.ID); err != nil && log != nil {
-			log.Error("Failed to link attachment to message",
-				"message_id", messageID, "attachment", ref.ID, "error", err)
+		if err := wcs.LinkAttachmentToMessage(ctx, messageID, ref.ID); err != nil {
+			if log != nil {
+				log.Error("Failed to link attachment to message",
+					"message_id", messageID, "attachment", ref.ID, "error", err)
+			}
+			continue
 		}
+		linked = append(linked, ref)
 	}
+	return linked
+}
+
+// linkSenderOwnedAttachmentRefs is linkAttachmentRefs for refs taken from
+// message metadata. A ref is linked only when its attachment row belongs to
+// the sender: a file of the sender's project (senderProjectID), or a file
+// with no project uploaded by senderID. Anything else, and any lookup error,
+// is skipped and logged. It returns the refs it linked.
+func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID, senderProjectID, senderID string, refs []AttachmentRef, log *slog.Logger) []AttachmentRef {
+	if wcs == nil || messageID == "" {
+		return nil
+	}
+	owned := make([]AttachmentRef, 0, len(refs))
+	for _, ref := range refs {
+		if ref.ID == "" {
+			continue
+		}
+		meta, err := wcs.GetAttachment(ctx, ref.ID)
+		if err != nil || meta == nil {
+			if log != nil {
+				log.Warn("Attachment not linked: lookup failed",
+					"message_id", messageID, "attachment", ref.ID, "error", err)
+			}
+			continue
+		}
+		if !attachmentOwnedBySender(meta, senderProjectID, senderID) {
+			if log != nil {
+				log.Info("Attachment not linked: not owned by the sender",
+					"message_id", messageID, "attachment", ref.ID, "sender", senderID)
+			}
+			continue
+		}
+		owned = append(owned, ref)
+	}
+	return linkAttachmentRefs(ctx, wcs, messageID, owned, log)
+}
+
+// attachmentOwnedBySender reports whether a file belongs to a sender: a file
+// of the sender's project, or a project-less file the sender uploaded.
+func attachmentOwnedBySender(meta *AttachmentMeta, senderProjectID, senderID string) bool {
+	if meta.ProjectID != "" {
+		return senderProjectID != "" && meta.ProjectID == senderProjectID
+	}
+	return senderID != "" && meta.UploadedBy == senderID
 }
 
 // Sentinel errors for skipped attachments, reported in the ingest log line.
@@ -291,4 +427,11 @@ const (
 	errAttachmentOutsideSharedDir attachmentSkipError = "path is outside the project's scratchpad shared dir"
 	errAttachmentNotRegular       attachmentSkipError = "not a regular file"
 	errAttachmentTooLarge         attachmentSkipError = "file exceeds the maximum attachment size"
+)
+
+// Wrapping sentinels: they classify a failure for AttachmentWarning without
+// changing the underlying error that is logged.
+var (
+	errAttachmentStore    = errors.New("attachment store failed")
+	errAttachmentFilename = errors.New("attachment filename rejected")
 )

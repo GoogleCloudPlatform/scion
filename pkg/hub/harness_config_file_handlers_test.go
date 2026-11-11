@@ -23,77 +23,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-func testHarnessConfigFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping: sqlite driver not registered")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	srv, err := New(cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-
-	stor := newContentMockStorage("test-bucket")
-	srv.SetStorage(stor)
-
-	return srv, s, stor
-}
-
-func createTestHarnessConfigWithFiles(t *testing.T, s store.Store, stor *contentMockStorage, files map[string]string) *store.HarnessConfig {
-	t.Helper()
-	ctx := context.Background()
-
-	hc := &store.HarnessConfig{
-		ID:            tid("hc-file-test-1"),
-		Name:          "test-hc",
-		Slug:          "test-hc",
-		Harness:       "claude",
-		Scope:         store.HarnessConfigScopeGlobal,
-		Status:        store.HarnessConfigStatusActive,
-		StoragePath:   "harness-configs/global/test-hc",
-		StorageBucket: "test-bucket",
-		Updated:       time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
-	}
-
-	hcFiles := make([]store.TemplateFile, 0, len(files))
-	for path, content := range files {
-		objectPath := hc.StoragePath + "/" + path
-		stor.content[objectPath] = []byte(content)
-		stor.objects[objectPath] = &storage.Object{
-			Name: objectPath,
-			Size: int64(len(content)),
-		}
-		hcFiles = append(hcFiles, store.TemplateFile{
-			Path: path,
-			Size: int64(len(content)),
-			Hash: "sha256:placeholder",
-		})
-	}
-	hc.Files = hcFiles
-	hc.ContentHash = computeContentHash(hcFiles)
-
-	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
-		t.Fatalf("failed to create test harness config: %v", err)
-	}
-	return hc
-}
 
 func TestHandleHarnessConfigFileWrite_UpdatesImage(t *testing.T) {
 	srv, s, _ := testHarnessConfigFileServer(t)
@@ -131,21 +63,92 @@ func TestHandleHarnessConfigFileWrite_UpdatesImage(t *testing.T) {
 		t.Errorf("expected path config.yaml, got %s", resp.Path)
 	}
 
-	// Verify storage content
-	storedContent := stor.content[hc.StoragePath+"/config.yaml"]
-	if string(storedContent) != configYAML {
-		t.Errorf("unexpected stored content: %s", string(storedContent))
-	}
-
 	// Verify hc.Config.Image was updated
 	updated, err := s.GetHarnessConfig(ctx, hc.ID)
 	if err != nil {
 		t.Fatalf("failed to get updated harness config: %v", err)
+	}
+
+	// Verify storage content: the write committed a blob and migrated the
+	// legacy row to the blob layout (ptone/scion#4219 part 2).
+	entry, ok := templateFileByPath(updated.Files, "config.yaml")
+	if !ok {
+		t.Fatal("config.yaml missing from the manifest after the write")
+	}
+	storedContent := stor.content[srv.harnessConfigObjectPath(updated, entry)]
+	if string(storedContent) != configYAML {
+		t.Errorf("unexpected stored content: %s", string(storedContent))
+	}
+	if updated.Layout != store.HarnessConfigLayoutBlobs {
+		t.Errorf("layout = %q, want blobs after the first commit", updated.Layout)
 	}
 	if updated.Config == nil {
 		t.Fatal("expected Config to be non-nil after writing config.yaml")
 	}
 	if updated.Config.Image != newImage {
 		t.Errorf("expected Config.Image = %q, got %q", newImage, updated.Config.Image)
+	}
+}
+
+// TestHandleHarnessConfigFileWrite_PersistsModelAliases is a regression test
+// for ptone/scion#2365 review round 1 (R2): the single-file config.yaml
+// write handler is one of the four write paths this fix touches, and needs
+// its own coverage rather than relying on the directory-bootstrap sync test.
+func TestHandleHarnessConfigFileWrite_PersistsModelAliases(t *testing.T) {
+	srv, s, _ := testHarnessConfigFileServer(t)
+	ctx := context.Background()
+
+	hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
+
+	configYAML := "harness: codex\nmodel_aliases:\n  small: tiny-model\n  large: write-large-model\n"
+	body := `{"content": "` + strings.ReplaceAll(configYAML, "\n", `\n`) + `"}`
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/harness-configs/"+hc.ID+"/files/config.yaml",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	updated, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		t.Fatalf("failed to get updated harness config: %v", err)
+	}
+	if updated.Config == nil || updated.Config.ModelAliases["large"] != "write-large-model" {
+		t.Errorf("expected Config.ModelAliases[large] = %q after file write, got %+v", "write-large-model", updated.Config)
+	}
+}
+
+// TestHandleHarnessConfigFileUpload_PersistsModelAliases is a regression
+// test for ptone/scion#2365 review round 1 (R2): the multipart upload
+// handler is a distinct write path from the single-file write and finalize
+// handlers, and needs its own coverage.
+func TestHandleHarnessConfigFileUpload_PersistsModelAliases(t *testing.T) {
+	srv, s, _ := testHarnessConfigFileServer(t)
+	ctx := context.Background()
+
+	hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
+
+	configYAML := "harness: codex\nmodel_aliases:\n  small: tiny-model\n  large: upload-large-model\n"
+	req := harnessConfigMultipartRequest(t, hc.ID, map[string][]byte{
+		"config.yaml": []byte(configYAML),
+	})
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	updated, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		t.Fatalf("failed to get updated harness config: %v", err)
+	}
+	if updated.Config == nil || updated.Config.ModelAliases["large"] != "upload-large-model" {
+		t.Errorf("expected Config.ModelAliases[large] = %q after multipart upload, got %+v", "upload-large-model", updated.Config)
 	}
 }

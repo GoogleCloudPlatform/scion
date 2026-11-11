@@ -17,11 +17,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 
@@ -33,6 +35,15 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
+
+// logQuerier is the subset of LogQueryService used by the hub handlers.
+// Handler tests substitute a fake to record the options they build.
+type logQuerier interface {
+	Query(ctx context.Context, opts LogQueryOptions) (*LogQueryResult, error)
+	Tail(ctx context.Context, opts LogQueryOptions) (<-chan CloudLogEntry, func(), error)
+	GCPProjectID() string
+	Close() error
+}
 
 // LogQueryService queries Google Cloud Logging for structured log entries.
 type LogQueryService struct {
@@ -73,7 +84,7 @@ type LogQueryOptions struct {
 	Until         time.Time
 	Severity      string
 	PageToken     string
-	Sources       []string // optional: "hub", "broker", "agent", "messages" — restricts to matching logs/subsystems
+	Sources       []string // optional: "hub", "broker", "agent", "messages", "artifacts" — restricts to matching logs/subsystems
 	Search        string   // optional: substring match on jsonPayload.message
 	HubName       string   // optional: filter by hub label to scope logs to this hub instance
 }
@@ -111,6 +122,9 @@ func NewLogQueryService(ctx context.Context, projectID string) (*LogQueryService
 	}, nil
 }
 
+// GCPProjectID returns the GCP project the service queries.
+func (s *LogQueryService) GCPProjectID() string { return s.projectID }
+
 // Close releases resources held by the LogQueryService.
 func (s *LogQueryService) Close() error {
 	var firstErr error
@@ -125,6 +139,9 @@ func (s *LogQueryService) Close() error {
 
 // Query returns log entries matching the given options.
 func (s *LogQueryService) Query(ctx context.Context, opts LogQueryOptions) (*LogQueryResult, error) {
+	if err := validateLogQueryOptions(opts); err != nil {
+		return nil, err
+	}
 	filter := BuildLogFilter(opts, s.projectID)
 
 	tail := opts.Tail
@@ -159,6 +176,56 @@ func (s *LogQueryService) Query(ctx context.Context, opts LogQueryOptions) (*Log
 	}, nil
 }
 
+// logSeverityNames is the closed set of Cloud Logging severity names a log
+// query accepts. It is the one table behind the request check
+// (logSeverityParam), the service check (validateLogQueryOptions) and the
+// severity clause of BuildLogFilter.
+var logSeverityNames = []string{
+	"DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY",
+}
+
+// errInvalidLogSeverity is returned for a severity outside logSeverityNames.
+var errInvalidLogSeverity = errors.New("severity must be one of: " + strings.Join(logSeverityNames, ", "))
+
+// normalizeLogSeverity returns the logSeverityNames entry that s names,
+// ignoring ASCII case. A value with any non-ASCII byte is refused before
+// matching, so Unicode case folding can never turn it into a name; the
+// result is always the table constant, never the caller's bytes.
+func normalizeLogSeverity(s string) (string, bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return "", false
+		}
+	}
+	for _, name := range logSeverityNames {
+		if strings.EqualFold(s, name) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// validateLogQueryOptions checks the options before a filter is built.
+// An empty severity means no severity filter.
+func validateLogQueryOptions(opts LogQueryOptions) error {
+	if opts.Severity != "" {
+		if _, ok := normalizeLogSeverity(opts.Severity); !ok {
+			return errInvalidLogSeverity
+		}
+	}
+	return nil
+}
+
+// messageRecordFilter restricts message log queries to message records:
+// entries tagged log_kind=event (lifecycle and delivery acknowledgement
+// lines) are left out, as are entries with neither a sender nor a
+// recipient label (older lifecycle lines written before the tag).
+// "NOT x = v" also matches entries without the label; "x:*" tests that
+// the label is present.
+var messageRecordFilter = fmt.Sprintf(
+	`NOT labels.%s = %q AND (labels.%s:* OR labels.%s:*)`,
+	logging.AttrLogKind, logging.LogKindEvent, logging.AttrSender, logging.AttrRecipient)
+
 // BuildLogFilter constructs a Cloud Logging filter string from the options.
 // When projectID is provided and opts.LogID is set, a logName filter is added
 // to restrict results to the specific Cloud Logging log.
@@ -174,8 +241,8 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		// not in the whitelist.
 		pid := projectID[0]
 		parts = append(parts, fmt.Sprintf(
-			`(logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s")`,
-			pid, logging.ServerLogID, pid, logging.AgentLogID, pid, logging.MessageLogID))
+			`(logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s")`,
+			pid, logging.ServerLogID, pid, logging.AgentLogID, pid, logging.MessageLogID, pid, logging.ArtifactLogID))
 	}
 	if opts.AgentID != "" && opts.LogID == logging.MessageLogID {
 		// For message logs, match where this agent is either the recipient
@@ -186,6 +253,9 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 			opts.AgentID, opts.AgentID))
 	} else if opts.AgentID != "" {
 		parts = append(parts, fmt.Sprintf(`labels.agent_id = %q`, opts.AgentID))
+	}
+	if opts.LogID == logging.MessageLogID {
+		parts = append(parts, messageRecordFilter)
 	}
 	// DEF-128b: participant scoping. When ParticipantID is set, restrict
 	// results to entries where that user is either the sender or the
@@ -207,13 +277,19 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		parts = append(parts, fmt.Sprintf(`labels.broker_id = %q`, opts.BrokerID))
 	}
 	if !opts.Since.IsZero() {
-		parts = append(parts, fmt.Sprintf(`timestamp >= %q`, opts.Since.Format(time.RFC3339Nano)))
+		parts = append(parts, fmt.Sprintf(`timestamp >= %q`, opts.Since.UTC().Format(time.RFC3339Nano)))
 	}
 	if !opts.Until.IsZero() {
-		parts = append(parts, fmt.Sprintf(`timestamp < %q`, opts.Until.Format(time.RFC3339Nano)))
+		parts = append(parts, fmt.Sprintf(`timestamp < %q`, opts.Until.UTC().Format(time.RFC3339Nano)))
 	}
 	if opts.Severity != "" {
-		parts = append(parts, fmt.Sprintf(`severity >= %s`, strings.ToUpper(opts.Severity)))
+		// Defence in depth only: Query and Tail refuse an unknown severity
+		// (validateLogQueryOptions) before they build a filter, so the clause
+		// is never dropped silently on their path. The clause carries the
+		// table constant, never the caller's bytes.
+		if sev, ok := normalizeLogSeverity(opts.Severity); ok {
+			parts = append(parts, "severity >= "+sev)
+		}
 	}
 	if opts.HubName != "" {
 		parts = append(parts, fmt.Sprintf(`labels.hub = %q`, opts.HubName))
@@ -236,6 +312,9 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 			case "messages":
 				srcParts = append(srcParts, fmt.Sprintf(
 					`logName = "projects/%s/logs/%s"`, pid, logging.MessageLogID))
+			case "artifacts":
+				srcParts = append(srcParts, fmt.Sprintf(
+					`logName = "projects/%s/logs/%s"`, pid, logging.ArtifactLogID))
 			}
 		}
 		if len(srcParts) > 0 {
@@ -319,6 +398,9 @@ func ConvertLogEntry(entry *gcplog.Entry) CloudLogEntry {
 // It sends matching log entries to the returned channel. The caller must call
 // the returned cancel function to stop the stream and release resources.
 func (s *LogQueryService) Tail(ctx context.Context, opts LogQueryOptions) (<-chan CloudLogEntry, func(), error) {
+	if err := validateLogQueryOptions(opts); err != nil {
+		return nil, nil, err
+	}
 	filter := BuildLogFilter(opts, s.projectID)
 
 	stream, err := s.tailClient.TailLogEntries(ctx)

@@ -1,6 +1,6 @@
 # ADK Scion Agent Example
 
-An example [ADK (Agent Development Kit)](https://google.github.io/adk-docs/) agent that integrates with scion's lifecycle management. The agent reports its status through scion's `sciontool` so it can be orchestrated alongside other agents in a grove.
+An example [ADK (Agent Development Kit)](https://google.github.io/adk-docs/) agent that integrates with scion's lifecycle management. The agent reports its status through scion's `sciontool` so it can be orchestrated alongside other agents in a project.
 
 ## Prerequisites
 
@@ -39,10 +39,10 @@ The image installs `google-adk` into a virtualenv and copies the agent source to
 
 ## Deploying via Scion Template
 
-A ready-to-use template is provided in `templates/adk/`. To deploy this agent in a grove:
+A ready-to-use template is provided in `templates/adk/`. To deploy this agent in a project:
 
 ```bash
-# Copy the template into your grove's .scion directory
+# Copy the template into your project's .scion directory
 cp -r examples/adk_scion_agent/templates/adk .scion/templates/adk
 
 # Copy the harness-config (or place it globally at ~/.scion/harness-configs/adk/)

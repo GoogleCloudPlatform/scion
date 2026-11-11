@@ -176,31 +176,57 @@ func (_c *RuntimeBrokerCreate) SetNillableRuntimes(v *string) *RuntimeBrokerCrea
 	return _c
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (_c *RuntimeBrokerCreate) SetDefaultProfile(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetDefaultProfile(v)
+	return _c
+}
+
+// SetNillableDefaultProfile sets the "default_profile" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableDefaultProfile(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetDefaultProfile(*v)
+	}
+	return _c
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (_c *RuntimeBrokerCreate) SetWorkspaceStorage(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetWorkspaceStorage(v)
+	return _c
+}
+
+// SetNillableWorkspaceStorage sets the "workspace_storage" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableWorkspaceStorage(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetWorkspaceStorage(*v)
+	}
+	return _c
+}
+
+// SetHealth sets the "health" field.
+func (_c *RuntimeBrokerCreate) SetHealth(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetHealth(v)
+	return _c
+}
+
+// SetNillableHealth sets the "health" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHealth(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHealth(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
-func (_c *RuntimeBrokerCreate) SetLabels(v string) *RuntimeBrokerCreate {
+func (_c *RuntimeBrokerCreate) SetLabels(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetLabels(v)
 	return _c
 }
 
-// SetNillableLabels sets the "labels" field if the given value is not nil.
-func (_c *RuntimeBrokerCreate) SetNillableLabels(v *string) *RuntimeBrokerCreate {
-	if v != nil {
-		_c.SetLabels(*v)
-	}
-	return _c
-}
-
 // SetAnnotations sets the "annotations" field.
-func (_c *RuntimeBrokerCreate) SetAnnotations(v string) *RuntimeBrokerCreate {
+func (_c *RuntimeBrokerCreate) SetAnnotations(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetAnnotations(v)
-	return _c
-}
-
-// SetNillableAnnotations sets the "annotations" field if the given value is not nil.
-func (_c *RuntimeBrokerCreate) SetNillableAnnotations(v *string) *RuntimeBrokerCreate {
-	if v != nil {
-		_c.SetAnnotations(*v)
-	}
 	return _c
 }
 
@@ -274,6 +300,62 @@ func (_c *RuntimeBrokerCreate) SetNillableGcpHostProjectID(v *string) *RuntimeBr
 	return _c
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (_c *RuntimeBrokerCreate) SetGcpHostSource(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetGcpHostSource(v)
+	return _c
+}
+
+// SetNillableGcpHostSource sets the "gcp_host_source" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableGcpHostSource(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetGcpHostSource(*v)
+	}
+	return _c
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (_c *RuntimeBrokerCreate) SetHostIdentityObservedEmail(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetHostIdentityObservedEmail(v)
+	return _c
+}
+
+// SetNillableHostIdentityObservedEmail sets the "host_identity_observed_email" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHostIdentityObservedEmail(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHostIdentityObservedEmail(*v)
+	}
+	return _c
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (_c *RuntimeBrokerCreate) SetHostIdentityObservation(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetHostIdentityObservation(v)
+	return _c
+}
+
+// SetNillableHostIdentityObservation sets the "host_identity_observation" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHostIdentityObservation(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHostIdentityObservation(*v)
+	}
+	return _c
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (_c *RuntimeBrokerCreate) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerCreate {
+	_c.mutation.SetHostIdentityObservedAt(v)
+	return _c
+}
+
+// SetNillableHostIdentityObservedAt sets the "host_identity_observed_at" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHostIdentityObservedAt(v *time.Time) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHostIdentityObservedAt(*v)
+	}
+	return _c
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_c *RuntimeBrokerCreate) SetConnectedHubID(v string) *RuntimeBrokerCreate {
 	_c.mutation.SetConnectedHubID(v)
@@ -312,6 +394,174 @@ func (_c *RuntimeBrokerCreate) SetConnectedAt(v time.Time) *RuntimeBrokerCreate 
 func (_c *RuntimeBrokerCreate) SetNillableConnectedAt(v *time.Time) *RuntimeBrokerCreate {
 	if v != nil {
 		_c.SetConnectedAt(*v)
+	}
+	return _c
+}
+
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetID(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetID(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetID sets the "runtime_target_id" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetID(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetID(*v)
+	}
+	return _c
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetType(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetType(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetType sets the "runtime_target_type" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetType(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetType(*v)
+	}
+	return _c
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetDisplayName(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetDisplayName sets the "runtime_target_display_name" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetDisplayName(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetDisplayName(*v)
+	}
+	return _c
+}
+
+// SetRuntimeTargetPresentation sets the "runtime_target_presentation" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetPresentation(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetPresentation(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetPresentation sets the "runtime_target_presentation" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetPresentation(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetPresentation(*v)
+	}
+	return _c
+}
+
+// SetRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetPresentationHash(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetPresentationHash(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetPresentationHash(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetPresentationHash(*v)
+	}
+	return _c
+}
+
+// SetPresentationEpoch sets the "presentation_epoch" field.
+func (_c *RuntimeBrokerCreate) SetPresentationEpoch(v int64) *RuntimeBrokerCreate {
+	_c.mutation.SetPresentationEpoch(v)
+	return _c
+}
+
+// SetNillablePresentationEpoch sets the "presentation_epoch" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillablePresentationEpoch(v *int64) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetPresentationEpoch(*v)
+	}
+	return _c
+}
+
+// SetPresentationSeq sets the "presentation_seq" field.
+func (_c *RuntimeBrokerCreate) SetPresentationSeq(v int64) *RuntimeBrokerCreate {
+	_c.mutation.SetPresentationSeq(v)
+	return _c
+}
+
+// SetNillablePresentationSeq sets the "presentation_seq" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillablePresentationSeq(v *int64) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetPresentationSeq(*v)
+	}
+	return _c
+}
+
+// SetPresentationFencedAt sets the "presentation_fenced_at" field.
+func (_c *RuntimeBrokerCreate) SetPresentationFencedAt(v time.Time) *RuntimeBrokerCreate {
+	_c.mutation.SetPresentationFencedAt(v)
+	return _c
+}
+
+// SetNillablePresentationFencedAt sets the "presentation_fenced_at" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillablePresentationFencedAt(v *time.Time) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetPresentationFencedAt(*v)
+	}
+	return _c
+}
+
+// SetPresentationObservedAt sets the "presentation_observed_at" field.
+func (_c *RuntimeBrokerCreate) SetPresentationObservedAt(v time.Time) *RuntimeBrokerCreate {
+	_c.mutation.SetPresentationObservedAt(v)
+	return _c
+}
+
+// SetNillablePresentationObservedAt sets the "presentation_observed_at" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillablePresentationObservedAt(v *time.Time) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetPresentationObservedAt(*v)
+	}
+	return _c
+}
+
+// SetConversionPlanPresentation sets the "conversion_plan_presentation" field.
+func (_c *RuntimeBrokerCreate) SetConversionPlanPresentation(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetConversionPlanPresentation(v)
+	return _c
+}
+
+// SetNillableConversionPlanPresentation sets the "conversion_plan_presentation" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableConversionPlanPresentation(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetConversionPlanPresentation(*v)
+	}
+	return _c
+}
+
+// SetConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field.
+func (_c *RuntimeBrokerCreate) SetConversionPlanPresentationHash(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetConversionPlanPresentationHash(v)
+	return _c
+}
+
+// SetNillableConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableConversionPlanPresentationHash(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetConversionPlanPresentationHash(*v)
+	}
+	return _c
+}
+
+// SetConversionPlanObservedAt sets the "conversion_plan_observed_at" field.
+func (_c *RuntimeBrokerCreate) SetConversionPlanObservedAt(v time.Time) *RuntimeBrokerCreate {
+	_c.mutation.SetConversionPlanObservedAt(v)
+	return _c
+}
+
+// SetNillableConversionPlanObservedAt sets the "conversion_plan_observed_at" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableConversionPlanObservedAt(v *time.Time) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetConversionPlanObservedAt(*v)
 	}
 	return _c
 }
@@ -412,6 +662,18 @@ func (_c *RuntimeBrokerCreate) defaults() {
 	if _, ok := _c.mutation.AutoProvide(); !ok {
 		v := runtimebroker.DefaultAutoProvide
 		_c.mutation.SetAutoProvide(v)
+	}
+	if _, ok := _c.mutation.GcpHostSource(); !ok {
+		v := runtimebroker.DefaultGcpHostSource
+		_c.mutation.SetGcpHostSource(v)
+	}
+	if _, ok := _c.mutation.RuntimeTargetType(); !ok {
+		v := runtimebroker.DefaultRuntimeTargetType
+		_c.mutation.SetRuntimeTargetType(v)
+	}
+	if _, ok := _c.mutation.RuntimeTargetDisplayName(); !ok {
+		v := runtimebroker.DefaultRuntimeTargetDisplayName
+		_c.mutation.SetRuntimeTargetDisplayName(v)
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := runtimebroker.DefaultCreated()
@@ -550,12 +812,24 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldRuntimes, field.TypeString, value)
 		_node.Runtimes = value
 	}
+	if value, ok := _c.mutation.DefaultProfile(); ok {
+		_spec.SetField(runtimebroker.FieldDefaultProfile, field.TypeString, value)
+		_node.DefaultProfile = value
+	}
+	if value, ok := _c.mutation.WorkspaceStorage(); ok {
+		_spec.SetField(runtimebroker.FieldWorkspaceStorage, field.TypeString, value)
+		_node.WorkspaceStorage = value
+	}
+	if value, ok := _c.mutation.Health(); ok {
+		_spec.SetField(runtimebroker.FieldHealth, field.TypeString, value)
+		_node.Health = value
+	}
 	if value, ok := _c.mutation.Labels(); ok {
-		_spec.SetField(runtimebroker.FieldLabels, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
 	}
 	if value, ok := _c.mutation.Annotations(); ok {
-		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeJSON, value)
 		_node.Annotations = value
 	}
 	if value, ok := _c.mutation.Endpoint(); ok {
@@ -578,6 +852,22 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldGcpHostProjectID, field.TypeString, value)
 		_node.GcpHostProjectID = &value
 	}
+	if value, ok := _c.mutation.GcpHostSource(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostSource, field.TypeString, value)
+		_node.GcpHostSource = value
+	}
+	if value, ok := _c.mutation.HostIdentityObservedEmail(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString, value)
+		_node.HostIdentityObservedEmail = &value
+	}
+	if value, ok := _c.mutation.HostIdentityObservation(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservation, field.TypeString, value)
+		_node.HostIdentityObservation = &value
+	}
+	if value, ok := _c.mutation.HostIdentityObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime, value)
+		_node.HostIdentityObservedAt = &value
+	}
 	if value, ok := _c.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
 		_node.ConnectedHubID = &value
@@ -589,6 +879,54 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.ConnectedAt(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedAt, field.TypeTime, value)
 		_node.ConnectedAt = &value
+	}
+	if value, ok := _c.mutation.RuntimeTargetID(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetID, field.TypeString, value)
+		_node.RuntimeTargetID = &value
+	}
+	if value, ok := _c.mutation.RuntimeTargetType(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetType, field.TypeString, value)
+		_node.RuntimeTargetType = value
+	}
+	if value, ok := _c.mutation.RuntimeTargetDisplayName(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString, value)
+		_node.RuntimeTargetDisplayName = value
+	}
+	if value, ok := _c.mutation.RuntimeTargetPresentation(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetPresentation, field.TypeString, value)
+		_node.RuntimeTargetPresentation = value
+	}
+	if value, ok := _c.mutation.RuntimeTargetPresentationHash(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetPresentationHash, field.TypeString, value)
+		_node.RuntimeTargetPresentationHash = value
+	}
+	if value, ok := _c.mutation.PresentationEpoch(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationEpoch, field.TypeInt64, value)
+		_node.PresentationEpoch = &value
+	}
+	if value, ok := _c.mutation.PresentationSeq(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationSeq, field.TypeInt64, value)
+		_node.PresentationSeq = &value
+	}
+	if value, ok := _c.mutation.PresentationFencedAt(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationFencedAt, field.TypeTime, value)
+		_node.PresentationFencedAt = &value
+	}
+	if value, ok := _c.mutation.PresentationObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationObservedAt, field.TypeTime, value)
+		_node.PresentationObservedAt = &value
+	}
+	if value, ok := _c.mutation.ConversionPlanPresentation(); ok {
+		_spec.SetField(runtimebroker.FieldConversionPlanPresentation, field.TypeString, value)
+		_node.ConversionPlanPresentation = value
+	}
+	if value, ok := _c.mutation.ConversionPlanPresentationHash(); ok {
+		_spec.SetField(runtimebroker.FieldConversionPlanPresentationHash, field.TypeString, value)
+		_node.ConversionPlanPresentationHash = value
+	}
+	if value, ok := _c.mutation.ConversionPlanObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldConversionPlanObservedAt, field.TypeTime, value)
+		_node.ConversionPlanObservedAt = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(runtimebroker.FieldCreated, field.TypeTime, value)
@@ -836,8 +1174,62 @@ func (u *RuntimeBrokerUpsert) ClearRuntimes() *RuntimeBrokerUpsert {
 	return u
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsert) SetDefaultProfile(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldDefaultProfile, v)
+	return u
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateDefaultProfile() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldDefaultProfile)
+	return u
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsert) ClearDefaultProfile() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldDefaultProfile)
+	return u
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (u *RuntimeBrokerUpsert) SetWorkspaceStorage(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldWorkspaceStorage, v)
+	return u
+}
+
+// UpdateWorkspaceStorage sets the "workspace_storage" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateWorkspaceStorage() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldWorkspaceStorage)
+	return u
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (u *RuntimeBrokerUpsert) ClearWorkspaceStorage() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldWorkspaceStorage)
+	return u
+}
+
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsert) SetHealth(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHealth, v)
+	return u
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHealth() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHealth)
+	return u
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsert) ClearHealth() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHealth)
+	return u
+}
+
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsert) SetLabels(v string) *RuntimeBrokerUpsert {
+func (u *RuntimeBrokerUpsert) SetLabels(v map[string]string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldLabels, v)
 	return u
 }
@@ -855,7 +1247,7 @@ func (u *RuntimeBrokerUpsert) ClearLabels() *RuntimeBrokerUpsert {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsert) SetAnnotations(v string) *RuntimeBrokerUpsert {
+func (u *RuntimeBrokerUpsert) SetAnnotations(v map[string]string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldAnnotations, v)
 	return u
 }
@@ -956,6 +1348,78 @@ func (u *RuntimeBrokerUpsert) ClearGcpHostProjectID() *RuntimeBrokerUpsert {
 	return u
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsert) SetGcpHostSource(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldGcpHostSource, v)
+	return u
+}
+
+// UpdateGcpHostSource sets the "gcp_host_source" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateGcpHostSource() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldGcpHostSource)
+	return u
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsert) ClearGcpHostSource() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldGcpHostSource)
+	return u
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsert) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHostIdentityObservedEmail, v)
+	return u
+}
+
+// UpdateHostIdentityObservedEmail sets the "host_identity_observed_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHostIdentityObservedEmail() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHostIdentityObservedEmail)
+	return u
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsert) ClearHostIdentityObservedEmail() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHostIdentityObservedEmail)
+	return u
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsert) SetHostIdentityObservation(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHostIdentityObservation, v)
+	return u
+}
+
+// UpdateHostIdentityObservation sets the "host_identity_observation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHostIdentityObservation() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHostIdentityObservation)
+	return u
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsert) ClearHostIdentityObservation() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHostIdentityObservation)
+	return u
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsert) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHostIdentityObservedAt, v)
+	return u
+}
+
+// UpdateHostIdentityObservedAt sets the "host_identity_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHostIdentityObservedAt() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHostIdentityObservedAt)
+	return u
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsert) ClearHostIdentityObservedAt() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHostIdentityObservedAt)
+	return u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (u *RuntimeBrokerUpsert) SetConnectedHubID(v string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldConnectedHubID, v)
@@ -1007,6 +1471,234 @@ func (u *RuntimeBrokerUpsert) UpdateConnectedAt() *RuntimeBrokerUpsert {
 // ClearConnectedAt clears the value of the "connected_at" field.
 func (u *RuntimeBrokerUpsert) ClearConnectedAt() *RuntimeBrokerUpsert {
 	u.SetNull(runtimebroker.FieldConnectedAt)
+	return u
+}
+
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetID(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetID, v)
+	return u
+}
+
+// UpdateRuntimeTargetID sets the "runtime_target_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetID() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetID)
+	return u
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetID() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetID)
+	return u
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetType(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetType, v)
+	return u
+}
+
+// UpdateRuntimeTargetType sets the "runtime_target_type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetType() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetType)
+	return u
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetType() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetType)
+	return u
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetDisplayName, v)
+	return u
+}
+
+// UpdateRuntimeTargetDisplayName sets the "runtime_target_display_name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetDisplayName() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetDisplayName)
+	return u
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetDisplayName)
+	return u
+}
+
+// SetRuntimeTargetPresentation sets the "runtime_target_presentation" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetPresentation(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetPresentation, v)
+	return u
+}
+
+// UpdateRuntimeTargetPresentation sets the "runtime_target_presentation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetPresentation() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetPresentation)
+	return u
+}
+
+// ClearRuntimeTargetPresentation clears the value of the "runtime_target_presentation" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetPresentation() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetPresentation)
+	return u
+}
+
+// SetRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetPresentationHash(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetPresentationHash, v)
+	return u
+}
+
+// UpdateRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetPresentationHash() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetPresentationHash)
+	return u
+}
+
+// ClearRuntimeTargetPresentationHash clears the value of the "runtime_target_presentation_hash" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetPresentationHash() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetPresentationHash)
+	return u
+}
+
+// SetPresentationEpoch sets the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsert) SetPresentationEpoch(v int64) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldPresentationEpoch, v)
+	return u
+}
+
+// UpdatePresentationEpoch sets the "presentation_epoch" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdatePresentationEpoch() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldPresentationEpoch)
+	return u
+}
+
+// AddPresentationEpoch adds v to the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsert) AddPresentationEpoch(v int64) *RuntimeBrokerUpsert {
+	u.Add(runtimebroker.FieldPresentationEpoch, v)
+	return u
+}
+
+// ClearPresentationEpoch clears the value of the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsert) ClearPresentationEpoch() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldPresentationEpoch)
+	return u
+}
+
+// SetPresentationSeq sets the "presentation_seq" field.
+func (u *RuntimeBrokerUpsert) SetPresentationSeq(v int64) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldPresentationSeq, v)
+	return u
+}
+
+// UpdatePresentationSeq sets the "presentation_seq" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdatePresentationSeq() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldPresentationSeq)
+	return u
+}
+
+// AddPresentationSeq adds v to the "presentation_seq" field.
+func (u *RuntimeBrokerUpsert) AddPresentationSeq(v int64) *RuntimeBrokerUpsert {
+	u.Add(runtimebroker.FieldPresentationSeq, v)
+	return u
+}
+
+// ClearPresentationSeq clears the value of the "presentation_seq" field.
+func (u *RuntimeBrokerUpsert) ClearPresentationSeq() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldPresentationSeq)
+	return u
+}
+
+// SetPresentationFencedAt sets the "presentation_fenced_at" field.
+func (u *RuntimeBrokerUpsert) SetPresentationFencedAt(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldPresentationFencedAt, v)
+	return u
+}
+
+// UpdatePresentationFencedAt sets the "presentation_fenced_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdatePresentationFencedAt() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldPresentationFencedAt)
+	return u
+}
+
+// ClearPresentationFencedAt clears the value of the "presentation_fenced_at" field.
+func (u *RuntimeBrokerUpsert) ClearPresentationFencedAt() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldPresentationFencedAt)
+	return u
+}
+
+// SetPresentationObservedAt sets the "presentation_observed_at" field.
+func (u *RuntimeBrokerUpsert) SetPresentationObservedAt(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldPresentationObservedAt, v)
+	return u
+}
+
+// UpdatePresentationObservedAt sets the "presentation_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdatePresentationObservedAt() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldPresentationObservedAt)
+	return u
+}
+
+// ClearPresentationObservedAt clears the value of the "presentation_observed_at" field.
+func (u *RuntimeBrokerUpsert) ClearPresentationObservedAt() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldPresentationObservedAt)
+	return u
+}
+
+// SetConversionPlanPresentation sets the "conversion_plan_presentation" field.
+func (u *RuntimeBrokerUpsert) SetConversionPlanPresentation(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldConversionPlanPresentation, v)
+	return u
+}
+
+// UpdateConversionPlanPresentation sets the "conversion_plan_presentation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateConversionPlanPresentation() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldConversionPlanPresentation)
+	return u
+}
+
+// ClearConversionPlanPresentation clears the value of the "conversion_plan_presentation" field.
+func (u *RuntimeBrokerUpsert) ClearConversionPlanPresentation() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldConversionPlanPresentation)
+	return u
+}
+
+// SetConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field.
+func (u *RuntimeBrokerUpsert) SetConversionPlanPresentationHash(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldConversionPlanPresentationHash, v)
+	return u
+}
+
+// UpdateConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateConversionPlanPresentationHash() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldConversionPlanPresentationHash)
+	return u
+}
+
+// ClearConversionPlanPresentationHash clears the value of the "conversion_plan_presentation_hash" field.
+func (u *RuntimeBrokerUpsert) ClearConversionPlanPresentationHash() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldConversionPlanPresentationHash)
+	return u
+}
+
+// SetConversionPlanObservedAt sets the "conversion_plan_observed_at" field.
+func (u *RuntimeBrokerUpsert) SetConversionPlanObservedAt(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldConversionPlanObservedAt, v)
+	return u
+}
+
+// UpdateConversionPlanObservedAt sets the "conversion_plan_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateConversionPlanObservedAt() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldConversionPlanObservedAt)
+	return u
+}
+
+// ClearConversionPlanObservedAt clears the value of the "conversion_plan_observed_at" field.
+func (u *RuntimeBrokerUpsert) ClearConversionPlanObservedAt() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldConversionPlanObservedAt)
 	return u
 }
 
@@ -1290,8 +1982,71 @@ func (u *RuntimeBrokerUpsertOne) ClearRuntimes() *RuntimeBrokerUpsertOne {
 	})
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsertOne) SetDefaultProfile(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetDefaultProfile(v)
+	})
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateDefaultProfile() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateDefaultProfile()
+	})
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsertOne) ClearDefaultProfile() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearDefaultProfile()
+	})
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertOne) SetWorkspaceStorage(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetWorkspaceStorage(v)
+	})
+}
+
+// UpdateWorkspaceStorage sets the "workspace_storage" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateWorkspaceStorage() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateWorkspaceStorage()
+	})
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertOne) ClearWorkspaceStorage() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearWorkspaceStorage()
+	})
+}
+
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsertOne) SetHealth(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHealth(v)
+	})
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHealth() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHealth()
+	})
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsertOne) ClearHealth() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHealth()
+	})
+}
+
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsertOne) SetLabels(v string) *RuntimeBrokerUpsertOne {
+func (u *RuntimeBrokerUpsertOne) SetLabels(v map[string]string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetLabels(v)
 	})
@@ -1312,7 +2067,7 @@ func (u *RuntimeBrokerUpsertOne) ClearLabels() *RuntimeBrokerUpsertOne {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsertOne) SetAnnotations(v string) *RuntimeBrokerUpsertOne {
+func (u *RuntimeBrokerUpsertOne) SetAnnotations(v map[string]string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetAnnotations(v)
 	})
@@ -1430,6 +2185,90 @@ func (u *RuntimeBrokerUpsertOne) ClearGcpHostProjectID() *RuntimeBrokerUpsertOne
 	})
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertOne) SetGcpHostSource(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostSource(v)
+	})
+}
+
+// UpdateGcpHostSource sets the "gcp_host_source" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateGcpHostSource() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostSource()
+	})
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertOne) ClearGcpHostSource() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostSource()
+	})
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertOne) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedEmail(v)
+	})
+}
+
+// UpdateHostIdentityObservedEmail sets the "host_identity_observed_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHostIdentityObservedEmail() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedEmail()
+	})
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertOne) ClearHostIdentityObservedEmail() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedEmail()
+	})
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertOne) SetHostIdentityObservation(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservation(v)
+	})
+}
+
+// UpdateHostIdentityObservation sets the "host_identity_observation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHostIdentityObservation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservation()
+	})
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertOne) ClearHostIdentityObservation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservation()
+	})
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedAt(v)
+	})
+}
+
+// UpdateHostIdentityObservedAt sets the "host_identity_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHostIdentityObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedAt()
+	})
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) ClearHostIdentityObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedAt()
+	})
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (u *RuntimeBrokerUpsertOne) SetConnectedHubID(v string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
@@ -1490,6 +2329,272 @@ func (u *RuntimeBrokerUpsertOne) UpdateConnectedAt() *RuntimeBrokerUpsertOne {
 func (u *RuntimeBrokerUpsertOne) ClearConnectedAt() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearConnectedAt()
+	})
+}
+
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetID(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetID(v)
+	})
+}
+
+// UpdateRuntimeTargetID sets the "runtime_target_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetID()
+	})
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetID()
+	})
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetType(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetType(v)
+	})
+}
+
+// UpdateRuntimeTargetType sets the "runtime_target_type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetType() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetType()
+	})
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetType() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetType()
+	})
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetDisplayName(v)
+	})
+}
+
+// UpdateRuntimeTargetDisplayName sets the "runtime_target_display_name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetDisplayName() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetDisplayName()
+	})
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetDisplayName()
+	})
+}
+
+// SetRuntimeTargetPresentation sets the "runtime_target_presentation" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetPresentation(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetPresentation(v)
+	})
+}
+
+// UpdateRuntimeTargetPresentation sets the "runtime_target_presentation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetPresentation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetPresentation()
+	})
+}
+
+// ClearRuntimeTargetPresentation clears the value of the "runtime_target_presentation" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetPresentation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetPresentation()
+	})
+}
+
+// SetRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetPresentationHash(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetPresentationHash(v)
+	})
+}
+
+// UpdateRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetPresentationHash() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetPresentationHash()
+	})
+}
+
+// ClearRuntimeTargetPresentationHash clears the value of the "runtime_target_presentation_hash" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetPresentationHash() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetPresentationHash()
+	})
+}
+
+// SetPresentationEpoch sets the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsertOne) SetPresentationEpoch(v int64) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationEpoch(v)
+	})
+}
+
+// AddPresentationEpoch adds v to the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsertOne) AddPresentationEpoch(v int64) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.AddPresentationEpoch(v)
+	})
+}
+
+// UpdatePresentationEpoch sets the "presentation_epoch" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdatePresentationEpoch() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationEpoch()
+	})
+}
+
+// ClearPresentationEpoch clears the value of the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsertOne) ClearPresentationEpoch() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationEpoch()
+	})
+}
+
+// SetPresentationSeq sets the "presentation_seq" field.
+func (u *RuntimeBrokerUpsertOne) SetPresentationSeq(v int64) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationSeq(v)
+	})
+}
+
+// AddPresentationSeq adds v to the "presentation_seq" field.
+func (u *RuntimeBrokerUpsertOne) AddPresentationSeq(v int64) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.AddPresentationSeq(v)
+	})
+}
+
+// UpdatePresentationSeq sets the "presentation_seq" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdatePresentationSeq() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationSeq()
+	})
+}
+
+// ClearPresentationSeq clears the value of the "presentation_seq" field.
+func (u *RuntimeBrokerUpsertOne) ClearPresentationSeq() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationSeq()
+	})
+}
+
+// SetPresentationFencedAt sets the "presentation_fenced_at" field.
+func (u *RuntimeBrokerUpsertOne) SetPresentationFencedAt(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationFencedAt(v)
+	})
+}
+
+// UpdatePresentationFencedAt sets the "presentation_fenced_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdatePresentationFencedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationFencedAt()
+	})
+}
+
+// ClearPresentationFencedAt clears the value of the "presentation_fenced_at" field.
+func (u *RuntimeBrokerUpsertOne) ClearPresentationFencedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationFencedAt()
+	})
+}
+
+// SetPresentationObservedAt sets the "presentation_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) SetPresentationObservedAt(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationObservedAt(v)
+	})
+}
+
+// UpdatePresentationObservedAt sets the "presentation_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdatePresentationObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationObservedAt()
+	})
+}
+
+// ClearPresentationObservedAt clears the value of the "presentation_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) ClearPresentationObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationObservedAt()
+	})
+}
+
+// SetConversionPlanPresentation sets the "conversion_plan_presentation" field.
+func (u *RuntimeBrokerUpsertOne) SetConversionPlanPresentation(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConversionPlanPresentation(v)
+	})
+}
+
+// UpdateConversionPlanPresentation sets the "conversion_plan_presentation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateConversionPlanPresentation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConversionPlanPresentation()
+	})
+}
+
+// ClearConversionPlanPresentation clears the value of the "conversion_plan_presentation" field.
+func (u *RuntimeBrokerUpsertOne) ClearConversionPlanPresentation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConversionPlanPresentation()
+	})
+}
+
+// SetConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field.
+func (u *RuntimeBrokerUpsertOne) SetConversionPlanPresentationHash(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConversionPlanPresentationHash(v)
+	})
+}
+
+// UpdateConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateConversionPlanPresentationHash() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConversionPlanPresentationHash()
+	})
+}
+
+// ClearConversionPlanPresentationHash clears the value of the "conversion_plan_presentation_hash" field.
+func (u *RuntimeBrokerUpsertOne) ClearConversionPlanPresentationHash() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConversionPlanPresentationHash()
+	})
+}
+
+// SetConversionPlanObservedAt sets the "conversion_plan_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) SetConversionPlanObservedAt(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConversionPlanObservedAt(v)
+	})
+}
+
+// UpdateConversionPlanObservedAt sets the "conversion_plan_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateConversionPlanObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConversionPlanObservedAt()
+	})
+}
+
+// ClearConversionPlanObservedAt clears the value of the "conversion_plan_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) ClearConversionPlanObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConversionPlanObservedAt()
 	})
 }
 
@@ -1942,8 +3047,71 @@ func (u *RuntimeBrokerUpsertBulk) ClearRuntimes() *RuntimeBrokerUpsertBulk {
 	})
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsertBulk) SetDefaultProfile(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetDefaultProfile(v)
+	})
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateDefaultProfile() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateDefaultProfile()
+	})
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsertBulk) ClearDefaultProfile() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearDefaultProfile()
+	})
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertBulk) SetWorkspaceStorage(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetWorkspaceStorage(v)
+	})
+}
+
+// UpdateWorkspaceStorage sets the "workspace_storage" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateWorkspaceStorage() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateWorkspaceStorage()
+	})
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertBulk) ClearWorkspaceStorage() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearWorkspaceStorage()
+	})
+}
+
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsertBulk) SetHealth(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHealth(v)
+	})
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHealth() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHealth()
+	})
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHealth() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHealth()
+	})
+}
+
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsertBulk) SetLabels(v string) *RuntimeBrokerUpsertBulk {
+func (u *RuntimeBrokerUpsertBulk) SetLabels(v map[string]string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetLabels(v)
 	})
@@ -1964,7 +3132,7 @@ func (u *RuntimeBrokerUpsertBulk) ClearLabels() *RuntimeBrokerUpsertBulk {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsertBulk) SetAnnotations(v string) *RuntimeBrokerUpsertBulk {
+func (u *RuntimeBrokerUpsertBulk) SetAnnotations(v map[string]string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetAnnotations(v)
 	})
@@ -2082,6 +3250,90 @@ func (u *RuntimeBrokerUpsertBulk) ClearGcpHostProjectID() *RuntimeBrokerUpsertBu
 	})
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertBulk) SetGcpHostSource(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostSource(v)
+	})
+}
+
+// UpdateGcpHostSource sets the "gcp_host_source" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateGcpHostSource() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostSource()
+	})
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertBulk) ClearGcpHostSource() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostSource()
+	})
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertBulk) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedEmail(v)
+	})
+}
+
+// UpdateHostIdentityObservedEmail sets the "host_identity_observed_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHostIdentityObservedEmail() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedEmail()
+	})
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHostIdentityObservedEmail() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedEmail()
+	})
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertBulk) SetHostIdentityObservation(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservation(v)
+	})
+}
+
+// UpdateHostIdentityObservation sets the "host_identity_observation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHostIdentityObservation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservation()
+	})
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHostIdentityObservation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservation()
+	})
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedAt(v)
+	})
+}
+
+// UpdateHostIdentityObservedAt sets the "host_identity_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHostIdentityObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedAt()
+	})
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHostIdentityObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedAt()
+	})
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (u *RuntimeBrokerUpsertBulk) SetConnectedHubID(v string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
@@ -2142,6 +3394,272 @@ func (u *RuntimeBrokerUpsertBulk) UpdateConnectedAt() *RuntimeBrokerUpsertBulk {
 func (u *RuntimeBrokerUpsertBulk) ClearConnectedAt() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearConnectedAt()
+	})
+}
+
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetID(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetID(v)
+	})
+}
+
+// UpdateRuntimeTargetID sets the "runtime_target_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetID()
+	})
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetID()
+	})
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetType(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetType(v)
+	})
+}
+
+// UpdateRuntimeTargetType sets the "runtime_target_type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetType() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetType()
+	})
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetType() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetType()
+	})
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetDisplayName(v)
+	})
+}
+
+// UpdateRuntimeTargetDisplayName sets the "runtime_target_display_name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetDisplayName() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetDisplayName()
+	})
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetDisplayName()
+	})
+}
+
+// SetRuntimeTargetPresentation sets the "runtime_target_presentation" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetPresentation(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetPresentation(v)
+	})
+}
+
+// UpdateRuntimeTargetPresentation sets the "runtime_target_presentation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetPresentation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetPresentation()
+	})
+}
+
+// ClearRuntimeTargetPresentation clears the value of the "runtime_target_presentation" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetPresentation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetPresentation()
+	})
+}
+
+// SetRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetPresentationHash(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetPresentationHash(v)
+	})
+}
+
+// UpdateRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetPresentationHash() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetPresentationHash()
+	})
+}
+
+// ClearRuntimeTargetPresentationHash clears the value of the "runtime_target_presentation_hash" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetPresentationHash() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetPresentationHash()
+	})
+}
+
+// SetPresentationEpoch sets the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsertBulk) SetPresentationEpoch(v int64) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationEpoch(v)
+	})
+}
+
+// AddPresentationEpoch adds v to the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsertBulk) AddPresentationEpoch(v int64) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.AddPresentationEpoch(v)
+	})
+}
+
+// UpdatePresentationEpoch sets the "presentation_epoch" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdatePresentationEpoch() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationEpoch()
+	})
+}
+
+// ClearPresentationEpoch clears the value of the "presentation_epoch" field.
+func (u *RuntimeBrokerUpsertBulk) ClearPresentationEpoch() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationEpoch()
+	})
+}
+
+// SetPresentationSeq sets the "presentation_seq" field.
+func (u *RuntimeBrokerUpsertBulk) SetPresentationSeq(v int64) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationSeq(v)
+	})
+}
+
+// AddPresentationSeq adds v to the "presentation_seq" field.
+func (u *RuntimeBrokerUpsertBulk) AddPresentationSeq(v int64) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.AddPresentationSeq(v)
+	})
+}
+
+// UpdatePresentationSeq sets the "presentation_seq" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdatePresentationSeq() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationSeq()
+	})
+}
+
+// ClearPresentationSeq clears the value of the "presentation_seq" field.
+func (u *RuntimeBrokerUpsertBulk) ClearPresentationSeq() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationSeq()
+	})
+}
+
+// SetPresentationFencedAt sets the "presentation_fenced_at" field.
+func (u *RuntimeBrokerUpsertBulk) SetPresentationFencedAt(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationFencedAt(v)
+	})
+}
+
+// UpdatePresentationFencedAt sets the "presentation_fenced_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdatePresentationFencedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationFencedAt()
+	})
+}
+
+// ClearPresentationFencedAt clears the value of the "presentation_fenced_at" field.
+func (u *RuntimeBrokerUpsertBulk) ClearPresentationFencedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationFencedAt()
+	})
+}
+
+// SetPresentationObservedAt sets the "presentation_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) SetPresentationObservedAt(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetPresentationObservedAt(v)
+	})
+}
+
+// UpdatePresentationObservedAt sets the "presentation_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdatePresentationObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdatePresentationObservedAt()
+	})
+}
+
+// ClearPresentationObservedAt clears the value of the "presentation_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) ClearPresentationObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearPresentationObservedAt()
+	})
+}
+
+// SetConversionPlanPresentation sets the "conversion_plan_presentation" field.
+func (u *RuntimeBrokerUpsertBulk) SetConversionPlanPresentation(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConversionPlanPresentation(v)
+	})
+}
+
+// UpdateConversionPlanPresentation sets the "conversion_plan_presentation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateConversionPlanPresentation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConversionPlanPresentation()
+	})
+}
+
+// ClearConversionPlanPresentation clears the value of the "conversion_plan_presentation" field.
+func (u *RuntimeBrokerUpsertBulk) ClearConversionPlanPresentation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConversionPlanPresentation()
+	})
+}
+
+// SetConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field.
+func (u *RuntimeBrokerUpsertBulk) SetConversionPlanPresentationHash(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConversionPlanPresentationHash(v)
+	})
+}
+
+// UpdateConversionPlanPresentationHash sets the "conversion_plan_presentation_hash" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateConversionPlanPresentationHash() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConversionPlanPresentationHash()
+	})
+}
+
+// ClearConversionPlanPresentationHash clears the value of the "conversion_plan_presentation_hash" field.
+func (u *RuntimeBrokerUpsertBulk) ClearConversionPlanPresentationHash() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConversionPlanPresentationHash()
+	})
+}
+
+// SetConversionPlanObservedAt sets the "conversion_plan_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) SetConversionPlanObservedAt(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConversionPlanObservedAt(v)
+	})
+}
+
+// UpdateConversionPlanObservedAt sets the "conversion_plan_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateConversionPlanObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConversionPlanObservedAt()
+	})
+}
+
+// ClearConversionPlanObservedAt clears the value of the "conversion_plan_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) ClearConversionPlanObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConversionPlanObservedAt()
 	})
 }
 

@@ -192,7 +192,7 @@ func TestResolution_ProjectEnvVar(t *testing.T) {
 	// Store a project-scoped env var
 	_, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
 		ID:            api.NewUUID(),
-		Key:           "GROVE_VAR",
+		Key:           "PROJECT_VAR",
 		Value:         "project-var-value",
 		Scope:         "project",
 		ScopeID:       tid("project-res-3"),
@@ -220,8 +220,8 @@ func TestResolution_ProjectEnvVar(t *testing.T) {
 		t.Fatalf("buildCreateRequest failed: %v", err)
 	}
 
-	if val, ok := req.ResolvedEnv["GROVE_VAR"]; !ok {
-		t.Error("expected GROVE_VAR in ResolvedEnv")
+	if val, ok := req.ResolvedEnv["PROJECT_VAR"]; !ok {
+		t.Error("expected PROJECT_VAR in ResolvedEnv")
 	} else if val != "project-var-value" {
 		t.Errorf("expected value %q, got %q", "project-var-value", val)
 	}

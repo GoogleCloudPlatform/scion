@@ -48,6 +48,7 @@ The **Runtime** is the infrastructure layer responsible for executing the agent 
 - **Podman**: A daemonless, rootless alternative to Docker for Linux and macOS.
 - **Apple Container**: Uses the native Virtualization Framework on macOS for improved performance.
 - **Kubernetes**: Allows running agents as Pods in a Kubernetes cluster, enabling remote execution and scaling at production scale.
+- **Substrate**: Runs each agent as an [Agent Substrate](https://github.com/agent-substrate/substrate) actor on GKE, driven through the Substrate `ateapi` control plane and `atenet` router by an in-cluster Runtime Broker. Selected explicitly with a `type: substrate` runtime entry; see [`deploy/substrate/`](https://github.com/GoogleCloudPlatform/scion/tree/main/deploy/substrate) for cluster and Runtime Broker manifests and operations docs.
 
 ### Runtime Broker
 A **Runtime Broker** is a *service* that manages the lifecycle of containerized agents on behalf of the **Hub** — it is not itself a compute node. It provisions workspaces, hydrates templates, streams logs, and delegates container operations to a pluggable **Runtime**.
@@ -66,15 +67,23 @@ Agent state uses a **layered model** with three dimensions:
 
 - **Phase** — The lifecycle stage of the agent container:
   `created` → `provisioning` → `cloning` → `starting` → `running` → `stopping` → `stopped`
-  with two off-the-happy-path destinations: `suspended` (paused for later resume) and `error` (the agent crashed).
+  with three off-the-happy-path destinations: `suspended` (paused for later resume), `error` (the agent crashed), and `halted` (the platform ended a run that should still be running).
 
 - **Activity** — What the agent is doing within the `running` phase:
-  `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
+  `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
   (the `crashed` value exists in the enum, but a real crash now surfaces as the `error` *phase* — see below — rather than as an activity)
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
 
-This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). Activities like `completed`, `blocked`, and `limits_exceeded` are "sticky" — they persist until the agent is explicitly restarted or stopped. The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+
+#### Sticky activities
+
+The activities `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, and `crashed` are "sticky": routine harness events (model calls, tool runs, the end of a turn, sub-agent activity) do not replace them, except as listed below for `waiting_for_input`. A sticky activity is cleared by new work (a new prompt, or a new harness session), by an explicit status update from the agent (`sciontool status`), or by a lifecycle phase change such as stopping. Beyond that, each one has its own rules:
+
+- **`limits_exceeded` and `crashed`** are terminal: they record how the agent ended. A later notification, or a later question from the agent (a Claude Code `AskUserQuestion` or `ExitPlanMode`), does not replace them.
+- **`blocked` and `completed`** are kept through tool runs, which may follow `task_completed` as wrap-up. The agent asking the user (its own question, or a harness notification that asks the user) moves them to `waiting_for_input`. A sub-agent's question does not.
+- **`waiting_for_input`** set by the agent itself (`sciontool status ask_user`, or the agent's own `AskUserQuestion` or `ExitPlanMode`) is cleared when the agent starts its next tool, because the user has answered. A wait set by a harness prompt (for example a permission dialog) is also cleared when the prompted tool ends or the turn ends. While a sub-agent's question is open, the wait stays until that sub-agent's question is answered or the sub-agent ends, even if the parent agent answers its own question first.
 
 #### Suspended phase
 
@@ -94,9 +103,30 @@ The `error` phase is not limited to runtime crashes — it also covers **setup f
 
 The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/local/agent-lifecycle/#crash-recovery-the-error-phase).
 
+#### Halted phase (the platform ended the run)
+
+`halted` means the platform, not you and not the agent, ended a run that was meant to keep running. The agent's **exit reason** says why:
+
+| Exit reason | What happened |
+|---|---|
+| `preempted` | The Kubernetes scheduler evicted the pod to make room for a higher-priority one. |
+| `evicted` | The pod was removed by another disruption, such as node-pressure eviction or a node drain. |
+| `oom_killed` | The container was killed for exceeding its memory limit. |
+| `container_missing` | The agent runtime kept reporting a complete inventory without the agent's container. |
+
+A stopped or suspended agent can also carry the exit reason `signaled`. The agent reports it when it stopped after a termination signal (for example `docker stop`, or a host or node shutdown). It is not a halt reason: on its own it never halts an agent, it only fills an empty exit reason, and it is cleared when the agent next starts.
+
+Only the agent runtime's own observations (its reports of the container, and the Hub's check of its inventory) can halt an agent; a status report an agent sends about itself never does, and never sets one of these reasons. An agent is halted only when all of these hold: it was meant to be running (it was started and not stopped since), no start, restart or stop of it is in progress, and its agent runtime is Docker, Podman, Apple container, or Kubernetes. Otherwise the same run ends `stopped` or `error`, as before. While the agent is running, a reason from the table reported by the agent runtime halts it whatever the exit code. If the agent has already reported that it stopped, a later reason from the table reported by the agent runtime with a clean exit (code 0) upgrades it to `halted` only when the agent's report said it stopped after a termination signal.
+
+`halted` is terminal, like `stopped`: the agent has no container and does not count toward the agent quota. It stays `halted` until you act on it. Status reports from the old run do not move it.
+
+To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
+
+`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. The agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
+
 #### Stalled, offline, and auto-suspend
 
-The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. An agent that stays stalled long enough may be **auto-suspended** to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
+The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. If `server.hub.auto_suspend_stalled` is on (off by default), the Hub also **auto-suspends** a stalled agent to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
 
 The `offline` activity status occurs when an agent heartbeat has not been heard from for some time. Currently, this may be due to an agent being unable to refresh its auth token, which disconnects it from sending its heartbeat and other updates. These agents can be stopped and restarted to be provisioned with a new auth token. They should be able to refresh this token as long as they can maintain a connection to the Hub.
 
@@ -114,26 +144,33 @@ Furthermore, agent identities are **strictly scoped by their project** (e.g., `p
 
 ### Workspace Sharing Modes
 
-A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**. There is one universal set of three modes, intended for both local and Hub-managed projects:
+A **Workspace** is the working directory mounted into a single agent's container, at `/workspace`; in worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`); scripts should use `$PWD` or `git rev-parse --show-toplevel`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
 
 - **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
-- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode today (not yet on Hub-managed projects).
+- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker; not supported on Kubernetes.
 - **Clone-per-agent** — Each agent gets its own full git clone of the repository.
+- **Empty-per-agent** — For Hub-managed projects without git: each agent gets its own private directory that starts empty. Use [shared directories](/scion/local/workspaces-and-sharing/#2-the-shared-directories-invariant) to share or keep files.
 
-**Worktree-per-agent (local git projects):**
-- A new worktree is created (e.g. at `../.scion_worktrees/<project>/<agent>`) with a dedicated branch, and mounted into the agent's container as `/workspace`.
-- Agents operate on the same repository history but have independent working directories.
-- Work is merged back to the main branch manually (e.g., `git merge <agent-branch>`).
+**Worktree-per-agent (a repository linked to the local workstation Hub):**
+- A new worktree of your checkout is created at `.scion/agents/<agent>/workspace` with a branch named after the agent. Your repository is mounted in the container at `/repo-root`, and the agent works in `/repo-root/.scion/agents/<agent>/workspace` (not `/workspace`).
+- Agents operate on the same repository history as your checkout but have independent working directories.
+- Work is merged back manually (e.g., `git merge <agent-branch>`). See [Linked git projects](/scion/local/workspace/#linked-git-projects) for the checks and cautions.
+
+**Worktree-per-agent (Hub-managed git projects created with that mode):**
+- The Runtime Broker keeps one shared base clone of the repository on its host and creates a worktree per agent in that clone's `worktrees` directory, on a dedicated branch.
+- Work reaches your own checkout by pushing the agent's branch and merging it there (or through a pull request); the base clone is not your checkout.
 
 **Clone-per-agent (Hub-managed git projects):**
-When a Hub manages a git-based project, agents are provisioned with an independent clone via a robust `git init` + `git fetch` strategy rather than a shared worktree.
+When a Hub manages a git-based project and worktree-per-agent mode is not selected, agents are provisioned with an independent clone via a robust `git init` + `git fetch` strategy rather than a shared worktree.
 - The broker injects `SCION_GIT_CLONE_URL`, `SCION_GIT_BRANCH`, and a `GITHUB_TOKEN` into the container.
 - `sciontool init` inside the container initializes the workspace, fetches the repo over HTTPS, then checks out a `scion/<agent-name>` branch.
 - This approach handles workspaces that already contain `.scion` metadata or `.scion-volumes` directories, clearing stale artifacts before initialization.
 - SSH credentials on the host are not used; a `GITHUB_TOKEN` is required.
 - This strategy is consistent across all broker machines, whether or not the repo exists locally.
 
-This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub. See the [About Workspaces](/scion/local/workspace/) guide for details.
+This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`. When linking a git checkout to the local workstation Hub creates the project, it is created in that mode.
+
+**Worktree-per-agent (Hub-managed git projects):** the Runtime Broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as a linked checkout on the workstation Hub, gated on the Runtime Broker host's git version being 2.48 or later; the Runtime Broker falls back to clone-per-agent if worktree provisioning is not possible. On the local workstation Hub, agents of a linked checkout use that checkout instead, and creation fails rather than falling back (see [Workspace Mode Change for Git Projects](/scion/hosted/user/hosted-user/#workspace-mode-change-for-git-projects)). See the [About Workspaces](/scion/local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.
@@ -154,7 +191,7 @@ These platform skills ensure agents understand their specific execution environm
 
 Scion supports a plugin architecture built on `hashicorp/go-plugin` for extending system capabilities without modifying Scion core. Plugins are out-of-process extensions that communicate over gRPC.
 
-Today the plugin interface supplies **Message Broker** implementations — custom message delivery backends (e.g. Telegram, Google Chat) that surface agent notifications and structured messaging. Additional plugin types may be added in the future.
+Today the plugin interface supplies **Message Broker** implementations — custom message delivery backends (e.g. Telegram, Google Chat) that surface agent notifications and structured messaging. Loaded message-bus plugins are supervised by the Hub: if a plugin's RPC session is lost or stops responding to control pings, the supervisor respawns a hub-managed plugin process or re-dials a self-managed plugin with exponential backoff, swaps its event-bus spoke and replays topic subscriptions, and reports `degraded` (`restarting`) or `unhealthy` (`failing`) health in the [Health Dashboard](/scion/workstation/dashboard/#integrations-across-hub-instances) and [`scion doctor`](/scion/reference/cli/#scion-doctor); see [Message-Bus Plugin Supervision](/scion/hosted/user/external-channels/#message-bus-plugin-supervision). Additional plugin types may be added in the future.
 
 :::note[Harnesses are not plugins]
 **Harness** implementations (Claude Code, Gemini CLI, Codex, OpenCode, …) are *not* offered as plugins. A harness is external, vendor-supplied agent software that Scion drives; new harnesses are integrated through a **harness-config** and its container-script provisioner, not through the `go-plugin` interface. See the [Glossary](/scion/glossary/) for the distinction.

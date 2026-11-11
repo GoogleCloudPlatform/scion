@@ -22,43 +22,7 @@ import (
 )
 
 func TestAgentInfo_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{
-			"id": "agent-1",
-			"grove": "legacy-grove",
-			"groveId": "legacy-id",
-			"grovePath": "/legacy/path"
-		}`
-		var info AgentInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.Project != "legacy-grove" {
-			t.Errorf("Project = %q, want %q", info.Project, "legacy-grove")
-		}
-		if info.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", info.ProjectID, "legacy-id")
-		}
-		if info.ProjectPath != "/legacy/path" {
-			t.Errorf("ProjectPath = %q, want %q", info.ProjectPath, "/legacy/path")
-		}
-	})
-
-	t.Run("unmarshal project priority", func(t *testing.T) {
-		jsonData := `{
-			"project": "new-project",
-			"grove": "old-grove"
-		}`
-		var info AgentInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.Project != "new-project" {
-			t.Errorf("Project = %q, want %q (project should win)", info.Project, "new-project")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		info := AgentInfo{
 			Project:     "my-project",
 			ProjectID:   "my-id",
@@ -76,11 +40,8 @@ func TestAgentInfo_JSON(t *testing.T) {
 
 		expected := map[string]string{
 			"project":     "my-project",
-			"grove":       "my-project",
 			"projectId":   "my-id",
-			"groveId":     "my-id",
 			"projectPath": "/my/path",
-			"grovePath":   "/my/path",
 		}
 
 		for k, v := range expected {
@@ -88,22 +49,52 @@ func TestAgentInfo_JSON(t *testing.T) {
 				t.Errorf("Field %q = %v, want %v", k, m[k], v)
 			}
 		}
+
+		for _, legacyKey := range []string{"grove", "groveId", "grovePath"} {
+			if _, ok := m[legacyKey]; ok {
+				t.Errorf("legacy key %q present in marshal output, want absent: %v", legacyKey, m[legacyKey])
+			}
+		}
+
+		var roundTripped AgentInfo
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.Project != info.Project || roundTripped.ProjectID != info.ProjectID || roundTripped.ProjectPath != info.ProjectPath {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, info)
+		}
+	})
+
+	t.Run("unmarshal ignores unknown legacy fields", func(t *testing.T) {
+		jsonData := `{
+			"id": "agent-1",
+			"grove": "legacy-grove",
+			"groveId": "legacy-id",
+			"grovePath": "/legacy/path"
+		}`
+		var info AgentInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.Project != "" || info.ProjectID != "" || info.ProjectPath != "" {
+			t.Errorf("legacy grove keys were honoured: %+v", info)
+		}
 	})
 }
 
 func TestResolvedSecret_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove source", func(t *testing.T) {
+	t.Run("does not translate a bare legacy grove source", func(t *testing.T) {
 		jsonData := `{"name": "MY_SECRET", "source": "grove"}`
 		var secret ResolvedSecret
 		if err := json.Unmarshal([]byte(jsonData), &secret); err != nil {
 			t.Fatalf("Unmarshal failed: %v", err)
 		}
-		if secret.Source != "project" {
-			t.Errorf("Source = %q, want %q", secret.Source, "project")
+		if secret.Source != "grove" {
+			t.Errorf("Source = %q, want %q (legacy source value is no longer translated)", secret.Source, "grove")
 		}
 	})
 
-	t.Run("marshal project source", func(t *testing.T) {
+	t.Run("marshal emits only canonical fields", func(t *testing.T) {
 		secret := ResolvedSecret{
 			Name:   "MY_SECRET",
 			Source: "project",
@@ -114,6 +105,14 @@ func TestResolvedSecret_JSON(t *testing.T) {
 		}
 		if !strings.Contains(string(data), `"source":"project"`) {
 			t.Errorf("Marshal output missing source:project: %s", string(data))
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+		if _, ok := m["grove"]; ok {
+			t.Errorf("legacy 'grove' key present in marshal output, want absent: %v", m["grove"])
 		}
 	})
 }
@@ -520,5 +519,63 @@ func TestScionConfig_ParseMaxDuration(t *testing.T) {
 				t.Errorf("ParseMaxDuration() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestReincarnateEligible covers the design §3.4 Amendment A23 eligibility
+// predicate over the modes it distinguishes: clone-per-agent, an explicit
+// mount (shared-workspace or hub-managed), empty-per-agent
+// (miller79/scion#167), and "none of these". Worktree-per-agent
+// and shared-workspace exclusion are layered on top by the Hub caller (see
+// ReincarnateEligible's doc comment) and are not this function's concern —
+// pkg/hub's handlers_agent_reincarnate_test.go covers those.
+func TestReincarnateEligible(t *testing.T) {
+	tests := []struct {
+		name          string
+		hasGitClone   bool
+		workspace     string
+		emptyPerAgent bool
+		want          bool
+	}{
+		{"clone-per-agent: GitClone set, no Workspace", true, "", false, true},
+		{"explicit mount: no GitClone, Workspace set", false, "/mnt/project", false, true},
+		{"both set (defensive; GitClone still wins)", true, "/mnt/project", false, true},
+		{"empty-per-agent: no GitClone, no Workspace", false, "", true, true},
+		{"none of GitClone, Workspace, empty-per-agent", false, "", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ReincarnateEligible(tt.hasGitClone, tt.workspace, tt.emptyPerAgent)
+			if got != tt.want {
+				t.Errorf("ReincarnateEligible(%v, %q, %v) = %v, want %v", tt.hasGitClone, tt.workspace, tt.emptyPerAgent, got, tt.want)
+			}
+		})
+	}
+}
+
+// ProvisionedOnly has no omitempty: false is sent explicitly so a client
+// merging responses clears a previously seen true (ptone/scion#2929).
+func TestAgentInfo_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
+	data, err := json.Marshal(AgentInfo{Name: "a"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"provisionedOnly":false`) {
+		t.Errorf("expected explicit provisionedOnly false, got %s", data)
+	}
+}
+
+// TestIsLocalDiskRuntime pins the shared local-disk runtime allow-list
+// (miller79/scion#167) used by the Hub's reincarnate gate and the broker's
+// Reprovision guard: everything not listed fails closed.
+func TestIsLocalDiskRuntime(t *testing.T) {
+	for name, want := range map[string]bool{
+		"docker": true, "podman": true, "container": true, "apple": true, " Docker ": true,
+		"kubernetes": false, "k8s": false, "cloudrun": false, "cloudrun-sandbox": false,
+		"substrate": false, "mock": false, "": false,
+	} {
+		if got := IsLocalDiskRuntime(name); got != want {
+			t.Errorf("IsLocalDiskRuntime(%q) = %v, want %v", name, got, want)
+		}
 	}
 }

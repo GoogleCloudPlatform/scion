@@ -1,0 +1,55 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (2):
+  git mv hub/move.go hub/sub/move.go
+  git mv hub/move_ext_test.go hub/sub/move_ext_test.go
+
+Renames (0):
+
+Alias entries (2):
+  var   Start = sub.Start
+  var   Wire = sub.Wire
+
+Alias files (1):
+  hub/zz_alias_sub.go (14 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 14. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:14: example.com/fx/hub.Start is now example.com/fx/hub/sub.Start for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/move.go:52: example.com/fx/hub.Wire is now example.com/fx/hub/sub.Wire for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: moved function calls log/slog: log sourceLocation (file/function) and ERROR stack traces change; check log-based metrics and Error Reporting grouping ==
+  hub/move.go:14: func Start calls slog.Info
+  hub/move.go:16: method service.stop calls (*slog.Logger).Error
+  hub/move.go:18: func legacy calls log.Printf
+  hub/move.go:20: func viaDefault calls (*slog.Logger).Warn
+  hub/move.go:22: func stdLogger calls (*log.Logger).Println
+  hub/move.go:26: func closure calls slog.Debug
+  hub/move.go:28: var onError calls slog.Error
+  hub/move.go:33: var logf calls or uses as func values log.Printf (func value)
+  hub/move.go:46: func valueOf calls or uses as func values (*slog.Logger).Info (func value), slog.Error (func value)
+  hub/move_ext_test.go:10: func TestWire calls stdlog.Print
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:11: hub.service becomes sub.service for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+== INFO: moved external test package ==
+  hub/move_ext_test.go: package hub_test becomes sub_test
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

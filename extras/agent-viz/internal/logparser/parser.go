@@ -281,7 +281,12 @@ func extractTimeRange(entries []GCPLogEntry) TimeRange {
 
 func extractProjectInfo(entries []GCPLogEntry) (string, string) {
 	for _, e := range entries {
-		if gid, ok := e.Labels["grove_id"]; ok {
+		gid, ok := e.Labels["project_id"]
+		if !ok {
+			// Legacy logs carry the project ID under the grove_id label.
+			gid, ok = e.Labels["grove_id"]
+		}
+		if ok {
 			// Try to find project name from server logs
 			name := gid
 			if slug, ok := e.JSONPayload["slug"]; ok {

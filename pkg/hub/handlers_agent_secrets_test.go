@@ -29,39 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func setupAgentSecretTest(t *testing.T) (*Server, store.Store, string, string, string) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
-	ctx := context.Background()
-
-	projectID := tid("project-agent-secret")
-	project := &store.Project{
-		ID: projectID, Name: "Agent Secret Project", Slug: "agent-secret-project",
-		Created: time.Now(), Updated: time.Now(),
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	agentID := tid("agent-secret-1")
-	agent := &store.Agent{
-		ID: agentID, Slug: "secret-agent", Name: "Secret Agent",
-		ProjectID: projectID, Phase: string(state.PhaseRunning), StateVersion: 1,
-		Created: time.Now(), Updated: time.Now(),
-	}
-	if err := s.CreateAgent(ctx, agent); err != nil {
-		t.Fatalf("failed to create agent: %v", err)
-	}
-
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
-
-	return srv, s, agentID, projectID, agentToken
-}
-
 func TestAgentSecrets_CreateSuccess(t *testing.T) {
 	srv, _, agentID, projectID, agentToken := setupAgentSecretTest(t)
 

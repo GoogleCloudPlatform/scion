@@ -6,9 +6,10 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"log/slog"
-	"os"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/log"
 )
@@ -40,17 +41,20 @@ func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return false
 }
 
-// Handle implements slog.Handler.
+// Handle implements slog.Handler. Every enabled child handler is invoked,
+// even after an earlier child fails; the children's errors are returned
+// joined (nil when all succeed). slog.Logger methods ignore this error, so
+// only direct Handle callers (for example auditevent.SlogSink) observe it.
 func (m *multiHandler) Handle(ctx context.Context, r slog.Record) error {
+	var errs []error
 	for _, h := range m.handlers {
 		if h.Enabled(ctx, r.Level) {
 			if err := h.Handle(ctx, r); err != nil {
-				// Log errors don't propagate - just continue to next handler
-				continue
+				errs = append(errs, err)
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // WithAttrs implements slog.Handler.
@@ -77,25 +81,38 @@ type OTelConfig struct {
 	Endpoint string
 	// Protocol is the transport protocol ("grpc" or "http").
 	Protocol string
-	// Insecure skips TLS verification.
+	// Insecure selects plaintext transport (no TLS).
 	Insecure bool
+	// SkipTLSVerify keeps TLS but does not verify the endpoint certificate.
+	SkipTLSVerify bool
+	// CAFile is a PEM CA bundle for verifying the endpoint.
+	CAFile string
+	// CertFile and KeyFile are a PEM client certificate and key for mTLS.
+	// Set both or neither.
+	CertFile string
+	KeyFile  string
+	// Headers are sent with every export request.
+	Headers map[string]string
 	// ProjectID is the GCP project ID.
 	ProjectID string
 }
 
-// NewOTelHandler creates an slog handler that bridges to OTel logs.
-// Returns nil if lp is nil.
+// NewOTelHandler creates an slog handler that bridges to OTel logs, with
+// error-valued attributes rendered as sanitized strings. Returns nil if lp
+// is nil.
 func NewOTelHandler(component string, lp log.LoggerProvider) slog.Handler {
 	if lp == nil {
 		return nil
 	}
-	return otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp))
+	return WithSanitizedErrorAttrs(otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp)))
 }
 
 // SetupWithOTel initializes the global logger with optional OTel bridge.
 // If lp is nil, falls back to standard Setup behavior.
 // Extra handlers (e.g., CloudHandler) are appended to the handler chain.
 func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.LoggerProvider, extraHandlers ...slog.Handler) {
+	ApplyDebugFlag(debug)
+
 	// Collect all handlers
 	var handlers []slog.Handler
 
@@ -103,10 +120,10 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 	// forwarded to Cloud Logging by the runtime. When a direct Cloud Logging
 	// handler is also present in extraHandlers, including the stdout base
 	// handler would produce duplicate entries. Skip it in that case.
-	onCloudRun := os.Getenv("K_SERVICE") != ""
+	onCloudRun := cloudrunenv.IsService()
 	cloudHandlerPresent := hasCloudHandler(extraHandlers)
 	if !onCloudRun || !cloudHandlerPresent {
-		baseHandler := createBaseHandler(component, debug, useGCP, hubName)
+		baseHandler := createBaseHandler(component, useGCP, hubName)
 		handlers = append(handlers, baseHandler)
 	}
 
@@ -123,7 +140,9 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 		handler = newMultiHandler(handlers...)
 	}
 
-	logger := slog.New(handler)
+	// Gate the whole chain with the shared level state so every sink
+	// honours SCION_LOG_LEVEL, including per-component levels.
+	logger := slog.New(newLevelFilter(handler))
 	slog.SetDefault(logger)
 }
 

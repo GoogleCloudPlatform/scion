@@ -7,12 +7,44 @@ Scion automatically handles discovering and injecting LLM credentials into agent
 
 > **Note**: This documentation covers how harnesses gain access to LLM models, as well as how agents authenticate to Git repositories.
 
-## Local vs. Hub Deployment
+## Workstation vs. Hosted Brokers
 
-Authentication setup depends heavily on how you are running Scion:
+Every agent is started by a Runtime Broker on behalf of a Hub. What the agent can pick up from your machine depends on where that broker runs:
 
-- **Local (Solo) Mode**: Scion running locally will automatically scan your host machine's environment variables and well-known credential file paths (like `~/.config/gcloud/application_default_credentials.json`).
-- **Hub (Hosted) Mode**: For agents dispatched by a Scion Hub to remote brokers, the agent's environment is strictly isolated from the broker's host machine. You must provide credentials explicitly via Hub Secrets or profile settings, which are then securely injected into the agent container at launch.
+- **Workstation** (the broker inside `scion server start`, on your machine, with the Hub on loopback and dev auth): API keys exported in the shell you run `scion` from are sent with the start request. The harness login files in your home directory are given to the agent too; see [Host credential files on a workstation](#host-credential-files-on-a-workstation). Your gcloud ADC file is given to agents only when you opt in with `auto_inject_gcloud_adc: true` (the onboarding wizard offers it). Hub secrets take precedence over all of these.
+- **Hosted brokers**: the agent's environment is strictly isolated from the broker's host machine. You must provide credentials explicitly via Hub Secrets or profile settings, which are then securely injected into the agent container at launch.
+
+## Host credential files on a workstation
+
+On a workstation server, an agent gets the harness login files from your home directory, for
+example `~/.claude/.credentials.json` after you sign in to Claude Code on this machine, or
+`~/.gemini/oauth_creds.json` after a Gemini CLI login. You do not need to upload them as
+secrets. This is controlled by the global setting `use_host_credentials`:
+
+```yaml
+# ~/.scion/settings.yaml
+use_host_credentials: false   # default: true on a workstation
+```
+
+or `scion config set --global use_host_credentials false`.
+
+- **When it applies.** Only when the broker runs inside a workstation server (not hosted mode)
+  with dev auth, the start request comes over that server's own connection, and the Hub endpoint is
+  loopback. Hosted brokers never read host credential files, whatever the setting says.
+- **Which files.** Only the credential files declared by the harness configs that ship with
+  Scion (the paths in the table under [`auth-file`](#harness-specific-credential-file-auth-file)).
+  A template-bundled, project or user-installed harness config cannot add paths. A file must be a
+  regular file inside your home directory, after following symlinks, and at most 1 MiB. Copilot's
+  `~/.copilot/config.json` is used only when it holds sign-in data; a config file with only
+  preferences is skipped.
+- **Precedence.** A Hub secret with the same name or the same target path wins over the host file.
+- **When it is read.** On every start, restart and resume. Turning the setting off takes effect on
+  the next start; the server does not need a restart. If the settings file cannot be read, no host
+  files are given to agents.
+- **What it does not cover.** Environment variables (API keys come from your shell through the
+  start request) and gcloud ADC (opt in with `auto_inject_gcloud_adc: true`).
+
+The broker logs the names of the files it gave to an agent, never their contents.
 
 ---
 
@@ -22,12 +54,19 @@ All harnesses are provisioned by a **container-script** (`provision.py`) that ru
 agent container, backed by the shared `scion_harness` Python library. Credential resolution is a
 two-part collaboration:
 
-1. **Host-side gather (Go)**: Before the container starts, Scion collects candidate credentials from environment variables and well-known file paths. In Hub mode this includes only the secrets and variables explicitly injected into the agent; direct Hub-secret access from inside the agent is blocked.
+1. **Host-side gather (Go)**: Before the container starts, Scion collects candidate credentials from environment variables and well-known file paths. On a hosted broker this includes only the secrets and variables explicitly injected into the agent; direct Hub-secret access from inside the agent is blocked.
 2. **In-container select (`provision.py`)**: The harness's provisioner evaluates the staged candidates against the harness's declared auth methods (the `auth:` block in its `config.yaml`), selects one, and writes the harness-native configuration (e.g. `~/.claude.json`, `~/.gemini/settings.json`, `~/.hermes/.env`).
 
 The selection logic lives in each bundle's `provision.py` via `scion_harness.AuthSpec` /
 `ctx.select_auth(...)`. The order of methods in that spec — not the `config.yaml` `autodetect`
 map — determines which credential wins when several are present.
+
+When Scion picks the auth type before provisioning (at agent start, and in
+the broker's preflight check, which use the same auto-detect), a file
+credential normally wins over an environment variable. One exception: for harnesses whose
+default auth type is `api-key` (Claude, Gemini CLI, Grok Build, Hermes), an API
+key in the environment wins over a `gcloud-adc` file credential, matching their
+`provision.py` order. Every other file credential still wins.
 
 ### Source precedence
 
@@ -68,9 +107,12 @@ agents start pre-authenticated.
    harness's native login command (e.g. `claude setup-token`, `codex login --device-auth`,
    `copilot login`, `agy`). Each bundle's no-auth message tells you exactly which command to run.
 3. **Capture** — You run the bundle's `capture_auth.py`, which locates the credential files the
-   harness just wrote and stores them as project secrets. On the next start, the host stages those
-   secrets back into the agent and provisioning selects them automatically. See
-   [Capturing Credentials](#capturing-credentials-from-a-running-agent).
+   harness just wrote and stores them in the Hub secret store (`--scope user` by default, or
+   `--scope project`). A user-scoped capture is held as a **pending secret** (`captured (pending approval in Scion)`)
+   until you approve it in **Profile > Secrets** or with `scion hub secret pending approve <ID>`
+   (a project-scoped capture is stored directly). Once approved (or stored at project scope), on the
+   next start the host stages those secrets back into the agent and provisioning selects them
+   automatically. See [Capturing Credentials](#capturing-credentials-from-a-running-agent).
 
 If you already have a plain API key (or a credential file) you can skip stages 1–3 entirely by
 providing it up front — see [Credential Sources & Setup](#credential-sources--setup).
@@ -85,6 +127,7 @@ The per-harness login and capture details:
 | **OpenCode** | `opencode auth login` | `OPENCODE_AUTH` (file `~/.local/share/opencode/auth.json`) |
 | **Copilot** | `copilot login` | `COPILOT_CONFIG` (file `~/.copilot/config.json`) |
 | **Hermes** | `hermes setup` | *(none — Hermes is API-key only; provide the key up front)* |
+| **Pi** | `pi`, then `/login` | `PI_AUTH` (file `~/.pi/agent/auth.json`) |
 | **Antigravity** | `agy` | `AGY_TOKEN` (file `~/.gemini/antigravity-cli/antigravity-oauth-token`, with a gnome-keyring fallback) |
 
 ---
@@ -176,24 +219,25 @@ This is also the token that Claude's `capture_auth.py` stores automatically afte
 
 ### Vertex Model Garden (`vertex-ai`)
 
-Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). Scion supports two primary ways to authenticate in Hub mode: via an assigned GCP Identity (Service Account) or an injected ADC file secret. Supported by Claude, Gemini, OpenCode, and Antigravity (Codex, Copilot, and Hermes do not support Vertex AI).
+Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). On a Hub, Scion supports two primary ways to authenticate: via an assigned GCP Identity (Service Account) or an injected ADC file secret. Supported by Claude, Gemini, OpenCode, and Antigravity (Codex, Copilot, and Hermes do not support Vertex AI).
 
 **Required Sources:**
-- **Assigned GCP Identity** (Hub Mode): If the agent is assigned a Hub-managed GCP Service Account via metadata emulation, Vertex AI will automatically use it. This is the recommended and most secure approach.
-- **ADC JSON file** (Fallback/Local): Automatically discovered at `~/.config/gcloud/application_default_credentials.json` if present locally. In Hub mode, you can upload an ADC file via the `gcloud-adc` file secret or specify the `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing to a custom credential file.
+- **Assigned GCP Identity**: If the agent is assigned a Hub-managed GCP Service Account via metadata emulation, Vertex AI will automatically use it. This is the recommended and most secure approach.
+- **ADC JSON file**: On a workstation, your host file at `~/.config/gcloud/application_default_credentials.json` is used when `auto_inject_gcloud_adc: true` is set in your global settings. Otherwise, you can upload an ADC file via the `gcloud-adc` file secret or specify the `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing to a custom credential file.
 - `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID.
-- `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini. `CLOUD_ML_REGION` and `GOOGLE_CLOUD_LOCATION` are accepted as alternatives.
+- `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini. `GOOGLE_CLOUD_LOCATION` and `CLOUD_ML_REGION` are accepted as alternatives. If more than one is set, Scion uses them in this order: `GOOGLE_CLOUD_LOCATION`, then `GOOGLE_CLOUD_REGION`, then `CLOUD_ML_REGION`. It prints a warning when `GOOGLE_CLOUD_LOCATION` and `GOOGLE_CLOUD_REGION` are both set to different values. Hermes checks `VERTEX_REGION` first. Hermes, Antigravity and OpenCode do not read `CLOUD_ML_REGION` directly (OpenCode also accepts `VERTEX_LOCATION`, last).
 
-**Local Setup:**
+**Workstation Setup:**
 ```bash
-# Assuming ADC is already generated via `gcloud auth application-default login`
+# Assuming ADC is already generated via `gcloud auth application-default login`,
+# and ~/.scion/settings.yaml contains: auto_inject_gcloud_adc: true
 export GOOGLE_CLOUD_PROJECT="my-project"
 export GOOGLE_CLOUD_REGION="us-east5"
 scion start --harness claude my-agent
 ```
 
 **Hub Setup:**
-For Hub mode, the recommended approach is to assign a GCP Service Account to the agent at creation time.
+On a shared Hub, the recommended approach is to assign a GCP Service Account to the agent at creation time.
 
 :::note[IAM-Gated Service Account Assignment]
 Binding a GCP Service Account to an agent on a Hub requires satisfying two authorization gates:
@@ -225,7 +269,7 @@ The `gcloud-adc` secret automatically writes the ADC file to the well-known GCP 
 :::
 
 :::tip[Claude Vertex AI Translation]
-For the Claude harness, Scion automatically translates `GOOGLE_CLOUD_PROJECT` to the `ANTHROPIC_VERTEX_PROJECT_ID` environment variable during container provisioning. This ensures that Claude Code's native Vertex AI client authenticates and operates correctly with Vertex Model Garden endpoints without manual environment adjustments.
+For the Claude harness in `vertex-ai` mode, Scion sets `CLAUDE_CODE_USE_VERTEX=1` and translates `GOOGLE_CLOUD_PROJECT` to `ANTHROPIC_VERTEX_PROJECT_ID` and the resolved region (`GOOGLE_CLOUD_LOCATION`, `GOOGLE_CLOUD_REGION`, or `CLOUD_ML_REGION`) to `CLOUD_ML_REGION` during container provisioning (including on Cloud Run, where the resolved values override the harness bundle's `${GOOGLE_CLOUD_PROJECT}` and `${GOOGLE_CLOUD_LOCATION}` environment placeholders). This ensures that Claude Code's native Vertex AI client authenticates and operates against the intended project and region without manual environment adjustments.
 :::
 
 :::tip[Antigravity Vertex AI & ADC]
@@ -244,8 +288,8 @@ To prevent auth state corruption across container restarts, Scion implements a s
 
 Some harnesses authenticate with their own credential files, such as OAuth credential files. Scion
 stages the file at the harness's expected path inside the container. The file is provided either by
-uploading it as a **file secret**, or (locally) by having it present at its conventional path on
-your host, where Scion discovers it and mounts it into the agent.
+uploading it as a **file secret**, or (on a workstation) by having it present at its conventional
+path in your home directory; see [Host credential files on a workstation](#host-credential-files-on-a-workstation).
 
 **Well-known paths & file-secret keys:**
 
@@ -258,8 +302,12 @@ your host, where Scion discovers it and mounts it into the agent.
 | **Copilot** | `~/.copilot/config.json` | `COPILOT_CONFIG` |
 | **Antigravity** | `~/.gemini/antigravity-cli/antigravity-oauth-token` | `AGY_TOKEN` |
 
-**Local Setup:**
-If you have run the harness's native authentication command (e.g. an OAuth login on your host), Scion will automatically detect the resulting credential file and mount it into the agent.
+:::caution[Upgrading a Hub]
+Harness-config resolution changed in the 2026-10-06 release. Upgrade the Hub before, or together with, its Runtime Brokers. Existing agents that use `auth-file` must re-authenticate (or be re-created) once after the upgrade. Agents that authenticate with environment secrets are not affected.
+:::
+
+**Workstation Setup:**
+If you have run the harness's native authentication command (e.g. an OAuth login on your host), the workstation broker gives the resulting credential file to the agent, as long as `use_host_credentials` is not turned off.
 
 **Hub Setup:**
 Upload the credential file as a file secret via the Web Interface or CLI, targeting the harness's expected path:
@@ -281,12 +329,27 @@ run next.
 
 This lets you launch an agent, log in to the harness interactively (e.g. `claude setup-token`,
 `copilot login`, `hermes setup`, `agy`), and then capture the resulting credentials for reuse
-(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with the harness's
-login command and message.
+(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with a message, and
+optionally a login command to run first. Copilot runs no command: it starts a shell with sign-in
+instructions. A harness-config can add environment variables for no-auth mode only, in a
+`no-auth-env.yaml` file next to its `config.yaml` with one `env` map. Copilot's sets
+`DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus`, so in that mode
+it runs with no session bus and keeps its sign-in in `~/.copilot/config.json`. Starts with
+credentials never get these variables.
 
 The fallback applies only to **automatic** resolution. If you selected an auth type via the
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be
 present or the agent fails to start with an actionable error.
+
+**Runtime Broker check before the container starts.** A Runtime Broker checks the staged auth
+candidates before it creates the container, and fails the start at once when the harness's
+provisioner would certainly reject it: an explicitly selected auth type whose credentials are all
+missing, or, for a harness that has no no-auth fallback, no satisfied auth type at all. The error
+names the harness and the accepted auth types and, for a selected auth type, the environment
+keys it looks for, never their values. An auth type that declares `required_files` is never
+rejected by this check, because a credential file can reach the container by routes the Runtime
+Broker cannot see (volumes, file secrets, a persistent home, pre-start hooks). All shipped harness
+configs declare a no-auth fallback, so for them only an explicit auth type can fail this way.
 
 :::note[Git Credentials and GCP Service Accounts in No-Auth Fallback]
 * **Git Credentials Exemption**: During a no-auth fallback (when LLM credentials are not yet found or captured), Scion previously suppressed all secrets. Now, Git credentials (specifically `GITHUB_TOKEN`) are **exempt from suppression**. Scion will resolve `GITHUB_TOKEN` from project secrets (with a fallback to user-scoped secrets) so that repository cloning in `clone-per-agent` workspaces succeeds even when running in no-auth fallback mode.
@@ -315,6 +378,15 @@ Credential capture supports scoping captured credentials to either the **project
     python3 ~/.scion/harness/capture_auth.py --scope project
     ```
 
+**Hub admins can restrict this to user scope only.** If the "Restrict agent-written secrets to
+profile scope" setting is on (Admin > Server Config, `agent_secrets.user_scope_only`), the hub
+rejects any project-scope write an agent attempts — capture included — with a 403, whatever
+harness, flag, or `--force` is used. In the Web UI, the Project option in the Capture Auth dialog
+is disabled with an explanation and Profile is preselected while the setting is on; retrying a
+rejected capture with `--scope user` (or via the CLI/Script path above) still works. This does not
+affect user-originated project writes made directly through the web UI or `scion hub secret set
+--project`.
+
 ### How capture works
 
 The host generates a capture manifest (`inputs/capture-auth-config.json`) from the harness's
@@ -325,11 +397,16 @@ harness just wrote, and stores it as a secret by shelling out to
 
 By default, all capture paths use **user scope** with **progeny enabled** (`--allow-progeny`), meaning the credentials are kept private to your user identity but safely passed down to any child agents (progeny) your agent creates.
 
+**Owner approval for user-scoped captures.** A user-scoped secret saved by an agent (`--scope user`, the default for `capture_auth.py`) is held on the Hub as a **pending secret** (`202 Accepted`, `state: "pending"`, expiring after 7 days; capped at 10 pending secrets per agent and 50 per owner) and is not delivered to any agent until you approve it:
+- `capture_auth.py` prints `captured (pending approval in Scion)` and exits `0`. Because a user-scoped save does not overwrite an existing approved secret directly, re-authentication at user scope completes in one run without `--force`, and your existing approved secret stays in effect until you approve the replacement (`--force` has no effect at user scope).
+- Approve, reject, or inspect the held value from **Profile > Secrets** in the Web UI (where you can also untick **Also deliver to agents your agents create** to turn progeny off at approval) or with `scion hub secret pending` (`list`, `show <ID>`, `reveal <ID>`, `approve <ID> [--no-progeny]`, `reject <ID>`). See [Approving user secrets saved by your agents](/scion/hosted/user/secrets/#approving-user-secrets-saved-by-your-agents).
+- Project-scoped captures (`--scope project`) are stored immediately without a pending approval step.
+
 - **What is captured** — the harness's credential file(s). For example, Codex captures
   `~/.codex/auth.json` as the `CODEX_AUTH` file secret; Gemini captures
   `~/.gemini/oauth_creds.json` as `GEMINI_OAUTH_CREDS`. See the table in
   [The Three-Stage Auth Workflow](#the-three-stage-auth-workflow).
-- **Where it goes** — into the **secret store** (the Hub's secret store in Hub mode), scoped either to the project or the originating user. This is why captured credentials survive container restarts: the file lives in the store, not in the ephemeral container, and the host re-stages it on every subsequent start.
+- **Where it goes** — into the **secret store** (the Hub's secret store), scoped either to the originating user (held as a pending secret until you approve it) or to the project. This is why captured credentials survive container restarts: the file lives in the store, not in the ephemeral container, and the host re-stages it on every subsequent start.
 - **Harness-specific extras** — some bundles override the generic flow:
   - **Claude** additionally scans the terminal scrollback for the `sk-ant-oat…` token printed by
     `claude setup-token` and stores it as the `CLAUDE_CODE_OAUTH_TOKEN` environment secret.
@@ -344,14 +421,14 @@ The script's exit code distinguishes outcomes:
 
 | Code | Meaning |
 | :--- | :--- |
-| `0` | One or more credentials captured successfully. |
+| `0` | One or more credentials captured (at user scope, held pending your approval in Scion; at project scope, stored immediately). |
 | `2` | No credentials found to capture (nothing logged in yet, or the harness has no capturable files). |
-| `3` | A conflict — a secret with that key already exists. Re-run with `--force` to overwrite it. |
-| `1` | An error occurred while capturing. |
+| `3` | A conflict — at project scope, a secret with that key already exists (re-run with `--force` to overwrite it); at user scope, another agent already holds a pending secret with that name (`409 secret_pending_held_by_other_agent` — approve or reject that pending secret first). |
+| `1` | An error occurred while capturing (for example, a pending-secret cap of 10 per agent or 50 per owner was reached, `429 secret_pending_cap`). |
 
 ```bash
-# Overwrite an existing captured secret
-python3 ~/.scion/harness/capture_auth.py --force
+# Overwrite an existing project-scoped captured secret
+python3 ~/.scion/harness/capture_auth.py --scope project --force
 ```
 
 :::note
@@ -361,8 +438,8 @@ There is currently no `scion auth capture` CLI wrapper; capture is performed by 
 
 ## Persistence Across Restarts
 
-Once captured, credentials live in the project secret store rather than in the ephemeral agent
-container. On each subsequent start:
+Once captured (and, for user-scoped captures, approved by you), credentials live in the Hub secret
+store rather than in the ephemeral agent container. On each subsequent start:
 
 1. The host-side gather stages the stored secret back into the agent (as a candidate or file
    secret).
@@ -403,8 +480,10 @@ scion reset-auth <agent-name>
 ```
 
 This generates a new token on the Hub, pushes it into the running container, and signals the agent
-to restart its token-refresh loop. It requires Hub connectivity and only works on a **running**
-agent (a stopped agent gets a fresh token on its next start). The same action is available as a
+to restart its token-refresh loop. If the signal does not reach the agent, it still picks up the new
+token: the agent checks its token file every few seconds and adopts a new token the Hub accepts
+through the same reset. It requires Hub connectivity and only works on a **running** agent (a
+stopped agent gets a fresh token on its next start). The same action is available as a
 **Reset Auth** button in the web UI. See [Diagnostics](#diagnostics) to identify when this is
 needed.
 
@@ -412,8 +491,17 @@ needed.
 
 Two diagnostic commands help troubleshoot auth and connectivity:
 
-- **`scion doctor`** (host-side): checks host prerequisites — Git, tmux, the active container runtime (Docker/Podman daemon or Kubernetes cluster access), and related diagnostics. Supports `--format json`.
-- **`sciontool doctor`** (in-container): checks the *agent's* health from inside the container — required environment variables, the Hub token (presence, format, expiry), Hub reachability, token refresh, the GCP metadata server and token acquisition, and the GitHub App token. When the token check fails it prints a remediation hint pointing you at `scion reset-auth`.
+- **`scion doctor`** (host-side): checks host prerequisites and, when a Hub is configured, the Hub and the platform it manages — Git, tmux, Hub reachability and authentication, where the Hub credential came from (`hub-credential`), the Hub's Platform Health summary, and the active container runtime (Docker/Podman daemon or Kubernetes cluster access). Supports `--format json`, which emits `formatVersion: 2` with `generatedAt`, a `hub` block (endpoint, version, serving instance and credential source) and `platformHealth.state` (`ok`, `skipped` or `unavailable`, with a `reason` code when not `ok`). See [`scion doctor`](/scion/reference/cli/#scion-doctor).
+- **`sciontool doctor`** (in-container): checks the *agent's* health from inside the container — required environment variables, the Hub token (presence, format, expiry), Hub reachability, token validity (a read-only check that leaves the agent's token untouched), the GCP metadata server and token acquisition, and the GitHub App token. When the token check fails it prints a remediation hint pointing you at `scion reset-auth`.
+  It also reports the credential held by the long-running `sciontool init` process, which the other checks cannot see, because they read the token file. Doctor shows:
+  - whether init holds the same credential as the token file (compared by credential ID and a short hash, never the value);
+  - init's last heartbeat, refresh and start-up check results, with times;
+  - whether init's credential has expired or is refused.
+
+  The check fails when init's credential has expired or its requests are refused (401/403). When the credential has expired or the Hub refused it, doctor says how to reload the credential.
+  In the 20 seconds after a new token file is written, init may still be switching to it, so doctor only warns and asks you to run it again.
+  Init publishes this state in a root-owned file. When the state file is absent and `init` (PID 1) is the `sciontool` binary running as a non-root user (such as `scion` on Kubernetes), `sciontool doctor` reports `[INFO] Init credential check not applicable: init (PID 1) runs as a non-root user and does not publish its credential state` instead of a warning; when PID 1 runs with effective UID `0` or its privilege cannot be determined, a missing state file is reported as `[WARN] Init credential state unavailable ...`.
+  When the Hub refuses a GCP credential request with HTTP `403`, the in-container metadata server opens a capped exponential back-off window with jitter (base 10 seconds, max 5 minutes), tracked separately for the access token and for identity tokens: during the window, token requests receive the cached `403` refusal (`credential refused by hub; retry after ...`) without calling the Hub and one log line is written per back-off step. A successful fetch resets the back-off, as does a change to the agent's assignment (its service account or Hub credential), which is retried at once; any other error returns `502` with no back-off. Concurrent identity-token fetches are deduplicated per target audience.
 
 ## Agent Progeny & Secret Access
 
@@ -429,7 +517,7 @@ For user-scoped (personal) secrets, you can explicitly configure them to propaga
 scion hub secret set --allow-progeny MY_PERSONAL_TOKEN my-secret-value
 ```
 
-When a child agent is created, Scion walks the ancestry chain of the agent (from child to ancestors) to resolve secrets. If the secret's creator is in the agent's ancestry chain AND `allow-progeny` is enabled, the secret is safely inherited and projected into the descendant agent. Under the hood, this dynamically manages implicit **progeny policies** (`progeny-secret-access:<id>`) on the Scion Hub.
+When a child agent is created, started, or reads secrets at runtime, Scion walks the ancestry and delegation chain of the agent (from child to ancestors) to resolve secrets. If the secret's creator is in the agent's ancestry chain AND `allow-progeny` is enabled — and, when the agent's delegation chain has recorded provenance, every hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use`, and the recorded author of the secret — the secret is safely inherited and projected into the descendant agent (at start, restart, and resume, progeny-shared owner secrets are decided once per request on the owner-material chain, and a legacy chain with no recorded ancestry is withheld; see [Propagation to Descendant Agents](/scion/hosted/user/secrets/#propagation-to-descendant-agents-progeny)). When an agent saves a user-scoped secret on your behalf, it waits for your approval first, and approving it records you as `created_by` (and `agent:<id>` as `updated_by`) so progeny inheritance works across your agent trees unless you turn progeny off at approval (`--no-progeny`). Under the hood, this dynamically manages implicit **progeny policies** (`progeny-secret-access:<id>`) on the Scion Hub.
 
 ---
 
@@ -440,6 +528,15 @@ The harness couldn't find any usable credentials through the automatic implicit 
 
 ### "auth type selected but..."
 You have configured the **Explicit Path** (e.g., selecting `vertex-ai`) but the specific credentials required for that path (like `GOOGLE_CLOUD_PROJECT`) are missing. The explicit path disables fallback, so ensure all required sources for the chosen explicit type are provided.
+
+### "no auth method satisfied"
+The Runtime Broker refused the start before creating a container (see [No-Auth Fallback](#no-auth-fallback)). The message names the harness, the accepted auth types and, for a selected auth type, the credentials it looks for. Provide one of them as a Hub secret (`scion hub secret set`) or a Hub environment setting (`scion hub env set`), or select a different auth type with `--harness-auth`.
+
+### "agent secrets could not be resolved" or "agent environment settings could not be read"
+Create, start, restart, resume and waking an agent for a direct message fail closed with `503` when the Hub cannot resolve the agent's configured secret metadata or read its stored environment settings, instead of starting the agent without them. A start leaves the agent as it was, a restart leaves it stopped (its stop leg has already run), and a failed create is rolled back. A provision-only create still succeeds; the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg: it is recorded as failed with the same message and the previous config is restored. This points to a secret backend or database problem on the Hub, not a missing credential (an agent with no secrets or settings starts normally). Retry once the Hub's backend is healthy; the Hub's server log has the cause. When an individual secret's metadata resolves but the secret store cannot return its value (`access`, `not_found`, or `missing`), the Hub skips that secret so the dispatch proceeds without it and returns a warning in `warnings` (`secrets not delivered because the secret store could not return them: <items>; the agent was <started|restarted|created> without them`; see [Start-Time Authorization](/scion/hosted/user/secrets/#start-time-authorization)).
+
+### "the hub issued no agent token for this start"
+A Hub-dispatched create, start, or restart requires a Hub-issued agent token (`StartOptions.HubIssuedToken`). If the Hub issues none, the Runtime Broker removes any previous `~/.scion/scion-token` file from the Agent home and fails the start with `500 runtime_error` (`the hub issued no agent token for this start; check the hub's agent token service`) without starting a container; on a restart, the running container is stopped first, leaving the agent stopped. Check the Hub's agent token signing configuration (`server.keyring_file` / JWT signing keys) and server logs. Setting `SCION_AUTH_TOKEN` in an agent's or harness-config's `env` does not satisfy this requirement: in Runtime Broker mode that variable is stripped and ignored with a start warning.
 
 ### "unknown auth type"
 The value you passed to `--harness-auth` (or `auth_selectedType`) is not one this harness supports. Valid universal types are `api-key`, `oauth-token`, `auth-file`, and `vertex-ai`, but each harness only accepts a subset — see the [auth capability matrix](/scion/supported-harnesses/#feature-capability-matrix).
@@ -462,7 +559,7 @@ Scion provides deep integration with GitHub Apps to manage Git credentials autom
 2. **Credential Helper**: Scion injects `sciontool` as a Git credential helper into the agent container (`git config --global credential.helper`).
 3. **On-Demand Tokens**: When the agent executes a `git clone`, `push`, or `pull`, Git asks the credential helper for a password. `sciontool` retrieves the fresh, short-lived token provided by the Hub, ensuring operations never fail due to token expiration—even for long-running agents.
 
-This flow is automatically enabled for any project linked to a GitHub App installation.
+This flow is enabled for a project whose GitHub App installation association is authorized (checked when the association is recorded and at every token mint): the project's git remote must be on the configured GitHub host (`github.com`, or the host of `github_app.api_base_url`), the installation must be active and its account must match the remote's owner, and either an active Hub admin bound the installation to that remote (`PUT /api/v1/projects/{id}/github-installation`, recorded in `scion.dev/github-installation-binding` with `installation_id`, `remote`, `bound_by`, and `bound_at`) or the project creator's user-scope `GITHUB_TOKEN` secret has at least `pull` access to the repository on GitHub (`pull`-only proof caps the minted token to read-only, whereas `push` access allows write permissions). On agent create, start, restart, and token refresh, the Hub mints a GitHub App installation token from the agent's own project, or, when the agent's project has no installation configured, from the project named by the `scion.dev/github-token-source-project` label only when the agent's authoritative source user is active and holds `agent.create` in that source project (and that source project's installation association is authorized).
 
 ### Personal Access Tokens (PATs)
 

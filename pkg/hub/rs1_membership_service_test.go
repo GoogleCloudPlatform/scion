@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -273,16 +272,27 @@ func TestRS1_PrincipalEligibility(t *testing.T) {
 		{"user_member", store.RoleBindingPrincipalUser, store.ProjectRoleMember, true},
 		{"group_member", store.RoleBindingPrincipalGroup, store.ProjectRoleMember, true},
 		{"agent_member", store.RoleBindingPrincipalAgent, store.ProjectRoleMember, true},
+
+		// Viewer: like member (ptone/scion#5519).
+		{"user_viewer", store.RoleBindingPrincipalUser, store.ProjectRoleViewer, true},
+		{"group_viewer", store.RoleBindingPrincipalGroup, store.ProjectRoleViewer, true},
+		{"agent_viewer", store.RoleBindingPrincipalAgent, store.ProjectRoleViewer, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := principalEligibleForRole(tt.principalType, tt.roleName)
+			result := principalEligibleForRole(tt.principalType, &store.RoleDefinition{Name: tt.roleName, System: true})
 			assert.Equal(t, tt.expectOK, result,
 				"principalEligibleForRole(%q, %q) = %v, want %v",
 				tt.principalType, tt.roleName, result, tt.expectOK)
 		})
 	}
+
+	// A custom (non-system) role that holds a built-in name gets the
+	// custom-role rule: users and groups only, never agents.
+	custom := &store.RoleDefinition{Name: store.ProjectRoleMember, System: false}
+	assert.True(t, principalEligibleForRole(store.RoleBindingPrincipalUser, custom))
+	assert.False(t, principalEligibleForRole(store.RoleBindingPrincipalAgent, custom), "a custom row named project-member is not built-in")
 }
 
 // ---------------------------------------------------------------------------
@@ -590,12 +600,7 @@ func TestRS1_LifecycleEnforcement_ExpiredOwnerNotCounted(t *testing.T) {
 
 	// Even though there are two owner bindings, the expired one shouldn't count.
 	// The active owner count should still be 1.
-	svc := &ProjectMembershipService{
-		store:   s,
-		nowFunc: time.Now,
-	}
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.Equal(t, 1, count,
 		"expired owner should not be counted as active")
 }
@@ -629,12 +634,7 @@ func TestRS1_LifecycleEnforcement_FutureOwnerNotCounted(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	svc := &ProjectMembershipService{
-		store:   s,
-		nowFunc: time.Now,
-	}
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.Equal(t, 1, count,
 		"future owner should not be counted as active")
 }
@@ -859,63 +859,3 @@ func TestRS1_UpdateRole_AdminCannotPromoteToAdmin(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// createRS1Project creates a project with a permanent owner.
-func createRS1Project(t *testing.T, s store.Store, projectID, ownerID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: ownerID, Email: ownerID + "@test.com",
-		DisplayName: "Owner", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, ownerID)
-
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:        projectID,
-		Name:      "RS1 Test Project " + projectID,
-		Slug:      fmt.Sprintf("rs1-test-%s", projectID[:8]),
-		CreatedBy: ownerID,
-	}))
-
-	// Create owner role binding.
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: ownerRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      ownerID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create owner binding: %v", err)
-	}
-}
-
-// createRS1UserWithRole creates a user and assigns them a project role.
-func createRS1UserWithRole(t *testing.T, s store.Store, userID, email, projectID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: userID, Email: email,
-		DisplayName: "User", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, userID)
-
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create role binding: %v", err)
-	}
-}

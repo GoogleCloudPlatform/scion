@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -39,6 +40,21 @@ func newFakeSecretBackend() *fakeSecretBackend {
 }
 
 func (f *fakeSecretBackend) HubID() string { return f.hubID }
+
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (f *fakeSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", errors.New("pending secrets are not supported by this test backend")
+}
+
+func (f *fakeSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, errors.New("pending secrets are not supported by this test backend")
+}
+
+func (f *fakeSecretBackend) DropPending(context.Context, string) error { return nil }
+func (f *fakeSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
 
 func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.SecretWithValue, error) {
 	v, ok := f.values[name]
@@ -70,6 +86,17 @@ func (f *fakeSecretBackend) UpdateMeta(_ context.Context, _ *secret.UpdateMetaIn
 
 func (f *fakeSecretBackend) Resolve(context.Context, string, string, string, *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
 	return nil, nil
+}
+
+// FetchValues is not exercised by secretmigration.MigratePluginSecrets; this
+// stub only satisfies secret.SecretBackend and reports every item not found,
+// the same as the other minimal fakes in this codebase.
+func (f *fakeSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
 }
 
 // captureLog collects everything written to the standard logger while fn runs.

@@ -52,7 +52,6 @@ func main() {
 	)
 
 	flag.StringVar(&project, "project", "", "Project ID — auto-discover agent directories via Docker labels")
-	flag.StringVar(&project, "grove", "", "Deprecated alias for --project")
 	flag.Var(&watchDirs, "watch", "Directory to watch explicitly (repeatable)")
 	flag.StringVar(&logFile, "log", "-", "Output log file path (- for stdout)")
 	flag.StringVar(&labelKey, "label-key", "scion.name", "Docker label key to use as agent ID")

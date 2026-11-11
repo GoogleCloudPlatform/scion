@@ -49,12 +49,11 @@ func TestDEF141_AC1_DerivedRouting_IncrementsDerivedRoutes(t *testing.T) {
 
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "d141-derived-agent",
-		Slug:       "d141-derived-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "d141-derived-agent",
+		Slug:      "d141-derived-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	recipientID := api.NewUUID()
@@ -132,12 +131,11 @@ func TestDEF141_AC2_ExplicitRouting_IncrementsExplicitRoutes(t *testing.T) {
 
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "d141-explicit-agent",
-		Slug:       "d141-explicit-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "d141-explicit-agent",
+		Slug:      "d141-explicit-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	recipientID := api.NewUUID()
@@ -190,51 +188,6 @@ func TestDEF141_AC2_ExplicitRouting_IncrementsExplicitRoutes(t *testing.T) {
 // the ConversationAsserted propagation) are caught. The broker-only tests
 // above verify the broker's three-way switch in isolation.
 // ---------------------------------------------------------------------------
-
-// def141BrokerSetup creates a server with a broker, project, agent, and user.
-// The broker is wired so that handler → PublishUserMessage → deliverToUser.
-func def141BrokerSetup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, user *store.User) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	project = &store.Project{
-		ID:   tid("d141-broker-project"),
-		Name: "d141-broker-project",
-		Slug: "d141-broker-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	user = &store.User{
-		ID:          tid("d141-broker-user"),
-		Email:       "d141-broker@example.com",
-		DisplayName: "D141 Broker User",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-
-	agent = &store.Agent{
-		ID:         tid("d141-broker-agent"),
-		Name:       "d141-broker-agent",
-		Slug:       "d141-broker-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-	bus := eventbus.NewInProcessEventBus(slog.Default())
-	t.Cleanup(func() { _ = bus.Close() })
-
-	proxy := NewMessageBrokerProxy(bus, s, events,
-		func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
-	proxy.Start()
-	t.Cleanup(proxy.Stop)
-	srv.SetMessageBrokerProxy(proxy)
-
-	return srv, s, project, agent, user
-}
 
 func TestDEF141_AC1_FullPath_DerivedRouting(t *testing.T) {
 	srv, _, project, agent, user := def141BrokerSetup(t)
@@ -487,7 +440,8 @@ func TestDEF141_AC6_ConversationAsserted_NotInDeliveryText(t *testing.T) {
 // value. Rather than duplicating that test, we verify the specific property
 // that DEF-141's changes preserved: CheckConversationConsistency is called
 // in the broker's deliverToUser (with its return consumed) on EVERY path
-// of the three-way switch.
+// of the three-way switch. The check runs in the background, so each step
+// waits for the runner to go idle before reading the counter.
 // ---------------------------------------------------------------------------
 
 func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
@@ -497,12 +451,11 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "d141-cc-agent",
-		Slug:       "d141-cc-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "d141-cc-agent",
+		Slug:      "d141-cc-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	recipientID := api.NewUUID()
@@ -537,6 +490,7 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 	msg1.ConversationID = created.ID
 	msg1.ConversationAsserted = true
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg1)
+	messaging.ConsistencyCheckRunner.Wait()
 	ccAfter := messaging.DivergenceMetrics.ConsistencyChecks()
 	require.Greater(t, ccAfter, ccBefore,
 		"AC-7: CheckConversationConsistency must run on the asserted path")
@@ -549,6 +503,7 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 	msg2.ConversationID = created.ID
 	msg2.ConversationAsserted = false
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg2)
+	messaging.ConsistencyCheckRunner.Wait()
 	ccAfter = messaging.DivergenceMetrics.ConsistencyChecks()
 	require.Greater(t, ccAfter, ccBefore,
 		"AC-7: CheckConversationConsistency must run on the derived path")
@@ -560,6 +515,7 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 	msg3.RecipientID = recipientID
 	// No ConversationID, no ConversationAsserted.
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg3)
+	messaging.ConsistencyCheckRunner.Wait()
 	ccAfter = messaging.DivergenceMetrics.ConsistencyChecks()
 	require.Greater(t, ccAfter, ccBefore,
 		"AC-7: CheckConversationConsistency must run on the default (broker-derived) path")

@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,14 +43,15 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 
 	nonInteractive = true
 	autoConfirm = true // --non-interactive implies --yes
+	allowEnvSend(t)
 
 	// When the key is available in the local env, non-interactive mode
-	// should gather and submit it automatically (same as --yes).
+	// with --send-env gathers and submits it.
 	_ = os.Setenv("TEST_SECRET_KEY", "secret-value")
 	defer func() { _ = os.Unsetenv("TEST_SECRET_KEY") }()
 
 	// Set up mock Hub server
-	projectID := tid("grove-1")
+	projectID := tid("project-1")
 	server, captured := newEnvGatherMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -98,12 +100,12 @@ func TestGatherAndSubmitEnv_NonInteractiveAllowsWhenAllSatisfied(t *testing.T) {
 		EnvGather: &hubclient.EnvGatherResponse{
 			AgentID:  "agent-2",
 			Required: []string{"GEMINI_API_KEY"},
-			HubHas:   []hubclient.EnvSource{{Key: "GEMINI_API_KEY", Scope: "grove"}},
+			HubHas:   []hubclient.EnvSource{{Key: "GEMINI_API_KEY", Scope: "project"}},
 			Needs:    []string{},
 		},
 	}
 
-	result, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	result, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.NoError(t, err)
 	// Should return the original response since no env was gathered
 	assert.Equal(t, resp, result)
@@ -137,7 +139,7 @@ func TestGatherAndSubmitEnv_NonInteractiveMultipleKeysMissing(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot satisfy required environment variables")
 	assert.Contains(t, err.Error(), "KEY_A")
@@ -164,7 +166,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 	_ = os.Unsetenv("MISSING_KEY")
 
 	agentID := "agent-cleanup-1"
-	projectID := "grove-cleanup"
+	projectID := "project-cleanup"
 	var deleteCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -210,13 +212,13 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	err = startAgentViaHub(hubCtx, "test-agent", "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, "test-agent", "", false, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "env-gather failed")
 	assert.True(t, deleteCalled, "expected provisioning agent to be deleted on env-gather failure")
 }
 
-func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
+func TestStartAgentViaHub_GlobalProjectSkipsWorkspaceBootstrap(t *testing.T) {
 	origOutputFormat := outputFormat
 	origTemplateName := templateName
 	origHarnessConfigFlag := harnessConfigFlag
@@ -239,7 +241,7 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "state.yaml"), []byte("syncedAgents: []\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "large-local-file.txt"), []byte("should-not-upload"), 0644))
 
-	projectID := "grove-global"
+	projectID := "project-global"
 	var captured *hubclient.CreateAgentRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +285,7 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 		IsGlobal:    true,
 	}
 
-	err = startAgentViaHub(hubCtx, "global-agent", "hello", false, nil)
+	err = startAgentViaHub(nil, hubCtx, "global-agent", "hello", false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, captured)
 	assert.Empty(t, captured.WorkspaceFiles)
@@ -351,7 +353,7 @@ func TestGatherAndSubmitEnv_InteractiveSecretPrompt(t *testing.T) {
 	}
 
 	// Set up mock Hub server
-	projectID := "grove-prompt"
+	projectID := "project-prompt"
 	server, captured := newEnvGatherMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -418,7 +420,7 @@ func TestGatherAndSubmitEnv_FileSecretShowsGuidance(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "FILE_CERT")
 }
@@ -454,7 +456,7 @@ func TestGatherAndSubmitEnv_MixedSecretAndEnvKeys(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	// Should fail because ENV_ONLY is not secret-eligible and not in local env
 	assert.Contains(t, err.Error(), "ENV_ONLY")
@@ -495,7 +497,7 @@ func TestGatherAndSubmitEnv_NonInteractiveSecretsMissing(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot satisfy required environment variables")
 }
@@ -542,7 +544,62 @@ func TestGatherAndSubmitEnv_InteractiveSecretEmptyInput(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MY_SECRET")
+}
+
+// An env submit that the hub answers after the hub client's usual timeout
+// still succeeds: the submit carries the launch and gets the create
+// request's longer timeout. The timeouts are scaled down; the usual one is
+// 50ms here, as hubClientTimeout (30s) is in production.
+func TestGatherAndSubmitEnv_SlowSubmitOutlastsClientTimeout(t *testing.T) {
+	origNonInteractive, origAutoConfirm := nonInteractive, autoConfirm
+	origTimeout := hubCreateRequestTimeout
+	t.Cleanup(func() {
+		nonInteractive, autoConfirm = origNonInteractive, origAutoConfirm
+		hubCreateRequestTimeout = origTimeout
+	})
+	nonInteractive, autoConfirm = true, true
+	allowEnvSend(t)
+	hubCreateRequestTimeout = 10 * time.Second
+	t.Setenv("TEST_SLOW_SUBMIT_KEY", "slow-value")
+
+	projectID := tid("project-1")
+	var submits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		submits.Add(1)
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"agent": map[string]interface{}{"id": tid("agent-1"), "status": "running"},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client, err := hubclient.New(server.URL, hubclient.WithTimeout(50*time.Millisecond))
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	resp := &hubclient.CreateAgentResponse{
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
+		EnvGather: &hubclient.EnvGatherResponse{
+			AgentID:  tid("agent-1"),
+			Required: []string{"TEST_SLOW_SUBMIT_KEY"},
+			Needs:    []string{"TEST_SLOW_SUBMIT_KEY"},
+		},
+	}
+
+	result, err := gatherAndSubmitEnv(context.Background(), hubCtx, projectID, resp)
+	require.NoError(t, err, "an env submit slower than the client timeout must not be cut off")
+	require.NotNil(t, result)
+	require.NotNil(t, result.Agent)
+	assert.Equal(t, tid("agent-1"), result.Agent.ID)
+	assert.Equal(t, int32(1), submits.Load(), "the submit is sent once")
 }

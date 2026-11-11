@@ -44,7 +44,8 @@ What already exists and is reused as-is:
 - Dual-mount recipe — `pkg/runtime/common.go:188-222` (`.git` at `/repo-root/.git` +
   worktree at `/repo-root/<rel>`), gated on `RepoRoot`+`Workspace` set and `GitClone==nil`.
 - `SCION_HOST_UID` guard forcing `isGit=false` in-container (`provision.go:303-309`).
-- Teardown: `RemoveWorktree` / `PruneWorktreesIn` / `DeleteBranchIn` (`provision.go:35-146`).
+- Teardown: `RemoveWorktree` / `RemoveWorktreeEntryIn` / `DeleteBranchIn` (`pkg/agent/provision.go`);
+  stale-record cleanup removes only the agent's own worktree entry.
 - Advisory lock + sentinel guard (`workspace_backend_nfs.go:141-268`).
 
 ---

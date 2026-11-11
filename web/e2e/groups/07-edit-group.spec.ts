@@ -17,12 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createGroup,
-  uniqueSlug,
-  uniqueName,
-} from './groups-setup.js';
+import { getE2EEnv, createGroup, uniqueSlug } from './groups-setup.js';
 
 test.describe('Edit group (AC7)', () => {
   const env = getE2EEnv();
@@ -58,7 +53,7 @@ test.describe('Edit group (AC7)', () => {
 
     // Change the name via the component's value property
     const nameInput = dialog.locator('#name-input');
-    await nameInput.evaluate((el: any, val: string) => {
+    await nameInput.evaluate((el: HTMLElement & { value: string }, val: string) => {
       el.value = val;
       el.dispatchEvent(new Event('sl-input', { bubbles: true }));
     }, 'Renamed Edit Group');

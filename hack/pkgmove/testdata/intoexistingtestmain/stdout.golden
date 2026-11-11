@@ -1,0 +1,46 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub, test-only move into the existing package)
+
+Files (1):
+  git mv hub/policy_a_test.go hub/sub/policy_a_test.go
+
+Renames (0):
+
+Alias entries (0):
+
+Alias files (0):
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Alias references resolved to their targets (5):
+  hub/policy_a_test.go:15: sub.DefaultName -> DefaultName
+  hub/policy_a_test.go:19: newPolicy -> NewPolicy
+  hub/policy_a_test.go:22: maxRules -> MaxRules
+  hub/policy_a_test.go:22: codeNotFound -> apierr.CodeNotFound
+  hub/policy_a_test.go:25: Evaluate -> Evaluate
+
+Staying helpers reused from the target (2):
+  hub/policy_a_test.go:12: const testAction, declared in the staying policy_helpers_test.go: the target's equivalent declaration at hub/sub/helpers_test.go:8 is used
+  hub/policy_a_test.go:15: func mkPolicy, declared in the staying policy_helpers_test.go: the target's equivalent declaration at hub/sub/helpers_test.go:6 is used
+
+Moved declarations dropped (equivalent to the target's) (1):
+  hub/policy_a_test.go:12: func describe (the target already declares an equivalent one at hub/sub/helpers_test.go:10)
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 1. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: TestMain separation ==
+  hub/sub/main_test.go:9: moved tests leave the TestMain of hub (hub/main_test.go:10) and run under the existing TestMain of sub, which differs from it, or calls helpers that are not equivalent - verify that it does everything the source TestMain does in every build configuration (both should call the same RunTestMain helper)
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

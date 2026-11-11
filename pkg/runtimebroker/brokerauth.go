@@ -16,6 +16,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -25,6 +26,24 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
+
+// authenticatingHubConnCtxKey is the context key MultiKeyBrokerAuthMiddleware
+// uses to record which hub connection's key authenticated an incoming
+// request (design t1-async-create-v11.md §3.8.5 routing rule 2). It is the
+// second-priority source (after the X-Scion-Hub-Connection header) the
+// broker uses to pick which hub connection owns a launch, so later reports
+// for it are sent directly to that connection instead of fanning out.
+type authenticatingHubConnCtxKey struct{}
+
+// authenticatingHubConnFromContext returns the name of the hub connection
+// whose secret key verified the request's HMAC signature, or "" when
+// authentication is disabled, unauthenticated requests are allowed through,
+// or no context value was set (e.g. a request built by a test without
+// routing it through the middleware).
+func authenticatingHubConnFromContext(ctx context.Context) string {
+	name, _ := ctx.Value(authenticatingHubConnCtxKey{}).(string)
+	return name
+}
 
 // BrokerAuthConfig configures host-side HMAC authentication.
 type BrokerAuthConfig struct {
@@ -52,11 +71,15 @@ func DefaultBrokerAuthConfig() BrokerAuthConfig {
 // This verifies that requests from the Hub are properly signed.
 type BrokerAuthMiddleware struct {
 	config BrokerAuthConfig
+	// seen remembers the signed requests already served (by their verified
+	// signature bytes), until their timestamps leave the accepted window, so
+	// each is served once.
+	seen *seenOnce
 }
 
 // NewBrokerAuthMiddleware creates a new broker authentication middleware.
 func NewBrokerAuthMiddleware(cfg BrokerAuthConfig) *BrokerAuthMiddleware {
-	return &BrokerAuthMiddleware{config: cfg}
+	return &BrokerAuthMiddleware{config: cfg, seen: newSeenOnce()}
 }
 
 // Middleware returns an HTTP middleware handler that validates HMAC signatures.
@@ -102,6 +125,17 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			m.writeError(w, "missing X-Scion-Signature header")
 			return
 		}
+		if nonce == "" {
+			m.writeError(w, "missing X-Scion-Nonce header")
+			return
+		}
+
+		// Bound the body before anything reads it: the canonical string
+		// below hashes the body before the signature is checked.
+		if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+			writeSignedBodyTooLarge(w)
+			return
+		}
 
 		// Validate timestamp
 		ts, err := strconv.ParseInt(timestamp, 10, 64)
@@ -110,8 +144,9 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		now := time.Now()
 		requestTime := time.Unix(ts, 0)
-		clockSkew := time.Since(requestTime)
+		clockSkew := now.Sub(requestTime)
 		if clockSkew < 0 {
 			clockSkew = -clockSkew
 		}
@@ -127,6 +162,13 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A signed body must declare its length. BuildCanonicalString
+		// covers the body either way; this refuses unsized framing early.
+		if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+			m.writeError(w, err.Error())
+			return
+		}
+
 		// Build canonical string and verify signature
 		canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
 		if !apiclient.VerifyHMAC(m.config.SecretKey, canonical, sigBytes) {
@@ -134,9 +176,28 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Serve each signed request once while its timestamp is accepted.
+		// The key is the verified signature bytes: they depend only on the
+		// canonical signed input, so every header encoding of one signed
+		// request (signature text spellings, a nonce that takes in a signed
+		// header line) has the same key.
+		if !m.seen.add(string(sigBytes), requestTime.Add(m.config.MaxClockSkew), now) {
+			m.writeError(w, "request already served")
+			return
+		}
+
 		// Signature valid, continue to handler
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeSignedBodyTooLarge answers a signed request whose body exceeds
+// apiclient.MaxSignedRequestBodyBytes with 413, in the same JSON error shape
+// as the authentication errors.
+func writeSignedBodyTooLarge(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusRequestEntityTooLarge)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":"payload_too_large","message":%q}}`, apiclient.SignedBodyTooLargeMessage)
 }
 
 // writeError writes an authentication error response.
@@ -171,6 +232,11 @@ type MultiKeyBrokerAuthMiddleware struct {
 	maxClockSkew         time.Duration
 	allowUnauthenticated bool
 	enabled              bool
+	// seen remembers the signed requests already served (by their verified
+	// signature bytes), until their timestamps leave the accepted window, so
+	// each is served once. It is this middleware's own set, not the conduit
+	// guard's: a conduit request passes the guard and then this middleware.
+	seen *seenOnce
 }
 
 // NewMultiKeyBrokerAuthMiddleware creates a new multi-key broker authentication middleware.
@@ -179,6 +245,7 @@ func NewMultiKeyBrokerAuthMiddleware(enabled bool, maxClockSkew time.Duration, a
 		enabled:              enabled,
 		maxClockSkew:         maxClockSkew,
 		allowUnauthenticated: allowUnauthenticated,
+		seen:                 newSeenOnce(),
 	}
 }
 
@@ -193,92 +260,127 @@ func (m *MultiKeyBrokerAuthMiddleware) UpdateKeys(keys []secretKeyEntry) {
 // against any of the registered secret keys.
 func (m *MultiKeyBrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.mu.RLock()
-		enabled := m.enabled
-		allowUnauth := m.allowUnauthenticated
-		keys := m.keys
-		maxSkew := m.maxClockSkew
-		m.mu.RUnlock()
-
-		if !enabled {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Health endpoints are always public — no authentication required.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Extract HMAC headers
-		brokerID := r.Header.Get(apiclient.HeaderBrokerID)
-		timestamp := r.Header.Get(apiclient.HeaderTimestamp)
-		nonce := r.Header.Get(apiclient.HeaderNonce)
-		signature := r.Header.Get(apiclient.HeaderSignature)
-
-		// If no HMAC headers present, check if unauthenticated requests are allowed
-		if brokerID == "" && timestamp == "" && signature == "" {
-			if allowUnauth {
-				next.ServeHTTP(w, r)
-				return
-			}
-			m.writeError(w, "missing authentication headers")
-			return
-		}
-
-		// Validate required headers
-		if brokerID == "" {
-			m.writeError(w, "missing X-Scion-Broker-ID header")
-			return
-		}
-		if timestamp == "" {
-			m.writeError(w, "missing X-Scion-Timestamp header")
-			return
-		}
-		if signature == "" {
-			m.writeError(w, "missing X-Scion-Signature header")
-			return
-		}
-
-		// Validate timestamp
-		ts, err := strconv.ParseInt(timestamp, 10, 64)
-		if err != nil {
-			m.writeError(w, "invalid timestamp format")
-			return
-		}
-
-		requestTime := time.Unix(ts, 0)
-		clockSkew := time.Since(requestTime)
-		if clockSkew < 0 {
-			clockSkew = -clockSkew
-		}
-		if clockSkew > maxSkew {
-			m.writeError(w, fmt.Sprintf("timestamp outside acceptable range (skew: %v)", clockSkew))
-			return
-		}
-
-		// Decode the signature
-		sigBytes, err := base64.StdEncoding.DecodeString(signature)
-		if err != nil {
-			m.writeError(w, "invalid signature encoding")
-			return
-		}
-
-		// Build canonical string
-		canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
-
-		// Try each key until one matches
-		for _, entry := range keys {
-			if apiclient.VerifyHMAC(entry.secretKey, canonical, sigBytes) {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		// No key matched
-		m.writeError(w, "invalid signature")
+		m.ServeWith(w, r, next)
 	})
+}
+
+// ServeWith handles r as the handler returned by Middleware(next) does.
+func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	m.mu.RLock()
+	enabled := m.enabled
+	allowUnauth := m.allowUnauthenticated
+	keys := m.keys
+	maxSkew := m.maxClockSkew
+	m.mu.RUnlock()
+
+	if !enabled {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// Health endpoints are always public — no authentication required.
+	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// Extract HMAC headers
+	brokerID := r.Header.Get(apiclient.HeaderBrokerID)
+	timestamp := r.Header.Get(apiclient.HeaderTimestamp)
+	nonce := r.Header.Get(apiclient.HeaderNonce)
+	signature := r.Header.Get(apiclient.HeaderSignature)
+
+	// If no HMAC headers present, check if unauthenticated requests are allowed
+	if brokerID == "" && timestamp == "" && signature == "" {
+		if allowUnauth {
+			next.ServeHTTP(w, r)
+			return
+		}
+		m.writeError(w, "missing authentication headers")
+		return
+	}
+
+	// Validate required headers
+	if brokerID == "" {
+		m.writeError(w, "missing X-Scion-Broker-ID header")
+		return
+	}
+	if timestamp == "" {
+		m.writeError(w, "missing X-Scion-Timestamp header")
+		return
+	}
+	if signature == "" {
+		m.writeError(w, "missing X-Scion-Signature header")
+		return
+	}
+	if nonce == "" {
+		m.writeError(w, "missing X-Scion-Nonce header")
+		return
+	}
+
+	// Bound the body before anything reads it: the canonical string below
+	// hashes the body before the signature is checked.
+	if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+		writeSignedBodyTooLarge(w)
+		return
+	}
+
+	// Validate timestamp
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		m.writeError(w, "invalid timestamp format")
+		return
+	}
+
+	now := time.Now()
+	requestTime := time.Unix(ts, 0)
+	clockSkew := now.Sub(requestTime)
+	if clockSkew < 0 {
+		clockSkew = -clockSkew
+	}
+	if clockSkew > maxSkew {
+		m.writeError(w, fmt.Sprintf("timestamp outside acceptable range (skew: %v)", clockSkew))
+		return
+	}
+
+	// Decode the signature
+	sigBytes, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil {
+		m.writeError(w, "invalid signature encoding")
+		return
+	}
+
+	// A signed body must declare its length. BuildCanonicalString
+	// covers the body either way; this refuses unsized framing early.
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		m.writeError(w, err.Error())
+		return
+	}
+
+	// Build canonical string
+	canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
+
+	// Try each key until one matches
+	for _, entry := range keys {
+		if apiclient.VerifyHMAC(entry.secretKey, canonical, sigBytes) {
+			// Serve each signed request once while its timestamp is
+			// accepted. The key is the verified signature bytes: they
+			// depend only on the canonical signed input, so every header
+			// encoding of one signed request has the same key.
+			if !m.seen.add(string(sigBytes), requestTime.Add(maxSkew), now) {
+				m.writeError(w, "request already served")
+				return
+			}
+			if entry.hubName != "" {
+				r = r.WithContext(context.WithValue(r.Context(), authenticatingHubConnCtxKey{}, entry.hubName))
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+	}
+
+	// No key matched
+	m.writeError(w, "invalid signature")
 }
 
 // writeError writes an authentication error response.

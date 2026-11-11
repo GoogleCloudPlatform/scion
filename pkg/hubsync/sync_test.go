@@ -28,12 +28,28 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
+// setOrUnsetEnv sets key to val for the duration of the test, unless val is
+// empty, in which case it removes key from the environment entirely rather
+// than setting it to an empty string. This matters for SCION_ config vars:
+// koanf's settings loader treats an empty-valued env var as present and lets
+// it override a real value loaded from a settings file, whereas a genuinely
+// absent env var does not. Always going through t.Setenv first (even when
+// unsetting) keeps its guard against use alongside t.Parallel.
+func setOrUnsetEnv(t *testing.T, key, val string) {
+	t.Helper()
+	t.Setenv(key, val)
+	if val == "" {
+		_ = os.Unsetenv(key)
+	}
+}
+
 func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()
@@ -103,7 +119,6 @@ hub:
 	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
-		SkipSync:    true,
 		AutoConfirm: true,
 	})
 	if err != nil {
@@ -172,7 +187,6 @@ hub:
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm:      true,
-		SkipSync:         true,
 		EndpointOverride: server.URL,
 	})
 	if err != nil {
@@ -186,16 +200,17 @@ hub:
 	}
 }
 
-func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
+func TestEnsureHubReady_GlobalFallbackWithoutEndpoint(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_PROJECT_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			_ = os.Unsetenv(e)
 			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
-	// When projectPath="" and the resolution falls back to global with hub NOT
-	// enabled, EnsureHubReady should return (nil, nil) - same behavior as before.
+	// When projectPath="" falls back to global and no endpoint is
+	// configured, EnsureHubReady returns the not-configured error. A stale
+	// hub.enabled=false changes nothing: there is no local-only mode.
 
 	tmpHome := t.TempDir()
 	globalDir := filepath.Join(tmpHome, ".scion")
@@ -221,14 +236,13 @@ func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
 	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
-		SkipSync:    true,
 		AutoConfirm: true,
 	})
-	if err != nil {
-		t.Fatalf("EnsureHubReady returned error: %v", err)
+	if !errors.Is(err, ErrHubNotConfigured) {
+		t.Fatalf("EnsureHubReady error = %v, want ErrHubNotConfigured", err)
 	}
 	if hubCtx != nil {
-		t.Error("EnsureHubReady should return nil when hub is not enabled")
+		t.Error("EnsureHubReady returned a hub context with an error")
 	}
 }
 
@@ -269,7 +283,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	// Simulate container env vars
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", projectID)
+	t.Setenv("SCION_PROJECT_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -344,7 +358,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", projectID)
+	t.Setenv("SCION_PROJECT_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -356,7 +370,6 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm: true,
-		// Intentionally NOT setting SkipSync — should be forced by hub context
 	})
 	if err != nil {
 		t.Fatalf("EnsureHubReady returned error: %v", err)
@@ -374,12 +387,11 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 }
 
 func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
-	// When SCION_GROVE_ID env var and settings.project_id both exist in hub
+	// When a project id env var and settings.project_id both exist in hub
 	// context, the env var should take priority. This is important for
 	// template-sync agents that clone an external repo whose .scion/settings
 	// contains the source repo's project_id.
 
-	envProjectID := "env-project-id-target"
 	settingsProjectID := "settings-project-id-source"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -393,43 +405,68 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpHome := t.TempDir()
-	// Create a project directory with .scion that has a project_id in settings
-	projectDir := filepath.Join(tmpHome, "project")
-	scionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
-		t.Fatalf("Failed to create scion dir: %v", err)
+	tests := []struct {
+		name      string
+		projectID string
+		want      string
+	}{
+		{name: "env set, wins over settings", projectID: "env-project-id-target", want: "env-project-id-target"},
+		{name: "env unset, falls back to settings", projectID: "", want: settingsProjectID},
 	}
 
-	settingsContent := fmt.Sprintf("grove_id: %s\nruntime: docker\n", settingsProjectID)
-	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
-		t.Fatalf("Failed to write settings: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			// Create a project directory with .scion that has a project_id in settings
+			projectDir := filepath.Join(tmpHome, "project")
+			scionDir := filepath.Join(projectDir, ".scion")
+			if err := os.MkdirAll(scionDir, 0755); err != nil {
+				t.Fatalf("Failed to create scion dir: %v", err)
+			}
 
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", envProjectID)
-	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
-	t.Setenv("SCION_DEV_TOKEN", "")
+			settingsContent := fmt.Sprintf("project_id: %s\nruntime: docker\n", settingsProjectID)
+			if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+				t.Fatalf("Failed to write settings: %v", err)
+			}
+			// Also write .scion/project-id: the loader applies this file after
+			// the env provider, so it survives env overrides. Without it,
+			// settings.ProjectID equals the env value and the ordering below
+			// is untestable.
+			if err := os.WriteFile(filepath.Join(scionDir, "project-id"), []byte(settingsProjectID), 0644); err != nil {
+				t.Fatalf("Failed to write project-id: %v", err)
+			}
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(origDir) }()
+			t.Setenv("HOME", tmpHome)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			t.Setenv("SCION_HUB_URL", "")
+			// Unset (rather than set-to-empty) the var this test isn't
+			// exercising, for hygiene: the .scion/project-id fixture above is
+			// what actually makes settings.ProjectID resist the env var, so
+			// this isn't load-bearing for the precedence check itself, but
+			// leaving a var truly absent is clearer than leaving it empty.
+			setOrUnsetEnv(t, "SCION_PROJECT_ID", tt.projectID)
+			t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+			t.Setenv("SCION_DEV_TOKEN", "")
 
-	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
-		AutoConfirm: true,
-	})
-	if err != nil {
-		t.Fatalf("EnsureHubReady returned error: %v", err)
-	}
-	if hubCtx == nil {
-		t.Fatal("EnsureHubReady returned nil")
-	}
-	if hubCtx.ProjectID != envProjectID {
-		t.Errorf("ProjectID = %q, want %q (SCION_GROVE_ID should take priority over settings.project_id in hub context)", hubCtx.ProjectID, envProjectID)
+			origDir, _ := os.Getwd()
+			if err := os.Chdir(projectDir); err != nil {
+				t.Fatalf("Failed to chdir: %v", err)
+			}
+			defer func() { _ = os.Chdir(origDir) }()
+
+			hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
+				AutoConfirm: true,
+			})
+			if err != nil {
+				t.Fatalf("EnsureHubReady returned error: %v", err)
+			}
+			if hubCtx == nil {
+				t.Fatal("EnsureHubReady returned nil")
+			}
+			if hubCtx.ProjectID != tt.want {
+				t.Errorf("ProjectID = %q, want %q", hubCtx.ProjectID, tt.want)
+			}
+		})
 	}
 }
 
@@ -1160,7 +1197,7 @@ hub:
   endpoint: https://hub.example.com
   brokerId: stale-broker-id
   brokerToken: stale-broker-token
-  groveId: my-grove
+  projectId: my-project
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(legacyContent), 0644); err != nil {
 		t.Fatal(err)
@@ -1185,8 +1222,8 @@ hub:
 	if !strings.Contains(content, "endpoint") {
 		t.Error("hub.endpoint should be preserved")
 	}
-	if !strings.Contains(content, "groveId") {
-		t.Error("hub.groveId should be preserved")
+	if !strings.Contains(content, "projectId") {
+		t.Error("hub.projectId should be preserved")
 	}
 }
 
@@ -1198,7 +1235,7 @@ func TestCleanupProjectBrokerCredentials_V1(t *testing.T) {
 active_profile: local
 hub:
   endpoint: https://hub.example.com
-  grove_id: my-grove
+  project_id: my-project
 server:
   broker:
     broker_id: stale-broker-id
@@ -1248,7 +1285,7 @@ func TestCleanupProjectBrokerCredentials_V1_NoBrokerCreds(t *testing.T) {
 active_profile: local
 hub:
   endpoint: https://hub.example.com
-  grove_id: my-grove
+  project_id: my-project
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(v1Content), 0644); err != nil {
 		t.Fatal(err)
@@ -1301,9 +1338,12 @@ func TestCreateHubClient_UsesAgentTokenFromEnv(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindAgentToken {
+		t.Errorf("expected CredentialKindAgentToken, got %q", kind)
 	}
 
 	// Make a request to verify the agent token is used
@@ -1338,9 +1378,12 @@ func TestCreateHubClient_PrefersTokenFileOverEnv(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindAgentToken {
+		t.Errorf("expected CredentialKindAgentToken, got %q", kind)
 	}
 
 	_, err = client.Health(context.Background())
@@ -1384,9 +1427,12 @@ func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_abc123")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindAgentToken {
+		t.Errorf("expected CredentialKindAgentToken (the real per-agent token must win over the dev token present here), got %q", kind)
 	}
 
 	_, err = client.Health(context.Background())
@@ -1395,27 +1441,48 @@ func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
 	}
 }
 
+// TestCreateHubClient_PrefersOAuthOverAgentToken sets BOTH an OAuth
+// credential and an agent token and proves OAuth wins.
+// credentials.GetAccessToken reads its store from a file under HOME, so a
+// clean, test-local HOME plus credentials.Store makes OAuth directly
+// testable here.
 func TestCreateHubClient_PrefersOAuthOverAgentToken(t *testing.T) {
-	// When OAuth credentials exist, they should take precedence over SCION_AUTH_TOKEN.
-	// We can't easily test this because credentials.GetAccessToken uses a global store,
-	// but we can verify that without OAuth, SCION_AUTH_TOKEN is picked up.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Just verify the request arrives
+		if auth := r.Header.Get("Authorization"); auth != "Bearer oauth-access-token" {
+			t.Errorf("expected Authorization 'Bearer oauth-access-token', got %q", auth)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 
-	// Use a clean HOME so no token file interferes
+	// Clean HOME so no token file interferes, then store OAuth credentials
+	// for this exact server URL (GetAccessToken is keyed by hub URL).
 	t.Setenv("HOME", t.TempDir())
-	// With SCION_AUTH_TOKEN set but no OAuth, agent token should be used
-	t.Setenv("SCION_AUTH_TOKEN", "agent-jwt")
+	if err := credentials.Store(server.URL, &credentials.TokenResponse{
+		AccessToken: "oauth-access-token",
+		ExpiresIn:   time.Hour,
+	}); err != nil {
+		t.Fatalf("credentials.Store failed: %v", err)
+	}
+	// Also set an agent token, to prove OAuth is preferred over it.
+	t.Setenv("SCION_AUTH_TOKEN", "should-not-be-used")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
 	settings := &config.Settings{}
-	_, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindOAuth {
+		t.Errorf("expected CredentialKindOAuth, got %q", kind)
+	}
+
+	_, err = client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health check failed: %v", err)
 	}
 }
 
@@ -1434,14 +1501,53 @@ func TestCreateHubClient_FallsBackToDevAuth(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "dev-token-123")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindDevAuto {
+		t.Errorf("expected CredentialKindDevAuto, got %q", kind)
 	}
 
 	// Verify client was created (dev auth resolves the token)
 	if client == nil {
 		t.Fatal("expected non-nil client")
+	}
+}
+
+// TestCreateHubClient_UsesHubTokenFromEnv covers the SCION_HUB_TOKEN legacy
+// bearer-token branch — no prior test in this file exercised it at all.
+func TestCreateHubClient_UsesHubTokenFromEnv(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer legacy-hub-token" {
+			t.Errorf("expected Authorization 'Bearer legacy-hub-token', got %q", auth)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+
+	// Clean HOME so no token file or OAuth store interferes; no agent token
+	// either, so only the SCION_HUB_TOKEN branch can fire.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_AUTH_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN", "")
+	t.Setenv("SCION_HUB_TOKEN", "legacy-hub-token")
+
+	settings := &config.Settings{}
+	client, kind, err := createHubClient(settings, server.URL)
+	if err != nil {
+		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindHubToken {
+		t.Errorf("expected CredentialKindHubToken, got %q", kind)
+	}
+
+	_, err = client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health check failed: %v", err)
 	}
 }
 
@@ -2382,26 +2488,278 @@ func TestAddRemoveSyncedAgent(t *testing.T) {
 	}
 }
 
-func TestWrapHubError_SuppressesLocalHintForAgents(t *testing.T) {
+func TestWrapHubError_SuppressesHubCheckHintForAgents(t *testing.T) {
 	baseErr := errors.New("hub connection refused")
 
-	t.Run("standalone CLI includes local-only hint", func(t *testing.T) {
-		t.Setenv("SCION_AGENT_ID", "") // Ensure agent context is cleared.
-		got := wrapHubError(baseErr)
-		if !strings.Contains(got.Error(), "local-only mode") {
-			t.Errorf("expected local-only mode hint for standalone CLI, got: %s", got)
+	t.Run("standalone CLI includes the hub-check hint", func(t *testing.T) {
+		clearHubCredentialEnv(t)
+		got := wrapHubError("https://hub.example.com", baseErr)
+		if got.Error() != "hub connection refused\n\nCheck the hub with 'scion hub status'." {
+			t.Errorf("unexpected message for standalone CLI: %q", got)
+		}
+		if strings.Contains(got.Error(), "--no-hub") || strings.Contains(got.Error(), "local-only") {
+			t.Errorf("hint must not suggest local-only mode, got: %s", got)
 		}
 	})
 
-	t.Run("hub-managed agent omits local-only hint", func(t *testing.T) {
+	t.Run("hub-managed agent omits the hint", func(t *testing.T) {
+		clearHubCredentialEnv(t)
 		t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
-		got := wrapHubError(baseErr)
-		if strings.Contains(got.Error(), "local-only mode") {
-			t.Errorf("expected no local-only mode hint for hub-managed agent, got: %s", got)
+		got := wrapHubError("https://hub.example.com", baseErr)
+		if got.Error() != baseErr.Error() {
+			t.Errorf("expected the bare error for a hub-managed agent, got: %s", got)
 		}
 		// The original error should still be present.
 		if !errors.Is(got, baseErr) {
 			t.Errorf("expected wrapped error to contain base error")
 		}
 	})
+}
+
+func TestHubCheckHint(t *testing.T) {
+	const localHint = "Is the local server running? Check with 'scion server status'; start it with 'scion server start'."
+	const remoteHint = "Check the hub with 'scion hub status'."
+	tests := []struct {
+		name     string
+		endpoint string
+		devToken string
+		want     string
+	}{
+		{name: "local workstation endpoint", endpoint: "http://127.0.0.1:8080", devToken: "scion_dev_abc", want: localHint},
+		{name: "loopback without dev token", endpoint: "http://127.0.0.1:8080", want: remoteHint},
+		{name: "remote endpoint", endpoint: "https://hub.example.com", devToken: "scion_dev_abc", want: remoteHint},
+		{name: "no endpoint", endpoint: "", devToken: "scion_dev_abc", want: remoteHint},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearHubCredentialEnv(t)
+			t.Setenv("SCION_DEV_TOKEN", tc.devToken)
+			if got := HubCheckHint(tc.endpoint); got != tc.want {
+				t.Errorf("HubCheckHint(%q) = %q, want %q", tc.endpoint, got, tc.want)
+			}
+			want := "boom\n\n" + tc.want
+			if tc.endpoint == "" {
+				want = "boom" // no endpoint: no hint
+			}
+			got := wrapHubError(tc.endpoint, errors.New("boom"))
+			if got.Error() != want {
+				t.Errorf("wrapHubError(%q) = %q, want %q", tc.endpoint, got, want)
+			}
+		})
+	}
+}
+
+// setupGlobalHubProject points HOME at a temporary global project with the
+// given project ID, clears the hub and credential environment, and changes
+// into HOME. The settings name the endpoint too, which EnsureHubReady does
+// not read: callers pass it as EndpointOverride.
+func setupGlobalHubProject(t *testing.T, projectID, endpoint string) {
+	t.Helper()
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID", "SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE"} {
+		setOrUnsetEnv(t, e, "")
+	}
+	tmpHome := t.TempDir()
+	globalDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(globalDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsContent := fmt.Sprintf("project_id: %s\nhub:\n  enabled: true\n  endpoint: %s\n", projectID, endpoint)
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpHome)
+	t.Chdir(tmpHome)
+}
+
+// TestEnsureHubReady_ScopedTokenWithoutProjectRead covers a user access token
+// that lacks project:read: the hub answers the project lookup with 404. The
+// CLI must report the likely missing scope and must not list, link or
+// register projects (ptone/scion#3319).
+func TestEnsureHubReady_ScopedTokenWithoutProjectRead(t *testing.T) {
+	projectID := "11111111-2222-3333-4444-555555555555"
+	var projectGets, otherProjectCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+			projectGets++
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{"code": "not_found", "message": "project not found"},
+			})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects"):
+			// List (name matching) or register: neither may happen.
+			otherProjectCalls++
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	setupGlobalHubProject(t, projectID, server.URL)
+	t.Setenv("SCION_HUB_TOKEN", "scion_pat_testtoken")
+
+	// Auto-confirm on, as under --yes: the registration path would proceed
+	// without asking, so only the scoped-token check can stop it.
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, EndpointOverride: server.URL})
+	if !errors.Is(err, ErrScopedTokenProjectNotFound) {
+		t.Fatalf("error = %v, want ErrScopedTokenProjectNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "project:read") {
+		t.Errorf("error should name the project:read scope, got: %v", err)
+	}
+	if projectGets == 0 {
+		t.Error("expected the project lookup to reach the hub")
+	}
+	if otherProjectCalls != 0 {
+		t.Errorf("expected no list or register calls after the 404, got %d", otherProjectCalls)
+	}
+}
+
+// emptyProjectListHub serves a hub whose project list is always empty, as
+// the hub answers a user access token without project:list. It counts
+// project list calls.
+func emptyProjectListHub(t *testing.T, lists *int) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
+			*lists++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"projects": []interface{}{}, "totalCount": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// projectRefsMatchingNothing are the reference forms that resolve through
+// the project list: a slug or name, and a git URL.
+var projectRefsMatchingNothing = []struct{ name, ref, plain string }{
+	{"slug", "wo-c-git", "project 'wo-c-git' not found on hub"},
+	{"git URL", "https://github.com/x/y.git", "no project found for git URL 'https://github.com/x/y.git'"},
+}
+
+// TestEnsureHubReady_ScopedTokenProjectRefMatchesNothing covers a project
+// reference (a slug or a git URL) that the hub's project list does not
+// match under a user access token (ptone/scion#7068): the CLI names the
+// likely missing project:read and project:list scopes instead of only
+// reporting that the project was not found. The hub answers the same way
+// whether or not the project exists, and so does the message.
+func TestEnsureHubReady_ScopedTokenProjectRefMatchesNothing(t *testing.T) {
+	for _, tc := range projectRefsMatchingNothing {
+		t.Run(tc.name, func(t *testing.T) {
+			var lists int
+			server := emptyProjectListHub(t, &lists)
+			setupGlobalHubProject(t, "11111111-2222-3333-4444-555555555555", server.URL)
+			t.Setenv("SCION_HUB_TOKEN", "scion_pat_testtoken")
+
+			_, err := EnsureHubReady(tc.ref, EnsureHubReadyOptions{EndpointOverride: server.URL})
+			if !errors.Is(err, ErrScopedTokenProjectNotFound) {
+				t.Fatalf("error = %v, want ErrScopedTokenProjectNotFound", err)
+			}
+			for _, want := range []string{"'" + tc.ref + "'", "project:read", "project:list", "project:manage does not include them"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error should contain %q, got: %v", want, err)
+				}
+			}
+			if lists == 0 {
+				t.Error("expected the project list lookup to reach the hub")
+			}
+		})
+	}
+}
+
+// TestEnsureHubReady_SessionProjectRefMatchesNothing pins that a caller
+// without a user access token keeps the plain not-found error, for each
+// reference form.
+func TestEnsureHubReady_SessionProjectRefMatchesNothing(t *testing.T) {
+	for _, tc := range projectRefsMatchingNothing {
+		t.Run(tc.name, func(t *testing.T) {
+			var lists int
+			server := emptyProjectListHub(t, &lists)
+			setupGlobalHubProject(t, "11111111-2222-3333-4444-555555555555", server.URL)
+			t.Setenv("SCION_HUB_TOKEN", "")
+			t.Setenv("SCION_DEV_TOKEN", "test-dev-token")
+
+			_, err := EnsureHubReady(tc.ref, EnsureHubReadyOptions{EndpointOverride: server.URL})
+			var notFound *ProjectNotFoundError
+			if !errors.As(err, &notFound) {
+				t.Fatalf("error = %v, want *ProjectNotFoundError", err)
+			}
+			if err.Error() != tc.plain {
+				t.Errorf("error = %q, want %q", err.Error(), tc.plain)
+			}
+			if errors.Is(err, ErrScopedTokenProjectNotFound) || strings.Contains(err.Error(), "project:list") {
+				t.Errorf("a session caller must not get the scoped-token hint, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestEnsureHubReady_NonInteractiveAmbiguousProject covers the path commands
+// such as list and start take: an unregistered project with several
+// same-name matches on the Hub must error under --non-interactive instead
+// of linking the first, and must not register anything (ptone/scion#3320).
+func TestEnsureHubReady_NonInteractiveAmbiguousProject(t *testing.T) {
+	projectID := "11111111-2222-3333-4444-555555555555"
+	var registers int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"projects": []interface{}{
+					map[string]interface{}{"id": "hub-id-1", "name": "global", "slug": "global"},
+					map[string]interface{}{"id": "hub-id-2", "name": "global", "slug": "global-2"},
+				},
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/projects"):
+			registers++
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			// Includes GET /api/v1/projects/<id>: not registered.
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{"code": "not_found", "message": "not found"},
+			})
+		}
+	}))
+	defer server.Close()
+
+	setupGlobalHubProject(t, projectID, server.URL)
+	t.Setenv("SCION_DEV_TOKEN", "test-dev-token")
+
+	// --non-interactive implies --yes, so AutoConfirm is set as well.
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, NonInteractive: true, EndpointOverride: server.URL})
+	if !errors.Is(err, ErrAmbiguousProject) {
+		t.Fatalf("error = %v, want ErrAmbiguousProject", err)
+	}
+	if registers != 0 {
+		t.Errorf("expected no register call, got %d", registers)
+	}
+}
+
+// TestWrapHubError_Nil checks that a nil error stays nil, for every kind of
+// endpoint and inside a hub-managed agent.
+func TestWrapHubError_Nil(t *testing.T) {
+	clearHubCredentialEnv(t)
+	for _, ep := range []string{"", "https://hub.example.com", "http://127.0.0.1:8080"} {
+		if got := wrapHubError(ep, nil); got != nil {
+			t.Errorf("wrapHubError(%q, nil) = %v, want nil", ep, got)
+		}
+	}
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
+	if got := wrapHubError("https://hub.example.com", nil); got != nil {
+		t.Errorf("wrapHubError in a hub-managed agent = %v, want nil", got)
+	}
 }

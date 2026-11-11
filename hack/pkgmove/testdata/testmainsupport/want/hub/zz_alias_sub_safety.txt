@@ -1,0 +1,13 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 2. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: TestMain separation (generated a delegating TestMain) ==
+  hub/main_test.go:10: moved tests leave the TestMain of hub; the target gets a TestMain that calls example.com/fx/hubtest.RunTestMain - check that it does everything the source TestMain does
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:5: example.com/fx/hub.Home is now example.com/fx/hub/sub.Home for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces

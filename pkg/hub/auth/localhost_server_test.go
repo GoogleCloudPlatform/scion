@@ -17,7 +17,9 @@ package auth
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,6 +174,54 @@ func TestLocalhostAuthServer_ErrorResponse(t *testing.T) {
 	_, err = server.WaitForCode(ctx)
 	if err == nil {
 		t.Error("WaitForCode should have failed for error response")
+	}
+}
+
+func TestLocalhostAuthServer_ErrorPageEscapesDescription(t *testing.T) {
+	tests := []struct {
+		name    string
+		desc    string
+		want    string
+		notWant string
+	}{
+		{
+			name:    "html special characters",
+			desc:    `<b>"a" & 'b'</b>`,
+			want:    "<p>&lt;b&gt;&#34;a&#34; &amp; &#39;b&#39;&lt;/b&gt;</p>",
+			notWant: `<b>"a" & 'b'</b>`,
+		},
+		{
+			name: "ordinary description",
+			desc: "User denied access",
+			want: "<p>User denied access</p>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewLocalhostAuthServer()
+			server.state = "test-state"
+
+			q := url.Values{}
+			q.Set("state", "test-state")
+			q.Set("error", "access_denied")
+			q.Set("error_description", tt.desc)
+			req := httptest.NewRequest(http.MethodGet, CallbackPath+"?"+q.Encode(), nil)
+			rec := httptest.NewRecorder()
+
+			server.handleCallback(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, tt.want) {
+				t.Errorf("body does not contain %q:\n%s", tt.want, body)
+			}
+			if tt.notWant != "" && strings.Contains(body, tt.notWant) {
+				t.Errorf("body contains unescaped %q:\n%s", tt.notWant, body)
+			}
+		})
 	}
 }
 

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 // DEF-157 tests: PromoteDM must write a derived external_ref via
@@ -22,9 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -158,7 +160,7 @@ VALUES ('msg-rt-1', 'proj-rt', 'user:frank', 'user-rt', 'agent:helper', 'agent-r
 		projectID, topicID, resolvedConvID, convID)
 
 	// Confirm the topic also has the right conversation_id.
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	require.Equal(t, convID, topicConvID,
 		"promoted topic should carry the same conversation_id")
 }

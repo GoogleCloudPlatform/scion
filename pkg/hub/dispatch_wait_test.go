@@ -47,9 +47,15 @@ func (f *fakeDispatchStore) ClaimBrokerDispatch(_ context.Context, _, _ string) 
 func (f *fakeDispatchStore) CompleteBrokerDispatch(_ context.Context, _, _ string) error {
 	return nil
 }
-func (f *fakeDispatchStore) FailBrokerDispatch(_ context.Context, _, _ string) error { return nil }
+func (f *fakeDispatchStore) FailBrokerDispatch(_ context.Context, _, _, _ string) error { return nil }
 func (f *fakeDispatchStore) ListPendingDispatch(_ context.Context, _ string) ([]store.BrokerDispatch, error) {
 	return nil, nil
+}
+func (f *fakeDispatchStore) HasOutstandingBrokerDispatch(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+func (f *fakeDispatchStore) HasCompletedBrokerDispatchSince(_ context.Context, _, _ string, _ time.Time) (bool, error) {
+	return false, nil
 }
 func (f *fakeDispatchStore) MarkMessageDispatched(_ context.Context, _ string) (bool, error) {
 	return false, nil
@@ -63,11 +69,26 @@ func (f *fakeDispatchStore) ListPendingMessages(_ context.Context, _ string) ([]
 func (f *fakeDispatchStore) ReapStuckDispatch(_ context.Context, _ time.Time, _ int) (int, int, error) {
 	return 0, 0, nil
 }
+func (f *fakeDispatchStore) CountBrokerDispatchHealth(_ context.Context, _, _ time.Time) (int, int, error) {
+	return 0, 0, nil
+}
 func (f *fakeDispatchStore) CountStuckPendingMessages(_ context.Context, _ time.Time) (int, error) {
 	return 0, nil
 }
+func (f *fakeDispatchStore) ListStuckPendingMessageIDs(_ context.Context, _ time.Time, _ int) ([]string, error) {
+	return nil, nil
+}
 func (f *fakeDispatchStore) ExpireStuckPendingMessages(_ context.Context, _ time.Time, _ string) (int, error) {
 	return 0, nil
+}
+func (f *fakeDispatchStore) FailPendingMessagesWithMissingRecipient(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
+func (f *fakeDispatchStore) BackfillNonAgentDispatchState(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
+func (f *fakeDispatchStore) ExpireAndListStuckPendingMessages(_ context.Context, _ time.Time, _ string) ([]store.ExpiredPendingMessage, error) {
+	return nil, nil
 }
 
 // sendStatus pushes a fake AgentStatusEvent onto the channel.
@@ -82,132 +103,171 @@ func sendStatus(ch chan<- Event, phase, activity string, detail *AgentDetail) {
 	ch <- Event{Subject: "agent.agent-1.status", Data: data}
 }
 
-func TestWaitForAgentTransition_TerminalPhase(t *testing.T) {
-	ch := make(chan Event, 8)
-	unsub := func() {}
-	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
+// startTerminal and stopTerminal are the lifecycle terminal sets used by the
+// waitForLifecycleOutcome tests below.
+var (
+	startTerminal = func(p string) bool { return p == "running" || p == "error" }
+	stopTerminal  = func(p string) bool { return p == "stopped" || p == "error" }
+)
 
+// noRowStore is a dispatch store with no rows, so the lifecycle waiter never
+// sees a failed row.
+func noRowStore() *fakeDispatchStore {
+	return &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{}}
+}
+
+func TestWaitForLifecycleOutcome_SuccessPhase(t *testing.T) {
+	ch := make(chan Event, 8)
 	go func() {
 		sendStatus(ch, "starting", "pulling image", nil)
 		sendStatus(ch, "running", "", nil)
 	}()
 
-	phase, err := waitForAgentTransition(
-		context.Background(), ch, unsub,
-		func(p string) bool { return p == "running" || p == "error" },
-	)
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "start", startTerminal)
 	require.NoError(t, err)
-	assert.Equal(t, "running", phase)
 }
 
-func TestWaitForAgentTransition_ErrorPhase(t *testing.T) {
+func TestWaitForLifecycleOutcome_ErrorPhaseWithoutFailedRow(t *testing.T) {
+	setLifecycleTimings(t, 0, 0, 20*time.Millisecond)
 	ch := make(chan Event, 8)
-	unsub := func() {}
-	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
-
 	go func() {
 		sendStatus(ch, "starting", "", nil)
 		sendStatus(ch, "error", "", nil)
 	}()
 
-	phase, err := waitForAgentTransition(
-		context.Background(), ch, unsub,
-		func(p string) bool { return p == "running" || p == "error" },
-	)
-	require.NoError(t, err)
-	assert.Equal(t, "error", phase)
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "start", startTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered error phase during start")
 }
 
-func TestWaitForAgentTransition_RollingReset(t *testing.T) {
-	// Interim detail updates keep the wait alive past one window.
-	// We use a very short timeout override for testing speed.
-	ch := make(chan Event, 64)
-	unsub := func() {}
-	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
+// A halted agent (the platform ended the run) fails a start or stop wait
+// like the error phase, with its own message (ptone/scion#4853).
+func TestWaitForLifecycleOutcome_HaltedPhaseFailsStart(t *testing.T) {
+	setLifecycleTimings(t, 0, 0, 20*time.Millisecond)
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "starting", "", nil)
+		sendStatus(ch, "halted", "", nil)
+	}()
 
-	// Override the timeout by wrapping: we cannot easily override the
-	// const, but we can send events faster than the 90s default and
-	// confirm the terminal is reached. The real test is that interim
-	// events don't cause early return. Send 5 interim events, then terminal.
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "start", isStartTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered halted phase during start")
+}
+
+func TestWaitForLifecycleOutcome_HaltedPhaseFailsStop(t *testing.T) {
+	setLifecycleTimings(t, 0, 0, 20*time.Millisecond)
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "halted", "", nil)
+	}()
+
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "stop", isStopTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered halted phase during stop")
+}
+
+func TestWaitForLifecycleOutcome_HaltedPhaseWithFinishedRow(t *testing.T) {
+	// The dispatch row has already finished: the halted phase is the
+	// outcome at once, with no grace wait, as for the error phase.
+	// A long grace and a short context: an outcome that fell back to the
+	// grace wait would fail on the context instead of passing slowly.
+	setLifecycleTimings(t, 0, 0, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ds := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{
+		"d-1": {ID: "d-1", State: store.DispatchStateDone},
+	}}
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "halted", "", nil)
+	}()
+
+	err := waitForLifecycleOutcome(ctx, ch, func() {}, ds, "d-1", "start", isStartTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered halted phase during start")
+}
+
+func TestWaitForLifecycleOutcome_HaltedPhaseWithFailedRow(t *testing.T) {
+	// The executor failed the dispatch row: the row's own failure wins over
+	// the halted phase, as for the error phase.
+	// A long grace and a short context: an outcome that fell back to the
+	// grace wait would fail on the context instead of passing slowly.
+	setLifecycleTimings(t, 0, 0, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ds := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{
+		"d-1": {ID: "d-1", State: store.DispatchStateFailed, Error: "broker refused the start"},
+	}}
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "halted", "", nil)
+	}()
+
+	err := waitForLifecycleOutcome(ctx, ch, func() {}, ds, "d-1", "start", isStartTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "broker refused the start")
+	assert.NotContains(t, err.Error(), "halted phase")
+}
+
+func TestWaitForLifecycleOutcome_RollingReset(t *testing.T) {
+	// Interim status events keep the wait alive past one rolling window.
+	setLifecycleTimings(t, 50*time.Millisecond, 0, 0)
+	ch := make(chan Event, 64)
 	go func() {
 		for i := 0; i < 5; i++ {
 			sendStatus(ch, "starting", "step", &AgentDetail{Message: "progress"})
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		}
 		sendStatus(ch, "running", "", nil)
 	}()
 
-	phase, err := waitForAgentTransition(
-		context.Background(), ch, unsub,
-		func(p string) bool { return p == "running" || p == "error" },
-	)
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "start", startTerminal)
 	require.NoError(t, err)
-	assert.Equal(t, "running", phase)
 }
 
-func TestWaitForAgentTransition_SilenceExpiry(t *testing.T) {
-	// Override the rolling timeout to something very short so the test
-	// completes quickly. We can't mutate the const, so instead we close
-	// the channel which produces a zero Event -> ErrDispatchFailed via
-	// the ok=false branch.
+func TestWaitForLifecycleOutcome_SilenceExpiry(t *testing.T) {
+	setLifecycleTimings(t, 20*time.Millisecond, 0, 0)
 	ch := make(chan Event, 4)
-	unsub := func() {}
-	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
-	// Close immediately: simulates silence (no events).
-	close(ch)
-
-	_, err := waitForAgentTransition(
-		context.Background(), ch, unsub,
-		func(p string) bool { return p == "running" },
-	)
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "start", startTerminal)
 	assert.ErrorIs(t, err, ErrDispatchFailed)
 }
 
-func TestWaitForAgentTransition_ContextCancel(t *testing.T) {
+func TestWaitForLifecycleOutcome_ClosedChannel(t *testing.T) {
 	ch := make(chan Event, 4)
-	unsub := func() {}
-	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
+	close(ch)
 
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "start", startTerminal)
+	assert.ErrorIs(t, err, ErrDispatchFailed)
+}
+
+func TestWaitForLifecycleOutcome_ContextCancel(t *testing.T) {
+	ch := make(chan Event, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := waitForAgentTransition(
-		ctx, ch, unsub,
-		func(p string) bool { return p == "running" },
-	)
+	err := waitForLifecycleOutcome(ctx, ch, func() {}, noRowStore(), "d-1", "start", startTerminal)
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
-func TestWaitForAgentTransition_UnsubCalled(t *testing.T) {
+func TestWaitForLifecycleOutcome_UnsubCalled(t *testing.T) {
 	ch := make(chan Event, 4)
 	var unsubCalled bool
-	unsub := func() { unsubCalled = true }
-	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
-
 	close(ch)
-	_, _ = waitForAgentTransition(
-		context.Background(), ch, unsub,
-		func(p string) bool { return p == "running" },
-	)
+
+	_ = waitForLifecycleOutcome(context.Background(), ch, func() { unsubCalled = true }, noRowStore(), "d-1", "start", startTerminal)
 	assert.True(t, unsubCalled, "unsub must be called on return")
 }
 
-func TestWaitForAgentTransition_StopTerminal(t *testing.T) {
+func TestWaitForLifecycleOutcome_StopSuccessPhase(t *testing.T) {
 	ch := make(chan Event, 4)
-	unsub := func() {}
-	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
-
 	go func() {
 		sendStatus(ch, "stopped", "", nil)
 	}()
 
-	phase, err := waitForAgentTransition(
-		context.Background(), ch, unsub,
-		func(p string) bool { return p == "stopped" || p == "error" },
-	)
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "stop", stopTerminal)
 	require.NoError(t, err)
-	assert.Equal(t, "stopped", phase)
 }
 
 // =========================================================================
@@ -315,4 +375,55 @@ func TestWaitForDispatchDone_TimeoutReread(t *testing.T) {
 	close(ch)
 	_, _ = waitForDispatchDone(context.Background(), ch, unsub, fs, dispatchID)
 	assert.True(t, unsubCalled, "unsub must be called on return")
+}
+
+// cancelOnReadStore is a dispatch store whose row read ends the caller's ctx
+// and fails with its error, as a store read does when ctx is cancelled
+// while it runs.
+type cancelOnReadStore struct {
+	*fakeDispatchStore
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnReadStore) GetBrokerDispatch(ctx context.Context, _ string) (*store.BrokerDispatch, error) {
+	c.cancel()
+	return nil, ctx.Err()
+}
+
+// A row read that fails because ctx ended returns ctx.Err(), not the
+// timeout or error-phase error, whichever case made the read.
+func TestWaitForLifecycleOutcome_RowReadCtxErrorReturnsCtxErr(t *testing.T) {
+	t.Run("closed channel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &cancelOnReadStore{fakeDispatchStore: noRowStore(), cancel: cancel}
+		ch := make(chan Event)
+		close(ch)
+
+		err := waitForLifecycleOutcome(ctx, ch, func() {}, st, "d-1", "start", startTerminal)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, ErrDispatchFailed)
+	})
+
+	t.Run("error phase", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &cancelOnReadStore{fakeDispatchStore: noRowStore(), cancel: cancel}
+		ch := make(chan Event, 1)
+		sendStatus(ch, "error", "", nil)
+
+		err := waitForLifecycleOutcome(ctx, ch, func() {}, st, "d-1", "start", startTerminal)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("rolling window expiry", func(t *testing.T) {
+		setLifecycleTimings(t, 20*time.Millisecond, time.Hour, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &cancelOnReadStore{fakeDispatchStore: noRowStore(), cancel: cancel}
+
+		err := waitForLifecycleOutcome(ctx, make(chan Event), func() {}, st, "d-1", "start", startTerminal)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, ErrDispatchFailed)
+	})
 }

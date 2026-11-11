@@ -72,7 +72,7 @@ func (s *hubPreStartHookService) List(ctx context.Context) (*ListProjectPreStart
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListProjectPreStartHooksResponse](resp)
+	return apiclient.DecodeRequired[ListProjectPreStartHooksResponse](resp)
 }
 
 func (s *hubPreStartHookService) Get(ctx context.Context, hookID string) (*store.ProjectPreStartHook, error) {
@@ -80,7 +80,7 @@ func (s *hubPreStartHookService) Get(ctx context.Context, hookID string) (*store
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.ProjectPreStartHook](resp)
+	return apiclient.DecodeRequired[store.ProjectPreStartHook](resp)
 }
 
 func (s *hubPreStartHookService) Create(ctx context.Context, req *CreateProjectPreStartHookRequest) (*store.ProjectPreStartHook, error) {
@@ -88,7 +88,7 @@ func (s *hubPreStartHookService) Create(ctx context.Context, req *CreateProjectP
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.ProjectPreStartHook](resp)
+	return apiclient.DecodeRequired[store.ProjectPreStartHook](resp)
 }
 
 func (s *hubPreStartHookService) Update(ctx context.Context, hookID string, req *UpdateProjectPreStartHookRequest) (*store.ProjectPreStartHook, error) {
@@ -96,7 +96,7 @@ func (s *hubPreStartHookService) Update(ctx context.Context, hookID string, req 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.ProjectPreStartHook](resp)
+	return apiclient.DecodeRequired[store.ProjectPreStartHook](resp)
 }
 
 func (s *hubPreStartHookService) Activate(ctx context.Context, hookID string) (*store.ProjectPreStartHook, error) {
@@ -104,7 +104,7 @@ func (s *hubPreStartHookService) Activate(ctx context.Context, hookID string) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.ProjectPreStartHook](resp)
+	return apiclient.DecodeRequired[store.ProjectPreStartHook](resp)
 }
 
 func (s *hubPreStartHookService) Delete(ctx context.Context, hookID string) error {

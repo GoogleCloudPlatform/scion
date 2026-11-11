@@ -23,64 +23,63 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func TestExtractOwnerRepo(t *testing.T) {
+func TestGitHubOwnerRepo(t *testing.T) {
+	githubCom := &Server{}
+	ghes := &Server{}
+	ghes.config.GitHubAppConfig.APIBaseURL = "https://github.example.com/api/v3"
+
 	tests := []struct {
 		name     string
+		srv      *Server
 		remote   string
 		expected string
 	}{
-		{"https github", "https://github.com/acme/widgets.git", "acme/widgets"},
-		{"https github no .git", "https://github.com/acme/widgets", "acme/widgets"},
-		{"https github trailing slash", "https://github.com/acme/widgets/", "acme/widgets"},
-		{"ssh github", "git@github.com:acme/widgets.git", "acme/widgets"},
-		{"ssh github no .git", "git@github.com:acme/widgets", "acme/widgets"},
-		{"http github", "http://github.com/acme/widgets.git", "acme/widgets"},
-		{"github enterprise https", "https://github.example.com/org/repo.git", "org/repo"},
-		{"ssh with slash prefix", "git@github.com:/acme/widgets.git", "acme/widgets"},
-		{"empty", "", ""},
-		{"just hostname", "github.com", ""},
-		{"no repo", "https://github.com/acme", ""},
-		{"too many parts", "https://github.com/a/b/c", ""},
+		{"https github", githubCom, "https://github.com/acme/widgets.git", "acme/widgets"},
+		{"https github no .git", githubCom, "https://github.com/acme/widgets", "acme/widgets"},
+		{"https github trailing slash", githubCom, "https://github.com/acme/widgets/", "acme/widgets"},
+		{"ssh github", githubCom, "git@github.com:acme/widgets.git", "acme/widgets"},
+		{"ssh github no .git", githubCom, "git@github.com:acme/widgets", "acme/widgets"},
+		{"http github", githubCom, "http://github.com/acme/widgets.git", "acme/widgets"},
+		{"case preserved", githubCom, "https://GitHub.com/Acme/Widgets.git", "Acme/Widgets"},
+		{"github enterprise https", ghes, "https://github.example.com/org/repo.git", "org/repo"},
+		{"github enterprise ssh with port", ghes, "ssh://git@github.example.com:2222/org/repo.git", "org/repo"},
+		{"ssh with port, other hostname", ghes, "ssh://git@gitlab.example.com:2222/org/repo.git", ""},
+		{"ssh userinfo names the GHES host", ghes, "ssh://git@github.example.com@other.example/org/repo.git", ""},
+		{"scp-form userinfo names the GHES host", ghes, "git@github.example.com@other.example:org/repo.git", ""},
+		{"scp-form path is not owner/repo", ghes, "git@github.example.com:other", ""},
+		{"https with a non-default port", ghes, "https://github.example.com:8443/org/repo.git", ""},
+		{"empty", githubCom, "", ""},
+		{"just hostname", githubCom, "github.com", ""},
+		{"no repo", githubCom, "https://github.com/acme", ""},
+		{"too many parts", githubCom, "https://github.com/a/b/c", ""},
+
+		// Host match: only the configured GitHub host.
+		{"other host", githubCom, "https://gitlab.com/acme/widgets.git", ""},
+		{"other host ssh", githubCom, "git@gitlab.com:acme/widgets.git", ""},
+		{"lookalike host", githubCom, "https://github.com.other.example/acme/widgets", ""},
+		{"port is a different host", githubCom, "https://github.com:8443/acme/widgets", ""},
+		{"userinfo before another host", githubCom, "https://github.com@other.example/acme/widgets", ""},
+		{"github.com when GHES is configured", ghes, "https://github.com/acme/widgets.git", ""},
+		{"GHES host when github.com is configured", githubCom, "https://github.example.com/org/repo.git", ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := extractOwnerRepo(tc.remote)
+			result := tc.srv.githubOwnerRepo(tc.remote)
 			if result != tc.expected {
-				t.Errorf("extractOwnerRepo(%q) = %q, want %q", tc.remote, result, tc.expected)
-			}
-		})
-	}
-}
-
-func TestIsValidOwnerRepo(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected bool
-	}{
-		{"acme/widgets", true},
-		{"a/b", true},
-		{"", false},
-		{"acme", false},
-		{"/repo", false},
-		{"owner/", false},
-		{"a/b/c", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result := isValidOwnerRepo(tc.input)
-			if result != tc.expected {
-				t.Errorf("isValidOwnerRepo(%q) = %v, want %v", tc.input, result, tc.expected)
+				t.Errorf("githubOwnerRepo(%q) = %q, want %q", tc.remote, result, tc.expected)
 			}
 		})
 	}
@@ -91,18 +90,6 @@ func signWebhookPayload(payload []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)
 	return fmt.Sprintf("sha256=%x", mac.Sum(nil))
-}
-
-// webhookTestServer creates a test server with the webhook secret configured.
-func webhookTestServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.mu.Lock()
-	srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
-	srv.config.GitHubAppConfig.WebhooksEnabled = true
-	srv.config.GitHubAppConfig.AppID = 42
-	srv.mu.Unlock()
-	return srv, s
 }
 
 func TestHandleGitHubWebhook_Ping(t *testing.T) {
@@ -130,6 +117,170 @@ func TestHandleGitHubWebhook_Ping(t *testing.T) {
 	}
 }
 
+func TestHandleGitHubWebhook_NoSecretConfigured_UnsignedRejected(t *testing.T) {
+	// The capture must run before testServer: testServer's New() call binds
+	// the Server's subsystem loggers (logging.Subsystem) to whatever
+	// slog.Default() is at that moment, and that binding does not follow a
+	// later slog.SetDefault swap. Capturing afterward could leave the
+	// "secret lookup failed" check below unable to observe a log line
+	// written through a subsystem logger, making the absence check vacuous.
+	//
+	// A "not configured" secret lookup (store.ErrNotFound) must not be treated
+	// as a backend error: only the once-per-process "not configured" WARN
+	// should fire, not the per-request "secret lookup failed" WARN.
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Positive control: New() unconditionally logs an Info line during
+	// construction, so the capture must have observed something. This
+	// guards against a misrouted capture making the absence check below
+	// pass vacuously.
+	requireLogCaptureLive(t, &logBuf, serverConstructionLogLine)
+
+	payload := mustJSON(t, map[string]interface{}{
+		"action": "created",
+		"installation": map[string]interface{}{
+			"id":     987654321,
+			"app_id": 42,
+			"account": map[string]interface{}{
+				"login": "example-org",
+				"type":  "Organization",
+			},
+			"repository_selection": "all",
+		},
+		"repositories": []map[string]interface{}{
+			{"id": 1, "full_name": "example-org/example-repo", "name": "example-repo"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "installation")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-no-secret-1")
+	req.Header.Set("Content-Type", "application/json")
+	// Deliberately no Authorization header and no X-Hub-Signature-256 header.
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetGitHubInstallation(ctx, 987654321); err == nil {
+		t.Fatal("expected no installation row to be created when no webhook secret is configured")
+	}
+
+	if strings.Contains(logBuf.String(), "secret lookup failed") {
+		t.Errorf("expected no \"secret lookup failed\" WARN for a not-configured secret, got log: %s", logBuf.String())
+	}
+}
+
+func TestHandleGitHubWebhook_NoSecretConfigured_BogusSignatureRejected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	payload := mustJSON(t, map[string]interface{}{
+		"action": "created",
+		"installation": map[string]interface{}{
+			"id":     987654322,
+			"app_id": 42,
+			"account": map[string]interface{}{
+				"login": "example-org",
+				"type":  "Organization",
+			},
+			"repository_selection": "all",
+		},
+		"repositories": []map[string]interface{}{
+			{"id": 1, "full_name": "example-org/example-repo", "name": "example-repo"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "installation")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-no-secret-2")
+	req.Header.Set("X-Hub-Signature-256", "sha256=deadbeef")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetGitHubInstallation(ctx, 987654322); err == nil {
+		t.Fatal("expected no installation row to be created when no webhook secret is configured")
+	}
+}
+
+func TestHandleGitHubWebhook_NoSecretConfigured_PingRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	payload := []byte(`{"zen":"Practicality beats purity."}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-no-secret-3")
+	// No signature header at all — even ping must not be let through.
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleGitHubWebhook_SecretConfigured_ValidSignatureStillProcessed guards
+// against regressing the existing behavior: when a secret IS configured and
+// the signature is valid, the request must still be processed normally.
+func TestHandleGitHubWebhook_SecretConfigured_ValidSignatureStillProcessed(t *testing.T) {
+	srv, _ := webhookTestServer(t)
+
+	payload := []byte(`{"zen":"Practicality beats purity."}`)
+	sig := signWebhookPayload(payload, "test-webhook-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "test-delivery-valid-sig")
+	req.Header.Set("X-Hub-Signature-256", sig)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["status"] != "pong" {
+		t.Errorf("expected pong, got %s", resp["status"])
+	}
+}
+
+// TestHandleGitHubWebhook_SecretConfigured_WrongSignatureRejected guards
+// against regressing the existing behavior: when a secret IS configured, a
+// wrong signature must still be rejected with 401.
+func TestHandleGitHubWebhook_SecretConfigured_WrongSignatureRejected(t *testing.T) {
+	srv, _ := webhookTestServer(t)
+
+	payload := []byte(`{"action":"created"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "installation")
+	req.Header.Set("X-Hub-Signature-256", "sha256=badsignature")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleGitHubWebhook_InvalidSignature(t *testing.T) {
 	srv, _ := webhookTestServer(t)
 
@@ -150,12 +301,20 @@ func TestHandleGitHubWebhook_InstallationCreated(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
+	// The project's creator proves access to the repository with their own
+	// GitHub token; a repo-name match alone does not associate.
+	giveUserGitHubToken(t, srv, s, "creator-1", "ghp_creator_1")
+	fakeCreatorAccess(srv, map[string]githubapp.RepoAccess{
+		"ghp_creator_1|acme/widgets": {Push: true, Pull: true},
+	})
+
 	// Create a project with a matching git remote
 	project := &store.Project{
 		ID:        tid("project-1"),
 		Name:      "Test Project",
 		Slug:      "test-project",
 		GitRemote: "https://github.com/acme/widgets.git",
+		CreatedBy: "creator-1",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
@@ -388,11 +547,19 @@ func TestMatchProjectsToInstallation(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
+	// The creator proves access to every repository with their own token.
+	giveUserGitHubToken(t, srv, s, "creator-g", "ghp_creator_g")
+	fakeCreatorAccess(srv, map[string]githubapp.RepoAccess{
+		"ghp_creator_g|acme/widgets": {Push: true, Pull: true},
+		"ghp_creator_g|acme/api":     {Push: true, Pull: true},
+		"ghp_creator_g|other/repo":   {Push: true, Pull: true},
+	})
+
 	// Create projects with different git remotes
 	projects := []*store.Project{
-		{ID: tid("g1"), Name: "G1", Slug: tid("g1"), GitRemote: "https://github.com/acme/widgets.git", Created: time.Now(), Updated: time.Now()},
-		{ID: tid("g2"), Name: "G2", Slug: tid("g2"), GitRemote: "https://github.com/acme/api.git", Created: time.Now(), Updated: time.Now()},
-		{ID: tid("g3"), Name: "G3", Slug: tid("g3"), GitRemote: "https://github.com/other/repo.git", Created: time.Now(), Updated: time.Now()},
+		{ID: tid("g1"), Name: "G1", Slug: tid("g1"), GitRemote: "https://github.com/acme/widgets.git", CreatedBy: "creator-g", Created: time.Now(), Updated: time.Now()},
+		{ID: tid("g2"), Name: "G2", Slug: tid("g2"), GitRemote: "https://github.com/acme/api.git", CreatedBy: "creator-g", Created: time.Now(), Updated: time.Now()},
+		{ID: tid("g3"), Name: "G3", Slug: tid("g3"), GitRemote: "https://github.com/other/repo.git", CreatedBy: "creator-g", Created: time.Now(), Updated: time.Now()},
 		{ID: tid("g4"), Name: "G4", Slug: tid("g4"), Created: time.Now(), Updated: time.Now()}, // No git remote
 	}
 
@@ -406,6 +573,7 @@ func TestMatchProjectsToInstallation(t *testing.T) {
 		InstallationID: 12345,
 		AccountLogin:   "acme",
 		Repositories:   []string{"acme/widgets", "acme/api"},
+		Status:         store.GitHubInstallationStatusActive,
 	}
 	if err := s.CreateGitHubInstallation(ctx, installation); err != nil {
 		t.Fatalf("failed to create installation: %v", err)
@@ -717,11 +885,17 @@ func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 	recorder := &recordingEventPublisher{}
 	srv.events = recorder
 
+	giveUserGitHubToken(t, srv, s, "creator-3", "ghp_creator_3")
+	fakeCreatorAccess(srv, map[string]githubapp.RepoAccess{
+		"ghp_creator_3|acme/widgets": {Push: true, Pull: true},
+	})
+
 	// Create a project with a matching git remote but no installation yet
 	project := &store.Project{
 		ID:        tid("project-event-3"),
 		Name:      "Event Test Project 3",
 		Slug:      "event-test-project-3",
+		CreatedBy: "creator-3",
 		GitRemote: "https://github.com/acme/widgets.git",
 		Created:   time.Now(),
 		Updated:   time.Now(),
@@ -768,13 +942,4 @@ func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 	if updates[0].GitHubInstallationID == nil || *updates[0].GitHubInstallationID != 12345 {
 		t.Error("expected project to be associated with installation 12345")
 	}
-}
-
-func mustJSON(t *testing.T, v interface{}) []byte {
-	t.Helper()
-	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("failed to marshal JSON: %v", err)
-	}
-	return data
 }

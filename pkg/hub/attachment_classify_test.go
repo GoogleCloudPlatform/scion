@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -538,7 +539,7 @@ func TestAttachmentUpload_FailureMessageIsASingleReason(t *testing.T) {
 		{uploadFile{name: "diagram.svg", mime: "image/svg+xml", content: "<svg/>"},
 			"files with a .svg extension are not accepted"},
 		{uploadFile{name: "bad.exe", mime: "application/octet-stream", content: "MZ binary"},
-			"dangerous file extension: .exe"},
+			"files with a .exe extension are not accepted"},
 		{uploadFile{name: "..", mime: "text/plain", content: "hi"},
 			"invalid filename"},
 	}
@@ -623,12 +624,19 @@ func TestAttachmentDownload_SetsNosniffAndDisposition(t *testing.T) {
 		if h := got.Header().Get("X-Content-Type-Options"); h != "nosniff" {
 			t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", att.Name, h)
 		}
+		if h := got.Header().Get("Content-Security-Policy"); h != untrustedContentSandboxCSP {
+			t.Errorf("%s: Content-Security-Policy = %q, want %q", att.Name, h, untrustedContentSandboxCSP)
+		}
+		if h := got.Header().Get("Permissions-Policy"); h != untrustedContentPermissionsPolicy {
+			t.Errorf("%s: Permissions-Policy = %q, want %q", att.Name, h, untrustedContentPermissionsPolicy)
+		}
 		if h := got.Header().Get("Content-Type"); h != expected.mime {
 			t.Errorf("%s: Content-Type = %q, want %q", att.Name, h, expected.mime)
 		}
-		wantCD := expected.disposition + `; filename="` + att.Name + `"`
-		if h := got.Header().Get("Content-Disposition"); h != wantCD {
-			t.Errorf("%s: Content-Disposition = %q, want %q", att.Name, h, wantCD)
+		cd := got.Header().Get("Content-Disposition")
+		disp, params, err := mime.ParseMediaType(cd)
+		if err != nil || disp != expected.disposition || params["filename"] != att.Name {
+			t.Errorf("%s: Content-Disposition = %q, want %s with filename %q", att.Name, cd, expected.disposition, att.Name)
 		}
 	}
 }
@@ -711,5 +719,145 @@ func TestAttachmentUpload_MetadataFailureLeavesNoOrphanBlob(t *testing.T) {
 		if name == "boom.log" {
 			t.Errorf("boom.log is still on disk with no row to reach it")
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Batch status under internal failures (ptone/scion#1123)
+// ---------------------------------------------------------------------------
+
+// The per-file loop decides the batch's status from every file's outcome:
+// 201 if anything was stored, otherwise 500 if any failure was ours and 400
+// if every failure was the caller's. The 500 branch is part of the documented
+// API contract, and the orphan-blob cleanup runs on the same path, so both are
+// pinned together here under an injected metadata-write failure.
+func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
+	logFile := func(name string) uploadFile {
+		return uploadFile{name: name, mime: "application/octet-stream", content: name + "\n"}
+	}
+	rejected := uploadFile{name: "bad.exe", mime: "application/octet-stream", content: "MZ binary"}
+
+	tenFiles := func() []uploadFile {
+		files := make([]uploadFile, 0, MaxAttachmentsPerMessage)
+		for i := 0; i < MaxAttachmentsPerMessage; i++ {
+			files = append(files, logFile(fmt.Sprintf("file-%02d.log", i)))
+		}
+		return files
+	}
+	allTen := map[string]bool{}
+	allTenFailed := map[string]string{}
+	for _, f := range tenFiles() {
+		allTen[f.name] = true
+		allTenFailed[f.name] = "upload failed"
+	}
+
+	cases := []struct {
+		name         string
+		files        []uploadFile
+		failNames    map[string]bool
+		wantStatus   int
+		wantStored   int
+		wantFailures map[string]string // filename -> failure text
+	}{
+		{
+			name:       "internal failure on the first of ten keeps the other nine",
+			files:      tenFiles(),
+			failNames:  map[string]bool{"file-00.log": true},
+			wantStatus: http.StatusCreated,
+			wantStored: MaxAttachmentsPerMessage - 1,
+			wantFailures: map[string]string{
+				"file-00.log": "upload failed",
+			},
+		},
+		{
+			name:         "internal failure on every file is a 500",
+			files:        tenFiles(),
+			failNames:    allTen,
+			wantStatus:   http.StatusInternalServerError,
+			wantStored:   0,
+			wantFailures: allTenFailed,
+		},
+		{
+			name:       "internal failure beats a later caller rejection when nothing is stored",
+			files:      []uploadFile{logFile("boom.log"), rejected},
+			failNames:  map[string]bool{"boom.log": true},
+			wantStatus: http.StatusInternalServerError,
+			wantStored: 0,
+			wantFailures: map[string]string{
+				"boom.log": "upload failed",
+				"bad.exe":  "files with a .exe extension are not accepted",
+			},
+		},
+		{
+			name:       "internal failure beats an earlier caller rejection when nothing is stored",
+			files:      []uploadFile{rejected, logFile("boom.log")},
+			failNames:  map[string]bool{"boom.log": true},
+			wantStatus: http.StatusInternalServerError,
+			wantStored: 0,
+			wantFailures: map[string]string{
+				"bad.exe":  "files with a .exe extension are not accepted",
+				"boom.log": "upload failed",
+			},
+		},
+		{
+			name:       "caller rejections alone are a 400",
+			files:      []uploadFile{rejected},
+			failNames:  nil,
+			wantStatus: http.StatusBadRequest,
+			wantStored: 0,
+			wantFailures: map[string]string{
+				"bad.exe": "files with a .exe extension are not accepted",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := attachmentTestServer(t)
+
+			dir := t.TempDir()
+			as, err := NewLocalDiskAttachmentStore(dir)
+			if err != nil {
+				t.Fatalf("NewLocalDiskAttachmentStore: %v", err)
+			}
+			srv.SetAttachmentStore(as)
+			srv.SetWebChatStore(createAttachmentFailingStore{
+				WebChatStore: srv.webChatStore,
+				failNames:    tc.failNames,
+			})
+
+			rec := uploadAttachments(t, srv, tc.files)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			resp := decodeUploadResponse(t, rec)
+			if len(resp.Attachments) != tc.wantStored {
+				t.Fatalf("stored %d files, want %d: %s", len(resp.Attachments), tc.wantStored, rec.Body.String())
+			}
+			if len(resp.Failures) != len(tc.wantFailures) {
+				t.Fatalf("failures = %+v, want %d entries", resp.Failures, len(tc.wantFailures))
+			}
+			for _, f := range resp.Failures {
+				want, ok := tc.wantFailures[f.Name]
+				if !ok {
+					t.Errorf("unexpected failure entry for %q: %q", f.Name, f.Error)
+					continue
+				}
+				if f.Error != want {
+					t.Errorf("%s: failure text = %q, want %q", f.Name, f.Error, want)
+				}
+			}
+
+			// Every blob on disk must belong to a stored attachment: a file
+			// whose metadata write failed must not survive the request.
+			blobs := countStoredBlobs(t, dir)
+			if len(blobs) != tc.wantStored {
+				t.Fatalf("on disk: %v, want exactly the %d files that got a row", blobs, tc.wantStored)
+			}
+			for _, name := range blobs {
+				if tc.failNames[name] {
+					t.Errorf("%s is still on disk with no row to reach it", name)
+				}
+			}
+		})
 	}
 }

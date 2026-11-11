@@ -1,0 +1,15 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 4. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: exported method (may newly satisfy interfaces) ==
+  hub/move.go:20: apiClient.apiKey -> APIKey: check dynamic interface assertions that could now match; types in other packages that embed apiClient are not checked for shadowing or newly promoted methods
+  hub/stay.go:7: keyer.apiKey -> APIKey: check dynamic interface assertions that could now match; types in other packages that embed keyer are not checked for shadowing or newly promoted methods
+  hub/stay.go:13: envKeyer.apiKey -> APIKey: check dynamic interface assertions that could now match; types in other packages that embed envKeyer are not checked for shadowing or newly promoted methods
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:17: hub.apiClient becomes sub.APIClient for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

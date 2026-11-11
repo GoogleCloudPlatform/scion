@@ -1,0 +1,15 @@
+# Operator notes: keep this header.
+schema_version: "1"
+# Hub connections, newest first.
+hub_connections:
+  hub-prod:
+    endpoint: https://prod.example.com
+zz_unknown_key: kept # not a known key
+default_harness_config: claude
+active_profile: local
+server:
+  broker:
+    broker_id: b-1 # registered
+    hub_endpoint: https://hub.example.com
+  hub:
+    port: 9999

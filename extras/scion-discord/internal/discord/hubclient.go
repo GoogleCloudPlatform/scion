@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // httpHubClient implements HubClient using HTTP calls to the Hub API.
@@ -64,93 +65,18 @@ type hubAgent struct {
 	Phase    string `json:"phase"`
 }
 
-func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
+// ListProjectsForUser lists the projects the linked user is a member of by
+// calling GET /projects with the linked-user header set.
+func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
 	url := c.hubURL + "/api/v1/projects"
 
-	slog.Debug("Listing projects from hub", "url", url, "broker_id", c.brokerID)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Debug("Hub returned non-OK for list projects", "status", resp.StatusCode, "url", url)
-		return nil, fmt.Errorf("list projects returned status %d", resp.StatusCode)
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list projects response: %w", err)
-	}
-
-	slog.Debug("Hub returned projects", "count", len(result.Projects))
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
-func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/broker/projects"
-
-	slog.Debug("Listing fresh projects from hub broker endpoint", "url", url, "broker_id", c.brokerID)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list fresh projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list fresh projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Debug("Hub returned non-OK for list fresh projects", "status", resp.StatusCode, "url", url)
-		return nil, fmt.Errorf("list fresh projects returned status %d", resp.StatusCode)
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list fresh projects response: %w", err)
-	}
-
-	slog.Debug("Hub returned fresh projects", "count", len(result.Projects))
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
-func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
-
-	slog.Debug("Listing projects for user from hub", "url", url, "owner_id", ownerID)
+	slog.Debug("Listing projects for user from hub", "url", url, "on_behalf_of", onBehalfOf)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -163,7 +89,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list user projects returned status %d", resp.StatusCode)
+		return nil, newHubError("list user projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -178,13 +104,14 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	return projects, nil
 }
 
-func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -197,7 +124,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list agents returned status %d", resp.StatusCode)
+		return nil, newHubError("list agents", resp)
 	}
 
 	var result hubAgentsResponse
@@ -225,7 +152,7 @@ type hubTemplate struct {
 	Status      string `json:"status"`
 }
 
-func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]Template, error) {
+func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf string) (TemplateList, error) {
 	// Fetch global templates.
 	globalURL := c.hubURL + "/api/v1/templates?scope=global&status=active"
 
@@ -233,26 +160,27 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]
 
 	globalReq, err := http.NewRequestWithContext(ctx, "GET", globalURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create list global templates request: %w", err)
+		return TemplateList{}, fmt.Errorf("create list global templates request: %w", err)
 	}
+	setOnBehalfOf(globalReq, onBehalfOf)
 	if err := c.signRequest(globalReq); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
+		return TemplateList{}, fmt.Errorf("sign request: %w", err)
 	}
 
 	globalResp, err := c.httpClient.Do(globalReq)
 	if err != nil {
-		return nil, fmt.Errorf("list global templates request failed: %w", err)
+		return TemplateList{}, fmt.Errorf("list global templates request failed: %w", err)
 	}
 	defer globalResp.Body.Close()
 
 	if globalResp.StatusCode != http.StatusOK {
 		slog.Debug("Hub returned non-OK for list global templates", "status", globalResp.StatusCode, "url", globalURL)
-		return nil, fmt.Errorf("list global templates returned status %d", globalResp.StatusCode)
+		return TemplateList{}, newHubError("list global templates", globalResp)
 	}
 
 	var globalResult hubTemplatesResponse
 	if err := json.NewDecoder(globalResp.Body).Decode(&globalResult); err != nil {
-		return nil, fmt.Errorf("decode list global templates response: %w", err)
+		return TemplateList{}, fmt.Errorf("decode list global templates response: %w", err)
 	}
 
 	slog.Debug("Hub returned global templates", "count", len(globalResult.Templates))
@@ -263,7 +191,9 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]
 		bySlug[t.Slug] = t
 	}
 
-	// Fetch project-scoped templates if a project ID is provided.
+	// Fetch project-scoped templates if a project ID is provided. A failure
+	// here keeps the global templates and is reported in ProjectErr.
+	var projectErr error
 	if projectID != "" {
 		projectURL := fmt.Sprintf("%s/api/v1/templates?scope=project&projectId=%s&status=active", c.hubURL, projectID)
 
@@ -271,30 +201,22 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]
 
 		projectReq, err := http.NewRequestWithContext(ctx, "GET", projectURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("create list project templates request: %w", err)
+			return TemplateList{}, fmt.Errorf("create list project templates request: %w", err)
 		}
+		setOnBehalfOf(projectReq, onBehalfOf)
 		if err := c.signRequest(projectReq); err != nil {
-			return nil, fmt.Errorf("sign request: %w", err)
+			return TemplateList{}, fmt.Errorf("sign request: %w", err)
 		}
 
-		projectResp, err := c.httpClient.Do(projectReq)
+		projectTemplates, err := c.listProjectTemplates(projectReq)
 		if err != nil {
 			slog.Warn("Failed to list project templates, using global only", "error", err, "project_id", projectID)
+			projectErr = err
 		} else {
-			defer projectResp.Body.Close()
-			if projectResp.StatusCode == http.StatusOK {
-				var projectResult hubTemplatesResponse
-				if err := json.NewDecoder(projectResp.Body).Decode(&projectResult); err != nil {
-					slog.Warn("Failed to decode project templates response, using global only", "error", err)
-				} else {
-					slog.Debug("Hub returned project templates", "count", len(projectResult.Templates))
-					// Project-scoped templates override global ones with the same slug.
-					for _, t := range projectResult.Templates {
-						bySlug[t.Slug] = t
-					}
-				}
-			} else {
-				slog.Debug("Hub returned non-OK for list project templates", "status", projectResp.StatusCode)
+			slog.Debug("Hub returned project templates", "count", len(projectTemplates))
+			// Project-scoped templates override global ones with the same slug.
+			for _, t := range projectTemplates {
+				bySlug[t.Slug] = t
 			}
 		}
 	}
@@ -309,16 +231,31 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]
 		templates = append(templates, Template{Slug: t.Slug, Name: name})
 	}
 
-	return templates, nil
+	return TemplateList{Templates: templates, ProjectErr: projectErr}, nil
+}
+
+// listProjectTemplates sends a signed project-templates request and decodes
+// the answer. A non-OK answer is returned as a *HubError.
+func (c *httpHubClient) listProjectTemplates(req *http.Request) ([]hubTemplate, error) {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list project templates request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, newHubError("list project templates", resp)
+	}
+	var result hubTemplatesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list project templates response: %w", err)
+	}
+	return result.Templates, nil
 }
 
 // hubCreateAgentResponse mirrors the relevant fields of the hub's CreateAgentResponse.
 // The hub returns {"agent": {...}, "warnings": [...], ...}; we only need the agent.
 type hubCreateAgentResponse struct {
-	Agent struct {
-		Slug string `json:"slug"`
-		Name string `json:"name"`
-	} `json:"agent"`
+	Agent hubclient.Agent `json:"agent"`
 }
 
 func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error) {
@@ -339,10 +276,7 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 
 	// Set the delegated identity header so the hub attributes the agent to the
 	// invoking user rather than leaving it ownerless.
-	if onBehalfOf != "" {
-		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
-		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
-	}
+	setOnBehalfOf(httpReq, onBehalfOf)
 
 	if err := c.signRequest(httpReq); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -363,9 +297,12 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return nil, fmt.Errorf("decode create agent response: %w", err)
 		}
+		agent := result.Agent
 		return &CreateAgentResponse{
-			Slug: result.Agent.Slug,
-			Name: result.Agent.Name,
+			ID:    agent.ID,
+			Slug:  agent.Slug,
+			Name:  agent.Name,
+			Agent: &agent,
 		}, nil
 
 	case http.StatusOK: // 200 — hub resumed/started an existing agent; treat as conflict per design decision 7b
@@ -375,20 +312,64 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 		return nil, fmt.Errorf("an agent with this slug already exists — try a different title")
 
 	case http.StatusNotFound: // 404 — template or project not found
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("not found: %s", he.Message)
+		he := newHubError("create agent", resp)
+		he.text = "not found: " + createAgentErrorMessage(he)
+		return nil, he
 
 	case http.StatusBadRequest: // 400 — validation error
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("validation error: %s", he.Message)
+		he := newHubError("create agent", resp)
+		he.text = "validation error: " + createAgentErrorMessage(he)
+		return nil, he
 
 	case http.StatusForbidden: // 403 — permission denied
-		return nil, fmt.Errorf("you don't have permission to create agents in this project")
+		return nil, newHubError("create agent", resp)
 
 	default:
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("create agent returned status %d: %s", resp.StatusCode, he.Message)
+		he := newHubError("create agent", resp)
+		he.text = fmt.Sprintf("create agent returned status %d: %s", resp.StatusCode, createAgentErrorMessage(he))
+		return nil, he
 	}
+}
+
+// GetAgent reads one agent of the project by ID or slug, for the linked user.
+// A non-OK answer is returned as a *HubError.
+func (c *httpHubClient) GetAgent(ctx context.Context, projectID, agentID, onBehalfOf string) (*hubclient.Agent, error) {
+	u := fmt.Sprintf("%s/api/v1/projects/%s/agents/%s", c.hubURL, url.PathEscape(projectID), url.PathEscape(agentID))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get agent request: %w", err)
+	}
+	setOnBehalfOf(req, onBehalfOf)
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, newHubError("get agent", resp)
+	}
+
+	var agent hubclient.Agent
+	if err := json.NewDecoder(resp.Body).Decode(&agent); err != nil {
+		return nil, fmt.Errorf("decode get agent response: %w", err)
+	}
+	return &agent, nil
+}
+
+// createAgentErrorMessage returns the hub's error message for a failed
+// create agent response, or the HTTP status text when the response has no
+// error envelope with a code.
+func createAgentErrorMessage(he *HubError) string {
+	if he.Code == "" {
+		return http.StatusText(he.StatusCode)
+	}
+	return he.Message
 }
 
 func (c *httpHubClient) HubBaseURL() string {
@@ -422,7 +403,7 @@ type hubListSecretsResponse struct {
 	Secrets []SecretInfo `json:"secrets"`
 }
 
-func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) ([]SecretInfo, error) {
+func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID, onBehalfOf string) ([]SecretInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/secrets?scope=%s&scopeId=%s",
 		c.hubURL, url.QueryEscape(scope), url.QueryEscape(scopeID))
 
@@ -430,6 +411,7 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) 
 	if err != nil {
 		return nil, fmt.Errorf("create list secrets request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -441,8 +423,7 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("list secrets returned status %d: %s", resp.StatusCode, he.Message)
+		return nil, newHubError("list secrets", resp)
 	}
 
 	var result hubListSecretsResponse
@@ -452,7 +433,7 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) 
 	return result.Secrets, nil
 }
 
-func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID string) (*SecretInfo, error) {
+func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID, onBehalfOf string) (*SecretInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/secrets/%s?scope=%s&scopeId=%s",
 		c.hubURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
 
@@ -460,6 +441,7 @@ func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID strin
 	if err != nil {
 		return nil, fmt.Errorf("create get secret request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -474,8 +456,7 @@ func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID strin
 		return nil, fmt.Errorf("secret %q not found", key)
 	}
 	if resp.StatusCode != http.StatusOK {
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("get secret returned status %d: %s", resp.StatusCode, he.Message)
+		return nil, newHubError("get secret", resp)
 	}
 
 	var info SecretInfo
@@ -504,10 +485,7 @@ func (c *httpHubClient) SetSecret(ctx context.Context, key, value, scope, scopeI
 		return fmt.Errorf("create set secret request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if onBehalfOf != "" {
-		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
-		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
-	}
+	setOnBehalfOf(httpReq, onBehalfOf)
 	if err := c.signRequest(httpReq); err != nil {
 		return fmt.Errorf("sign request: %w", err)
 	}
@@ -519,8 +497,7 @@ func (c *httpHubClient) SetSecret(ctx context.Context, key, value, scope, scopeI
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		he := parseHubError(resp)
-		return fmt.Errorf("set secret returned status %d: %s", resp.StatusCode, he.Message)
+		return newHubError("set secret", resp)
 	}
 	return nil
 }
@@ -533,10 +510,7 @@ func (c *httpHubClient) DeleteSecret(ctx context.Context, key, scope, scopeID, o
 	if err != nil {
 		return fmt.Errorf("create delete secret request: %w", err)
 	}
-	if onBehalfOf != "" {
-		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
-		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
-	}
+	setOnBehalfOf(httpReq, onBehalfOf)
 	if err := c.signRequest(httpReq); err != nil {
 		return fmt.Errorf("sign request: %w", err)
 	}
@@ -548,10 +522,20 @@ func (c *httpHubClient) DeleteSecret(ctx context.Context, key, scope, scopeID, o
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		he := parseHubError(resp)
-		return fmt.Errorf("delete secret returned status %d: %s", resp.StatusCode, he.Message)
+		return newHubError("delete secret", resp)
 	}
 	return nil
+}
+
+// setOnBehalfOf sets the linked-user header, and lists it in the signed
+// headers, when onBehalfOf is a non-empty namespaced principal such as
+// "user:alice@example.com". Call it before signRequest.
+func setOnBehalfOf(req *http.Request, onBehalfOf string) {
+	if onBehalfOf == "" {
+		return
+	}
+	req.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
+	req.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {

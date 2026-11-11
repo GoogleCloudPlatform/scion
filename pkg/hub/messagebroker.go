@@ -25,10 +25,13 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/google/uuid"
 )
 
 // brokerCallbackTimeout bounds how long a broker subscription callback may
@@ -51,12 +54,15 @@ type MessageBrokerProxy struct {
 	getDispatcher func() AgentDispatcher
 	log           *slog.Logger
 	messageLog    *slog.Logger
-	chatNotifier  *ChatNotifier // W6: DM notification trigger for agent replies (nil-safe)
 	// webChatStore is used for the two things that need the store-assigned
 	// message ID: stamping the DM watermark and linking the message's
 	// attachments. Neither can happen in the web channel spoke, because the ID
 	// does not exist until deliverToUser runs. Nil-safe.
 	webChatStore WebChatStore
+	// memberFanout, when non-nil, fans a stored web thread message out to
+	// the thread's members on their user subjects (see
+	// Server.fanOutThreadMessageToMembersAsync).
+	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, opts ...ChatEventOption)
 	// writeDenyEnabled returns whether the G2 write-deny switch is on.
 	// When nil or returning false, conversation resolution failures are non-fatal
 	// (B10 contract). When returning true, they deny the write (G2 contract).
@@ -69,13 +75,27 @@ type MessageBrokerProxy struct {
 	// history. Nil means no reauthorization (legacy same-project behavior).
 	messageAuthorizer func(ctx context.Context, senderID string, targetAgent *store.Agent) *MessageDecision
 
+	// recordArtifactRefs, when non-nil, persists the admitted artifact
+	// references of a user message deliverToUser stored (ptone/scion#3222).
+	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef
+
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
+	globalSubscription  eventbus.Subscription              // global broadcast subscription; Stop removes it
 	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
-	stopCh              chan struct{}
-	stopOnce            sync.Once
-	wg                  sync.WaitGroup
+	runningSeen         map[string]bool                    // agent IDs whose running status already ensured subscriptions
+	stopped             bool                               // set by Stop; no subscription is registered afterwards
+	// userSubLocks holds one mutex per user-message topic (guarded by mu;
+	// entries are never removed, so the map is bounded by project count).
+	// A topic's mutex is held across its first Subscribe, so a caller that
+	// is told "subscribed" knows Subscribe has returned, while first
+	// subscriptions for other projects proceed independently
+	// (ptone/scion#1906).
+	userSubLocks map[string]*sync.Mutex
+	stopCh       chan struct{}
+	stopOnce     sync.Once
+	wg           sync.WaitGroup
 }
 
 // NewMessageBrokerProxy creates a new MessageBrokerProxy.
@@ -95,6 +115,8 @@ func NewMessageBrokerProxy(
 		subscriptions:       make(map[string][]eventbus.Subscription),
 		pluginSubscriptions: make(map[string]eventbus.Subscription),
 		subscribedTopics:    make(map[string]bool),
+		runningSeen:         make(map[string]bool),
+		userSubLocks:        make(map[string]*sync.Mutex),
 		stopCh:              make(chan struct{}),
 	}
 }
@@ -168,6 +190,9 @@ func (p *MessageBrokerProxy) bootstrapExistingProjects() {
 // Stop signals the proxy to shut down and waits for goroutines to finish.
 func (p *MessageBrokerProxy) Stop() {
 	p.stopOnce.Do(func() {
+		p.mu.Lock()
+		p.stopped = true
+		p.mu.Unlock()
 		close(p.stopCh)
 		p.wg.Wait()
 
@@ -183,8 +208,17 @@ func (p *MessageBrokerProxy) Stop() {
 			_ = sub.Unsubscribe()
 			delete(p.pluginSubscriptions, pattern)
 		}
+		globalSub := p.globalSubscription
+		p.globalSubscription = nil
 		p.subscribedTopics = make(map[string]bool)
+		p.runningSeen = make(map[string]bool)
 		p.mu.Unlock()
+
+		// Unsubscribe waits for an in-flight broadcast handler, so it runs
+		// without p.mu held.
+		if globalSub != nil {
+			_ = globalSub.Unsubscribe()
+		}
 
 		p.log.Info("Message broker proxy stopped")
 	})
@@ -317,6 +351,9 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent created event", "error", err)
 			return
 		}
+		if !p.createdAgentLive(created) {
+			return
+		}
 		p.subscribeAgent(created.ProjectID, created.Slug)
 		p.subscribeProjectBroadcast(created.ProjectID)
 		p.subscribeProjectUserMessages(created.ProjectID)
@@ -327,9 +364,16 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent status event", "error", err)
 			return
 		}
-		// We don't need to take action on status events for the subscription
-		// proxy — subscriptions are per-agent, not per-status. The agent's
-		// subscription persists through status changes until it's deleted.
+		// Subscriptions are per-agent and persist through status changes, but
+		// they are only created at startup (for agents already running) and on
+		// agent.created. An agent that was not running when the hub started
+		// and is later started or resumed never gets them, so its outbound
+		// replies to users (published on the project user-message topic) find
+		// no subscriber and are silently dropped. Ensure them the first time
+		// each agent reports running.
+		if status.Phase == "running" && status.ProjectID != "" && status.AgentID != "" {
+			p.ensureSubscriptionsForRunningAgent(status.ProjectID, status.AgentID)
+		}
 
 	case containsSuffix(evt.Subject, ".agent.deleted"):
 		var deleted AgentDeletedEvent
@@ -337,6 +381,9 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent deleted event", "error", err)
 			return
 		}
+		p.mu.Lock()
+		delete(p.runningSeen, deleted.AgentID)
+		p.mu.Unlock()
 		// Agent subscriptions are cleaned up when the project's subscriptions
 		// are rebuilt. Individual cleanup is handled by the broker's
 		// Unsubscribe mechanism if needed.
@@ -345,12 +392,82 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 	}
 }
 
+// createdAgentLive reports whether an agent.created event still names a live
+// agent, by the same rule publishAgentCreatedIfLive applies before it
+// publishes (ptone/scion#2972): the row exists, is not soft-deleted, and no
+// delete claim holds it. A stale created (one that lost the publish's
+// residual window, or a replay) must not subscribe a deleted agent's slug,
+// because agent.deleted does not remove subscriptions (ptone/scion#3056).
+// The row is looked up by ID, so a stale created never matches a same-slug
+// successor. A read error other than not-found subscribes, as before: the
+// subscribe helpers are idempotent and a missed subscription drops messages.
+// A delete that later fails leaves the agent unsubscribed until it reports
+// running (ensureSubscriptionsForRunningAgent).
+func (p *MessageBrokerProxy) createdAgentLive(created AgentCreatedEvent) bool {
+	if created.AgentID == "" {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+	defer cancel()
+	agent, err := p.store.GetAgent(ctx, created.AgentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		p.log.Debug("Skipping subscriptions for created event: agent deleted", "agent_id", created.AgentID)
+		return false
+	case err != nil:
+		p.log.Warn("Failed to read created agent for broker subscriptions; subscribing",
+			"agent_id", created.AgentID, "error", err)
+		return true
+	}
+	if deletedOrDeleteHeld(agent) {
+		p.log.Debug("Skipping subscriptions for created event: agent deleted or being deleted",
+			"agent_id", created.AgentID, "deletion_state", agent.DeletionState)
+		return false
+	}
+	return true
+}
+
+// ensureSubscriptionsForRunningAgent subscribes a running agent's topic and
+// its project's broadcast and user-message topics, once per agent ID per
+// proxy lifetime. The agent is read back first so that a status event that
+// is already stale (the agent stopped again) does not mark it as handled.
+// The subscribe helpers are idempotent; the runningSeen guard only avoids a
+// store read on every later status event of the same agent.
+func (p *MessageBrokerProxy) ensureSubscriptionsForRunningAgent(projectID, agentID string) {
+	p.mu.Lock()
+	seen := p.runningSeen[agentID]
+	p.mu.Unlock()
+	if seen {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+	defer cancel()
+	agent, err := p.store.GetAgent(ctx, agentID)
+	if err != nil {
+		p.log.Error("Failed to read running agent for broker subscriptions",
+			"project_id", projectID, "agent_id", agentID, "error", err)
+		return
+	}
+	if agent.Phase != "running" || agent.ProjectID != projectID {
+		return
+	}
+
+	p.subscribeAgent(projectID, agent.Slug)
+	p.subscribeProjectBroadcast(projectID)
+	p.subscribeProjectUserMessages(projectID)
+
+	p.mu.Lock()
+	p.runningSeen[agentID] = true
+	p.mu.Unlock()
+}
+
 // subscribeAgent creates a broker subscription for an individual agent's message topic.
 func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 	topic := eventbus.TopicAgentMessages(projectID, agentSlug)
 
 	p.mu.Lock()
-	if p.subscribedTopics[topic] {
+	if p.stopped || p.subscribedTopics[topic] {
 		p.mu.Unlock()
 		return
 	}
@@ -369,6 +486,11 @@ func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 	}
 
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		_ = sub.Unsubscribe()
+		return
+	}
 	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
@@ -381,7 +503,7 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 	topic := eventbus.TopicProjectBroadcast(projectID)
 
 	p.mu.Lock()
-	if p.subscribedTopics[topic] {
+	if p.stopped || p.subscribedTopics[topic] {
 		p.mu.Unlock()
 		return
 	}
@@ -400,6 +522,11 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 	}
 
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		_ = sub.Unsubscribe()
+		return
+	}
 	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
@@ -410,38 +537,139 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 // messages in a project. When a message arrives, it is persisted to the message
 // store and published as a user.message SSE event for connected browser clients.
 // The subscription uses a wildcard to cover all users in the project.
-func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) {
+//
+// It reports whether the persisting subscription is in place when it
+// returns (ptone/scion#1906): true only once Subscribe has returned
+// successfully, so a caller that publishes next is guaranteed a subscriber.
+// It returns false after Stop, when Subscribe fails (the topic is left
+// unmarked so a later call retries), or when the bus has no inprocess spoke
+// (handlers would never run). Callers that need the message persisted fall
+// back to writing it themselves on false.
+func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) bool {
 	topic := eventbus.TopicAllUserMessages(projectID)
 
+	if hs, ok := p.bus.(interface{ HasSpoke(string) bool }); ok && !hs.HasSpoke(eventbus.InProcessBusName) {
+		return false
+	}
+
+	// Fast path, without the topic lock: the flag is only set after
+	// Subscribe has returned, so an already-subscribed topic never waits
+	// behind another caller's (possibly slow, plugin-backed) Subscribe.
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
 	if p.subscribedTopics[topic] {
 		p.mu.Unlock()
-		return
+		return true
 	}
-	p.subscribedTopics[topic] = true
+	topicMu := p.userSubLocks[topic]
+	if topicMu == nil {
+		topicMu = &sync.Mutex{}
+		p.userSubLocks[topic] = topicMu
+	}
 	p.mu.Unlock()
 
-	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	// Serialize callers for this topic across Subscribe: a concurrent
+	// caller (e.g. the lifecycle goroutine and the notifier reacting to
+	// the same status event) must not see the topic as subscribed before
+	// it is. Re-check under the lock: another caller may have finished.
+	topicMu.Lock()
+	defer topicMu.Unlock()
+
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
+	if p.subscribedTopics[topic] {
+		p.mu.Unlock()
+		return true
+	}
+	p.mu.Unlock()
+
+	sub, err := p.bus.Subscribe(topic, func(hctx context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
+		// Carry only the notification ID (log correlation) from the
+		// publisher's ctx; delivery keeps its own lifetime.
+		ctx = withNotificationID(ctx, notificationIDFromContext(hctx))
 		p.deliverToUser(ctx, projectID, t, msg)
 	})
 	if err != nil {
 		p.log.Error("Failed to subscribe for project user messages",
 			"projectID", projectID, "error", err)
-		return
+		return false
 	}
 
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		_ = sub.Unsubscribe()
+		return false
+	}
+	p.subscribedTopics[topic] = true
 	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
 	p.log.Debug("Subscribed to project user messages", "topic", topic)
+	return true
+}
+
+// notificationIDKey carries a notification ID from the notifier's publish
+// into deliverToUser, in process only, so a lost inbox row can be logged
+// against the notification it came from.
+type notificationIDKey struct{}
+
+func withNotificationID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, notificationIDKey{}, id)
+}
+
+func notificationIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(notificationIDKey{}).(string)
+	return id
+}
+
+// canPersistUserDM reports whether deliverToUser can persist a DM addressed
+// to recipientID. Under G2 write-deny a DM row needs a resolved conversation,
+// and DM conversation keys only accept canonical UUIDs
+// (messages.DMConversationKey), so a federated or otherwise non-canonical
+// principal cannot be persisted there. deliverToUser applies it only when
+// both principal kinds are determined (it persists undetermined-kind DMs
+// without a conversation); notifications always have determined kinds
+// (agent:<slug> to user:<id>). Shared with the notifier's persistsViaInbox
+// so the two cannot drift.
+func canPersistUserDM(recipientID string, writeDeny bool) bool {
+	if !writeDeny {
+		return true
+	}
+	u, err := uuid.Parse(recipientID)
+	return err == nil && u.String() == recipientID
 }
 
 // deliverToUser handles a broker message addressed to a human user by persisting
 // it to the message store and publishing a user.message SSE event.
 func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic string, msg *messages.StructuredMessage) {
+	// One message record per message: the success path below writes it;
+	// an early return (conversation or persist failure) writes it here so
+	// the message still appears once.
+	recorded := false
+	defer func() {
+		if recorded || p.messageLog == nil {
+			return
+		}
+		attrs := []any{"project_id", projectID, "topic", topic, "source", "broker", "persisted", false}
+		attrs = append(attrs, msg.LogAttrs()...)
+		p.messageLog.Info("user message handed to delivery", attrs...)
+	}()
+
 	// Persist to message store (write-through; non-fatal if store fails).
 	// AgentID is the sender's agent ID when an agent sends to a user.
 	agentID := ""
@@ -449,8 +677,22 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		agentID = msg.SenderID
 	}
 
+	// The row takes the id and creation time the sending handler already
+	// reported (PersistMessageID, PersistCreatedAt), so the receipt's
+	// message_id and the published Timestamp name this row.
+	storeID := msg.StoredMessageID
+	if storeID == "" {
+		storeID = msg.PersistMessageID
+	}
+	if storeID == "" {
+		storeID = api.NewUUID()
+	}
+	createdAt := msg.PersistCreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
 	storeMsg := &store.Message{
-		ID:          api.NewUUID(),
+		ID:          storeID,
 		ProjectID:   projectID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
@@ -463,125 +705,87 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		AgentID:     agentID,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
-		CreatedAt:   time.Now(),
+		// This delivery *is* the dispatch; Ent defaults dispatch_state to
+		// "pending" if left unset (nc-promote-busy).
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     createdAt,
 	}
-	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
-	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
-	if !msg.Broadcasted {
-		var convResult *messaging.ConversationResult
-
-		// DEF-138 P-3: honour a pre-resolved ConversationID from the
-		// upstream handler instead of re-deriving. The handler resolved
-		// and stamped structuredMsg before publishing to the broker.
-		// Re-deriving here produced the inbound/outbound conversation
-		// split: the handler resolved a thread conversation, then the
-		// broker re-derived a DM because the agent's reply carries no
-		// ThreadID. Note: non-emptiness means "already resolved upstream"
-		// — it does NOT mean "the caller asserted this". Provenance is
-		// carried by ConversationAsserted (DEF-141).
+	// A message the sending handler already stored (StoredMessageID,
+	// ptone/scion#4596 decision D2): the handler resolved its conversation,
+	// stored, linked and bound its attachments, stamped the watermarks and
+	// published the SSE event. Only the message record runs here, so no
+	// second row and no second event exist; msg is shared with the bus's
+	// other subscribers and is left unchanged (ptone/scion#5504).
+	if msg.StoredMessageID != "" {
 		if msg.ConversationID != "" {
 			storeMsg.ConversationID = msg.ConversationID
-			// Build a minimal ConversationResult for divergence logging.
-			// We do not re-fetch the conversation row — the handler
-			// already looked it up (explicit path) or created it
-			// (derivation path), and re-querying would add latency for
-			// information we have.
-			convResult = &messaging.ConversationResult{
-				ConversationID: msg.ConversationID,
-			}
-		} else if msg.ThreadID != "" {
-			var threadOpts []messaging.ThreadConversationOption
-			if p.webChatStore != nil {
-				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
-			}
-			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
-				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
-			}
-			var convErr error
-			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
-			if convErr != nil {
-				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("mb.user.thread")
-					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-					return
-				}
-				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
-			}
-		} else if msg.SenderID != "" && msg.RecipientID != "" {
-			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
-			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
-			if sOK && rOK {
-				var convErr error
-				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
-				if convErr != nil {
-					if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-						messaging.WriteDenialMetrics.Inc("mb.user.dm")
-						p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-						return
-					}
-					p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
-				}
-			} else {
-				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
-					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
-			}
 		}
-		if convResult != nil && storeMsg.ConversationID == "" {
-			storeMsg.ConversationID = convResult.ConversationID
-		}
-		// DEF-141: Classification is a three-way decision on provenance,
-		// separated from the honouring block above. Honouring is gated on
-		// non-emptiness (P-3, must not regress). Classification branches on
-		// ConversationAsserted — never on ConversationID != "".
-		switch {
-		case msg.ConversationAsserted:
-			// Caller named a conversation and the handler authorized it.
-			messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
-
-		case msg.ConversationID != "":
-			// Handler-derived and propagated. Deliberately NOT compared:
-			// ComputeDivergenceMatch would take both sides from the same input
-			// fields in the same request, so the verdict is tautological (DEF-139,
-			// [^72]/[^73]). Counting it as a "match" would inflate the board with
-			// confirmations that confirm nothing. CheckConversationConsistency
-			// below is the independent check and runs on every path regardless.
-			messaging.LogDerivedRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
-
-		default:
-			// No pre-resolved conversation — compare old-model vs new-model routing.
-			oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
-			convID := ""
-			actualRef := ""
-			if convResult != nil {
-				convID = convResult.ConversationID
-				actualRef = convResult.ExternalRef
-			}
-			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
-				MessageID:  storeMsg.ID,
-				OldRouting: oldRouting,
-				NewRouting: messaging.NewRoutingStr(convID),
-				Match:      match,
-				Reason:     reason,
-			})
-		}
-		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, storeMsg.ConversationID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
-			p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
-				"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
-		}
+		p.logUserMessageDelivered(projectID, topic, storeMsg, msg)
+		recorded = true
+		return
+	}
+	if !p.resolveUserMessageConversation(ctx, projectID, storeMsg, msg) {
+		return
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
+		if notifID := notificationIDFromContext(ctx); notifID != "" {
+			// ptone/scion#1906: this subscriber is the notification's only
+			// persister, so the inbox row is lost; nothing retries.
+			p.log.Warn("User notification inbox row lost: broker persist failed",
+				"notification_id", notifID, "topic", topic, "error", err)
+		}
 		return
 	}
 
-	// W7: Link the sender's attachments, recorded before publish, to the message
-	// row created here — the ID they need exists nowhere else. Done before the
-	// SSE event so a client refetching on it already sees them.
-	linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
-	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
+	// Attachments on this re-publish path (ptone/scion#4596, ptone/scion#5504;
+	// W7). msg is shared with the bus's other subscribers: nothing here
+	// modifies it, its metadata (transport key included) or the maps it holds.
+	// The AttachmentStore refs parsed from the transport metadata are linked
+	// to the row created here, the only place their message ID exists, before
+	// the SSE event, so a client refetching on it already sees them. A ref is
+	// linked only after it passes the AttachmentStore lookup and the sender
+	// ownership check (linkSenderOwnedAttachmentRefs), and the SSE event and
+	// the member fan-out carry exactly the linked refs, the files history
+	// lists. A linked file downloads for the message's readers, so naming it
+	// to them discloses nothing they may not read. An attachment stored as an
+	// artifact is not an AttachmentStore file, so an artifact id that appears
+	// in transport metadata fails the lookup and is dropped: this path never
+	// binds or publishes one (artifact references come only from the admitted
+	// references below). Pinned by
+	// TestDeliverToUser_RepublishCarriesNoArtifactAttachments.
+	linkedRefs := linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 
+	// Artifact references are recorded only when the hub's admission step
+	// set them on this in-process message. Any other value is ignored: it
+	// is never recorded, and nothing below reads it. The live chat event
+	// carries exactly the references recorded here.
+	var artifactRefs []artifacts.MessageRef
+	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
+		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
+			artifactRefs = p.recordArtifactRefs(ctx, storeMsg.ID, refs)
+		}
+	}
+
+	p.afterUserMessagePersisted(ctx, storeMsg)
+
+	// Publish SSE event so connected browser clients receive real-time inbox updates.
+	p.events.PublishUserMessage(ctx, storeMsg, linkedRefs, artifactRefs)
+	if p.memberFanout != nil {
+		p.memberFanout(ctx, storeMsg, linkedRefs, artifactRefs)
+	}
+
+	p.logUserMessageDelivered(projectID, topic, storeMsg, msg)
+	recorded = true
+}
+
+// afterUserMessagePersisted runs the watermark steps of a stored user
+// message, with its stored id, before its SSE event is published: the DM or
+// topic watermark, then the cross-channel DM watermark. deliverToUser runs
+// it, and so does a sending handler that stores the message itself
+// (ptone/scion#4596, decision D2), so a client that refetches the rail on
+// the event already sees the new last_message_id.
+func (p *MessageBrokerProxy) afterUserMessagePersisted(ctx context.Context, storeMsg *store.Message) {
 	// Stamp the DM watermark with the store-assigned message ID. The web
 	// channel spoke already registered the participant rows and bumped
 	// last_activity_at, but it runs before the ID exists — without this the
@@ -632,24 +836,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			}
 		}
 	}
+}
 
-	// Publish SSE event so connected browser clients receive real-time inbox updates.
-	p.events.PublishUserMessage(ctx, storeMsg, parseAttachmentRefs(msg.Metadata))
-
-	// W6: DM notification for agent → human replies via broker path.
-	if p.chatNotifier != nil && storeMsg.ThreadID != "" &&
-		strings.HasPrefix(storeMsg.ThreadID, "dm:") &&
-		storeMsg.RecipientID != "" && strings.HasPrefix(storeMsg.Sender, "agent:") {
-		senderName := strings.TrimPrefix(storeMsg.Sender, "agent:")
-		go p.chatNotifier.NotifyDMReceived(context.Background(), storeMsg.RecipientID, ChatMessageContext{
-			SenderID:        storeMsg.SenderID,
-			SenderName:      senderName,
-			ConversationKey: storeMsg.ThreadID,
-			Preview:         storeMsg.Msg,
-			ProjectID:       projectID,
-		})
-	}
-
+// logUserMessageDelivered writes the message record of a user message
+// delivered through the broker.
+func (p *MessageBrokerProxy) logUserMessageDelivered(projectID, topic string, storeMsg *store.Message, msg *messages.StructuredMessage) {
 	// Log to dedicated message audit log
 	if p.messageLog != nil {
 		logAttrs := []any{
@@ -657,46 +848,211 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			"topic", topic,
 			"source", "broker",
 		}
-		logAttrs = append(logAttrs, msg.LogAttrs()...)
+		// A shallow copy, so ConversationID can be set for the record: msg is
+		// shared with the bus's other subscribers. Metadata is the same map as
+		// msg's; do not modify it here.
+		logged := *msg
+		if storeMsg.ConversationID != "" {
+			logged.ConversationID = storeMsg.ConversationID
+		}
+		logAttrs = append(logAttrs, logged.LogAttrs()...)
 		p.messageLog.Info("user message delivered via broker", logAttrs...)
 	}
+}
+
+// resolveUserMessageConversation resolves or creates the conversation of a
+// user message before it is stored (Phase 5 dual-write), sets
+// storeMsg.ConversationID, logs the routing classification and runs the
+// DEF-3 consistency check. Broadcasts are skipped: they are ephemeral and
+// belong to no conversation. It reports false when the message must not be
+// stored (a resolution failure while write-deny is on). deliverToUser and a
+// sending handler that stores the message itself (ptone/scion#4596,
+// decision D2) share it.
+func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context, projectID string, storeMsg *store.Message, msg *messages.StructuredMessage) bool {
+	if msg.Broadcasted {
+		return true
+	}
+	var convResult *messaging.ConversationResult
+
+	// DEF-138 P-3: honour a pre-resolved ConversationID from the
+	// upstream handler instead of re-deriving. The handler resolved
+	// and stamped structuredMsg before publishing to the broker.
+	// Re-deriving here produced the inbound/outbound conversation
+	// split: the handler resolved a thread conversation, then the
+	// broker re-derived a DM because the agent's reply carries no
+	// ThreadID. Note: non-emptiness means "already resolved upstream"
+	// — it does NOT mean "the caller asserted this". Provenance is
+	// carried by ConversationAsserted (DEF-141).
+	if msg.ConversationID != "" {
+		storeMsg.ConversationID = msg.ConversationID
+		// Build a minimal ConversationResult for divergence logging.
+		// We do not re-fetch the conversation row — the handler
+		// already looked it up (explicit path) or created it
+		// (derivation path), and re-querying would add latency for
+		// information we have.
+		convResult = &messaging.ConversationResult{
+			ConversationID: msg.ConversationID,
+		}
+	} else if msg.ThreadID != "" {
+		var threadOpts []messaging.ThreadConversationOption
+		if p.webChatStore != nil {
+			threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
+		}
+		if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
+			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
+		}
+		// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
+		// this resolves as kind=="direct"; register both principals so
+		// the conversation is discoverable via `conversation list`.
+		threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
+		var convErr error
+		convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+		if convErr != nil {
+			if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("mb.user.thread")
+				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+				return false
+			}
+			p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		}
+	} else if msg.SenderID != "" && msg.RecipientID != "" {
+		senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
+		recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
+		if sOK && rOK {
+			// Only here, where DM key derivation would fail anyway: the
+			// undetermined-kind branch below persists without a
+			// conversation, as before.
+			if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
+				messaging.WriteDenialMetrics.Inc("mb.user.dm")
+				p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
+					"notification_id", notificationIDFromContext(ctx))
+				return false
+			}
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+			if convErr != nil {
+				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("mb.user.dm")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return false
+				}
+				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
+		} else {
+			p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
+				"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
+		}
+	}
+	if convResult != nil && storeMsg.ConversationID == "" {
+		storeMsg.ConversationID = convResult.ConversationID
+	}
+	// DEF-141: Classification is a three-way decision on provenance,
+	// separated from the honouring block above. Honouring is gated on
+	// non-emptiness (P-3, must not regress). Classification branches on
+	// ConversationAsserted — never on ConversationID != "".
+	switch {
+	case msg.ConversationAsserted:
+		// Caller named a conversation and the handler authorized it.
+		messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+
+	case msg.ConversationID != "":
+		// Handler-derived and propagated. Deliberately NOT compared:
+		// ComputeDivergenceMatch would take both sides from the same input
+		// fields in the same request, so the verdict is tautological (DEF-139,
+		// [^72]/[^73]). Counting it as a "match" would inflate the board with
+		// confirmations that confirm nothing. CheckConversationConsistency
+		// below is the independent check and runs on every path regardless.
+		messaging.LogDerivedRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+
+	default:
+		// No pre-resolved conversation — compare old-model vs new-model routing.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
+	}
+	// DEF-3: Independent consistency check against prior messages, run off
+	// the delivery path with its own deadline.
+	messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+		Store: p.store, Log: p.log, MessageID: storeMsg.ID, ConversationID: storeMsg.ConversationID,
+		ThreadID: msg.ThreadID, SenderID: msg.SenderID, RecipientID: msg.RecipientID,
+	}, func(ctx context.Context, in messaging.ConsistencyInput) {
+		if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, in.ThreadID, in.SenderID, in.RecipientID, in.Log); !consistent {
+			in.Log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
+				"message_id", in.MessageID, "conversation_id", in.ConversationID)
+		}
+	})
+	return true
 }
 
 // subscribeGlobalBroadcast creates a broker subscription for global broadcasts.
 func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 	topic := eventbus.TopicGlobalBroadcast()
 
-	_, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
 		p.fanOutGlobal(ctx, msg)
 	})
 	if err != nil {
 		p.log.Error("Failed to subscribe for global broadcast", "error", err)
+		return
+	}
+	// Keep the subscription so Stop can remove it. Dropping it left the
+	// bus's dispatch goroutine, and the proxy it references, alive after
+	// Stop.
+	p.mu.Lock()
+	stopped := p.stopped
+	if !stopped {
+		p.globalSubscription = sub
+	}
+	p.mu.Unlock()
+	if stopped {
+		_ = sub.Unsubscribe()
 	}
 }
 
 // deliverToAgent dispatches a message to a specific agent via the existing
 // DispatchAgentMessage path. ObserverOnly messages are skipped — they were
 // already delivered directly and are only published for plugin observers.
+//
+// StructuredMessage has no raw field: raw keystroke delivery through messages
+// has been removed, so nothing forwarded on this bus can request it.
 func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
 	if msg.ObserverOnly {
 		return
 	}
 
+	// msg may be a pointer shared across broker event-bus subscribers, so it
+	// is never mutated in place — a private copy is made once here (cheap:
+	// struct fields only, no deep copy needed unless a field below is
+	// reassigned) and both the "!" rewrite and the #2257 P2 metadata strip
+	// (design auto-offload-large-dm §4.2 item 1) apply to that copy.
+	copied := *msg
+	msg = &copied
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	// A leading "!" in the message body acts as an inline interrupt signal:
 	// strip the prefix and promote to urgent so the harness is interrupted
 	// before delivery — equivalent to --interrupt on the CLI.
-	// Shallow-copy to avoid mutating the event-bus pointer shared across subscribers.
 	if trimmed := strings.TrimSpace(msg.Msg); strings.HasPrefix(trimmed, "!") {
-		stripped := *msg
 		content := strings.TrimSpace(trimmed[1:])
 		if content == "" {
 			content = "interrupt"
 		}
-		stripped.Msg = content
-		stripped.Urgent = true
-		msg = &stripped
+		msg.Msg = content
+		msg.Urgent = true
 	}
 
 	dispatcher := p.getDispatcher()
@@ -741,7 +1097,68 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		}
 	}
 
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
+	// while the recipient is mid-`scion reincarnate`, the message is
+	// persisted (so it appears in conversation history for the new
+	// generation's catch-up) but never dispatched — the old container may
+	// already be stopped and the new one may not be listening yet. This
+	// check runs BEFORE the #1820 phase gate below: a migrating agent is
+	// necessarily non-"running" for most of the migration, and without this
+	// ordering the #1820 gate would silently drop the message instead of
+	// deferring it. Checked with the same reincarnationInFlight predicate
+	// the worker uses (reincarnate_worker.go) — non-terminal states only;
+	// once the migration completes or fails, ordinary delivery resumes.
+	//
+	// O2 (p2a-r1 review, accepted in part): broadcasts are excluded.
+	// Broadcast rows are persisted without a conversation (see below,
+	// `!msg.Broadcasted` on the conversation-resolution block) by design —
+	// they are ephemeral, project-wide fan-out, not addressed 1:1 — so a
+	// deferred broadcast could never be found by the new generation's
+	// `scion conversation catch-up`. A broadcast to a migrating agent keeps
+	// the pre-existing #1820 rejection instead of a silently-unreachable
+	// deferred row.
+	deferred := reincarnationInFlight(agent) && !msg.Broadcasted
+
+	// #1820: admission gate — mirror the phase check applied to direct
+	// sends (handleAgentMessage for humans, ExecuteAgentDM for agents).
+	// A non-running agent cannot receive terminal input; accepting the
+	// message would persist a "dispatched" row that the broker then
+	// silently drops. Reject before persistence and tell an agent sender.
+	// Runs after reauthorization so a denied sender learns nothing about
+	// the recipient's phase. Skipped for a migrating agent — the migration
+	// gate above already decided this message is deferred, not dropped.
+	if !deferred {
+		if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
+			p.log.Warn("Rejecting broker message to non-running agent",
+				"agentSlug", agentSlug, "projectID", projectID, "phase", agent.Phase)
+			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(phaseErr.Message))
+			return
+		}
+		// A held agent (ptone/scion#3433) is refused like a suspended one,
+		// for a topic message and a broadcast alike (ptone/scion#6859); a
+		// lookup fault refuses. The same predicate as Server.agentHeld.
+		held, holdErr := p.store.HasActiveAgentHold(ctx, agent.ID)
+		if holdErr != nil || held {
+			refusal := heldTargetDMError(agent)
+			if holdErr != nil {
+				refusal = heldLookupFaultDMError()
+			}
+			p.log.Warn("Rejecting broker message to held agent",
+				"agentSlug", agentSlug, "projectID", projectID, "error", holdErr)
+			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(refusal.Message))
+			return
+		}
+	}
+
 	// Persist to message store before delivery attempt (no pending rows).
+	// DispatchState reflects the migration gate above: "deferred" for a
+	// migrating recipient (never handed to a dispatcher, see below),
+	// "dispatched" otherwise (the pre-existing optimistic value; a later
+	// dispatch failure below still CASes it to "failed" via MarkMessageFailed).
+	initialDispatchState := store.MessageDispatchDispatched
+	if deferred {
+		initialDispatchState = store.MessageDispatchDeferred
+	}
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     projectID,
@@ -754,7 +1171,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		Urgent:        msg.Urgent,
 		Broadcasted:   msg.Broadcasted,
 		AgentID:       agent.ID,
-		DispatchState: store.MessageDispatchDispatched,
+		DispatchState: initialDispatchState,
 		CreatedAt:     time.Now(),
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
@@ -771,6 +1188,10 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
 				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 			}
+			// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
+			// this resolves as kind=="direct"; register both principals so
+			// the conversation is discoverable via `conversation list`.
+			threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 			if convErr != nil {
@@ -817,11 +1238,17 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			Match:      match,
 			Reason:     reason,
 		})
-		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, agent.ID, p.log); !consistent {
-			p.log.Warn("DEF-3: conversation consistency mismatch (agent message from broker)",
-				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
-		}
+		// DEF-3: Independent consistency check against prior messages, run
+		// off the delivery path with its own deadline.
+		messaging.GoConsistencyCheck(messaging.ConsistencyInput{
+			Store: p.store, Log: p.log, MessageID: storeMsg.ID, ConversationID: convID,
+			ThreadID: msg.ThreadID, SenderID: msg.SenderID, RecipientID: agent.ID,
+		}, func(ctx context.Context, in messaging.ConsistencyInput) {
+			if consistent := messaging.CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, in.ThreadID, in.SenderID, in.RecipientID, in.Log); !consistent {
+				in.Log.Warn("DEF-3: conversation consistency mismatch (agent message from broker)",
+					"message_id", in.MessageID, "conversation_id", in.ConversationID, "agent_id", in.RecipientID)
+			}
+		})
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
@@ -841,12 +1268,39 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		})
 	}
 
+	// The hub's message record, written before the gate and the dispatch
+	// outcome (see logMessageRecord). It is logged from a copy so the
+	// dispatched message is unchanged.
+	recordMsg := *msg
+	if storeMsg.ConversationID != "" {
+		recordMsg.ConversationID = storeMsg.ConversationID
+	}
+	logMessageRecord(p.messageLog, agent, &recordMsg)
+
+	// Migration gate: the message is persisted above (visible on catch-up)
+	// but must not be dispatched while the recipient is mid-migration — the
+	// old container may already be gone and the new one may not exist yet.
+	if deferred {
+		if p.messageLog != nil {
+			p.messageLog.Info("broker message deferred: recipient is reincarnating",
+				"agent_id", agent.ID, "agent_name", agent.Name, "project_id", agent.ProjectID,
+				"message_id", storeMsg.ID, "source", "broker",
+				logging.AttrLogKind, logging.LogKindEvent)
+		}
+		// O2 (p2a-r1 review, accepted in part): tell an agent sender their
+		// message was deferred, mirroring publishDeliveryFailed — §3.7's
+		// "sender is told" holds on this path too, not just the two
+		// synchronous (HTTP) paths.
+		p.publishDeliveryDeferred(ctx, agentSlug, msg)
+		return
+	}
+
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above
 	// (agent lookup, persistence), so retries get slightly less than 30s.
-	if err := dispatchWithBrokerRetry(ctx, dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
+	if err := dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), nil, dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
-		if markErr := p.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+		if markErr := markMessageFailed(ctx, p.store, storeMsg.ID, err.Error()); markErr != nil {
 			p.log.Error("Failed to mark broker message as failed", "id", storeMsg.ID, "error", markErr)
 		}
 		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, err)
@@ -860,6 +1314,10 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			"agent_name", agent.Name,
 			"project_id", agent.ProjectID,
 			"source", "broker",
+			logging.AttrLogKind, logging.LogKindEvent,
+		}
+		if storeMsg.ConversationID != "" {
+			msg.ConversationID = storeMsg.ConversationID
 		}
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
 		p.messageLog.Info("broker message delivered", logAttrs...)
@@ -966,35 +1424,93 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
 		return
 	}
+	// ptone/scion#1838: this notice is a post-dispatch finalization. Callers
+	// often hold a dispatch ctx that has already expired (broker timeout) or
+	// been cancelled, so detach from it with a bounded timeout rather than
+	// silently dropping the sender's DELIVERY_FAILED. The notice dispatches
+	// through the runtime broker, so it gets deliveryNoticeTimeout rather
+	// than the 5s row-CAS budget.
+	ctx, cancel := detachedContext(ctx, deliveryNoticeTimeout)
+	defer cancel()
 	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
 	if err != nil {
 		p.log.Warn("Could not resolve sender agent for DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
 		return
 	}
+	// A held sender gets no notice (ptone/scion#7145).
+	if heldNoticeWithheld(ctx, p.store, noticeLogger(p.messageLog, p.log), senderAgent, heldNoticeDeliveryFailed) {
+		return
+	}
 
 	var failMsg string
 	if deliveryErr != nil && !errors.Is(deliveryErr, store.ErrNotFound) {
-		failMsg = fmt.Sprintf("Message delivery failed to agent %q: %v", agentSlug, deliveryErr)
+		// ptone/scion#1841: deliveryErr can carry a raw broker response
+		// body; sanitize here so every DELIVERY_FAILED notice is covered
+		// whichever path produced it.
+		failMsg = fmt.Sprintf("Message delivery failed to agent %q: %s", agentSlug, sanitizeFailureReason(deliveryErr.Error()))
 	} else {
 		failMsg = fmt.Sprintf("Message delivery failed: agent %q not found in project", agentSlug)
 	}
-	structuredMsg := &messages.StructuredMessage{
-		Sender:    "system",
-		Recipient: msg.Sender,
-		Msg:       failMsg,
-		Type:      messages.TypeSystem,
-		Status:    "DELIVERY_FAILED",
-		Metadata:  map[string]string{"system_category": messages.SystemCategoryDeliveryFailed},
-	}
-	structuredMsg.RecipientID = senderAgent.ID
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, failMsg, "DELIVERY_FAILED", messages.SystemCategoryDeliveryFailed)
 
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {
 		return
 	}
+	logMessageRecord(p.messageLog, senderAgent, structuredMsg)
 	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
+			"senderID", msg.SenderID, "error", err)
+	}
+}
+
+// newDeliveryNotice builds the system notice sent to an agent sender about the
+// fate of its message (DELIVERY_FAILED, DELIVERY_DEFERRED). It goes through
+// messages.NewSystemMessage so every notice carries Version and an RFC3339 UTC
+// Timestamp (ptone/scion#2100); new notice sites should use it rather than a
+// StructuredMessage literal so they cannot drift.
+func newDeliveryNotice(recipient, recipientID, text, status, category string) *messages.StructuredMessage {
+	notice := messages.NewSystemMessage("system", recipient, text, category)
+	notice.RecipientID = recipientID
+	notice.Status = status
+	return notice
+}
+
+// publishDeliveryDeferred tells an agent sender that their message to
+// agentSlug was deferred by the migration gate (design agent-reincarnate
+// §3.7, O2 p2a-r1 review): the recipient is mid-`scion reincarnate`, so the
+// message was persisted for catch-up but not dispatched. Mirrors
+// publishDeliveryFailed structurally, with a distinct status so a sender
+// cannot mistake this for a failure — the message is saved, not dropped.
+// No-op for non-agent senders and for a nil dispatcher, same as
+// publishDeliveryFailed; a sender that cannot be notified this way still
+// has the persisted row available on its own next catch-up.
+func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentSlug string, msg *messages.StructuredMessage) {
+	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
+		return
+	}
+	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
+	if err != nil {
+		p.log.Warn("Could not resolve sender agent for DELIVERY_DEFERRED notification",
+			"senderID", msg.SenderID, "error", err)
+		return
+	}
+	// A held sender gets no notice (ptone/scion#7145).
+	if heldNoticeWithheld(ctx, p.store, noticeLogger(p.messageLog, p.log), senderAgent, heldNoticeDeliveryDeferred) {
+		return
+	}
+
+	deferredMsg := fmt.Sprintf("agent %q is reincarnating; message saved to history and will be seen on catch-up", agentSlug)
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, deferredMsg, "DELIVERY_DEFERRED", messages.SystemCategoryDeliveryDeferred)
+
+	dispatcher := p.getDispatcher()
+	if dispatcher == nil {
+		return
+	}
+	logMessageRecord(p.messageLog, senderAgent, structuredMsg)
+	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, deferredMsg, false, structuredMsg); err != nil {
+		p.log.Warn("Failed to dispatch DELIVERY_DEFERRED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
 }

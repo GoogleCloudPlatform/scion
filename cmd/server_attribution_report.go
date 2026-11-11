@@ -249,6 +249,9 @@ func runAttributionReportForProject(ctx context.Context, s store.Store, projectI
 		}, store.ListOptions{
 			Limit:  batchSize,
 			Cursor: cursor,
+			// Report.Total counts the items; nothing reads the page
+			// TotalCount, so skip the per-page COUNT the store would run.
+			SkipTotalCount: true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("listing messages: %w", err)

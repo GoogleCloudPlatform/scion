@@ -1,0 +1,38 @@
+# cr-ci teardown.sh (dry-run) project=example-project region=us-central1
+# dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
+# reconciler cr-runner-reconciler
+? gcloud scheduler jobs describe cr-runner-reconciler --location=us-central1 --project=example-project '--format=value(name)'
++ gcloud scheduler jobs delete cr-runner-reconciler --location=us-central1 --project=example-project --quiet
+# mediator service cr-runner-mediator
+? gcloud run services describe cr-runner-mediator --region=us-central1 --project=example-project '--format=value(metadata.name)'
++ gcloud run services delete cr-runner-mediator --region=us-central1 --project=example-project --quiet
+# runner job cr-gh-runner-8c32g
+? gcloud run jobs describe cr-gh-runner-8c32g --region=us-central1 --project=example-project '--format=value(name)'
++ gcloud run jobs delete cr-gh-runner-8c32g --region=us-central1 --project=example-project --quiet
+# repository cr-runners and its images
+? gcloud artifacts repositories describe cr-runners --location=us-central1 --project=example-project '--format=value(name)'
++ gcloud artifacts repositories delete cr-runners --location=us-central1 --project=example-project --quiet
+# build staging bucket gs://example-project-cr-ci-staging (uploaded sources only)
+? gcloud storage buckets describe gs://example-project-cr-ci-staging --project=example-project '--format=value(name)'
++ gcloud storage rm --recursive gs://example-project-cr-ci-staging --project=example-project
+# secret cr-runner-gh-app-private-key
+? gcloud secrets describe cr-runner-gh-app-private-key --project=example-project '--format=value(name)'
++ gcloud secrets delete cr-runner-gh-app-private-key --project=example-project --quiet
+# secret cr-runner-gh-webhook-secret
+? gcloud secrets describe cr-runner-gh-webhook-secret --project=example-project '--format=value(name)'
++ gcloud secrets delete cr-runner-gh-webhook-secret --project=example-project --quiet
+# project binding of BUILD_SA_NAME (logging.logWriter)
++ gcloud projects remove-iam-policy-binding example-project --member=serviceAccount:cr-runner-build-sa@example-project.iam.gserviceaccount.com --role=roles/logging.logWriter --condition=None --format=none
+# service account cr-runner-exec-sa@example-project.iam.gserviceaccount.com
+? gcloud iam service-accounts describe cr-runner-exec-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts delete cr-runner-exec-sa@example-project.iam.gserviceaccount.com --project=example-project --quiet
+# service account cr-runner-scheduler-sa@example-project.iam.gserviceaccount.com
+? gcloud iam service-accounts describe cr-runner-scheduler-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts delete cr-runner-scheduler-sa@example-project.iam.gserviceaccount.com --project=example-project --quiet
+# service account cr-runner-mediator-sa@example-project.iam.gserviceaccount.com
+? gcloud iam service-accounts describe cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts delete cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --project=example-project --quiet
+# service account cr-runner-build-sa@example-project.iam.gserviceaccount.com
+? gcloud iam service-accounts describe cr-runner-build-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts delete cr-runner-build-sa@example-project.iam.gserviceaccount.com --project=example-project --quiet
+# done; APIs were left enabled

@@ -100,17 +100,15 @@ func TestChannelRegistryRace(t *testing.T) {
 
 	// Build a ChannelRegistry with one noop channel so Len() > 0.
 	registry := &ChannelRegistry{
-		channels: []NotificationChannel{noopChannel{}},
-		configs:  []ChannelConfig{{Type: "noop"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: noopChannel{}, config: ChannelConfig{Type: "noop"}}},
+		log:     slog.Default(),
 	}
 
 	// Disable the per-sender rate limiter so high concurrency does not 429.
 	srv.chatSendLimiter = newChatSendLimiterWithRates(
 		map[chatSenderClass]float64{
-			chatSenderHuman:       1e9,
-			chatSenderAgent:       1e9,
-			chatSenderAgentMirror: 1e9,
+			chatSenderHuman: 1e9,
+			chatSenderAgent: 1e9,
 		}, time.Now)
 
 	const goroutines = 8

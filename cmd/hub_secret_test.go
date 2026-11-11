@@ -16,12 +16,15 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -75,6 +78,9 @@ func setupSecretProject(t *testing.T, home, endpoint string) string {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
 	return projectDir
 }
 
@@ -121,7 +127,7 @@ func TestHubSecretListCmd_Exists(t *testing.T) {
 
 func TestHubSecretListCmd_Flags(t *testing.T) {
 	// Verify required flags are present on the list command.
-	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("grove"), "list command should have --grove flag")
+	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("project"), "list command should have --project flag")
 	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("broker"), "list command should have --broker flag")
 	assert.NotNil(t, hubSecretListCmd.Flags().Lookup("json"), "list command should have --json flag")
 }
@@ -159,51 +165,54 @@ func TestRunSecretList_WithResults(t *testing.T) {
 }
 
 func TestRunSecretList_Empty(t *testing.T) {
-	orig := saveSecretTestState()
-	defer orig.restore()
-
-	server := newSecretListMockServer(t, []map[string]interface{}{})
-	defer server.Close()
-
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-
-	projectDir := setupSecretProject(t, tmpHome, server.URL)
-	projectPath = projectDir
-
-	secretOutputJSON = false
-	secretProjectScope = ""
-	secretBrokerScope = ""
-
-	err := runSecretList(hubSecretListCmd, nil)
-	assert.NoError(t, err)
-}
-
-func TestRunSecretList_JSON(t *testing.T) {
-	orig := saveSecretTestState()
-	defer orig.restore()
-
-	secrets := []map[string]interface{}{
-		{"key": "MY_SECRET", "type": "variable", "scope": "user", "version": 1, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"},
+	tests := []struct {
+		name     string
+		format   string
+		jsonFlag bool
+	}{
+		{name: "table", format: ""},
+		{name: "format json", format: "json"},
+		{name: "json flag", jsonFlag: true},
 	}
 
-	server := newSecretListMockServer(t, secrets)
-	defer server.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := saveSecretTestState()
+			origFormat := outputFormat
+			t.Cleanup(func() {
+				orig.restore()
+				outputFormat = origFormat
+			})
 
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			server := newSecretListMockServer(t, []map[string]interface{}{})
+			t.Cleanup(server.Close)
 
-	projectDir := setupSecretProject(t, tmpHome, server.URL)
-	projectPath = projectDir
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			projectPath = setupSecretProject(t, tmpHome, server.URL)
 
-	secretOutputJSON = true
-	secretProjectScope = ""
-	secretBrokerScope = ""
+			outputFormat = tt.format
+			secretOutputJSON = tt.jsonFlag
+			secretProjectScope = ""
+			secretBrokerScope = ""
+			secretScope = ""
 
-	err := runSecretList(hubSecretListCmd, nil)
-	assert.NoError(t, err)
+			out := captureStdout(t, func() {
+				require.NoError(t, runSecretList(hubSecretListCmd, nil))
+			})
+
+			if tt.format == "" && !tt.jsonFlag {
+				assert.Equal(t, "No secrets found (scope: user)\n", out)
+				return
+			}
+
+			var got map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(out), &got), "output must be valid JSON: %q", out)
+			assert.JSONEq(t, `"user"`, string(got["scope"]))
+			assert.Equal(t, "[]", string(got["secrets"]), "empty list must encode as [], not null")
+		})
+	}
 }
 
 func TestResolveSecretScope_ScopeHub(t *testing.T) {
@@ -212,8 +221,8 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
@@ -228,33 +237,38 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveSecretScope(testCmd, settings)
+	target, err := resolveSecretScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "hub", scope)
-	assert.Equal(t, "", scopeID, "hub scope should return empty scopeID (server resolves it)")
+	assert.Equal(t, "hub", target.scope)
+	assert.Equal(t, "", target.id, "hub scope should return empty scopeID (server resolves it)")
 }
 
-func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
-	// When --grove is set without value and settings.Hub.ProjectID is empty,
-	// it should fall back to settings.ProjectID (the top-level project ID).
+func TestResolveSecretScope_UnlinkedProjectIDIsNotUsed(t *testing.T) {
+	// A bare --project in a directory project that is not linked to a hub
+	// is an error: its own project_id is not a hub project.
 	orig := saveSecretTestState()
 	defer orig.restore()
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
-	// Set --grove without a value (triggers inference)
-	_ = testCmd.Flags().Set("grove", scopeInferSentinel)
+	// Set --project without a value (triggers inference)
+	_ = testCmd.Flags().Set("project", scopeInferSentinel)
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	// setupSecretProject sets project_id but NOT hub.projectId
+	t.Setenv("SCION_HUB_PROJECT_ID", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
 	projectDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
-	projectPath = projectDir
+	projectPath = ""
+	t.Chdir(filepath.Dir(projectDir))
 
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
@@ -262,10 +276,10 @@ func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
 	assert.Empty(t, settings.GetHubProjectID(), "hub project ID should be empty for this test")
 	assert.NotEmpty(t, settings.ProjectID, "top-level project ID should be set")
 
-	scope, scopeID, err := resolveSecretScope(testCmd, settings)
-	assert.NoError(t, err)
-	assert.Equal(t, "project", scope)
-	assert.Equal(t, settings.ProjectID, scopeID, "should fall back to settings.ProjectID")
+	target, err := resolveSecretScope(testCmd, settings)
+	require.Error(t, err, "a local project_id is never used for a project that is not linked to a hub")
+	assert.Equal(t, hubScopeTarget{}, target)
+	assert.Contains(t, err.Error(), "directory project project is not linked to a hub")
 }
 
 func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
@@ -274,14 +288,14 @@ func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
-	// Set both --scope and --grove
+	// Set both --scope and --project
 	_ = testCmd.Flags().Set("scope", "hub")
-	_ = testCmd.Flags().Set("grove", "some-project")
+	_ = testCmd.Flags().Set("project", "some-project")
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
@@ -291,7 +305,7 @@ func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveSecretScope(testCmd, settings)
+	_, err = resolveSecretScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }
@@ -302,8 +316,8 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&secretProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
@@ -319,7 +333,7 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveSecretScope(testCmd, settings)
+	_, err = resolveSecretScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }
@@ -431,4 +445,112 @@ func TestHubSecretListCmd_ScopeFlag(t *testing.T) {
 		f := cmd.Flags().Lookup("scope")
 		assert.NotNil(t, f, "%s command should have --scope flag", cmd.Use)
 	}
+}
+
+// secretListFixture includes a "value" field to confirm the CLI never
+// echoes it, even if a Hub response were to carry one.
+func secretListFixture() []map[string]interface{} {
+	return []map[string]interface{}{
+		{"id": "id-1", "key": "API_KEY", "type": "environment", "scope": "user", "scopeId": "u1", "description": "desc", "createdBy": "alice", "value": "do-not-print", "allowProgeny": true, "version": 3, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-02T03:04:05Z"},
+		{"key": "CONFIG", "type": "", "scope": "user", "version": 1, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"},
+	}
+}
+
+func setupSecretListTest(t *testing.T) {
+	t.Helper()
+	orig := saveSecretTestState()
+	origFormat := outputFormat
+	t.Cleanup(func() {
+		orig.restore()
+		outputFormat = origFormat
+	})
+
+	server := newSecretListMockServer(t, secretListFixture())
+	t.Cleanup(server.Close)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	projectPath = setupSecretProject(t, tmpHome, server.URL)
+
+	secretOutputJSON = false
+	secretProjectScope = ""
+	secretBrokerScope = ""
+	secretScope = ""
+}
+
+func assertSecretListJSON(t *testing.T, out string) {
+	t.Helper()
+	assert.NotContains(t, out, "do-not-print")
+	assert.NotContains(t, out, "Secrets (scope:", "JSON output must not include the table")
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), "output must be valid JSON: %q", out)
+	assert.Equal(t, "user", got["scope"])
+
+	items, ok := got["secrets"].([]interface{})
+	require.True(t, ok, "secrets must be an array")
+	require.Len(t, items, 2)
+
+	first := items[0].(map[string]interface{})
+	assert.ElementsMatch(t, []string{"key", "state", "type", "allowProgeny", "version", "updated"}, mapKeys(first))
+	assert.Equal(t, "approved", first["state"])
+	assert.Equal(t, "API_KEY", first["key"])
+	assert.Equal(t, "environment", first["type"])
+	assert.Equal(t, true, first["allowProgeny"])
+	assert.Equal(t, float64(3), first["version"])
+	assert.Equal(t, "2026-01-02T03:04:05Z", first["updated"])
+
+	second := items[1].(map[string]interface{})
+	assert.Equal(t, "environment", second["type"], "empty type defaults to environment, as in the table")
+	assert.Equal(t, false, second["allowProgeny"])
+}
+
+func mapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func TestRunSecretList_FormatJSON(t *testing.T) {
+	setupSecretListTest(t)
+	outputFormat = "json"
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runSecretList(hubSecretListCmd, nil))
+	})
+	assertSecretListJSON(t, out)
+}
+
+func TestRunSecretList_JSONFlagMetadataOnly(t *testing.T) {
+	setupSecretListTest(t)
+	secretOutputJSON = true
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runSecretList(hubSecretListCmd, nil))
+	})
+	assertSecretListJSON(t, out)
+}
+
+// TestRunSecretList_TableOutput: the user-scope table has a STATE column;
+// a Hub that answers without the merged list shows every secret approved.
+func TestRunSecretList_TableOutput(t *testing.T) {
+	setupSecretListTest(t)
+	outputFormat = ""
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runSecretList(hubSecretListCmd, nil))
+	})
+
+	updated1 := clitime.Format(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), clitime.Full)
+	updated2 := clitime.Format(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), clitime.Full)
+	want := "Secrets (scope: user):\n" +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "KEY", "STATE", "TYPE", "PROGENY", "VERSION", "UPDATED") +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "--------", "------------", "--------", "--------", "-----------------------") +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "API_KEY", "approved", "environment", "✓", "v3", updated1) +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "CONFIG", "approved", "environment", "-", "v1", updated2)
+	assert.Equal(t, want, out)
+	assert.NotContains(t, out, "do-not-print")
 }

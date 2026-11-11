@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // SharedDirsSubdir is the subdirectory name under project-configs for shared directories.
@@ -45,28 +45,36 @@ func GetSharedDirsBasePath(projectDir string) (string, error) {
 	// ~/.scion/project-configs/<slug>__<uuid>/.scion/
 	// Go up one level to get the project-config root, then into shared-dirs
 	parent := filepath.Dir(projectDir)
-	// Verify we're in a project-configs or grove-configs directory structure
-	parentBase := filepath.Base(filepath.Dir(parent))
-	if parentBase == ProjectConfigsDir || parentBase == GroveConfigsDir || filepath.Base(parent) != DotScion {
-		return filepath.Join(parent, SharedDirsSubdir), nil
-	}
-
 	return filepath.Join(parent, SharedDirsSubdir), nil
 }
 
-// GetSharedDirPath returns the host-side directory path for a specific shared dir.
+// GetSharedDirPath returns the host-side directory path for a specific shared
+// dir on the local backend. It finds the project-config root from the
+// project's on-disk marker (GetSharedDirsBasePath) and leaves the leaf, and
+// the validation of name, to the layout authority (pkg/projectfs).
 func GetSharedDirPath(projectDir, name string) (string, error) {
 	basePath, err := GetSharedDirsBasePath(projectDir)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(basePath, name), nil
+	res, err := projectfs.Layout{Backend: projectfs.BackendLocal}.Resolve(
+		projectfs.Project{ConfigRoot: filepath.Dir(basePath)}, "",
+		projectfs.SharedDirMount(api.SharedDir{Name: name}, ""))
+	if err != nil {
+		return "", err
+	}
+	return res.HostPath, nil
 }
 
-// EnsureSharedDirs creates the host-side directories for all declared shared dirs.
+// EnsureSharedDirs creates the host-side directories for all declared shared
+// dirs. Every name is checked with api.ValidateSharedDirs first; if any fails,
+// it returns that error and creates nothing.
 func EnsureSharedDirs(projectDir string, dirs []api.SharedDir) error {
 	if len(dirs) == 0 {
 		return nil
+	}
+	if err := api.ValidateSharedDirs(dirs); err != nil {
+		return fmt.Errorf("shared dirs: %w", err)
 	}
 
 	basePath, err := GetSharedDirsBasePath(projectDir)
@@ -104,10 +112,7 @@ func SharedDirsToVolumeMounts(projectDir string, dirs []api.SharedDir, container
 			return nil, fmt.Errorf("failed to resolve path for shared dir %q: %w", d.Name, err)
 		}
 
-		target := fmt.Sprintf("/scion-volumes/%s", d.Name)
-		if d.InWorkspace {
-			target = fmt.Sprintf("%s/.scion-volumes/%s", containerWorkspace, d.Name)
-		}
+		target := projectfs.SharedDirTarget(d.Name, d.InWorkspace, containerWorkspace)
 
 		mounts = append(mounts, api.VolumeMount{
 			Source:   hostPath,
@@ -161,17 +166,15 @@ func GetSharedDirInfos(projectDir string, dirs []api.SharedDir) ([]SharedDirInfo
 
 // SharedDirHostPath computes the host-side directory path for a shared
 // directory given the user's home directory, the project slug, project ID,
-// and shared dir name.  This is used by host-process plugins (Telegram,
-// Discord) that receive container-internal paths (/scion-volumes/<name>)
-// and need to translate them to host-side paths without requiring access to
-// the project's .scion marker file.
+// and shared dir name, without requiring access to the project's .scion
+// marker file.
+//
+// This is the local-backend layout only. Host-process plugins (Telegram,
+// Discord) must use runtime.ResolveSharedDirHostPath instead, which picks
+// the nfs mount path when the shared dir uses the nfs backend.
 //
 // The returned path is under ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>.
 func SharedDirHostPath(home, slug, projectID, sharedDirName string) string {
-	shortUUID := strings.ReplaceAll(projectID, "-", "")
-	if len(shortUUID) > 8 {
-		shortUUID = shortUUID[:8]
-	}
-	dirName := fmt.Sprintf("%s__%s", slug, shortUUID)
+	dirName := projectfs.LocalConfigDirName(slug, projectID)
 	return filepath.Join(home, GlobalDir, ProjectConfigsDir, dirName, SharedDirsSubdir, sharedDirName)
 }

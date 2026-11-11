@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import type { ScionPageAdminIntegrations } from './admin-integrations.js';
+import { integrationSettingsPayload } from './admin-integrations.js';
 
 // ── Mock data builders ──
 
@@ -86,9 +88,6 @@ function createFetchHandler(
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageAdminIntegrations: any;
-
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
 ) {
@@ -118,10 +117,6 @@ function queryAll(el: HTMLElement, selector: string): Element[] {
   return Array.from(el.shadowRoot?.querySelectorAll(selector) ?? []);
 }
 
-function query(el: HTMLElement, selector: string): Element | null {
-  return el.shadowRoot?.querySelector(selector) ?? null;
-}
-
 // ── Tests ──
 
 describe('scion-page-admin-integrations — Discord guild_ids', () => {
@@ -133,8 +128,7 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
       value: { pathname: '/admin/integrations/discord' },
       writable: true,
     });
-    const mod = await import('./admin-integrations.js');
-    ScionPageAdminIntegrations = mod.ScionPageAdminIntegrations;
+    await import('./admin-integrations.js');
   });
 
   afterEach(() => {
@@ -188,7 +182,7 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
 
   // ── Form submission ──
 
-  it('includes guild_ids in PUT payload', async () => {
+  it('includes an edited guild_ids in PUT payload, and only the changed key', async () => {
     let capturedPayload: Record<string, unknown> | null = null;
 
     element = await createComponent(
@@ -200,6 +194,13 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
       })
     );
 
+    const guildInput = queryAll(element, 'sl-input').find(
+      (input) => (input as any).value === '111,222'
+    ) as HTMLElement & { value: string };
+    guildInput.value = '111,222,333';
+    guildInput.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+
     // Click save button
     const buttons = queryAll(element, 'sl-button[variant="primary"]');
     const saveBtn = buttons.find((b) => b.textContent?.trim().includes('Save'));
@@ -208,17 +209,14 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(capturedPayload).not.toBeNull();
-    const settings = capturedPayload!.settings as Record<string, string>;
-    expect(settings).toBeDefined();
-    expect(settings.guild_ids).toBe('111,222');
-    expect(settings.application_id).toBeDefined();
+    expect(capturedPayload!.settings).toEqual({ guild_ids: '111,222,333' });
   });
 
-  it('sends empty guild_ids when cleared (global mode)', async () => {
+  it('sends null for a cleared stored guild_ids, so the stored key is deleted (global mode)', async () => {
     let capturedPayload: Record<string, unknown> | null = null;
 
     element = await createComponent(
-      createFetchHandler(makeDiscordDetail({ guild_ids: '' }), {
+      createFetchHandler(makeDiscordDetail({ guild_ids: '111' }), {
         putHandler: (body) => {
           capturedPayload = body;
           return { status: 200, body: {} };
@@ -226,13 +224,535 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
       })
     );
 
+    const guildInput = queryAll(element, 'sl-input').find(
+      (input) => (input as any).value === '111'
+    ) as HTMLElement & { value: string };
+    guildInput.value = '';
+    guildInput.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+
     const buttons = queryAll(element, 'sl-button[variant="primary"]');
     const saveBtn = buttons.find((b) => b.textContent?.trim().includes('Save'));
     (saveBtn as HTMLElement).click();
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(capturedPayload).not.toBeNull();
-    const settings = capturedPayload!.settings as Record<string, string>;
-    expect(settings.guild_ids).toBe('');
+    expect(capturedPayload!.settings).toEqual({ guild_ids: null });
+  });
+});
+
+describe('scion-page-admin-integrations — structured save errors (ptone/scion#3923)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  /** Answers the config PUT with `put` and counts detail GETs. */
+  function handler(
+    put: Response | (() => Response),
+    detail: Record<string, unknown> = makeDiscordDetail()
+  ) {
+    const base = createFetchHandler(detail);
+    const counts = { detailGets: 0 };
+    const puts: Record<string, unknown>[] = [];
+    const fetchFn = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'PUT' && path.endsWith('/config')) {
+        puts.push(JSON.parse(init.body as string));
+        return Promise.resolve(typeof put === 'function' ? put() : put);
+      }
+      if (/\/api\/v1\/admin\/integrations\/discord$/.test(path)) counts.detailGets++;
+      return base(url, init);
+    };
+    return { fetchFn, counts, puts };
+  }
+
+  function jsonResponse(body: unknown, status: number): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  async function clickSave(el: HTMLElement): Promise<void> {
+    const btn = queryAll(el, 'sl-button').find(
+      (b) => b.textContent?.trim() === 'Save Configuration'
+    );
+    (btn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await (el as any).updateComplete;
+  }
+
+  function text(el: Element | null | undefined): string {
+    return (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function q(el: HTMLElement, selector: string): Element | null {
+    return el.shadowRoot?.querySelector(selector) ?? null;
+  }
+
+  it('a validation error naming a setting shows inline at that field and in the section summary', async () => {
+    const { fetchFn } = handler(
+      jsonResponse(
+        {
+          error: 'validation_failed',
+          errors: {
+            settings: [{ Path: 'application_id', Message: 'must be numeric' }],
+            secrets: [{ path: 'bot_token', message: 'is too short' }],
+          },
+        },
+        400
+      )
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '[data-field-error="settings.application_id"]'))).toBe(
+      'must be numeric'
+    );
+    expect(text(q(element, '[data-field-error="secrets.bot_token"]'))).toBe('is too short');
+    const summary = text(q(element, '[data-section-errors="configuration"]'));
+    expect(summary).toContain('must be numeric');
+    expect(summary).toContain('is too short');
+  });
+
+  it('a path with no settings/secrets group is placed only when its key is in exactly one group', async () => {
+    const detail = {
+      ...makeDiscordDetail(),
+      settings: { application_id: '123', guild_ids: '', shared: 'x' },
+      has_secrets: { bot_token: true, shared: true },
+    };
+    const { fetchFn } = handler(
+      jsonResponse(
+        {
+          error: 'validation_failed',
+          errors: [
+            { Path: 'bot_token', Message: 'secret only' },
+            { Path: 'shared', Message: 'in both groups' },
+            { Path: 'unknown_key', Message: 'in no group' },
+          ],
+        },
+        400
+      ),
+      detail
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '[data-field-error="secrets.bot_token"]'))).toBe('secret only');
+    expect(q(element, '[data-field-error="settings.shared"]')).toBeNull();
+    expect(q(element, '[data-field-error="secrets.shared"]')).toBeNull();
+    const summary = text(q(element, '[data-section-errors="configuration"]'));
+    expect(summary).toContain('in both groups');
+    expect(summary).toContain('in no group');
+  });
+
+  it('the save payload is unchanged by the error handling', async () => {
+    const { fetchFn, puts } = handler(
+      jsonResponse({ error: 'validation_failed', errors: [{ Path: 'x', Message: 'bad' }] }, 400)
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+    await clickSave(element);
+
+    // Nothing was edited, so no setting is sent (ptone/scion#3913).
+    const expected = { settings: {} };
+    expect(puts).toEqual([expected, expected]);
+  });
+
+  it('revision_conflict shows the changed-since-loaded notice; Reload refetches the integration', async () => {
+    const { fetchFn, counts } = handler(
+      jsonResponse({ error: 'revision_conflict', message: 'changed', conflicted: [] }, 409)
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+    const notice = q(element, '[data-settings-conflict]');
+    expect(text(notice)).toContain('Settings changed since you loaded them');
+
+    const before = counts.detailGets;
+    (notice!.querySelector('[data-settings-reload]') as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await (element as any).updateComplete;
+    expect(counts.detailGets).toBe(before + 1);
+    expect(q(element, '[data-settings-conflict]')).toBeNull();
+  });
+
+  it('layer0_rejected names the deployment-managed key', async () => {
+    const { fetchFn } = handler(
+      jsonResponse({ error: 'layer0_rejected', keys: ['plugins.broker.discord.mode'] }, 422)
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    const notice = text(q(element, '[data-settings-layer0]'));
+    expect(notice).toContain('cannot be changed here');
+    expect(notice).toContain('plugins.broker.discord.mode');
+  });
+
+  it('an unknown error keeps the generic message plus the server text', async () => {
+    const { fetchFn } = handler(
+      jsonResponse(
+        { error: { code: 'forbidden', message: 'these keys require an interactive session' } },
+        403
+      )
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '.status-message.error'))).toBe(
+      'Failed to save configuration: these keys require an interactive session'
+    );
+  });
+
+  it('a malformed error body falls back to the generic message', async () => {
+    const { fetchFn } = handler(() => new Response('not json', { status: 500 }));
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '.status-message.error'))).toBe('Failed to save configuration');
+    expect(q(element, '[data-section-errors]')).toBeNull();
+  });
+});
+
+// ── Save payload covers every shown field (ptone/scion#3924) ──
+//
+// Integration settings are per-integration plugin settings saved to
+// PUT /api/v1/admin/integrations/<name>/config, not opsettings registry keys,
+// so only the "every shown field is sent, explicitly when cleared" half of
+// the admin settings payload check applies here. Each platform's
+// Configuration fields are cleared through their own controls, plus one
+// server-reported key the page has no definition for.
+
+describe('scion-page-admin-integrations — cleared config save (ptone/scion#3924)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  /** Integration name to the platform the page resolves it to (resolvePlatform). */
+  const INTEGRATIONS = ['telegram', 'discord', 'slack', 'chat-app', 'a2a-bridge', 'teams'];
+
+  it.each(INTEGRATIONS)(
+    '%s: every shown Configuration field is sent when cleared',
+    async (name) => {
+      let captured: Record<string, unknown> | null = null;
+      const detail = {
+        name,
+        platform: name,
+        self_managed: false,
+        // A key the page has no field definition for renders as a plain input.
+        settings: { extra_server_key: 'value' },
+        has_secrets: {},
+        status: { connected: true, version: '0.1.0' },
+      };
+      Object.defineProperty(window, 'location', {
+        value: { pathname: `/admin/integrations/${name}` },
+        writable: true,
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler(detail, {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: {} };
+            },
+          })
+        )
+      );
+      await import('./admin-integrations.js');
+      element = document.createElement('scion-page-admin-integrations');
+      document.body.appendChild(element);
+      const el = element as any;
+      await el.updateComplete;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await el.updateComplete;
+
+      const configSection = queryAll(element, '.section').find(
+        (s) => s.querySelector('.section-title')?.textContent?.trim() === 'Configuration'
+      );
+      expect(configSection).toBeDefined();
+      const fields = Array.from(configSection!.querySelectorAll('.form-grid > .form-field'));
+      expect(fields.length).toBeGreaterThan(1);
+
+      type Control = HTMLElement & { value?: string; checked?: boolean };
+      const controls = fields.map((field) => {
+        const control = field.querySelector('sl-input, sl-select, sl-switch, sl-textarea');
+        expect(control, field.querySelector('label')?.textContent ?? '').not.toBeNull();
+        return control as Control;
+      });
+
+      async function setAllAndSave(set: (c: Control, i: number) => void) {
+        captured = null;
+        for (const [i, control] of controls.entries()) {
+          set(control, i);
+          control.dispatchEvent(new Event('sl-change'));
+          await el.updateComplete;
+        }
+        const saveBtn = queryAll(element!, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save Configuration'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(captured).not.toBeNull();
+        return (captured as unknown as { settings: Record<string, string> }).settings;
+      }
+
+      // Each shown field reaches the payload: give every control a distinct
+      // value and find each one in the sent settings.
+      const isSwitch = (c: Control) => c.tagName === 'SL-SWITCH';
+      const filled = await setAllAndSave((c, i) => {
+        if (isSwitch(c)) c.checked = true;
+        else c.value = `value-${i}`;
+      });
+      const sentValues = Object.values(filled);
+      const notSent = controls
+        .map((c, i) => (isSwitch(c) ? null : `value-${i}`))
+        .filter((v): v is string => v !== null && !sentValues.includes(v));
+      expect(notSent, 'shown fields missing from the save payload').toEqual([]);
+
+      // Cleared (the reload after the save shows the stored values again):
+      // a stored key is sent as null, which deletes it on the hub; a field
+      // with no stored value, cleared or set to its default, is not sent,
+      // so plugin defaults are never written (ptone/scion#3913).
+      const cleared = await setAllAndSave((c) => {
+        if (isSwitch(c)) c.checked = false;
+        else c.value = '';
+      });
+      expect(cleared).toEqual({ extra_server_key: null });
+    }
+  );
+});
+
+describe('scion-page-admin-integrations — Telegram webhook secret requirement (ptone/scion#4541)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function renderTelegram(inboundMode: string) {
+    const detail = {
+      name: 'telegram',
+      platform: 'telegram',
+      self_managed: false,
+      settings: { inbound_mode: inboundMode },
+      has_secrets: { bot_token: true },
+      status: { connected: true, version: '0.1.0' },
+    };
+    Object.defineProperty(window, 'location', {
+      value: { pathname: '/admin/integrations/telegram' },
+      writable: true,
+    });
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(detail)));
+    await import('./admin-integrations.js');
+    element = document.createElement('scion-page-admin-integrations');
+    document.body.appendChild(element);
+    const el = element as any;
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await el.updateComplete;
+    return el as HTMLElement & { updateComplete: Promise<boolean> };
+  }
+
+  function webhookSecretRequired(el: HTMLElement): boolean {
+    const row = queryAll(el, '.secret-row').find((r) =>
+      r.querySelector('.secret-key')?.textContent?.includes('Webhook Secret')
+    );
+    expect(row, 'Webhook Secret row').toBeDefined();
+    return row!.querySelector('.required-tag') !== null;
+  }
+
+  it('marks Webhook Secret required when inbound mode is webhook', async () => {
+    const el = await renderTelegram('webhook');
+    expect(webhookSecretRequired(el)).toBe(true);
+  });
+
+  it('does not mark Webhook Secret required in poll mode', async () => {
+    const el = await renderTelegram('poll');
+    expect(webhookSecretRequired(el)).toBe(false);
+  });
+
+  it('follows an edit of the inbound mode field', async () => {
+    const el = await renderTelegram('poll');
+    const field = queryAll(el, '.form-field').find((f) =>
+      f.querySelector('label')?.textContent?.includes('Inbound Mode')
+    );
+    const input = field?.querySelector('sl-input') as (HTMLElement & { value: string }) | null;
+    expect(input).not.toBeNull();
+    input!.value = 'webhook';
+    input!.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(webhookSecretRequired(el)).toBe(true);
+  });
+});
+
+describe('scion-page-admin-integrations — plugin defaults are placeholders (ptone/scion#3913)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function render(name: string, settings: Record<string, string>) {
+    const puts: Array<Record<string, unknown>> = [];
+    const detail = {
+      name,
+      platform: name,
+      self_managed: false,
+      settings,
+      has_secrets: {},
+      status: { connected: true, version: '0.1.0' },
+    };
+    Object.defineProperty(window, 'location', {
+      value: { pathname: `/admin/integrations/${name}` },
+      writable: true,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        createFetchHandler(detail, {
+          putHandler: (body) => {
+            puts.push(body);
+            return { status: 200, body: {} };
+          },
+        })
+      )
+    );
+    await import('./admin-integrations.js');
+    element = document.createElement('scion-page-admin-integrations');
+    document.body.appendChild(element);
+    const el = element as any;
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await el.updateComplete;
+    return { el: el as HTMLElement & { updateComplete: Promise<boolean> }, puts };
+  }
+
+  async function save(el: HTMLElement) {
+    const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save Configuration'
+    );
+    (saveBtn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  function fieldControl(el: HTMLElement, label: string): HTMLElement & { value: string } {
+    const field = queryAll(el, '.form-field').find(
+      (f) => f.querySelector('label')?.textContent?.trim() === label
+    );
+    expect(field, label).toBeDefined();
+    return field!.querySelector('sl-input, sl-select, sl-switch') as HTMLElement & {
+      value: string;
+    };
+  }
+
+  it('shows a text default as the placeholder, not the value, and does not save it', async () => {
+    const { el, puts } = await render('telegram', {});
+    const input = queryAll(el, 'sl-input').find(
+      (i) => i.getAttribute('placeholder') === ':9094'
+    ) as (HTMLElement & { value: string }) | undefined;
+    expect(input, 'webhook listen input with the default as placeholder').toBeDefined();
+    expect(input!.value).toBe('');
+
+    await save(el);
+    expect(puts).toEqual([{ settings: {} }]);
+  });
+
+  it('a select set to its default with no stored value is not saved; another value is', async () => {
+    const { el, puts } = await render('a2a-bridge', {});
+    const select = fieldControl(el, 'Auth Scheme');
+    expect(select.value).toBe('none');
+
+    select.value = 'none';
+    select.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    await save(el);
+    expect(puts.at(-1)).toEqual({ settings: {} });
+
+    const again = fieldControl(el, 'Auth Scheme');
+    again.value = 'bearer';
+    again.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    await save(el);
+    expect(puts.at(-1)).toEqual({ settings: { auth_scheme: 'bearer' } });
+  });
+
+  it('Use default on a stored switch sends null, deleting the stored key', async () => {
+    const { el, puts } = await render('a2a-bridge', { rate_limit_enabled: 'true' });
+    expect(queryAll(el, '[data-use-default="auth_scheme"]')).toHaveLength(0);
+    const useDefault = queryAll(el, '[data-use-default="rate_limit_enabled"]');
+    expect(useDefault).toHaveLength(1);
+    (useDefault[0] as HTMLElement).click();
+    await el.updateComplete;
+    expect(queryAll(el, '[data-use-default="rate_limit_enabled"]')).toHaveLength(0);
+
+    await save(el);
+    expect(puts).toEqual([{ settings: { rate_limit_enabled: null } }]);
+  });
+});
+
+describe('integrationSettingsPayload (ptone/scion#3913)', () => {
+  const fields = [
+    { key: 'mode', defaultValue: 'poll' },
+    { key: 'listen', defaultValue: ':9094' },
+    { key: 'name', defaultValue: '' },
+  ];
+
+  it('sends nothing when nothing changed', () => {
+    expect(integrationSettingsPayload({ mode: 'webhook' }, { mode: 'webhook' }, fields)).toEqual(
+      {}
+    );
+    expect(integrationSettingsPayload({}, {}, fields)).toEqual({});
+  });
+
+  it('does not send an unset key left empty or set to its default', () => {
+    expect(integrationSettingsPayload({ name: '', mode: 'poll' }, {}, fields)).toEqual({});
+  });
+
+  it('sends a changed or newly set value', () => {
+    expect(
+      integrationSettingsPayload({ mode: 'webhook', listen: ':9095' }, { mode: 'poll' }, fields)
+    ).toEqual({ mode: 'webhook', listen: ':9095' });
+  });
+
+  it('sends a stored value equal to the default when the user keeps it explicitly', () => {
+    expect(integrationSettingsPayload({ mode: 'poll' }, { mode: 'webhook' }, fields)).toEqual({
+      mode: 'poll',
+    });
+  });
+
+  it('sends null for a cleared or reset stored key, and keeps a stored empty value', () => {
+    expect(
+      integrationSettingsPayload(
+        { listen: '', name: '' },
+        { listen: ':1', name: '', mode: 'x' },
+        fields
+      )
+    ).toEqual({ listen: null, mode: null });
+  });
+
+  it('treats server keys with no field definition the same way', () => {
+    expect(integrationSettingsPayload({ extra: '' }, { extra: 'v' }, fields)).toEqual({
+      extra: null,
+    });
+    expect(integrationSettingsPayload({ extra: 'w' }, {}, fields)).toEqual({ extra: 'w' });
   });
 });

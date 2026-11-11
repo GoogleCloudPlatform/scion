@@ -30,6 +30,7 @@ import type { PageData, HarnessConfig } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import { HarnessConfigFileBrowserDataSource } from '../shared/file-browser.js';
@@ -38,6 +39,56 @@ import { HarnessConfigFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
+import { navigateTo } from '../../client/navigation.js';
+import { describeSourceUrl } from '../../shared/source-url.js';
+
+/**
+ * The image to show and check for a harness-config: the image the hub last
+ * built for it when set, otherwise config.yaml's image (ptone/scion#4219).
+ */
+export function harnessConfigImage(hc: HarnessConfig): string | undefined {
+  return hc.builtImage || hc.config?.image;
+}
+
+/** Image availability from GET /api/v1/harness-configs/{id}/image-status. */
+interface HarnessConfigImageStatus {
+  image?: string;
+  registry?: {
+    image: string;
+    exists: boolean;
+    hash: string;
+    checked_at: string;
+  };
+  brokers?: Array<{
+    broker_id: string;
+    broker_name: string;
+    reachable: boolean;
+    unsupported?: boolean;
+    local_short?: { exists: boolean; hash: string };
+    local_long?: { exists: boolean; hash: string };
+    newer_in_registry?: boolean;
+    resolved_image?: string;
+    resolution_source?: string;
+  }>;
+  proxy_brokers?: Array<{
+    broker_id: string;
+    broker_name: string;
+    runtime: string;
+  }>;
+}
+
+/** Result of POST /api/v1/harness-configs/{id}/reimport. */
+interface HarnessConfigReimportResult {
+  count?: number;
+  harnessConfigs?: string[] | null;
+  failed?: Array<{ name: string; reason: string }>;
+}
+
+/** The fields of a maintenance run that the image build polling reads. */
+interface ImageBuildRun {
+  log?: string;
+  status?: string;
+}
 
 @customElement('scion-page-harness-config-detail')
 export class ScionPageHarnessConfigDetail extends LitElement {
@@ -120,31 +171,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private deleteError = '';
 
   @state()
-  private imageStatus: {
-    image?: string;
-    registry?: {
-      image: string;
-      exists: boolean;
-      hash: string;
-      checked_at: string;
-    };
-    brokers?: Array<{
-      broker_id: string;
-      broker_name: string;
-      reachable: boolean;
-      unsupported?: boolean;
-      local_short?: { exists: boolean; hash: string };
-      local_long?: { exists: boolean; hash: string };
-      newer_in_registry?: boolean;
-      resolved_image?: string;
-      resolution_source?: string;
-    }>;
-    proxy_brokers?: Array<{
-      broker_id: string;
-      broker_name: string;
-      runtime: string;
-    }>;
-  } | null = null;
+  private imageStatus: HarnessConfigImageStatus | null = null;
 
   @state()
   private expandedBrokers: Set<string> = new Set();
@@ -165,39 +192,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       margin: 0 auto;
     }
 
-    .back-links {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1rem;
-      flex-wrap: wrap;
-    }
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--sl-color-neutral-600);
-      text-decoration: none;
-      font-size: 0.875rem;
-    }
-    .back-link:hover {
-      color: var(--sl-color-primary-600);
-    }
-
-    .resource-header {
-      margin-bottom: 1.5rem;
-    }
-    .resource-title {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin: 0 0 0.5rem;
-    }
-    .resource-title h1 {
-      margin: 0;
-      font-size: 1.5rem;
-      font-weight: 600;
-    }
     .harness-badge {
       display: inline-block;
       padding: 0.15rem 0.5rem;
@@ -237,10 +231,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
     .editor-back-row {
       margin-bottom: 0.5rem;
-    }
-
-    .header-actions {
-      margin-left: auto;
     }
 
     .build-log-section {
@@ -568,7 +558,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       this.fileBrowserDataSource = new HarnessConfigFileBrowserDataSource(this.harnessConfigId);
       this.fileEditorDataSource = new HarnessConfigFileEditorDataSource(this.harnessConfigId);
 
-      if (this.harnessConfig.config?.image) {
+      if (harnessConfigImage(this.harnessConfig)) {
         void this.recheckImage();
       }
     } catch (err) {
@@ -609,7 +599,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     const browser = this.shadowRoot?.querySelector('scion-file-browser') as
       | import('../shared/file-browser.js').ScionFileBrowser
       | null;
-    browser?.loadFiles();
+    void browser?.loadFiles();
   }
 
   // ── Rendering ──
@@ -630,17 +620,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     if (!this.harnessConfig) return nothing;
 
     return html`
-      <div class="back-links">
-        ${this.backLinks().map(
-          (link) => html`
-            <a href=${link.href} class="back-link">
-              <sl-icon name="arrow-left"></sl-icon>
-              ${link.label}
-            </a>
-          `
-        )}
-      </div>
-
       ${this.renderHeader()} ${this.renderFilesSection()} ${this.renderImageSection()}
       ${this.renderBuildDialog()} ${this.renderBuildLog()} ${this.renderDeleteDialog()}
     `;
@@ -648,50 +627,19 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   private renderHeader() {
     const hc = this.harnessConfig!;
+    const canDelete = can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage');
     return html`
-      <div class="resource-header">
-        <div class="resource-title">
-          <sl-icon
-            name="sliders"
-            style="font-size: 1.25rem; color: var(--sl-color-neutral-500);"
-          ></sl-icon>
-          <h1>${hc.displayName || hc.name}</h1>
-          ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
-          <div class="header-actions">
-            ${hc.sourceUrl
-              ? html`
-                  <sl-button
-                    size="small"
-                    variant="default"
-                    @click=${this.startReimport}
-                    ?disabled=${this.reimportRunning}
-                    ?loading=${this.reimportRunning}
-                  >
-                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-                    Refresh from Source
-                  </sl-button>
-                `
-              : nothing}
-            ${can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage')
-              ? html`
-                  <sl-button
-                    size="small"
-                    variant="danger"
-                    outline
-                    @click=${() => {
-                      this.deleteDialogOpen = true;
-                      this.deleteError = '';
-                    }}
-                  >
-                    <sl-icon slot="prefix" name="trash"></sl-icon>
-                    Delete
-                  </sl-button>
-                `
-              : nothing}
-          </div>
-        </div>
-        ${hc.description ? html`<p class="resource-description">${hc.description}</p>` : ''}
-        <div class="resource-meta-row">
+      <scion-detail-header heading=${hc.displayName || hc.name}>
+        ${this.backLinks().map(
+          (link) =>
+            html`<scion-back-link slot="back" href=${link.href}>${link.label}</scion-back-link>`
+        )}
+        <sl-icon slot="icon" name="sliders"></sl-icon>
+        ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
+        ${hc.description
+          ? html`<p slot="meta" class="resource-description">${hc.description}</p>`
+          : ''}
+        <div slot="meta" class="resource-meta-row">
           <span>Scope: ${hc.scope}</span>
           <span>Status: ${hc.status}</span>
           ${hc.contentHash
@@ -700,23 +648,64 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                 <scion-hash-display .hash=${hc.contentHash} max-width="14ch"></scion-hash-display
               ></span>`
             : ''}
-          ${hc.sourceUrl
-            ? html`<span class="source-url"
-                >Source:
-                <a href=${hc.sourceUrl.replace(/^git\+/, '')} target="_blank" rel="noopener"
-                  >${hc.sourceUrl}</a
-                >
-              </span>`
-            : ''}
+          ${this.renderSourceUrl(hc.sourceUrl)}
         </div>
         ${this.reimportStatus
-          ? html`<p class="reimport-status success">${this.reimportStatus}</p>`
+          ? html`<p slot="meta" class="reimport-status success">${this.reimportStatus}</p>`
           : ''}
         ${this.reimportError
-          ? html`<p class="reimport-status error">${this.reimportError}</p>`
+          ? html`<p slot="meta" class="reimport-status error">${this.reimportError}</p>`
           : ''}
-      </div>
+        ${hc.sourceUrl || canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${hc.sourceUrl
+                  ? html`
+                      <sl-button
+                        size="small"
+                        variant="default"
+                        @click=${this.startReimport}
+                        ?disabled=${this.reimportRunning}
+                        ?loading=${this.reimportRunning}
+                      >
+                        <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                        Refresh from Source
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canDelete
+                  ? html`
+                      <sl-button
+                        size="small"
+                        variant="danger"
+                        outline
+                        @click=${() => {
+                          this.deleteDialogOpen = true;
+                          this.deleteError = '';
+                        }}
+                      >
+                        <sl-icon slot="prefix" name="trash"></sl-icon>
+                        Delete
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
+  }
+
+  private renderSourceUrl(sourceUrl: string | undefined): unknown {
+    const shown = describeSourceUrl(sourceUrl);
+    if (!shown) return '';
+    if (!shown.href) {
+      return html`<span class="source-url">Source: ${shown.text}</span>`;
+    }
+    return html`<span class="source-url"
+      >Source:
+      <a href=${shown.href} target="_blank" rel="noopener noreferrer">${shown.text}</a>
+    </span>`;
   }
 
   private renderFilesSection() {
@@ -758,7 +747,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   }
   private renderImageSection() {
     const hc = this.harnessConfig!;
-    const image = hc.config?.image;
+    const image = harnessConfigImage(hc);
     const showSection = image || this.hasDockerfile;
     if (!showSection) return nothing;
 
@@ -822,7 +811,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     st: typeof this.imageStatus
   ) {
     const hc = this.harnessConfig!;
-    const image = hc.config?.image;
+    const image = harnessConfigImage(hc);
 
     if (!broker.reachable) {
       return html`
@@ -1191,7 +1180,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     try {
       const resp = await apiFetch(`/api/v1/harness-configs/${this.harnessConfigId}/image-status`);
       if (resp.ok) {
-        this.imageStatus = await resp.json();
+        this.imageStatus = (await resp.json()) as HarnessConfigImageStatus;
       } else {
         const msg = await extractApiError(resp, `HTTP ${resp.status}`);
         showToast(msg);
@@ -1258,7 +1247,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         return;
       }
 
-      const result = await response.json();
+      const result = (await response.json()) as HarnessConfigReimportResult | null;
       const count = result?.count ?? result?.harnessConfigs?.length ?? 0;
       const failed: Array<{ name: string; reason: string }> = result?.failed ?? [];
 
@@ -1357,7 +1346,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         return;
       }
 
-      const result = await response.json();
+      const result = (await response.json()) as { runId?: string } | null;
       if (!result?.runId) {
         this.buildError = 'Build started but no run ID was returned';
         this.buildRunning = false;
@@ -1407,7 +1396,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       }
 
       this.buildPollErrors = 0;
-      const run = await resp.json();
+      const run = (await resp.json()) as ImageBuildRun;
       this.buildLog = run.log ?? '';
       this.buildStatus = run.status ?? '';
       void this.updateComplete.then(() => this.scrollBuildLog());
@@ -1540,7 +1529,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       this.deleteDialogOpen = false;
       // Navigate back to the list view
       const backLink = this.backLinks()[0];
-      window.location.href = backLink.href;
+      navigateTo(backLink.href);
     } catch (err) {
       this.deleteError = err instanceof Error ? err.message : 'Delete failed';
     } finally {

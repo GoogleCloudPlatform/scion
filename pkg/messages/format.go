@@ -24,6 +24,49 @@ const (
 	deliveryIntro  = "You are receiving a message from the orchestration system:"
 )
 
+// Hub-set sender metadata keys for a message from a project visitor (a user
+// of a trusted external issuer, ptone/scion#4603). Only the hub sets them:
+// the hub strips any client-supplied value (messaging.StripReservedMetadata)
+// and sets all of them on a visitor's message, so the recipient agent can
+// tell a visitor from a local user. The visitor's address (the message
+// sender) is its account ID; these keys name the person.
+const (
+	// MetadataSenderVisitor is "true" on a message whose sender is a
+	// project visitor.
+	MetadataSenderVisitor = "sender_visitor"
+	// MetadataSenderEmail is the visitor's email as verified by its issuer.
+	MetadataSenderEmail = "sender_email"
+	// MetadataSenderIssuer is the display name of the visitor's issuer.
+	MetadataSenderIssuer = "sender_issuer"
+	// MetadataSenderDisplay is the visitor's display label, as in
+	// "alice@corp.example (visitor via idp.example)".
+	MetadataSenderDisplay = "sender_display"
+)
+
+// MetadataSenderTimezone is the IANA time zone name from a human sender's
+// user profile, as stored, so the recipient agent can read times the
+// sender mentions in the sender's own zone. Only the hub sets it: the hub
+// strips any client-supplied value (messaging.StripReservedMetadata) and
+// sets it on a message from a human user whose profile has a time zone.
+// It is absent when the profile has none and when the sender is not a
+// human user.
+const MetadataSenderTimezone = "sender_timezone"
+
+// Choice response metadata (design choices v4, 4.4): the hub sets these on
+// the choice-response message it delivers to the asking agent and strips
+// any client-supplied value (messaging.StripReservedMetadata).
+const (
+	MetadataChoiceKey        = "choice_key"
+	MetadataChoiceVersion    = "choice_version"
+	MetadataChoiceID         = "choice_id"
+	MetadataChoiceProvenance = "choice_provenance"
+	// MetadataChoiceBatch and MetadataChoiceAnswers are set instead of the
+	// four keys above on the response of a set submit (design choices v5,
+	// 5.1): the batch id and a compact key@version=choiceId list.
+	MetadataChoiceBatch   = "choice_batch"
+	MetadataChoiceAnswers = "choice_answers"
+)
+
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
 // agents during delivery. Platform-specific keys (e.g. telegram_chat_id) are
 // excluded to avoid leaking implementation details.
@@ -37,6 +80,29 @@ var deliveryMetadataAllowlist = map[string]bool{
 	"channel":          true,
 	"thread_id":        true,
 	"system_category":  true,
+	// ptone/scion#2257 (design auto-offload-large-dm §4.2 item 3): hub-set
+	// only — messaging.OffloadForDelivery deletes any client-supplied value
+	// and sets these itself only when it offloads. Adding them here lets the
+	// switch-OFF (legacy) renderer show them; it does NOT add them to
+	// internalMetadataKeys, which would hide them from the switch-ON hub
+	// envelope instead.
+	"body_offloaded": true,
+	"body_chars":     true,
+	"body_sha256":    true,
+	// ptone/scion#4603: hub-set only (see MetadataSenderVisitor).
+	MetadataSenderVisitor: true,
+	MetadataSenderEmail:   true,
+	MetadataSenderIssuer:  true,
+	MetadataSenderDisplay: true,
+	// Hub-set only (see MetadataSenderTimezone).
+	MetadataSenderTimezone: true,
+	// Hub-set only (see MetadataChoiceKey).
+	MetadataChoiceKey:        true,
+	MetadataChoiceVersion:    true,
+	MetadataChoiceID:         true,
+	MetadataChoiceProvenance: true,
+	MetadataChoiceBatch:      true,
+	MetadataChoiceAnswers:    true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.
@@ -59,7 +125,7 @@ type deliveryMessage struct {
 // If the message has plain=true, only the raw msg text is returned.
 // The recipient and version fields are stripped before delivery.
 func FormatForDelivery(msg *StructuredMessage) string {
-	if msg.Plain || msg.Raw {
+	if msg.Plain {
 		return msg.Msg
 	}
 

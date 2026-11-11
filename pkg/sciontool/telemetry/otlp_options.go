@@ -29,7 +29,7 @@ func loadSecureGCPDialOptions(ctx context.Context, config *Config) ([]grpc.DialO
 }
 
 func loadSecureOTLPTLSConfig(config *Config) (*tls.Config, error) {
-	tlsConfig, err := loadOTLPTLSConfig(config.CAFile)
+	tlsConfig, err := loadOTLPTLSConfig(config.CAFile, config.CertFile, config.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load OTLP TLS config: %w", err)
 	}

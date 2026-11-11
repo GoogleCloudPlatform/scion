@@ -15,15 +15,12 @@
 package hub
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -31,26 +28,6 @@ import (
 // ---------------------------------------------------------------------------
 // countingGoogleValidator — tracks call counts for zero-call assertions.
 // ---------------------------------------------------------------------------
-
-type countingGoogleValidator struct {
-	fakeGoogleValidator
-	idTokenCalls     atomic.Int64
-	accessTokenCalls atomic.Int64
-}
-
-func (v *countingGoogleValidator) ValidateIDToken(ctx context.Context, token string, clientIDs []string) (*ValidatedGoogleIdentity, error) {
-	v.idTokenCalls.Add(1)
-	return v.fakeGoogleValidator.ValidateIDToken(ctx, token, clientIDs)
-}
-
-func (v *countingGoogleValidator) ValidateAccessToken(ctx context.Context, token string, clientIDs []string) (*ValidatedGoogleIdentity, error) {
-	v.accessTokenCalls.Add(1)
-	return v.fakeGoogleValidator.ValidateAccessToken(ctx, token, clientIDs)
-}
-
-func (v *countingGoogleValidator) totalCalls() int64 {
-	return v.idTokenCalls.Load() + v.accessTokenCalls.Load()
-}
 
 // ---------------------------------------------------------------------------
 // Helper: build a test server with rate limiter + exchange service.
@@ -62,18 +39,6 @@ func newRateLimitedTestServer(validator GoogleCredentialValidator, userStore *fa
 		geExchangeService:     svc,
 		geExchangeRateLimiter: limiter,
 	}
-}
-
-func exchangeRequest(body string) *http.Request {
-	return exchangeRequestWithAddr(body, "192.0.2.1:12345")
-}
-
-func exchangeRequestWithAddr(body, remoteAddr string) *http.Request {
-	req := httptest.NewRequest("POST", "/api/v1/auth/integrations/google/exchange",
-		bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.RemoteAddr = remoteAddr
-	return req
 }
 
 // ---------------------------------------------------------------------------

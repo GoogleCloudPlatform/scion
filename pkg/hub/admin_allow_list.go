@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -58,6 +59,8 @@ func setDeprecationHeader(w http.ResponseWriter) {
 
 // handleAdminAllowList handles GET/POST /api/v1/admin/allow-list.
 // DEPRECATED: Use POST /api/v1/admin/users/invite and GET /api/v1/users?status=invited instead.
+// Authorization: routeGuard checks hub.allow_list.read; POST also needs
+// hub.allow_list.update, checked here.
 func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
@@ -67,14 +70,23 @@ func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.handleAdminAllowListGet(w, r)
 	case http.MethodPost:
+		if !s.requireUpdateOnReadGuardedRoute(w, r, "hub.allow_list.update") {
+			return
+		}
 		s.handleAdminAllowListAdd(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
+// errAllowListUserNotFound marks a store.ErrNotFound returned by
+// tx.DeleteUser in the allow-list delete, so only that case maps to 404.
+var errAllowListUserNotFound = errors.New("allow-list user not found")
+
 // handleAdminAllowListByEmail handles sub-paths under /api/v1/admin/allow-list/.
 // DEPRECATED: Use the new invite endpoints instead.
+// Authorization: routeGuard checks hub.allow_list.read; the import POST
+// and the DELETE also need hub.allow_list.update, checked here.
 func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
@@ -86,7 +98,10 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	case "import":
 		setDeprecationHeader(w)
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if !s.requireUpdateOnReadGuardedRoute(w, r, "hub.allow_list.update") {
 			return
 		}
 		s.handleAdminAllowListImport(w, r, user)
@@ -94,7 +109,7 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	case "domains":
 		// Not deprecated — no Deprecation header.
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.handleAdminAllowListDomains(w, r)
@@ -105,7 +120,10 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	setDeprecationHeader(w)
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
+		return
+	}
+	if !s.requireUpdateOnReadGuardedRoute(w, r, "hub.allow_list.update") {
 		return
 	}
 
@@ -133,14 +151,64 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.store.DeleteUser(r.Context(), existingUser.ID); err != nil {
-		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)
-			return
+	// Same last-project-owner guard and role-binding cascade as
+	// DELETE /api/v1/users/{id} (ptone/scion#2598): an invited user may hold
+	// bindings if they were pre-added to a project.
+	err = s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := checkUserDeleteBlockersTx(r.Context(), tx, existingUser.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errAllowListUserNotFound
+			}
+			return err
 		}
-		InternalError(w)
+		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, s.membershipNow()); err != nil {
+			return err
+		}
+		// Same group-membership cleanup as deleteUser (ptone/scion#2769),
+		// including the owned-group lock it takes first on PostgreSQL.
+		if _, err := tx.DeleteGroupMembershipsForUser(r.Context(), existingUser.ID); err != nil {
+			return fmt.Errorf("delete group memberships: %w", err)
+		}
+		// Same delegator-edge sweep as deleteUserRowCascadeTx.
+		if err := deactivateUserDelegatorEdgesTx(r.Context(), tx, existingUser.ID); err != nil {
+			return err
+		}
+		if err := tx.DeleteUser(r.Context(), existingUser.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errAllowListUserNotFound
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		var lastOwnerErr *lastProjectOwnerDeleteError
+		var blockedErr *userDeleteBlockedError
+		var inProgressErr *userDeletionInProgressError
+		switch {
+		case errors.As(err, &lastOwnerErr):
+			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		case errors.As(err, &blockedErr):
+			writeUserDeleteBlockedError(w, blockedErr)
+		case errors.As(err, &inProgressErr):
+			writeUserDeletionInProgress(w, inProgressErr)
+		case errors.Is(err, errUserRoleBindingsChanged):
+			writeUserRoleBindingsChangedError(w)
+		case errors.Is(err, errAllowListUserNotFound):
+			// Only a not-found for the user itself (from DeleteUser or the
+			// user-row lock in checkUserDeleteBlockersTx) is a client 404; a
+			// not-found inside the guard (e.g. a missing role definition)
+			// is a server error and falls through to 500.
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)
+		default:
+			slog.Error("allow-list delete failed", "error", err)
+			InternalError(w)
+		}
 		return
 	}
+
+	// Best effort, after commit (ptone/scion#2769).
+	s.removeUserScopedData(r.Context(), existingUser.ID)
 
 	slog.Info("allow list entry removed (deprecated: deleted invited user)",
 		"email", email,
@@ -217,6 +285,15 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "valid email is required", nil)
 		return
 	}
+	if isReservedTestIdentityEmail(email) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "the email domain is reserved for hub-issued test identities", nil)
+		return
+	}
+	if s.proxyDrivers.contains(email) {
+		logProxyDriverCreateRefusal("allow-list add", user.ID(), email)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, proxyDriverPrincipalUserMessage, nil)
+		return
+	}
 
 	// Check if user already exists
 	_, err := s.store.GetUserByEmail(r.Context(), email)
@@ -239,7 +316,7 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 		ID:         uuid.New().String(),
 		Email:      email,
 		Status:     store.UserStatusInvited,
-		Role:       store.UserRoleMember,
+		Role:       store.UserRoleMember, // placeholder; the real role is assigned at first sign-in (see determineUserRole)
 		InvitedBy:  &invitedBy,
 		InviteNote: note,
 	}
@@ -289,7 +366,9 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		// CSV file upload
-		if err := r.ParseMultipartForm(2 << 20); err != nil { // 2MB max
+		cleanup, err := parseMultipartUpload(r, 2<<20) // 2MB in memory
+		defer cleanup()
+		if err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to parse multipart form", nil)
 			return
 		}
@@ -335,6 +414,9 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 		if _, err := mail.ParseAddress(email); err != nil || email == "" {
 			continue
 		}
+		if isReservedTestIdentityEmail(email) || s.proxyDrivers.contains(email) {
+			continue
+		}
 
 		// Check if user already exists
 		_, err := s.store.GetUserByEmail(r.Context(), email)
@@ -356,7 +438,7 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 			ID:         uuid.New().String(),
 			Email:      email,
 			Status:     store.UserStatusInvited,
-			Role:       store.UserRoleMember,
+			Role:       store.UserRoleMember, // placeholder; the real role is assigned at first sign-in (see determineUserRole)
 			InvitedBy:  &invitedBy,
 			InviteNote: note,
 		}

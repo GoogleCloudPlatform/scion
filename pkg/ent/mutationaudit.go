@@ -42,7 +42,39 @@ type MutationAudit struct {
 	CanDelegateResult string `json:"can_delegate_result,omitempty"`
 	// CanDelegateReason holds the value of the "can_delegate_reason" field.
 	CanDelegateReason string `json:"can_delegate_reason,omitempty"`
-	selectValues      sql.SelectValues
+	// CredentialName holds the value of the "credential_name" field.
+	CredentialName string `json:"credential_name,omitempty"`
+	// CredentialBoundaryKind holds the value of the "credential_boundary_kind" field.
+	CredentialBoundaryKind string `json:"credential_boundary_kind,omitempty"`
+	// CredentialBoundaryProjectID holds the value of the "credential_boundary_project_id" field.
+	CredentialBoundaryProjectID string `json:"credential_boundary_project_id,omitempty"`
+	// CredentialLabels holds the value of the "credential_labels" field.
+	CredentialLabels string `json:"credential_labels,omitempty"`
+	// CorrelationID holds the value of the "correlation_id" field.
+	CorrelationID string `json:"correlation_id,omitempty"`
+	// ExecutorKind holds the value of the "executor_kind" field.
+	ExecutorKind string `json:"executor_kind,omitempty"`
+	// ExecutorID holds the value of the "executor_id" field.
+	ExecutorID string `json:"executor_id,omitempty"`
+	// ActorAgentID holds the value of the "actor_agent_id" field.
+	ActorAgentID string `json:"actor_agent_id,omitempty"`
+	// AuthorizingUserID holds the value of the "authorizing_user_id" field.
+	AuthorizingUserID string `json:"authorizing_user_id,omitempty"`
+	// SourceGrantID holds the value of the "source_grant_id" field.
+	SourceGrantID string `json:"source_grant_id,omitempty"`
+	// ParentGrantID holds the value of the "parent_grant_id" field.
+	ParentGrantID string `json:"parent_grant_id,omitempty"`
+	// DelegationEdgeID holds the value of the "delegation_edge_id" field.
+	DelegationEdgeID string `json:"delegation_edge_id,omitempty"`
+	// ExchangeAgentCredentialID holds the value of the "exchange_agent_credential_id" field.
+	ExchangeAgentCredentialID string `json:"exchange_agent_credential_id,omitempty"`
+	// ActorKind holds the value of the "actor_kind" field.
+	ActorKind string `json:"actor_kind,omitempty"`
+	// AgentDelegationCode holds the value of the "agent_delegation_code" field.
+	AgentDelegationCode string `json:"agent_delegation_code,omitempty"`
+	// ProvenanceBasis holds the value of the "provenance_basis" field.
+	ProvenanceBasis string `json:"provenance_basis,omitempty"`
+	selectValues    sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -50,7 +82,7 @@ func (*MutationAudit) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case mutationaudit.FieldMutationType, mutationaudit.FieldActorPrincipalKind, mutationaudit.FieldActorPrincipalID, mutationaudit.FieldActorCredentialID, mutationaudit.FieldActorCredentialType, mutationaudit.FieldTargetType, mutationaudit.FieldTargetID, mutationaudit.FieldBeforeSummary, mutationaudit.FieldAfterSummary, mutationaudit.FieldCanDelegateResult, mutationaudit.FieldCanDelegateReason:
+		case mutationaudit.FieldMutationType, mutationaudit.FieldActorPrincipalKind, mutationaudit.FieldActorPrincipalID, mutationaudit.FieldActorCredentialID, mutationaudit.FieldActorCredentialType, mutationaudit.FieldTargetType, mutationaudit.FieldTargetID, mutationaudit.FieldBeforeSummary, mutationaudit.FieldAfterSummary, mutationaudit.FieldCanDelegateResult, mutationaudit.FieldCanDelegateReason, mutationaudit.FieldCredentialName, mutationaudit.FieldCredentialBoundaryKind, mutationaudit.FieldCredentialBoundaryProjectID, mutationaudit.FieldCredentialLabels, mutationaudit.FieldCorrelationID, mutationaudit.FieldExecutorKind, mutationaudit.FieldExecutorID, mutationaudit.FieldActorAgentID, mutationaudit.FieldAuthorizingUserID, mutationaudit.FieldSourceGrantID, mutationaudit.FieldParentGrantID, mutationaudit.FieldDelegationEdgeID, mutationaudit.FieldExchangeAgentCredentialID, mutationaudit.FieldActorKind, mutationaudit.FieldAgentDelegationCode, mutationaudit.FieldProvenanceBasis:
 			values[i] = new(sql.NullString)
 		case mutationaudit.FieldTimestamp:
 			values[i] = new(sql.NullTime)
@@ -149,6 +181,102 @@ func (_m *MutationAudit) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.CanDelegateReason = value.String
 			}
+		case mutationaudit.FieldCredentialName:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_name", values[i])
+			} else if value.Valid {
+				_m.CredentialName = value.String
+			}
+		case mutationaudit.FieldCredentialBoundaryKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_boundary_kind", values[i])
+			} else if value.Valid {
+				_m.CredentialBoundaryKind = value.String
+			}
+		case mutationaudit.FieldCredentialBoundaryProjectID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_boundary_project_id", values[i])
+			} else if value.Valid {
+				_m.CredentialBoundaryProjectID = value.String
+			}
+		case mutationaudit.FieldCredentialLabels:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_labels", values[i])
+			} else if value.Valid {
+				_m.CredentialLabels = value.String
+			}
+		case mutationaudit.FieldCorrelationID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field correlation_id", values[i])
+			} else if value.Valid {
+				_m.CorrelationID = value.String
+			}
+		case mutationaudit.FieldExecutorKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field executor_kind", values[i])
+			} else if value.Valid {
+				_m.ExecutorKind = value.String
+			}
+		case mutationaudit.FieldExecutorID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field executor_id", values[i])
+			} else if value.Valid {
+				_m.ExecutorID = value.String
+			}
+		case mutationaudit.FieldActorAgentID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field actor_agent_id", values[i])
+			} else if value.Valid {
+				_m.ActorAgentID = value.String
+			}
+		case mutationaudit.FieldAuthorizingUserID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field authorizing_user_id", values[i])
+			} else if value.Valid {
+				_m.AuthorizingUserID = value.String
+			}
+		case mutationaudit.FieldSourceGrantID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_grant_id", values[i])
+			} else if value.Valid {
+				_m.SourceGrantID = value.String
+			}
+		case mutationaudit.FieldParentGrantID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field parent_grant_id", values[i])
+			} else if value.Valid {
+				_m.ParentGrantID = value.String
+			}
+		case mutationaudit.FieldDelegationEdgeID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field delegation_edge_id", values[i])
+			} else if value.Valid {
+				_m.DelegationEdgeID = value.String
+			}
+		case mutationaudit.FieldExchangeAgentCredentialID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field exchange_agent_credential_id", values[i])
+			} else if value.Valid {
+				_m.ExchangeAgentCredentialID = value.String
+			}
+		case mutationaudit.FieldActorKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field actor_kind", values[i])
+			} else if value.Valid {
+				_m.ActorKind = value.String
+			}
+		case mutationaudit.FieldAgentDelegationCode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field agent_delegation_code", values[i])
+			} else if value.Valid {
+				_m.AgentDelegationCode = value.String
+			}
+		case mutationaudit.FieldProvenanceBasis:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field provenance_basis", values[i])
+			} else if value.Valid {
+				_m.ProvenanceBasis = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -220,6 +348,54 @@ func (_m *MutationAudit) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("can_delegate_reason=")
 	builder.WriteString(_m.CanDelegateReason)
+	builder.WriteString(", ")
+	builder.WriteString("credential_name=")
+	builder.WriteString(_m.CredentialName)
+	builder.WriteString(", ")
+	builder.WriteString("credential_boundary_kind=")
+	builder.WriteString(_m.CredentialBoundaryKind)
+	builder.WriteString(", ")
+	builder.WriteString("credential_boundary_project_id=")
+	builder.WriteString(_m.CredentialBoundaryProjectID)
+	builder.WriteString(", ")
+	builder.WriteString("credential_labels=")
+	builder.WriteString(_m.CredentialLabels)
+	builder.WriteString(", ")
+	builder.WriteString("correlation_id=")
+	builder.WriteString(_m.CorrelationID)
+	builder.WriteString(", ")
+	builder.WriteString("executor_kind=")
+	builder.WriteString(_m.ExecutorKind)
+	builder.WriteString(", ")
+	builder.WriteString("executor_id=")
+	builder.WriteString(_m.ExecutorID)
+	builder.WriteString(", ")
+	builder.WriteString("actor_agent_id=")
+	builder.WriteString(_m.ActorAgentID)
+	builder.WriteString(", ")
+	builder.WriteString("authorizing_user_id=")
+	builder.WriteString(_m.AuthorizingUserID)
+	builder.WriteString(", ")
+	builder.WriteString("source_grant_id=")
+	builder.WriteString(_m.SourceGrantID)
+	builder.WriteString(", ")
+	builder.WriteString("parent_grant_id=")
+	builder.WriteString(_m.ParentGrantID)
+	builder.WriteString(", ")
+	builder.WriteString("delegation_edge_id=")
+	builder.WriteString(_m.DelegationEdgeID)
+	builder.WriteString(", ")
+	builder.WriteString("exchange_agent_credential_id=")
+	builder.WriteString(_m.ExchangeAgentCredentialID)
+	builder.WriteString(", ")
+	builder.WriteString("actor_kind=")
+	builder.WriteString(_m.ActorKind)
+	builder.WriteString(", ")
+	builder.WriteString("agent_delegation_code=")
+	builder.WriteString(_m.AgentDelegationCode)
+	builder.WriteString(", ")
+	builder.WriteString("provenance_basis=")
+	builder.WriteString(_m.ProvenanceBasis)
 	builder.WriteByte(')')
 	return builder.String()
 }

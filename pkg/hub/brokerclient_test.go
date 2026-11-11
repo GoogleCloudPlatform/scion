@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,14 +32,9 @@ import (
 
 func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker
@@ -145,14 +141,9 @@ func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker
@@ -185,10 +176,12 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	// Create a test server
 	var receivedPath string
 	var receivedMethod string
+	var receivedBody []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		receivedMethod = r.Method
+		receivedBody, _ = io.ReadAll(r.Body)
 
 		// Verify signature is present
 		if r.Header.Get(apiclient.HeaderSignature) == "" {
@@ -210,8 +203,15 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	// Create authenticated client
 	client := NewAuthenticatedBrokerClient(db, false)
 
-	// Make request
-	resp, err := client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false)
+	// Make request, including a Workspace payload (GoogleCloudPlatform/scion#1931)
+	// to prove this pass-through layer doesn't drop it.
+	extras := StartExtras{
+		Workspace: WorkspaceDispatchSpec{
+			Branch:        "feature-branch",
+			WorkspaceMode: "worktree-per-agent",
+		},
+	}
+	resp, err := client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, extras)
 	if err != nil {
 		t.Fatalf("StartAgent failed: %v", err)
 	}
@@ -224,6 +224,17 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 		t.Errorf("wrong path: got %s, want /api/v1/agents/my-agent/start", receivedPath)
 	}
 
+	var wire map[string]interface{}
+	if err := json.Unmarshal(receivedBody, &wire); err != nil {
+		t.Fatalf("failed to unmarshal request body %s: %v", receivedBody, err)
+	}
+	if wire["branch"] != "feature-branch" {
+		t.Errorf("expected wire branch=%q, got %v", "feature-branch", wire["branch"])
+	}
+	if wire["workspaceMode"] != "worktree-per-agent" {
+		t.Errorf("expected wire workspaceMode=%q, got %v", "worktree-per-agent", wire["workspaceMode"])
+	}
+
 	if resp == nil || resp.Agent == nil {
 		t.Fatal("expected non-nil response with agent info")
 	}
@@ -234,14 +245,9 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 	// Create a test store without a secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker without a secret
@@ -292,14 +298,9 @@ func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 	// Create a test store with an expired secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker with expired secret
@@ -362,14 +363,9 @@ func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 }
 
 func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	brokerID := tid("test-host-invalid-json")
@@ -404,7 +400,7 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedBrokerClient(db, false)
-	_, err = client.StartAgent(context.Background(), brokerID, server.URL, tid("agent-1"), "", "", "", "", "", "", "", nil, nil, nil, nil, false, false)
+	_, err = client.StartAgent(context.Background(), brokerID, server.URL, tid("agent-1"), "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 	if err == nil {
 		t.Fatal("expected StartAgent to fail on invalid JSON response")
 	}
@@ -415,14 +411,9 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker
@@ -492,22 +483,22 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 		t.Errorf("CreateAgent failed: %v", err)
 	}
 
-	_, err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false)
+	_, err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 	if err != nil {
 		t.Errorf("StartAgent failed: %v", err)
 	}
 
-	err = client.StopAgent(ctx, brokerID, server.URL, "test-agent", "")
+	err = client.StopAgent(ctx, brokerID, server.URL, "test-agent", "", "")
 	if err != nil {
 		t.Errorf("StopAgent failed: %v", err)
 	}
 
-	err = client.RestartAgent(ctx, brokerID, server.URL, "test-agent", "", nil)
+	_, err = client.RestartAgent(ctx, brokerID, server.URL, "test-agent", "", nil, StartExtras{})
 	if err != nil {
 		t.Errorf("RestartAgent failed: %v", err)
 	}
 
-	err = client.DeleteAgent(ctx, brokerID, server.URL, "test-agent", "", true, true, false, time.Time{})
+	err = client.DeleteAgent(ctx, brokerID, server.URL, "test-agent", "", DeleteAgentOptions{DeleteFiles: true, RemoveBranch: true})
 	if err != nil {
 		t.Errorf("DeleteAgent failed: %v", err)
 	}

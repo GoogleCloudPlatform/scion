@@ -20,65 +20,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// testLocker is a mock AdvisoryLocker for testing.
-type testLocker struct {
-	mu       sync.Mutex
-	held     map[lockKey]bool
-	acquires int64
-}
-
-type lockKey struct {
-	classID int64
-	objID   int32
-	single  bool // true for single-int form
-}
-
-func newTestLocker() *testLocker {
-	return &testLocker{held: make(map[lockKey]bool)}
-}
-
-func (l *testLocker) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
-	k := lockKey{classID: int64(key), single: true}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held[k] {
-		return false, func() error { return nil }, nil
-	}
-	l.held[k] = true
-	atomic.AddInt64(&l.acquires, 1)
-	return true, func() error {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		delete(l.held, k)
-		return nil
-	}, nil
-}
-
-func (l *testLocker) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
-	k := lockKey{classID: int64(classID), objID: objID}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held[k] {
-		return false, func() error { return nil }, nil
-	}
-	l.held[k] = true
-	atomic.AddInt64(&l.acquires, 1)
-	return true, func() error {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		delete(l.held, k)
-		return nil
-	}, nil
-}
 
 // nfsTestBackend creates an nfsBackend with a temp directory as the mount root
 // and returns the backend, config, and project paths.
@@ -117,6 +66,7 @@ func initBareGitRepo(t *testing.T) string {
 		"commit", "-m", "initial")
 	runIn(t, workDir, "git", "push", "origin", "main")
 
+	provision.AllowLocalCloneFixture(t, bareDir)
 	return bareDir
 }
 
@@ -143,7 +93,6 @@ func runIn(t *testing.T, dir, name string, args ...string) {
 
 func TestNFSProvision_SharedPlain_NonGit(t *testing.T) {
 	b, _, mountRoot := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	projectID := "proj-nonGit-1"
 	res, err := b.Resolve(ResolveInput{
@@ -158,7 +107,6 @@ func TestNFSProvision_SharedPlain_NonGit(t *testing.T) {
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
-		Locker:    locker,
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -175,11 +123,6 @@ func TestNFSProvision_SharedPlain_NonGit(t *testing.T) {
 		t.Errorf("sentinel not written: %v", err)
 	}
 
-	// Verify lock was acquired.
-	if atomic.LoadInt64(&locker.acquires) != 1 {
-		t.Errorf("expected 1 lock acquire, got %d", atomic.LoadInt64(&locker.acquires))
-	}
-
 	_ = mountRoot
 }
 
@@ -187,7 +130,6 @@ func TestNFSProvision_SharedPlain_NonGit(t *testing.T) {
 
 func TestNFSProvision_SharedPlain_GitClone(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	bareRepo := initBareGitRepo(t)
 	projectID := "proj-git-1"
@@ -203,7 +145,6 @@ func TestNFSProvision_SharedPlain_GitClone(t *testing.T) {
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -235,7 +176,6 @@ func TestNFSProvision_SharedPlain_GitClone(t *testing.T) {
 
 func TestNFSProvision_Idempotent(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	bareRepo := initBareGitRepo(t)
 	projectID := "proj-idem-1"
@@ -251,7 +191,6 @@ func TestNFSProvision_Idempotent(t *testing.T) {
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -268,19 +207,12 @@ func TestNFSProvision_Idempotent(t *testing.T) {
 	if err := ProvisionShared(input); err != nil {
 		t.Fatalf("second Provision: %v", err)
 	}
-
-	// Lock acquired twice (once per call — lock is always acquired, sentinel
-	// check happens after lock).
-	if got := atomic.LoadInt64(&locker.acquires); got != 2 {
-		t.Errorf("expected 2 lock acquires, got %d", got)
-	}
 }
 
 // --- Sentinel short-circuit: no re-clone even with git config ---
 
 func TestNFSProvision_SentinelShortCircuits(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	projectID := "proj-sentinel-1"
 	res, err := b.Resolve(ResolveInput{
@@ -292,7 +224,12 @@ func TestNFSProvision_SentinelShortCircuits(t *testing.T) {
 	}
 
 	// Pre-create workspace dir and sentinel (simulating prior provisioning).
+	// The workspace has content: a marked workspace that is completely
+	// empty is cloned into instead (see provision.ProvisionShared).
 	if err := os.MkdirAll(res.HostPath, 0770); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(res.HostPath, "README.md"), []byte("existing"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	projectRoot := filepath.Dir(res.HostPath)
@@ -306,7 +243,6 @@ func TestNFSProvision_SentinelShortCircuits(t *testing.T) {
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL: "https://nonexistent.example.com/repo.git",
 		},
@@ -320,7 +256,6 @@ func TestNFSProvision_SentinelShortCircuits(t *testing.T) {
 
 func TestNFSProvision_WorktreePerAgent(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	bareRepo := initBareGitRepo(t)
 	projectID := "proj-wt-1"
@@ -340,7 +275,6 @@ func TestNFSProvision_WorktreePerAgent(t *testing.T) {
 		AgentID:   agentID,
 		AgentName: "test-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -368,7 +302,6 @@ func TestNFSProvision_WorktreePerAgent(t *testing.T) {
 
 func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	bareRepo := initBareGitRepo(t)
 	projectID := "proj-wt-2"
@@ -388,7 +321,6 @@ func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		AgentID:   "agent-1",
 		AgentName: "first-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -406,7 +338,6 @@ func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		AgentID:   "agent-2",
 		AgentName: "second-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -432,94 +363,37 @@ func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 
 func TestNFSProvision_LockPerProject_Independent(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
-	// Two different projects should get independent locks.
-	hash1 := store.StableProjectHash("proj-A")
-	hash2 := store.StableProjectHash("proj-B")
-	if hash1 == hash2 {
-		t.Skip("hash collision — extremely unlikely but skip test")
-	}
-
+	// Two different projects get independent locks: each project's file
+	// lock lives in its own project directory (the sentinel directory, the
+	// workspace's parent).
 	res1, _ := b.Resolve(ResolveInput{ProjectID: "proj-A", Mode: store.SharingModeSharedPlain})
 	res2, _ := b.Resolve(ResolveInput{ProjectID: "proj-B", Mode: store.SharingModeSharedPlain})
 
-	// Provision both — they should not block each other.
-	if err := ProvisionShared(ProvisionInput{
-		Resolved: res1, ProjectID: "proj-A", Mode: store.SharingModeSharedPlain, Locker: locker,
-	}); err != nil {
-		t.Fatalf("Provision proj-A: %v", err)
+	// Another holder has proj-A's lock (a fresh lock directory).
+	lockA := filepath.Join(filepath.Dir(res1.HostPath), ".scion-provision.lock")
+	if err := os.MkdirAll(lockA, 0o755); err != nil {
+		t.Fatal(err)
 	}
+
+	// proj-B does not wait for it.
+	start := time.Now()
 	if err := ProvisionShared(ProvisionInput{
-		Resolved: res2, ProjectID: "proj-B", Mode: store.SharingModeSharedPlain, Locker: locker,
+		Resolved: res2, ProjectID: "proj-B", Mode: store.SharingModeSharedPlain,
 	}); err != nil {
 		t.Fatalf("Provision proj-B: %v", err)
 	}
-
-	if got := atomic.LoadInt64(&locker.acquires); got != 2 {
-		t.Errorf("expected 2 lock acquires (one per project), got %d", got)
-	}
-}
-
-// --- Same project, same lock (mutual exclusion) ---
-
-func TestNFSProvision_LockPerProject_MutualExclusion(t *testing.T) {
-	b, _, _ := nfsTestBackend(t)
-
-	// A locker that simulates a lock already held by another node.
-	blockedLocker := &blockingLocker{blockedUntil: 3} // first 3 attempts blocked
-
-	res, _ := b.Resolve(ResolveInput{ProjectID: "proj-locked", Mode: store.SharingModeSharedPlain})
-
-	err := ProvisionShared(ProvisionInput{
-		Resolved:  res,
-		ProjectID: "proj-locked",
-		Mode:      store.SharingModeSharedPlain,
-		Locker:    blockedLocker,
-	})
-	if err != nil {
-		t.Fatalf("Provision should eventually succeed after retries: %v", err)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("proj-B waited %s on proj-A's lock", elapsed)
 	}
 
-	// Verify it retried the expected number of times.
-	if got := atomic.LoadInt64(&blockedLocker.attempts); got != 4 {
-		t.Errorf("expected 4 attempts (3 blocked + 1 success), got %d", got)
-	}
-}
-
-// blockingLocker simulates a lock held by another node for the first N attempts.
-type blockingLocker struct {
-	blockedUntil int64
-	attempts     int64
-}
-
-func (l *blockingLocker) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
-	return true, func() error { return nil }, nil
-}
-
-func (l *blockingLocker) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
-	attempt := atomic.AddInt64(&l.attempts, 1)
-	if attempt <= l.blockedUntil {
-		return false, func() error { return nil }, nil
-	}
-	return true, func() error { return nil }, nil
-}
-
-// --- No locker: degrades gracefully ---
-
-func TestNFSProvision_NoLocker_DegradedMode(t *testing.T) {
-	b, _, _ := nfsTestBackend(t)
-
-	res, _ := b.Resolve(ResolveInput{ProjectID: "proj-nolock", Mode: store.SharingModeSharedPlain})
-
-	err := ProvisionShared(ProvisionInput{
-		Resolved:  res,
-		ProjectID: "proj-nolock",
-		Mode:      store.SharingModeSharedPlain,
-		Locker:    nil, // no locker
-	})
-	if err != nil {
-		t.Fatalf("Provision without locker should succeed: %v", err)
+	// proj-A does wait for it: the planted lock is really held.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := ProvisionShared(ProvisionInput{
+		Ctx: ctx, Resolved: res1, ProjectID: "proj-A", Mode: store.SharingModeSharedPlain,
+	}); err == nil {
+		t.Fatal("Provision proj-A succeeded while its lock was held")
 	}
 }
 
@@ -527,7 +401,6 @@ func TestNFSProvision_NoLocker_DegradedMode(t *testing.T) {
 
 func TestNFSProvision_WorktreePerAgent_MissingAgentID(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	bareRepo := initBareGitRepo(t)
 	res, _ := b.Resolve(ResolveInput{ProjectID: "proj-noagent", Mode: store.SharingModeWorktreePerAgent})
@@ -537,7 +410,6 @@ func TestNFSProvision_WorktreePerAgent_MissingAgentID(t *testing.T) {
 		ProjectID: "proj-noagent",
 		AgentID:   "", // missing
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -552,7 +424,6 @@ func TestNFSProvision_WorktreePerAgent_MissingAgentID(t *testing.T) {
 
 func TestNFSProvision_DefaultSentinelDir_IsParent(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	projectID := "proj-sentinel-default"
 	res, err := b.Resolve(ResolveInput{
@@ -567,7 +438,6 @@ func TestNFSProvision_DefaultSentinelDir_IsParent(t *testing.T) {
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
-		Locker:    locker,
 		// SentinelDir is empty → default to parent
 	})
 	if err != nil {
@@ -589,7 +459,6 @@ func TestNFSProvision_DefaultSentinelDir_IsParent(t *testing.T) {
 
 func TestNFSProvision_CustomSentinelDir(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 
 	projectID := "proj-sentinel-custom"
 	res, err := b.Resolve(ResolveInput{
@@ -600,27 +469,58 @@ func TestNFSProvision_CustomSentinelDir(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
+	stateDir := filepath.Join(filepath.Dir(res.HostPath), "provision")
 	err = ProvisionShared(ProvisionInput{
 		Resolved:    res,
 		ProjectID:   projectID,
 		Mode:        store.SharingModeSharedPlain,
-		Locker:      locker,
-		SentinelDir: res.HostPath, // sentinel inside workspace dir
+		SentinelDir: stateDir,
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
-	// Sentinel should be inside the workspace dir.
-	workspaceSentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
-	if _, err := os.Stat(workspaceSentinel); err != nil {
-		t.Errorf("custom sentinel should be inside workspace dir: %v", err)
+	// Sentinel should be in the custom dir, and not in the workspace dir.
+	if _, err := os.Stat(filepath.Join(stateDir, ProvisionSentinelFile)); err != nil {
+		t.Errorf("custom sentinel should be in the custom dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(res.HostPath, ProvisionSentinelFile)); err == nil {
+		t.Errorf("no sentinel may be written inside the workspace dir")
+	}
+}
+
+// A sentinel directory that is the workspace itself is refused before
+// anything is written: the provisioning bookkeeping is never kept in the
+// workspace root.
+func TestNFSProvision_SentinelDirInWorkspaceRefused(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+
+	projectID := "proj-sentinel-in-ws"
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeSharedPlain,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	for _, dir := range []string{res.HostPath, filepath.Join(res.HostPath, "provision")} {
+		err = ProvisionShared(ProvisionInput{
+			Resolved:    res,
+			ProjectID:   projectID,
+			Mode:        store.SharingModeSharedPlain,
+			SentinelDir: dir,
+		})
+		if err == nil || !strings.Contains(err.Error(), "outside the workspace") {
+			t.Fatalf("SentinelDir %s: got %v, want the outside-the-workspace refusal", dir, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ProvisionSentinelFile)); err == nil {
+			t.Errorf("SentinelDir %s: sentinel written despite the refusal", dir)
+		}
 	}
 }
 
 func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectID := "proj-sentinel-idem"
@@ -636,8 +536,7 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 		Resolved:    res,
 		ProjectID:   projectID,
 		Mode:        store.SharingModeSharedPlain,
-		Locker:      locker,
-		SentinelDir: res.HostPath,
+		SentinelDir: filepath.Join(filepath.Dir(res.HostPath), "provision"),
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -653,7 +552,7 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 	}
 
 	// Sentinel exists in the custom dir.
-	sentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
+	sentinel := filepath.Join(input.SentinelDir, ProvisionSentinelFile)
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Errorf("sentinel should exist in custom dir: %v", err)
 	}
@@ -674,7 +573,6 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 // sentinel in per-project dir, worktree nested under workspace (no .. escape).
 func TestNFSWorktreePerAgent_E2E_FullValidation(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectID := "proj-nfs-e2e-1"
@@ -694,7 +592,6 @@ func TestNFSWorktreePerAgent_E2E_FullValidation(t *testing.T) {
 		AgentID:   agentID,
 		AgentName: "nfs-test-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -805,7 +702,6 @@ func TestNFSWorktreePerAgent_E2E_FullValidation(t *testing.T) {
 // - Independent branches
 func TestNFSWorktreePerAgent_E2E_TwoAgentsDistinctWorktrees(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectID := "proj-nfs-e2e-2agents"
@@ -827,7 +723,6 @@ func TestNFSWorktreePerAgent_E2E_TwoAgentsDistinctWorktrees(t *testing.T) {
 		AgentID:   "agent-alpha",
 		AgentName: "alpha-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  gitClone,
 	})
 	if err != nil {
@@ -841,7 +736,6 @@ func TestNFSWorktreePerAgent_E2E_TwoAgentsDistinctWorktrees(t *testing.T) {
 		AgentID:   "agent-beta",
 		AgentName: "beta-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  gitClone,
 	})
 	if err != nil {
@@ -917,7 +811,6 @@ func TestNFSWorktreePerAgent_E2E_TwoAgentsDistinctWorktrees(t *testing.T) {
 // makes a single NFS mount (or K8s subPath) sufficient for worktree-per-agent.
 func TestNFSWorktreePerAgent_E2E_WorktreeNestedNoEscape(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectID := "proj-nfs-nested"
@@ -937,7 +830,6 @@ func TestNFSWorktreePerAgent_E2E_WorktreeNestedNoEscape(t *testing.T) {
 		AgentID:   agentID,
 		AgentName: "nested-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	if err != nil {
@@ -1039,7 +931,6 @@ func TestNFSWorktreePerAgent_E2E_RealizeProducesMountForWorktree(t *testing.T) {
 // <MountRoot>/<shareID>/<SubPathRoot>/<projectID>/.scion-provisioned.
 func TestNFSWorktreePerAgent_E2E_SentinelLayoutMatchesNFS(t *testing.T) {
 	b, cfg, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectID := "proj-nfs-sentinel-layout"
@@ -1058,7 +949,6 @@ func TestNFSWorktreePerAgent_E2E_SentinelLayoutMatchesNFS(t *testing.T) {
 		AgentID:   "agent-s1",
 		AgentName: "sentinel-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	if err != nil {
@@ -1084,7 +974,6 @@ func TestNFSWorktreePerAgent_E2E_SentinelLayoutMatchesNFS(t *testing.T) {
 // and only creates its worktree. The lock count confirms exactly 2 acquisitions.
 func TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectID := "proj-nfs-skip-clone"
@@ -1106,7 +995,6 @@ func TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone(t *testing.T) {
 		AgentID:   "agent-first",
 		AgentName: "first",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  gitClone,
 	})
 	if err != nil {
@@ -1129,7 +1017,6 @@ func TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone(t *testing.T) {
 		AgentID:   "agent-second",
 		AgentName: "second",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  gitClone,
 	})
 	if err != nil {
@@ -1142,11 +1029,6 @@ func TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(res.HostPath, "worktrees", "agent-second")); err != nil {
 		t.Errorf("agent-second worktree missing: %v", err)
-	}
-
-	// Lock acquired exactly twice (once per ProvisionShared call).
-	if got := atomic.LoadInt64(&locker.acquires); got != 2 {
-		t.Errorf("expected 2 lock acquisitions, got %d", got)
 	}
 
 	_ = gitModTime // mtime check is informational; git worktree add may touch .git/

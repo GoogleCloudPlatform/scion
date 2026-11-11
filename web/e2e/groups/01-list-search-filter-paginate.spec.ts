@@ -20,12 +20,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createGroup,
-  uniqueSlug,
-  fillSlInput,
-} from './groups-setup.js';
+import { getE2EEnv, fillSlInput } from './groups-setup.js';
 
 test.describe('List: search, filter, paginate, deep-link (AC4)', () => {
   const env = getE2EEnv();

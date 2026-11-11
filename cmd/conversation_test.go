@@ -15,9 +15,20 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +131,35 @@ func TestConversationGetMessageFlags(t *testing.T) {
 	f := flags.Lookup("json")
 	require.NotNil(t, f, "--json flag should exist")
 	assert.Equal(t, "false", f.DefValue)
+
+	f = flags.Lookup("body")
+	require.NotNil(t, f, "--body flag should exist")
+	assert.Equal(t, "false", f.DefValue)
+}
+
+// U6 (ptone/scion#2257): --body must print exactly msg.Msg, with no added
+// bytes — no trailing newline, no label — for every body shape a large-DM
+// offload stub's fetch command might need to reproduce byte-for-byte.
+func TestWriteMessageBody_GoldenBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"crlf", "line one\r\nline two\r\n"},
+		{"trailing_newline", "hello world\n"},
+		{"no_trailing_newline", "hello world"},
+		{"unicode", "héllo wörld 🚀 中文"},
+		{"empty", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			msg := &store.Message{Msg: tc.body}
+			require.NoError(t, writeMessageBody(&buf, msg))
+			assert.Equal(t, tc.body, buf.String(), "must write exactly the persisted body, no additions")
+			assert.Equal(t, len(tc.body), buf.Len(), "byte count must match exactly (no added bytes)")
+		})
+	}
 }
 
 func TestConversationMessagesRequiresArgs(t *testing.T) {
@@ -202,25 +242,809 @@ func TestConversationCatchUpFlags(t *testing.T) {
 	assert.Equal(t, "false", f.DefValue)
 }
 
-func TestFormatTimeAgo(t *testing.T) {
-	tests := []struct {
-		name     string
-		duration time.Duration
-		expected string
-	}{
-		{"just now", 30 * time.Second, "just now"},
-		{"1 minute", 1 * time.Minute, "1m ago"},
-		{"5 minutes", 5 * time.Minute, "5m ago"},
-		{"1 hour", 1 * time.Hour, "1h ago"},
-		{"3 hours", 3 * time.Hour, "3h ago"},
-		{"1 day", 24 * time.Hour, "1d ago"},
-		{"7 days", 7 * 24 * time.Hour, "7d ago"},
+// ---------------------------------------------------------------------------
+// runConversationCreate end-to-end tests (review round 1, R2 / AC-11)
+//
+// TestResolveProjectID (notifications_test.go) only proves resolveProjectID's
+// resolution order — it would still pass if the `if convProject == ""` block
+// in runConversationCreate were deleted. These tests exercise the actual
+// wire request the command sends, mirroring the httptest-hub pattern already
+// used by TestSubscriptionCreateEndToEnd / setupSecretProject.
+// ---------------------------------------------------------------------------
+
+// conversationCreateTestState snapshots the package-level flag/global state
+// runConversationCreate depends on, so tests can restore it afterward.
+type conversationCreateTestState struct {
+	home           string
+	projectPath    string
+	convProject    string
+	convCreateJSON bool
+	outputFormat   string
+}
+
+func saveConversationCreateTestState() conversationCreateTestState {
+	return conversationCreateTestState{
+		home:           os.Getenv("HOME"),
+		projectPath:    projectPath,
+		convProject:    convProject,
+		convCreateJSON: convCreateJSON,
+		outputFormat:   outputFormat,
+	}
+}
+
+func (s conversationCreateTestState) restore() {
+	_ = os.Setenv("HOME", s.home)
+	projectPath = s.projectPath
+	convProject = s.convProject
+	convCreateJSON = s.convCreateJSON
+	outputFormat = s.outputFormat
+}
+
+// isolateHubEnvForTest overrides every SCION_ env var that
+// config.LoadSettings's env layer (pkg/config/settings_v1.go) merges over
+// project settings — SCION_HUB_ENDPOINT (-> hub.endpoint), SCION_HUB_URL
+// (cmd.GetHubEndpoint's secondary fallback), and SCION_PROJECT_ID (-> the
+// top-level, last-resort project ID resolveProjectID falls back to). Without
+// this, these tests are not hermetic when run inside a live Scion agent
+// container, which sets all three to point at the real orchestration hub and
+// project — silently defeating the "nothing resolves" case and masking which
+// value actually won. t.Setenv restores the originals automatically.
+func isolateHubEnvForTest(t *testing.T, hubEndpoint, projectID string) {
+	t.Helper()
+	t.Setenv("SCION_HUB_ENDPOINT", hubEndpoint)
+	t.Setenv("SCION_HUB_URL", hubEndpoint)
+	t.Setenv("SCION_PROJECT_ID", projectID)
+}
+
+// setupConversationCreateProject creates a project directory with hub
+// settings pointing at endpoint, optionally with a hub-linked project ID.
+// Mirrors setupSecretProject in hub_secret_test.go.
+func setupConversationCreateProject(t *testing.T, home, endpoint, hubProjectID string) string {
+	t.Helper()
+	projectDir := filepath.Join(home, "project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	hub := map[string]interface{}{
+		"enabled":  true,
+		"endpoint": endpoint,
+	}
+	if hubProjectID != "" {
+		hub["projectId"] = hubProjectID
+	}
+	settings := map[string]interface{}{
+		"hub": hub,
+	}
+	data, err := json.Marshal(settings)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
+
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
+	return projectDir
+}
+
+// TestRunConversationCreate_DefaultsProjectFromHubContext is the R2 fix:
+// AC-11 says "scion conversation create X with no --project sends the
+// hub-context project ID." This exercises the actual request
+// runConversationCreate sends when convProject is empty and the project
+// resolves via the hub-linked project (§3.6).
+func TestRunConversationCreate_DefaultsProjectFromHubContext(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	var gotProjectID string
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodPost {
+			var req struct {
+				ProjectID string `json:"projectId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotProjectID = req.ProjectID
+			sawRequest = true
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(store.Conversation{
+				ID:         "new-conv-id",
+				Kind:       "group",
+				Surface:    "native",
+				DriftState: "active",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "hub-linked-project-id")
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true // routes output through outputJSON instead of Printf
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"hub-context-test"})
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the create request to reach the mock hub")
+	assert.Equal(t, "hub-linked-project-id", gotProjectID,
+		"AC-11: with no --project, the CLI must send the hub-linked project ID")
+}
+
+// TestRunConversationCreate_NoProjectResolvable_SendsEmpty covers the other
+// half: when nothing resolves (no --project, no hub-linked project, no local
+// project), the CLI must not fabricate a project ID — it sends empty and
+// lets the server-side agent-token fallback (or the Phase 2 "projectId is
+// required" 400) apply.
+func TestRunConversationCreate_NoProjectResolvable_SendsEmpty(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	var gotProjectID string
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodPost {
+			var req struct {
+				ProjectID string `json:"projectId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotProjectID = req.ProjectID
+			sawRequest = true
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(store.Conversation{
+				ID:         "new-conv-id-2",
+				Kind:       "group",
+				Surface:    "native",
+				DriftState: "active",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // no local/hub project ID anywhere
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "") // no hub.projectId, no project_id
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"no-project-test"})
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the create request to reach the mock hub")
+	assert.Empty(t, gotProjectID, "projectId must be empty, not fabricated, when nothing resolves")
+}
+
+// newConversationCreateBadRequestServer returns an httptest server that
+// always responds to POST /api/v1/conversations with a 400 carrying the
+// given error message, in the same {"error":{"code","message"}} shape
+// writeError (pkg/hub/errors.go) produces.
+func newConversationCreateBadRequestServer(t *testing.T, message string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{
+					"code":    "invalid_request",
+					"message": message,
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+// TestRunConversationCreate_ProjectRequiredHint_AppendsResolveHint covers N2
+// (review round 2): when the server's 400 is specifically "projectId is
+// required" and the CLI itself couldn't resolve a project locally, the
+// error is augmented with resolveProjectID's actionable hint.
+func TestRunConversationCreate_ProjectRequiredHint_AppendsResolveHint(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	server := newConversationCreateBadRequestServer(t, "projectId is required")
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // nothing resolves locally
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "")
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"needs-project"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "projectId is required")
+	assert.Contains(t, err.Error(), "Use --project flag",
+		"N2: the resolve hint must be appended when the server's 400 is exactly projectId-required")
+}
+
+// TestRunConversationCreate_UnrelatedBadRequest_NoResolveHint is the other
+// half of N2: a 400 for a different reason (e.g. an invalid name) must not
+// be misreported as a project-resolution problem, even when the CLI itself
+// also couldn't resolve a project locally — e.g. an agent whose local
+// settings resolve nothing but whose token project the server used anyway,
+// only to reject the name.
+func TestRunConversationCreate_UnrelatedBadRequest_NoResolveHint(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	server := newConversationCreateBadRequestServer(t, "name contains invalid characters")
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // nothing resolves locally either
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "")
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"bad/name"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name contains invalid characters")
+	assert.NotContains(t, err.Error(), "Use --project flag",
+		"N2: an unrelated 400 must not be misreported as a project-resolution problem")
+}
+
+// conversationListTestState saves/restores the package-level flag variables
+// runConversationList reads, mirroring conversationCreateTestState.
+type conversationListTestState struct {
+	home         string
+	projectPath  string
+	convProject  string
+	convJSON     bool
+	outputFormat string
+}
+
+func saveConversationListTestState() conversationListTestState {
+	return conversationListTestState{
+		home:         os.Getenv("HOME"),
+		projectPath:  projectPath,
+		convProject:  convProject,
+		convJSON:     convJSON,
+		outputFormat: outputFormat,
+	}
+}
+
+func (s conversationListTestState) restore() {
+	_ = os.Setenv("HOME", s.home)
+	projectPath = s.projectPath
+	convProject = s.convProject
+	convJSON = s.convJSON
+	outputFormat = s.outputFormat
+}
+
+// newConversationListServer returns an httptest server that records the
+// project_id query parameter of GET /api/v1/conversations and responds with
+// an empty list.
+// newConversationListServer returns an httptest server that records both
+// the project_id and include_project_groups query parameters of GET
+// /api/v1/conversations. Review round 1 finding #2: these are two distinct,
+// non-overlapping parameters — project_id narrows (and must stay opt-in),
+// include_project_groups only adds — so tests need to observe both to tell
+// which one the CLI actually sent.
+func newConversationListServer(gotProjectID, gotIncludeProjectGroups *string, sawRequest *bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodGet {
+			*gotProjectID = r.URL.Query().Get("project_id")
+			*gotIncludeProjectGroups = r.URL.Query().Get("include_project_groups")
+			*sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"conversations": []interface{}{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+// TestRunConversationList_DefaultsProjectFromHubContext is AC-10's CLI half
+// (design doc §3.2/§9): "scion conversation list with no flags sends the
+// hub-context project," the same resolution (flag > hub-linked project >
+// local project) runConversationCreate already uses (§3.6). Review round 1
+// finding #2: the default must go out as the purely additive
+// include_project_groups, not project_id — project_id would drop the
+// caller's DMs (ProjectID == nil).
+func TestRunConversationList_DefaultsProjectFromHubContext(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var gotProjectID, gotIncludeProjectGroups string
+	var sawRequest bool
+	server := newConversationListServer(&gotProjectID, &gotIncludeProjectGroups, &sawRequest)
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "hub-linked-project-id")
+	projectPath = projectDir
+	convProject = ""
+	convJSON = true // routes output through outputJSON instead of a tabwriter
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+	assert.Equal(t, "hub-linked-project-id", gotIncludeProjectGroups,
+		"AC-10: with no --project, the CLI must send the hub-linked project ID via include_project_groups")
+	assert.Empty(t, gotProjectID, "with no explicit --project, project_id must not be sent (it would drop DMs)")
+}
+
+// TestRunConversationList_NoProjectResolvable_SendsEmpty covers the other
+// half: when nothing resolves (no --project, no hub-linked project, no local
+// project), the CLI sends neither parameter and gets today's behavior — no
+// error, unlike runConversationCreate's 400 path.
+func TestRunConversationList_NoProjectResolvable_SendsEmpty(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var gotProjectID, gotIncludeProjectGroups string
+	var sawRequest bool
+	server := newConversationListServer(&gotProjectID, &gotIncludeProjectGroups, &sawRequest)
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // no local/hub project ID anywhere
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "") // no hub.projectId
+	projectPath = projectDir
+	convProject = ""
+	convJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err, "an unresolved project must not error for list, unlike create")
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+	assert.Empty(t, gotProjectID, "project_id must be empty, not fabricated, when nothing resolves")
+	assert.Empty(t, gotIncludeProjectGroups, "include_project_groups must be empty, not fabricated, when nothing resolves")
+}
+
+// TestRunConversationList_ExplicitProjectFlag_Wins verifies the flag still
+// takes precedence over hub context, matching resolveProjectID's order.
+// Review round 1 finding #2: an explicit --project maps to project_id (the
+// existing narrowing behavior an API caller would expect from a flag named
+// --project), not to include_project_groups.
+func TestRunConversationList_ExplicitProjectFlag_Wins(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var gotProjectID, gotIncludeProjectGroups string
+	var sawRequest bool
+	server := newConversationListServer(&gotProjectID, &gotIncludeProjectGroups, &sawRequest)
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "hub-linked-project-id")
+	projectPath = projectDir
+	convProject = "explicit-flag-project-id"
+	convJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+	assert.Equal(t, "explicit-flag-project-id", gotProjectID,
+		"an explicit --project flag must win over the hub-linked project, and must map to project_id")
+	assert.Empty(t, gotIncludeProjectGroups, "an explicit --project must not also send include_project_groups")
+}
+
+// setupProjectWithoutHubEnabled creates a project ".scion" directory with no
+// settings file at all — in particular, no hub.enabled — mirroring an
+// in-container agent, where hub.enabled is never written to project
+// settings (see config.IsHubContext's doc comment). Any hub context is
+// carried entirely by env vars, as isolateHubEnvForTest sets up.
+func setupProjectWithoutHubEnabled(t *testing.T, home string) string {
+	t.Helper()
+	projectDir := filepath.Join(home, "agent-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	return projectDir
+}
+
+// TestRunConversationList_AgentHubContext_HubNotEnabledInSettings is a
+// regression test for ptone/scion#1909: inside an agent container,
+// "scion conversation list" failed with "requires Hub mode" because
+// requireHubClient (cmd/notifications.go) gated only on hub.enabled in
+// settings, which agent container settings never carry. It lacked the config.IsHubContext()
+// in-container fallback that hubsync.EnsureHubReady already has. This
+// exercises the actual agent shape: hub context env vars plus an
+// agent-scoped SCION_AUTH_TOKEN, with hub.enabled absent from settings.
+func TestRunConversationList_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodGet {
+			sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"conversations": []interface{}{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
+	convProject = ""
+	convJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err, "agent-context conversation list must not require hub.enabled in settings")
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+}
+
+// TestRunConversationCatchUp_AgentHubContext_HubNotEnabledInSettings is the
+// catch-up half of the ptone/scion#1909 regression: reincarnate Phase 2's
+// migration message gate (AC-8b) depends on "conversation catch-up" working
+// inside an agent container the same way list does.
+func TestRunConversationCatchUp_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+	origCatchUpJSON, origCatchUpSince := convCatchUpJSON, convCatchUpSince
+	defer func() {
+		convCatchUpJSON, convCatchUpSince = origCatchUpJSON, origCatchUpSince
+	}()
+
+	const convID = "11111111-1111-1111-1111-111111111111"
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations/"+convID+"/messages" && r.Method == http.MethodGet {
+			sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"items": []interface{}{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
+	convCatchUpJSON = true
+	convCatchUpSince = "1h"
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCatchUp(cmd, []string{"conv:" + convID})
+	require.NoError(t, err, "agent-context conversation catch-up must not require hub.enabled in settings")
+	require.True(t, sawRequest, "expected the catch-up request to reach the mock hub")
+}
+
+// TestRunConversationCatchUp_AgentHubContext_ForbiddenForNonParticipant is
+// the CLI-level deny counterpart requested alongside the ptone/scion#1909
+// fix: an agent that is not a participant of the conversation must see a
+// clear error, not the pre-fix "requires Hub mode" message and not a silent
+// empty result. Server-side denial for exactly this case (an agent reading
+// a conversation it does not participate in) is already covered at the hub
+// layer by TestDMAccess_ThirdPrincipalDenied (dm_access_test.go) and
+// TestConvListMessages_NotParticipant / TestGetConversation_NotParticipant
+// (handlers_conversations_test.go), which catch-up's ListMessages call
+// shares; this test pins that the CLI surfaces that denial correctly rather
+// than swallowing or misreporting it.
+func TestRunConversationCatchUp_AgentHubContext_ForbiddenForNonParticipant(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+	origCatchUpJSON, origCatchUpSince := convCatchUpJSON, convCatchUpSince
+	defer func() {
+		convCatchUpJSON, convCatchUpSince = origCatchUpJSON, origCatchUpSince
+	}()
+
+	const convID = "22222222-2222-2222-2222-222222222222"
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations/"+convID+"/messages" && r.Method == http.MethodGet {
+			sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    "forbidden",
+					"message": "not a participant in this conversation",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
+	convCatchUpJSON = false
+	convCatchUpSince = "1h"
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCatchUp(cmd, []string{"conv:" + convID})
+	require.True(t, sawRequest, "expected the catch-up request to reach the mock hub")
+	require.Error(t, err, "an agent not in the conversation must get an error, not a silent empty result")
+	assert.NotContains(t, err.Error(), "requires Hub mode",
+		"a permission denial must not be misreported as the F4 hub-mode-detection bug")
+	assert.Contains(t, err.Error(), "not a participant in this conversation")
+}
+
+// TestRunConversationList_NameColumn covers ptone/scion#3499: native
+// conversations carry no display name, so the NAME column must fall back to
+// DM:<peer> for direct conversations and the linked thread name for groups,
+// and "-" when the hub supplied neither. JSON output must pass the hub's
+// dmPeer/threadName fields through unchanged.
+func TestRunConversationList_NameColumn(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"conversations":[
+			{"id":"conv-dm-agent","kind":"direct","surface":"native","driftState":"active",
+			 "dmPeer":{"kind":"agent","id":"11111111-1111-1111-1111-111111111111","name":"reviewer"}},
+			{"id":"conv-thread","kind":"group","surface":"native","driftState":"active","threadName":"design-chat"},
+			{"id":"conv-named","kind":"group","surface":"native","driftState":"active","displayName":"release"},
+			{"id":"conv-dm-unknown","kind":"direct","surface":"native","driftState":"active",
+			 "dmPeer":{"kind":"agent","id":"22222222-2222-2222-2222-222222222222"}},
+			{"id":"conv-both","kind":"group","surface":"native","driftState":"active",
+			 "displayName":"named-wins","threadName":"thread-loses"},
+			{"id":"conv-grp-dm","kind":"group","surface":"native","driftState":"active","threadName":"group-thread",
+			 "dmPeer":{"kind":"agent","id":"33333333-3333-3333-3333-333333333333","name":"not-a-dm"}}
+		]}`))
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+
+	run := func() string {
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		return captureStdout(t, func() { require.NoError(t, runConversationList(cmd, nil)) })
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := formatTimeAgo(time.Now().Add(-tt.duration))
-			assert.Equal(t, tt.expected, result)
-		})
+	convJSON = false
+	outputFormat = ""
+	names := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(run()), "\n")[1:] {
+		fields := strings.Fields(line)
+		require.GreaterOrEqual(t, len(fields), 4, "row: %q", line)
+		names[fields[0]] = fields[3]
 	}
+	assert.Equal(t, map[string]string{
+		"conv-dm-agent":   "DM:reviewer",
+		"conv-thread":     "design-chat",
+		"conv-named":      "release",
+		"conv-dm-unknown": "-",
+		// The display name takes precedence over the thread name.
+		"conv-both": "named-wins",
+		// dmPeer only labels direct conversations; a group falls through.
+		"conv-grp-dm": "group-thread",
+	}, names)
+
+	convJSON = true
+	var got struct {
+		Conversations []map[string]any `json:"conversations"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(run()), &got))
+	require.Len(t, got.Conversations, 6)
+	assert.Equal(t, "reviewer", got.Conversations[0]["dmPeer"].(map[string]any)["name"])
+	assert.Equal(t, "design-chat", got.Conversations[1]["threadName"])
+	assert.NotContains(t, got.Conversations[2], "dmPeer")
+}
+
+// TestRunConversationList_FullIDsRoundTrip covers ptone/scion#7131: the
+// list table prints the full conversation and default-agent UUIDs, so a
+// listed ID resolves unchanged when passed back as conv:<id>.
+func TestRunConversationList_FullIDsRoundTrip(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	const convID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	const agentID = "5f6e7d8c-9b0a-4f1e-8d2c-3b4a5f6e7d8c"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"conversations":[{"id":"` + convID + `","kind":"group","surface":"native",
+			"driftState":"active","threadName":"design-chat","defaultAgentId":"` + agentID + `"}]}`))
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+	convJSON = false
+	outputFormat = ""
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	out := captureStdout(t, func() { require.NoError(t, runConversationList(cmd, nil)) })
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2, out)
+	fields := strings.Fields(lines[1])
+	require.Len(t, fields, 6, "row: %q", lines[1])
+	assert.Len(t, fields[0], 36)
+	assert.Equal(t, convID, fields[0])
+	assert.Equal(t, agentID, fields[4], "DEFAULT AGENT must not be truncated")
+
+	got, err := resolveConversationRef(context.Background(), nil, "conv:"+fields[0])
+	require.NoError(t, err)
+	assert.Equal(t, convID, got)
+
+	// JSON output carries the same full IDs.
+	convJSON = true
+	jsonOut := captureStdout(t, func() { require.NoError(t, runConversationList(cmd, nil)) })
+	var parsed struct {
+		Conversations []map[string]any `json:"conversations"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	require.Len(t, parsed.Conversations, 1)
+	assert.Equal(t, convID, parsed.Conversations[0]["id"])
+	assert.Equal(t, agentID, parsed.Conversations[0]["defaultAgentId"])
+}
+
+// TestConversationParticipantTables_FullIDs covers ptone/scion#7131 for
+// both participant tables: a UUID principal ID is printed in full.
+func TestConversationParticipantTables_FullIDs(t *testing.T) {
+	const id = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	ps := []hubclient.ConversationParticipantDetail{{
+		ConversationParticipant: store.ConversationParticipant{
+			PrincipalKind: "agent", PrincipalID: id, Role: "member", JoinedAt: time.Now(),
+		},
+		MessageMode: "project",
+	}}
+
+	var get bytes.Buffer
+	writeConversationGetParticipants(&get, ps)
+	assert.Equal(t, map[string]string{id: "project"}, modeColumnByID(t, get.String(), 1))
+
+	var list bytes.Buffer
+	require.NoError(t, writeConversationParticipantsTable(&list, ps))
+	assert.Equal(t, map[string]string{id: "project"}, modeColumnByID(t, list.String(), 1))
+}
+
+// modeTestParticipants is a participant list with a restricted agent, an
+// open agent, an agent the hub reported no mode for, and a user.
+func modeTestParticipants() []hubclient.ConversationParticipantDetail {
+	mk := func(kind, id, mode string) hubclient.ConversationParticipantDetail {
+		return hubclient.ConversationParticipantDetail{
+			ConversationParticipant: store.ConversationParticipant{
+				PrincipalKind: kind, PrincipalID: id, Role: "member", JoinedAt: time.Now(),
+			},
+			MessageMode: mode,
+		}
+	}
+	return []hubclient.ConversationParticipantDetail{
+		mk("agent", "agent-branch", "branch"),
+		mk("agent", "agent-project", "project"),
+		mk("agent", "agent-foreign", ""),
+		mk("user", "user-1", ""),
+	}
+}
+
+// modeColumnByID maps the first ID-like field of each table row to its
+// MSG MODE cell, located by the header's column position.
+func modeColumnByID(t *testing.T, out string, idCol int) map[string]string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	got := map[string]string{}
+	for _, l := range lines {
+		f := strings.Fields(l)
+		if len(f) > idCol+2 && (f[0] == "agent" || f[0] == "user") {
+			got[f[idCol]] = f[idCol+2]
+		}
+	}
+	return got
+}
+
+func TestWriteConversationGetParticipants_MessageMode(t *testing.T) {
+	var buf bytes.Buffer
+	writeConversationGetParticipants(&buf, modeTestParticipants())
+	out := buf.String()
+
+	assert.Contains(t, out, "MSG MODE")
+	got := modeColumnByID(t, out, 1)
+	assert.Equal(t, map[string]string{
+		"agent-branch":  "branch",
+		"agent-project": "project", // IDs are printed in full
+		"agent-foreign": "-",
+		"user-1":        "-",
+	}, got)
+	assert.Contains(t, out, conversationModeHint, "a branch agent should trigger the mode hint")
+}
+
+func TestWriteConversationGetParticipants_NoHintForOpenModes(t *testing.T) {
+	var buf bytes.Buffer
+	ps := modeTestParticipants()[1:] // drop the branch agent
+	writeConversationGetParticipants(&buf, ps)
+	assert.NotContains(t, buf.String(), conversationModeHint)
+
+	buf.Reset()
+	writeConversationGetParticipants(&buf, nil)
+	assert.Empty(t, buf.String())
+}
+
+func TestWriteConversationParticipantsTable_MessageMode(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, writeConversationParticipantsTable(&buf, modeTestParticipants()))
+	out := buf.String()
+
+	assert.True(t, strings.HasPrefix(out, "KIND"), out)
+	assert.Contains(t, strings.SplitN(out, "\n", 2)[0], "MSG MODE")
+	got := modeColumnByID(t, out, 1)
+	assert.Equal(t, map[string]string{
+		"agent-branch":  "branch",
+		"agent-project": "project",
+		"agent-foreign": "-",
+		"user-1":        "-",
+	}, got)
+}
+
+// TestConversationParticipantDetail_JSON checks that the participant JSON
+// carries messageMode for agents and omits it when the hub sent none.
+func TestConversationParticipantDetail_JSON(t *testing.T) {
+	ps := modeTestParticipants()
+	b, err := json.Marshal(ps)
+	require.NoError(t, err)
+	var raw []map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &raw))
+	require.Len(t, raw, 4)
+	assert.Equal(t, "branch", raw[0]["messageMode"])
+	assert.Equal(t, "agent-branch", raw[0]["principalId"], "embedded participant fields stay flat")
+	assert.NotContains(t, raw[2], "messageMode")
+	assert.NotContains(t, raw[3], "messageMode")
+
+	// And the hub's wire shape decodes into it.
+	var back hubclient.ConversationDetail
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"c1","participants":[{"principalKind":"agent","principalId":"a1","messageMode":"lineage"}]}`), &back))
+	require.Len(t, back.Participants, 1)
+	assert.Equal(t, "lineage", back.Participants[0].MessageMode)
+	assert.Equal(t, "a1", back.Participants[0].PrincipalID)
 }

@@ -43,8 +43,8 @@ backends already shipped (Wave 1/2):
   N1-7). NFSv4.1 needs Enterprise/zonal.
 - **Provisioning:** Cloud Run instances have no host access for the Hub to clone into; the
   workspace must be **pre-provisioned** on NFS (same as the K8s init-container model, Wave 2
-  N2-2/N2-2b) — guarded by the per-project Postgres advisory lock
-  (`TryAdvisoryLockObject(LockWorkspaceProvision, StableProjectHash(pid))`). A Cloud Run
+  N2-2/N2-2b) — guarded by the per-project `.scion-provision.lock` file lock on the
+  export that `sciontool provision` takes (`pkg/provision`). A Cloud Run
   runtime would need an equivalent first-access provisioning step (e.g. a pre-create
   provisioning Job, or Hub-side provisioner with NFS access) before starting the instance.
 - **Acceptance (future):** a Cloud Run instance mounts only `projects/<pid>/workspace` and

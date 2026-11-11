@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -42,10 +43,16 @@ type RuntimeBroker struct {
 	Resources string `json:"resources,omitempty"`
 	// Runtimes holds the value of the "runtimes" field.
 	Runtimes string `json:"runtimes,omitempty"`
+	// DefaultProfile holds the value of the "default_profile" field.
+	DefaultProfile string `json:"default_profile,omitempty"`
+	// WorkspaceStorage holds the value of the "workspace_storage" field.
+	WorkspaceStorage string `json:"workspace_storage,omitempty"`
+	// Health holds the value of the "health" field.
+	Health string `json:"health,omitempty"`
 	// Labels holds the value of the "labels" field.
-	Labels string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations holds the value of the "annotations" field.
-	Annotations string `json:"annotations,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 	// Endpoint holds the value of the "endpoint" field.
 	Endpoint string `json:"endpoint,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
@@ -56,12 +63,44 @@ type RuntimeBroker struct {
 	GcpHostServiceAccountEmail *string `json:"gcp_host_service_account_email,omitempty"`
 	// GcpHostProjectID holds the value of the "gcp_host_project_id" field.
 	GcpHostProjectID *string `json:"gcp_host_project_id,omitempty"`
+	// GcpHostSource holds the value of the "gcp_host_source" field.
+	GcpHostSource string `json:"gcp_host_source,omitempty"`
+	// HostIdentityObservedEmail holds the value of the "host_identity_observed_email" field.
+	HostIdentityObservedEmail *string `json:"host_identity_observed_email,omitempty"`
+	// HostIdentityObservation holds the value of the "host_identity_observation" field.
+	HostIdentityObservation *string `json:"host_identity_observation,omitempty"`
+	// HostIdentityObservedAt holds the value of the "host_identity_observed_at" field.
+	HostIdentityObservedAt *time.Time `json:"host_identity_observed_at,omitempty"`
 	// ConnectedHubID holds the value of the "connected_hub_id" field.
 	ConnectedHubID *string `json:"connected_hub_id,omitempty"`
 	// ConnectedSessionID holds the value of the "connected_session_id" field.
 	ConnectedSessionID *string `json:"connected_session_id,omitempty"`
 	// ConnectedAt holds the value of the "connected_at" field.
 	ConnectedAt *time.Time `json:"connected_at,omitempty"`
+	// RuntimeTargetID holds the value of the "runtime_target_id" field.
+	RuntimeTargetID *string `json:"runtime_target_id,omitempty"`
+	// RuntimeTargetType holds the value of the "runtime_target_type" field.
+	RuntimeTargetType string `json:"runtime_target_type,omitempty"`
+	// RuntimeTargetDisplayName holds the value of the "runtime_target_display_name" field.
+	RuntimeTargetDisplayName string `json:"runtime_target_display_name,omitempty"`
+	// RuntimeTargetPresentation holds the value of the "runtime_target_presentation" field.
+	RuntimeTargetPresentation string `json:"runtime_target_presentation,omitempty"`
+	// RuntimeTargetPresentationHash holds the value of the "runtime_target_presentation_hash" field.
+	RuntimeTargetPresentationHash string `json:"runtime_target_presentation_hash,omitempty"`
+	// PresentationEpoch holds the value of the "presentation_epoch" field.
+	PresentationEpoch *int64 `json:"presentation_epoch,omitempty"`
+	// PresentationSeq holds the value of the "presentation_seq" field.
+	PresentationSeq *int64 `json:"presentation_seq,omitempty"`
+	// PresentationFencedAt holds the value of the "presentation_fenced_at" field.
+	PresentationFencedAt *time.Time `json:"presentation_fenced_at,omitempty"`
+	// PresentationObservedAt holds the value of the "presentation_observed_at" field.
+	PresentationObservedAt *time.Time `json:"presentation_observed_at,omitempty"`
+	// ConversionPlanPresentation holds the value of the "conversion_plan_presentation" field.
+	ConversionPlanPresentation string `json:"conversion_plan_presentation,omitempty"`
+	// ConversionPlanPresentationHash holds the value of the "conversion_plan_presentation_hash" field.
+	ConversionPlanPresentationHash string `json:"conversion_plan_presentation_hash,omitempty"`
+	// ConversionPlanObservedAt holds the value of the "conversion_plan_observed_at" field.
+	ConversionPlanObservedAt *time.Time `json:"conversion_plan_observed_at,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -74,13 +113,15 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case runtimebroker.FieldLabels, runtimebroker.FieldAnnotations:
+			values[i] = new([]byte)
 		case runtimebroker.FieldAutoProvide:
 			values[i] = new(sql.NullBool)
-		case runtimebroker.FieldLockVersion:
+		case runtimebroker.FieldLockVersion, runtimebroker.FieldPresentationEpoch, runtimebroker.FieldPresentationSeq:
 			values[i] = new(sql.NullInt64)
-		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldLabels, runtimebroker.FieldAnnotations, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
+		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldDefaultProfile, runtimebroker.FieldWorkspaceStorage, runtimebroker.FieldHealth, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldGcpHostSource, runtimebroker.FieldHostIdentityObservedEmail, runtimebroker.FieldHostIdentityObservation, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID, runtimebroker.FieldRuntimeTargetID, runtimebroker.FieldRuntimeTargetType, runtimebroker.FieldRuntimeTargetDisplayName, runtimebroker.FieldRuntimeTargetPresentation, runtimebroker.FieldRuntimeTargetPresentationHash, runtimebroker.FieldConversionPlanPresentation, runtimebroker.FieldConversionPlanPresentationHash:
 			values[i] = new(sql.NullString)
-		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldConnectedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
+		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldHostIdentityObservedAt, runtimebroker.FieldConnectedAt, runtimebroker.FieldPresentationFencedAt, runtimebroker.FieldPresentationObservedAt, runtimebroker.FieldConversionPlanObservedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
 			values[i] = new(sql.NullTime)
 		case runtimebroker.FieldID:
 			values[i] = new(uuid.UUID)
@@ -178,17 +219,39 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Runtimes = value.String
 			}
-		case runtimebroker.FieldLabels:
+		case runtimebroker.FieldDefaultProfile:
 			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field labels", values[i])
+				return fmt.Errorf("unexpected type %T for field default_profile", values[i])
 			} else if value.Valid {
-				_m.Labels = value.String
+				_m.DefaultProfile = value.String
+			}
+		case runtimebroker.FieldWorkspaceStorage:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field workspace_storage", values[i])
+			} else if value.Valid {
+				_m.WorkspaceStorage = value.String
+			}
+		case runtimebroker.FieldHealth:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field health", values[i])
+			} else if value.Valid {
+				_m.Health = value.String
+			}
+		case runtimebroker.FieldLabels:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field labels", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Labels); err != nil {
+					return fmt.Errorf("unmarshal field labels: %w", err)
+				}
 			}
 		case runtimebroker.FieldAnnotations:
-			if value, ok := values[i].(*sql.NullString); !ok {
+			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field annotations", values[i])
-			} else if value.Valid {
-				_m.Annotations = value.String
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Annotations); err != nil {
+					return fmt.Errorf("unmarshal field annotations: %w", err)
+				}
 			}
 		case runtimebroker.FieldEndpoint:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -222,6 +285,33 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 				_m.GcpHostProjectID = new(string)
 				*_m.GcpHostProjectID = value.String
 			}
+		case runtimebroker.FieldGcpHostSource:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field gcp_host_source", values[i])
+			} else if value.Valid {
+				_m.GcpHostSource = value.String
+			}
+		case runtimebroker.FieldHostIdentityObservedEmail:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field host_identity_observed_email", values[i])
+			} else if value.Valid {
+				_m.HostIdentityObservedEmail = new(string)
+				*_m.HostIdentityObservedEmail = value.String
+			}
+		case runtimebroker.FieldHostIdentityObservation:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field host_identity_observation", values[i])
+			} else if value.Valid {
+				_m.HostIdentityObservation = new(string)
+				*_m.HostIdentityObservation = value.String
+			}
+		case runtimebroker.FieldHostIdentityObservedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field host_identity_observed_at", values[i])
+			} else if value.Valid {
+				_m.HostIdentityObservedAt = new(time.Time)
+				*_m.HostIdentityObservedAt = value.Time
+			}
 		case runtimebroker.FieldConnectedHubID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field connected_hub_id", values[i])
@@ -242,6 +332,84 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ConnectedAt = new(time.Time)
 				*_m.ConnectedAt = value.Time
+			}
+		case runtimebroker.FieldRuntimeTargetID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime_target_id", values[i])
+			} else if value.Valid {
+				_m.RuntimeTargetID = new(string)
+				*_m.RuntimeTargetID = value.String
+			}
+		case runtimebroker.FieldRuntimeTargetType:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime_target_type", values[i])
+			} else if value.Valid {
+				_m.RuntimeTargetType = value.String
+			}
+		case runtimebroker.FieldRuntimeTargetDisplayName:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime_target_display_name", values[i])
+			} else if value.Valid {
+				_m.RuntimeTargetDisplayName = value.String
+			}
+		case runtimebroker.FieldRuntimeTargetPresentation:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime_target_presentation", values[i])
+			} else if value.Valid {
+				_m.RuntimeTargetPresentation = value.String
+			}
+		case runtimebroker.FieldRuntimeTargetPresentationHash:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime_target_presentation_hash", values[i])
+			} else if value.Valid {
+				_m.RuntimeTargetPresentationHash = value.String
+			}
+		case runtimebroker.FieldPresentationEpoch:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field presentation_epoch", values[i])
+			} else if value.Valid {
+				_m.PresentationEpoch = new(int64)
+				*_m.PresentationEpoch = value.Int64
+			}
+		case runtimebroker.FieldPresentationSeq:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field presentation_seq", values[i])
+			} else if value.Valid {
+				_m.PresentationSeq = new(int64)
+				*_m.PresentationSeq = value.Int64
+			}
+		case runtimebroker.FieldPresentationFencedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field presentation_fenced_at", values[i])
+			} else if value.Valid {
+				_m.PresentationFencedAt = new(time.Time)
+				*_m.PresentationFencedAt = value.Time
+			}
+		case runtimebroker.FieldPresentationObservedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field presentation_observed_at", values[i])
+			} else if value.Valid {
+				_m.PresentationObservedAt = new(time.Time)
+				*_m.PresentationObservedAt = value.Time
+			}
+		case runtimebroker.FieldConversionPlanPresentation:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field conversion_plan_presentation", values[i])
+			} else if value.Valid {
+				_m.ConversionPlanPresentation = value.String
+			}
+		case runtimebroker.FieldConversionPlanPresentationHash:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field conversion_plan_presentation_hash", values[i])
+			} else if value.Valid {
+				_m.ConversionPlanPresentationHash = value.String
+			}
+		case runtimebroker.FieldConversionPlanObservedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field conversion_plan_observed_at", values[i])
+			} else if value.Valid {
+				_m.ConversionPlanObservedAt = new(time.Time)
+				*_m.ConversionPlanObservedAt = value.Time
 			}
 		case runtimebroker.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -329,11 +497,20 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString("runtimes=")
 	builder.WriteString(_m.Runtimes)
 	builder.WriteString(", ")
+	builder.WriteString("default_profile=")
+	builder.WriteString(_m.DefaultProfile)
+	builder.WriteString(", ")
+	builder.WriteString("workspace_storage=")
+	builder.WriteString(_m.WorkspaceStorage)
+	builder.WriteString(", ")
+	builder.WriteString("health=")
+	builder.WriteString(_m.Health)
+	builder.WriteString(", ")
 	builder.WriteString("labels=")
-	builder.WriteString(_m.Labels)
+	builder.WriteString(fmt.Sprintf("%v", _m.Labels))
 	builder.WriteString(", ")
 	builder.WriteString("annotations=")
-	builder.WriteString(_m.Annotations)
+	builder.WriteString(fmt.Sprintf("%v", _m.Annotations))
 	builder.WriteString(", ")
 	builder.WriteString("endpoint=")
 	builder.WriteString(_m.Endpoint)
@@ -354,6 +531,24 @@ func (_m *RuntimeBroker) String() string {
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")
+	builder.WriteString("gcp_host_source=")
+	builder.WriteString(_m.GcpHostSource)
+	builder.WriteString(", ")
+	if v := _m.HostIdentityObservedEmail; v != nil {
+		builder.WriteString("host_identity_observed_email=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.HostIdentityObservation; v != nil {
+		builder.WriteString("host_identity_observation=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.HostIdentityObservedAt; v != nil {
+		builder.WriteString("host_identity_observed_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
 	if v := _m.ConnectedHubID; v != nil {
 		builder.WriteString("connected_hub_id=")
 		builder.WriteString(*v)
@@ -366,6 +561,54 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString(", ")
 	if v := _m.ConnectedAt; v != nil {
 		builder.WriteString("connected_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.RuntimeTargetID; v != nil {
+		builder.WriteString("runtime_target_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("runtime_target_type=")
+	builder.WriteString(_m.RuntimeTargetType)
+	builder.WriteString(", ")
+	builder.WriteString("runtime_target_display_name=")
+	builder.WriteString(_m.RuntimeTargetDisplayName)
+	builder.WriteString(", ")
+	builder.WriteString("runtime_target_presentation=")
+	builder.WriteString(_m.RuntimeTargetPresentation)
+	builder.WriteString(", ")
+	builder.WriteString("runtime_target_presentation_hash=")
+	builder.WriteString(_m.RuntimeTargetPresentationHash)
+	builder.WriteString(", ")
+	if v := _m.PresentationEpoch; v != nil {
+		builder.WriteString("presentation_epoch=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.PresentationSeq; v != nil {
+		builder.WriteString("presentation_seq=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.PresentationFencedAt; v != nil {
+		builder.WriteString("presentation_fenced_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.PresentationObservedAt; v != nil {
+		builder.WriteString("presentation_observed_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("conversion_plan_presentation=")
+	builder.WriteString(_m.ConversionPlanPresentation)
+	builder.WriteString(", ")
+	builder.WriteString("conversion_plan_presentation_hash=")
+	builder.WriteString(_m.ConversionPlanPresentationHash)
+	builder.WriteString(", ")
+	if v := _m.ConversionPlanObservedAt; v != nil {
+		builder.WriteString("conversion_plan_observed_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")

@@ -17,9 +17,16 @@
 /**
  * Feature flag utilities.
  *
- * Checks for feature flags in this order:
- * 1. Server-injected `window.__SCION_FEATURES__` (set by the Go template)
- * 2. localStorage override for development (key: `scion:feature:<name>`)
+ * Resolution order, highest first:
+ * 1. Values already in `window.__SCION_FEATURES__` before the first
+ *    `setServerFlags()` call ("pinned") — only `setFeatureFlag('web.native_chat*')`
+ *    in production, and E2E init scripts otherwise.
+ * 2. The hub-wide value from `GET /api/v1/experiments`, applied at boot
+ *    through `setServerFlags()` (signed-in users only).
+ * 3. localStorage override for development (key: `scion:feature:<name>`),
+ *    which still applies to names the server did not send and on page loads
+ *    where the experiments fetch fails.
+ * 4. The compiled `DEFAULT_ON_FLAGS` below, used when the fetch fails.
  *
  * Default is `false` (flag off) when not found in any source.
  */
@@ -32,9 +39,73 @@ declare global {
 
 /**
  * Feature flags that are ON by default (Phase 5+).
- * These can still be disabled via server injection or localStorage override.
+ * These can still be disabled via the server (the experiments map or
+ * `setFeatureFlag()`) or a localStorage override.
+ *
+ * Entries stay string literals (not the exported constants below), because a
+ * Go-side consistency test extracts this set with a regex that only sees
+ * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.native_chat_v2']);
+const DEFAULT_ON_FLAGS = new Set([
+  'web.native_chat',
+  'web.agent_edit',
+  'web.chat_starred_messages',
+]);
+
+/**
+ * The window event sent after the flag bag changes (server flags applied, or
+ * a flag set), so mounted components can re-read flags they depend on.
+ */
+export const FEATURE_FLAGS_CHANGED_EVENT = 'scion-feature-flags-changed';
+
+function announceFlagsChanged(): void {
+  if (typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event(FEATURE_FLAGS_CHANGED_EVENT));
+  }
+}
+
+/**
+ * Snapshot of `window.__SCION_FEATURES__` taken the first time
+ * {@link setServerFlags} runs. Keys present here are "pinned" and are never
+ * overwritten by a later `setServerFlags()` call, so a value written before
+ * boot (an E2E init script, or `setFeatureFlag`) always wins over the server.
+ * Taken lazily so tests can set the bag before calling `setServerFlags()`.
+ */
+let pinned: Record<string, boolean> | null = null;
+
+/** Flag names for which the localStorage-shadowed-by-server notice has already been logged this page load. */
+const shadowLogged = new Set<string>();
+
+/**
+ * Apply the hub-wide experiment map fetched from `GET /api/v1/experiments`
+ * to the feature-flag bag. Call this once at boot, after the fetch resolves.
+ *
+ * Keys already present in `window.__SCION_FEATURES__` before the first call
+ * ("pinned") are left untouched, so E2E-pinned and `setFeatureFlag`-written
+ * values keep beating the server.
+ */
+export function setServerFlags(flags: Record<string, boolean>): void {
+  if (typeof window === 'undefined') return;
+  if (!flags || typeof flags !== 'object' || Array.isArray(flags)) return;
+  const current = window.__SCION_FEATURES__ ?? {};
+  if (pinned === null) pinned = { ...current };
+  const next = { ...current };
+  for (const [name, value] of Object.entries(flags)) {
+    if (Object.prototype.hasOwnProperty.call(pinned, name)) continue;
+    next[name] = value;
+  }
+  window.__SCION_FEATURES__ = next;
+  announceFlagsChanged();
+}
+
+/**
+ * @internal test-only: clears the pinned snapshot and the shadowed-override
+ * log dedup between tests.
+ */
+export function resetServerFlagStateForTests(): void {
+  pinned = null;
+  shadowLogged.clear();
+}
 
 /**
  * Check whether a feature flag is enabled.
@@ -43,13 +114,18 @@ const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.native_chat_v2']);
  * @returns true if the flag is enabled, false otherwise
  */
 export function isFeatureEnabled(name: string): boolean {
-  // 1. Check server-injected features
+  // 1 & 2. Pinned and server-applied values share one bag: setServerFlags()
+  // never overwrites a pinned key, so whichever is present here already
+  // reflects the right precedence.
   if (typeof window !== 'undefined' && window.__SCION_FEATURES__) {
     const value = window.__SCION_FEATURES__[name];
-    if (typeof value === 'boolean') return value;
+    if (typeof value === 'boolean') {
+      warnIfShadowed(name);
+      return value;
+    }
   }
 
-  // 2. Check localStorage override (dev convenience)
+  // 3. Check localStorage override (dev convenience)
   if (typeof localStorage !== 'undefined') {
     try {
       const stored = localStorage.getItem(`scion:feature:${name}`);
@@ -60,16 +136,38 @@ export function isFeatureEnabled(name: string): boolean {
     }
   }
 
-  // Default: on for flags in DEFAULT_ON_FLAGS, off otherwise
+  // 4. Default: on for flags in DEFAULT_ON_FLAGS, off otherwise
   return DEFAULT_ON_FLAGS.has(name);
+}
+
+/**
+ * Logs one `console.info` per flag per page load when a localStorage dev
+ * override exists for a name that the bag (pinned or server) already
+ * resolves, so a developer relying on a stale devtools override is not left
+ * confused about why it no longer applies.
+ */
+function warnIfShadowed(name: string): void {
+  if (shadowLogged.has(name)) return;
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const stored = localStorage.getItem(`scion:feature:${name}`);
+    if (stored !== 'true' && stored !== 'false') return;
+  } catch {
+    return;
+  }
+  shadowLogged.add(name);
+  console.info(
+    `[feature-flags] localStorage override for "${name}" is shadowed by the server/pinned value.`
+  );
 }
 
 /**
  * Override a feature flag from the server-published settings.
  *
- * Writes into the same `window.__SCION_FEATURES__` bag the Go template uses,
- * so the value takes precedence over both the localStorage dev override and
- * the compiled default. Call this at boot, before any routing decision.
+ * Writes into the same `window.__SCION_FEATURES__` bag read by
+ * {@link isFeatureEnabled}, so the value takes precedence over both the
+ * localStorage dev override and the compiled default. Call this at boot,
+ * before any routing decision.
  *
  * @param name - Dot-separated flag name (e.g. "web.native_chat")
  * @param enabled - The server-authoritative value
@@ -77,12 +175,86 @@ export function isFeatureEnabled(name: string): boolean {
 export function setFeatureFlag(name: string, enabled: boolean): void {
   if (typeof window === 'undefined') return;
   window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, [name]: enabled };
+  announceFlagsChanged();
 }
 
 /**
- * Wave-2 native chat feature flag.
- * Default ON (W9) — added to DEFAULT_ON_FLAGS for general availability.
- * Disable via server injection or localStorage: scion:feature:web.native_chat_v2=false
- * to fall back to wave-1 UI for rollback.
+ * Edit agent page (ptone/scion#3952): the by-tier grouping of its fields
+ * and the tier summary strip. The page and its by-function view are always
+ * available. Default ON.
  */
-export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
+export const AGENT_EDIT_FLAG = 'web.agent_edit';
+
+/**
+ * Brokers area (broker UI Option A, slice A1): with the registered
+ * experiment hub.flat_runtime_brokers on, /brokers and /brokers/{id} render
+ * the new Brokers area; with it off, the existing pages. Presentation only:
+ * every hub check is server-side. Default OFF (not in DEFAULT_ON_FLAGS).
+ */
+export const FLAT_BROKERS_FLAG = 'hub.flat_runtime_brokers';
+
+/**
+ * Agent badges (ptone/scion#5503): the harness vendor mark and model size
+ * chip in the upper-left of agent cards, table rows and graph nodes.
+ * Presentation only. Default OFF.
+ */
+export const AGENT_BADGES_FLAG = 'web.agent_badges';
+
+/**
+ * Hidden-tab stream close (ptone/scion#5235): a tab hidden for 60 s closes
+ * its events streams (view, agent feed, terminal metadata) and reopens them
+ * with a resync when shown. PTY sockets are unaffected. Presentation only:
+ * the hub behaves the same either way. Default OFF.
+ */
+export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
+
+/**
+ * Graphical review editor (ptone/scion#5913): a Markdown artifact review
+ * opens in a graphical editor with marks inline, where typing is recorded
+ * as suggestions, with a Graphical and Source toggle. Presentation only:
+ * every save goes through the unchanged review publish, which the hub
+ * checks. Default OFF.
+ */
+export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
+
+/**
+ * Manage access dialog (ptone/scion#7107): one Manage access button and
+ * dialog on the artifact page instead of Share, Grant review access and
+ * Retention…. Presentation only: every change goes through the existing
+ * routes, which the hub decides. Default OFF.
+ */
+export const ARTIFACT_MANAGE_ACCESS_FLAG = 'web.artifact_manage_access';
+
+/**
+ * Open review check (ptone/scion#6849): Review mode on the artifact page
+ * reports that a review is open, and an edit publish the hub refuses with
+ * 409 review_open shows a dialog with Wait and Publish anyway. Presentation
+ * only: the hub checks the experiment on the review-session routes and on
+ * each publish that adds a version to an artifact with a published version.
+ * Default OFF.
+ */
+export const ARTIFACTS_OPEN_REVIEW_CHECK_FLAG = 'hub.artifacts_open_review_check';
+
+/**
+ * Force user delete (ptone/scion#2143): the admin users page offers to
+ * force-delete a user who has agents and shows a deletion in
+ * progress. Presentation only: the hub checks the experiment on the force
+ * request and on the deletion resource. Default OFF.
+ */
+export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';
+
+/**
+ * Chat message retention (hub.chat_retention): the Chat retention panel in
+ * Admin > Server Config and the history divider at the top of a thread
+ * whose older messages the retention policy removed. Presentation only: the
+ * hub checks the experiment in the settings API, the sweep and the history
+ * marker. Default OFF.
+ */
+export const CHAT_RETENTION_FLAG = 'hub.chat_retention';
+
+/**
+ * Welcome project (hub.welcome_project): the Welcome project step of the
+ * workstation setup wizard. Presentation only: the hub checks the
+ * experiment on the welcome preview, install and skip routes. Default OFF.
+ */
+export const WELCOME_PROJECT_FLAG = 'hub.welcome_project';

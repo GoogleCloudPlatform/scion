@@ -143,13 +143,41 @@ func (m *mockMessageStore) ListMessages(_ context.Context, filter store.MessageF
 	return result, nil
 }
 
+func (m *mockMessageStore) LatestMessagesByThreadIDs(_ context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	return m.latestBy(ids, opts, func(msg *store.Message) string { return msg.ThreadID }), nil
+}
+
+func (m *mockMessageStore) LatestMessagesByConversationIDs(_ context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	return m.latestBy(ids, opts, func(msg *store.Message) string { return msg.ConversationID }), nil
+}
+
+func (m *mockMessageStore) latestBy(ids []string, opts store.LatestMessageOptions, key func(*store.Message) string) map[string]*store.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	out := make(map[string]*store.Message)
+	for i := range m.messages {
+		msg := m.messages[i]
+		k := key(&msg)
+		if !want[k] || (opts.Channel != "" && msg.Channel != opts.Channel) ||
+			(opts.ExcludeType != "" && msg.Type == opts.ExcludeType) {
+			continue
+		}
+		cur := out[k]
+		if cur == nil || msg.CreatedAt.After(cur.CreatedAt) ||
+			(msg.CreatedAt.Equal(cur.CreatedAt) && msg.ID > cur.ID) {
+			out[k] = &msg
+		}
+	}
+	return out
+}
+
 func (m *mockMessageStore) MarkMessageRead(_ context.Context, _ string) error { return nil }
 
 func (m *mockMessageStore) MarkAllMessagesRead(_ context.Context, _ string) error { return nil }
-
-func (m *mockMessageStore) PurgeOldMessages(_ context.Context, _, _ time.Time) (int, error) {
-	return 0, nil
-}
 
 func (m *mockMessageStore) SetMessageConversationID(_ context.Context, messageID, conversationID string) error {
 	m.mu.Lock()
@@ -293,6 +321,16 @@ func (m *mockConversationStore) GetConversationByExternalRef(_ context.Context, 
 		}
 	}
 	return nil, store.ErrNotFound
+}
+
+func (m *mockConversationStore) GetConversationsByExternalRefs(ctx context.Context, surface string, refs []string) (map[string]*store.Conversation, error) {
+	out := make(map[string]*store.Conversation, len(refs))
+	for _, ref := range refs {
+		if c, err := m.GetConversationByExternalRef(ctx, surface, ref); err == nil {
+			out[ref] = c
+		}
+	}
+	return out, nil
 }
 
 func (m *mockConversationStore) AddParticipant(_ context.Context, p *store.ConversationParticipant) error {
@@ -1043,6 +1081,51 @@ func TestBackfill_SinglePageNoCheckpoint(t *testing.T) {
 
 	assert.Empty(t, result.LastCheckpoint,
 		"single-page run should have empty checkpoint (all data processed)")
+}
+
+// countingMessageStore records the ListOptions of every ListMessages call
+// so a test can tell which pages asked the store for a total count.
+type countingMessageStore struct {
+	*mockMessageStore
+	pages        int
+	countedPages int
+}
+
+func (c *countingMessageStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
+	c.pages++
+	if !opts.SkipTotalCount {
+		c.countedPages++
+	}
+	return c.mockMessageStore.ListMessages(ctx, filter, opts)
+}
+
+// TestBackfill_NoPerPageTotalCount checks that the scan does not ask the
+// store for a total count on any page. Nothing reads the count, and the
+// store runs a COUNT over every matching message for it on each page.
+func TestBackfill_NoPerPageTotalCount(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+	var msgs []store.Message
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs, newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(time.Duration(i)*time.Second)))
+	}
+
+	for _, dryRun := range []bool{true, false} {
+		msgStore := &countingMessageStore{mockMessageStore: &mockMessageStore{messages: append([]store.Message(nil), msgs...)}}
+		svc := NewBackfillService(&mockConversationStore{}, msgStore, &mockAgentLookup{})
+
+		result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID, BatchSize: 2, DryRun: dryRun})
+		require.NoError(t, err)
+
+		assert.Equal(t, 5, result.TotalProcessed, "dryRun=%v", dryRun)
+		assert.Equal(t, 5, result.Attributed, "dryRun=%v", dryRun)
+		assert.Equal(t, 3, msgStore.pages, "dryRun=%v: 5 messages at batch size 2 should take 3 pages", dryRun)
+		assert.Equal(t, 0, msgStore.countedPages, "dryRun=%v: no page should request a total count", dryRun)
+	}
 }
 
 // TestBackfill_SameTimestampMessages is the service-level regression test for
@@ -1943,5 +2026,46 @@ func TestBackfill_DEF156_UnmappableChannel_MessageRefused(t *testing.T) {
 		"unmappable channel must be reported in DeriveFailures[%s]", DeriveErrSurfaceUnmap)
 
 	// Structural invariant must hold.
+	assertErrorInvariant(t, result)
+}
+
+// projectMismatchConvStore refuses every upsert the way the store refuses a
+// key that already names a conversation of another project.
+type projectMismatchConvStore struct {
+	mockConversationStore
+}
+
+func (m *projectMismatchConvStore) UpsertConversationByExternalRef(_ context.Context, _ *store.Conversation) (*store.Conversation, error) {
+	return nil, fmt.Errorf("wrapped: %w", store.ErrConversationProjectMismatch)
+}
+
+// TestBackfill_KeyOfOtherProjectSkipsGroup: when the store keeps an existing
+// conversation in its own project, the backfill leaves that group's messages
+// unstamped, counts them as skipped and records no error.
+func TestBackfill_KeyOfOtherProjectSkipsGroup(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+	now := time.Now()
+
+	msg1 := newTestMessage(projectID, "user:alice", uuid.NewString(), "agent:bot", agentID, now.Add(-2*time.Minute))
+	msg1.ThreadID = "deploy-thread"
+	msg2 := newTestMessage(projectID, "user:bob", uuid.NewString(), "agent:bot", agentID, now.Add(-1*time.Minute))
+	msg2.ThreadID = "deploy-thread"
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2}}
+	svc := NewBackfillService(&projectMismatchConvStore{}, msgStore, &mockAgentLookup{})
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.Skipped)
+	assert.Zero(t, result.WriteFailures)
+	assert.Empty(t, result.Errors)
+	assert.Zero(t, result.ConversationsCreated)
+	for _, id := range []string{msg1.ID, msg2.ID} {
+		got, gErr := msgStore.GetMessage(ctx, id)
+		require.NoError(t, gErr)
+		assert.Empty(t, got.ConversationID, "message %s stays unstamped", id)
+	}
 	assertErrorInvariant(t, result)
 }

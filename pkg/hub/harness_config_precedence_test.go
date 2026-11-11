@@ -21,11 +21,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +32,11 @@ import (
 
 // These tests pin the resolution precedence for harness_config:
 //
-//	explicit agent-create request > project annotation > template
+//	explicit agent-create request > project annotation > template > hub default
+//
+// where "template" means only the template's declared harness_config /
+// default_harness_config — never its bare harness type (ptone/scion#601
+// item 2).
 //
 // Historically the template beat the project annotation on both the
 // agent-create path and the scheduler dispatch path, which made
@@ -51,7 +54,7 @@ type capturingDispatcher struct {
 	dispatched              bool
 }
 
-func (d *capturingDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
+func (d *capturingDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.dispatched = true
 	if agent.AppliedConfig != nil {
 		d.dispatchedHarnessConfig = agent.AppliedConfig.HarnessConfig
@@ -59,59 +62,16 @@ func (d *capturingDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	return d.createAgentDispatcher.DispatchAgentCreate(ctx, agent)
 }
 
-func (d *capturingDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	if err := d.DispatchAgentCreate(ctx, agent); err != nil {
+func (d *capturingDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	if _, err := d.DispatchAgentCreate(ctx, agent); err != nil {
 		return nil, err
 	}
-	return d.envReqs, nil
-}
-
-// setProjectHarnessConfigAnnotation stamps the project-level
-// default-harness-config annotation, exactly as PUT /settings would.
-func setProjectHarnessConfigAnnotation(t *testing.T, s store.Store, project *store.Project, value string) {
-	t.Helper()
-	if project.Annotations == nil {
-		project.Annotations = map[string]string{}
-	}
-	project.Annotations[projectSettingDefaultHarnessConfig] = value
-	require.NoError(t, s.UpdateProject(context.Background(), project))
-}
-
-// setProjectAnnotations merges the given annotations into the project, exactly
-// as PUT /settings would. Used where a test needs more than one setting.
-func setProjectAnnotations(t *testing.T, s store.Store, project *store.Project, annotations map[string]string) {
-	t.Helper()
-	if project.Annotations == nil {
-		project.Annotations = map[string]string{}
-	}
-	for k, v := range annotations {
-		project.Annotations[k] = v
-	}
-	require.NoError(t, s.UpdateProject(context.Background(), project))
-}
-
-// createHarnessTemplate creates a global template whose DefaultHarnessConfig is
-// set. ContentHash is populated so the agent-create handler's "template has no
-// files" guard does not reject it.
-func createHarnessTemplate(t *testing.T, s store.Store, slug, defaultHarnessConfig string) *store.Template {
-	t.Helper()
-	tmpl := &store.Template{
-		ID:                   tid("template-" + slug + "-" + t.Name()),
-		Name:                 slug,
-		Slug:                 slug,
-		Harness:              "claude",
-		DefaultHarnessConfig: defaultHarnessConfig,
-		ContentHash:          "d00dfeed",
-		Scope:                store.TemplateScopeGlobal,
-		Status:               "active",
-	}
-	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
-	return tmpl
+	return envReqsResult(d.envReqs), nil
 }
 
 // createHarnessOnlyTemplate creates a global template with no
-// DefaultHarnessConfig, so that getHarnessConfigFromTemplate's fallback to the
-// bare Harness field is what supplies the template-tier value.
+// DefaultHarnessConfig, only a bare Harness type, which since
+// ptone/scion#601 item 2 contributes nothing to the harness-config slot.
 func createHarnessOnlyTemplate(t *testing.T, s store.Store, slug, harness string) *store.Template {
 	t.Helper()
 	tmpl := &store.Template{
@@ -282,10 +242,11 @@ func TestCreateAgent_ProjectHarnessConfigBeatsProjectDefaultTemplate(t *testing.
 		"the template itself still applies — only harness_config is overridden")
 }
 
-// TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback pins the
-// precedence against the *other* branch of getHarnessConfigFromTemplate: a
-// template with no DefaultHarnessConfig, whose bare Harness field supplies the
-// template-tier value. The project annotation must still win.
+// TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback: a
+// template with no declared harness-config, only a bare Harness type. The
+// project annotation supplies the value (since ptone/scion#601 item 2 the
+// harness type is never a candidate at all, so this is now simply the
+// project rung filling an otherwise-empty slot).
 func TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
@@ -308,13 +269,16 @@ func TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(t *tes
 	require.NoError(t, err)
 	require.NotNil(t, agent.AppliedConfig)
 	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig,
-		"project annotation outranks the template's Harness-field fallback too")
+		"project annotation fills the slot; the template's harness type is not a candidate")
 }
 
-// TestCreateAgent_TemplateHarnessOnlyFallbackWhenNoProjectAnnotation is the
-// matching regression guard: with no annotation, the Harness-field fallback
-// still supplies the value.
-func TestCreateAgent_TemplateHarnessOnlyFallbackWhenNoProjectAnnotation(t *testing.T) {
+// TestCreateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig flips the old
+// pin (ptone/scion#601 item 2, decision (a)): a template that declares no
+// harness_config/default_harness_config contributes nothing to the
+// harness-config slot — its bare Harness type ("claude") is a harness type,
+// not a harness-config slug. With no project or hub default either, the slot
+// stays empty and broker-side resolution decides.
+func TestCreateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -334,7 +298,43 @@ func TestCreateAgent_TemplateHarnessOnlyFallbackWhenNoProjectAnnotation(t *testi
 	agent, err := s.GetAgent(ctx, resp.Agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, agent.AppliedConfig)
-	assert.Equal(t, "claude", agent.AppliedConfig.HarnessConfig)
+	assert.Empty(t, agent.AppliedConfig.HarnessConfig,
+		"the template's harness type must not be used as a harness-config name")
+	assert.Empty(t, agent.AppliedConfig.HarnessConfigID)
+}
+
+// TestCreateAgent_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness is
+// the concrete harm #601 item 2 removes: Template.Harness is inferred from the
+// template NAME for any template whose name contains claude/gemini/opencode/
+// codex. That inferred type used to fill the harness-config slot before
+// applyHubAgentDefaults, so the hub operator's
+// agent_defaults.default_harness_config silently lost. Now the hub default
+// wins.
+func TestCreateAgent_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	const tmplName = "team-claude-reviewer"
+	inferred := inferHarnessFromName(tmplName)
+	require.NotEmpty(t, inferred, "fixture: the template name must trigger harness inference")
+	createHarnessOnlyTemplate(t, s, tmplName, inferred)
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-hub-beats-inferred",
+		ProjectID: project.ID,
+		Template:  tmplName,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "hub-hc", agent.AppliedConfig.HarnessConfig,
+		"the hub default must beat a name-inferred template harness type")
 }
 
 // TestCreateAgent_ProjectHarnessConfigStampsIDWhenResolvable and its
@@ -418,48 +418,6 @@ func TestCreateAgent_ProjectHarnessConfigUnresolvableLeavesIDEmpty(t *testing.T)
 // Not-found logging: level tracks provenance
 // ---------------------------------------------------------------------------
 
-// levelCapturingHandler records the level and message of every log record that
-// passes the level filter, so a test can assert on how loudly something was
-// logged rather than only whether it happened.
-type levelCapturingHandler struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (h *levelCapturingHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h *levelCapturingHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.records = append(h.records, r.Clone())
-	return nil
-}
-
-func (h *levelCapturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *levelCapturingHandler) WithGroup(string) slog.Handler      { return h }
-
-// harnessNotFoundRecords returns the captured records for the
-// harness-config-not-found message.
-func (h *levelCapturingHandler) harnessNotFoundRecords() []slog.Record {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var out []slog.Record
-	for _, r := range h.records {
-		if strings.Contains(r.Message, "harness config not found") {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// captureHarnessLogs swaps the server's agent-lifecycle logger for a capturing
-// one and returns the handler.
-func captureHarnessLogs(srv *Server) *levelCapturingHandler {
-	h := &levelCapturingHandler{}
-	srv.agentLifecycleLog = slog.New(h)
-	return h
-}
-
 // TestCreateAgent_UnresolvableProjectHarnessConfigWarns pins the WARN half of
 // the provenance rule. A project annotation naming a harness config that does
 // not exist is an operator-fixable misconfiguration that displaced a known-good
@@ -485,12 +443,12 @@ func TestCreateAgent_UnresolvableProjectHarnessConfigWarns(t *testing.T) {
 		"an unresolvable project annotation must warn — it displaced the template")
 }
 
-// TestCreateAgent_TemplateHarnessTypeNotFoundDoesNotWarn pins the DEBUG half,
-// which is the whole point of tracking provenance. Here hcName is the
-// template's bare Harness type ("claude"), not a stored slug, and no
-// HarnessConfig row matches it — the default state of a deployment that has
-// never created one. Warning here would fire on every agent create.
-func TestCreateAgent_TemplateHarnessTypeNotFoundDoesNotWarn(t *testing.T) {
+// TestCreateAgent_TemplateHarnessTypeProducesNoNotFoundLog replaces the old
+// "DEBUG, not WARN" pin. Before ptone/scion#601 item 2 the template's bare
+// Harness type was looked up as a harness-config slug and, finding none,
+// logged not-found at DEBUG on nearly every create. It is no longer a
+// candidate name, so there is nothing to look up and nothing to log.
+func TestCreateAgent_TemplateHarnessTypeProducesNoNotFoundLog(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
 	logs := captureHarnessLogs(srv)
@@ -504,10 +462,67 @@ func TestCreateAgent_TemplateHarnessTypeNotFoundDoesNotWarn(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
+	assert.Empty(t, logs.harnessNotFoundRecords(),
+		"a harness type is not a harness-config name, so no lookup and no not-found log")
+}
+
+// TestCreateAgent_UnresolvableTemplateDefaultHarnessConfigWarns covers
+// ptone/scion#620's hub half: a template's explicit default_harness_config is
+// a deliberate slug choice (unlike its bare Harness type), so when the hub has
+// no record of it the not-found log must be at WARN, with template provenance.
+// Dispatch still succeeds — observability only.
+func TestCreateAgent_UnresolvableTemplateDefaultHarnessConfigWarns(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessTemplate(t, s, "tmpl-missing-hc", "no-such-template-hc")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "log-template-default-unresolvable",
+		ProjectID: project.ID,
+		Template:  "tmpl-missing-hc",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
 	found := logs.harnessNotFoundRecords()
-	require.Len(t, found, 1, "the event is still recorded, just not at WARN")
-	assert.Equal(t, slog.LevelDebug, found[0].Level,
-		"a bare harness type falling through from the template is the normal case, not a warning")
+	require.Len(t, found, 1, "expected exactly one not-found log record")
+	assert.Equal(t, slog.LevelWarn, found[0].Level,
+		"an unresolvable template default_harness_config must warn")
+	fromTemplate, ok := recordAttr(found[0], "from_template_default")
+	require.True(t, ok, "the log must carry the template provenance attribute")
+	assert.True(t, fromTemplate.Bool())
+	fromProject, ok := recordAttr(found[0], "from_project_annotation")
+	require.True(t, ok)
+	assert.False(t, fromProject.Bool())
+}
+
+// TestCreateAgent_RequestNamingTemplateDefaultIsNotTemplateProvenance guards
+// that template provenance is carried, not inferred by name equality: a
+// request that explicitly names the template's default slug is request
+// provenance, and keeps the pre-existing (DEBUG) level.
+func TestCreateAgent_RequestNamingTemplateDefaultIsNotTemplateProvenance(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessTemplate(t, s, "tmpl-same-name", "same-name-hc")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:          "log-request-same-as-template",
+		ProjectID:     project.ID,
+		Template:      "tmpl-same-name",
+		HarnessConfig: "same-name-hc",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	found := logs.harnessNotFoundRecords()
+	require.Len(t, found, 1)
+	fromTemplate, ok := recordAttr(found[0], "from_template_default")
+	require.True(t, ok)
+	assert.False(t, fromTemplate.Bool(),
+		"the request named it; template provenance must not be inferred from the name")
+	assert.Equal(t, slog.LevelDebug, found[0].Level)
 }
 
 // ---------------------------------------------------------------------------
@@ -575,44 +590,6 @@ func TestCreateAgent_RequestProfileBeatsProjectActiveProfile(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Scheduler dispatch path (server.go, dispatchAgentEventHandler)
 // ---------------------------------------------------------------------------
-
-// runDispatchAgentEvent fires a dispatch_agent scheduled event for the project
-// and returns the created agent.
-func runDispatchAgentEvent(t *testing.T, srv *Server, s store.Store, projectID, agentName, template string) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := s.GetUser(ctx, DevUserID); err != nil {
-		require.ErrorIs(t, err, store.ErrNotFound)
-		require.NoError(t, s.CreateUser(ctx, &store.User{
-			ID:          DevUserID,
-			Email:       "dev@localhost",
-			DisplayName: "Dev User",
-			Role:        store.UserRoleAdmin,
-		}))
-	}
-
-	payload, err := json.Marshal(DispatchAgentEventPayload{
-		AgentName: agentName,
-		Template:  template,
-		Task:      "do the thing",
-	})
-	require.NoError(t, err)
-
-	handler := srv.dispatchAgentEventHandler()
-	require.NoError(t, handler(ctx, store.ScheduledEvent{
-		ID:        tid("sched-" + agentName + "-" + t.Name()),
-		ProjectID: projectID,
-		EventType: "dispatch_agent",
-		Payload:   string(payload),
-		CreatedBy: DevUserID,
-	}))
-
-	agent, err := s.GetAgentBySlug(ctx, projectID, agentName)
-	require.NoError(t, err)
-	require.NotNil(t, agent)
-	require.NotNil(t, agent.AppliedConfig)
-	return agent
-}
 
 // TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplate mirrors the headline
 // create-path case. Site 2 is where the only-if-unset guard inside
@@ -698,7 +675,7 @@ func TestSchedulerDispatch_ProjectHarnessConfigBeatsProjectDefaultTemplate(t *te
 }
 
 // TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback is
-// the scheduler-side counterpart to the Harness-field fallback case.
+// the scheduler-side counterpart for a harness-type-only template.
 func TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
@@ -708,7 +685,64 @@ func TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(
 
 	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-harness-only-tmpl", "tmpl-bare")
 	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig,
-		"project annotation outranks the template's Harness-field fallback too")
+		"project annotation fills the slot; the template's harness type is not a candidate")
+}
+
+// TestSchedulerDispatch_TemplateHarnessTypeNotUsedAsHarnessConfig is the
+// scheduler twin of TestCreateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig
+// (ptone/scion#601 item 2): a harness-type-only template contributes nothing
+// to the harness-config slot on the scheduled-dispatch path either.
+func TestSchedulerDispatch_TemplateHarnessTypeNotUsedAsHarnessConfig(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	createHarnessOnlyTemplate(t, s, "tmpl-bare", "claude")
+
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-harness-type-only", "tmpl-bare")
+	assert.Empty(t, agent.AppliedConfig.HarnessConfig,
+		"the template's harness type must not be used as a harness-config name")
+	assert.Empty(t, agent.AppliedConfig.HarnessConfigID)
+}
+
+// TestSchedulerDispatch_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness
+// is the scheduler twin of
+// TestCreateAgent_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness.
+func TestSchedulerDispatch_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	const tmplName = "sched-claude-reviewer"
+	inferred := inferHarnessFromName(tmplName)
+	require.NotEmpty(t, inferred, "fixture: the template name must trigger harness inference")
+	createHarnessOnlyTemplate(t, s, tmplName, inferred)
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc"})
+
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-hub-beats-inferred", tmplName)
+	assert.Equal(t, "hub-hc", agent.AppliedConfig.HarnessConfig,
+		"the hub default must beat a name-inferred template harness type")
+}
+
+// TestSchedulerDispatch_UnresolvableTemplateDefaultHarnessConfigWarns is the
+// scheduler twin of TestCreateAgent_UnresolvableTemplateDefaultHarnessConfigWarns
+// (ptone/scion#620). The template provenance travels on ctx through
+// deriveAgentConfig, so this pins it on the scheduled-dispatch path too.
+func TestSchedulerDispatch_UnresolvableTemplateDefaultHarnessConfigWarns(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessTemplate(t, s, "tmpl-missing-hc", "no-such-template-hc")
+
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-template-default-unresolvable", "tmpl-missing-hc")
+	assert.Equal(t, "no-such-template-hc", agent.AppliedConfig.HarnessConfig)
+
+	found := logs.harnessNotFoundRecords()
+	require.Len(t, found, 1, "expected exactly one not-found log record")
+	assert.Equal(t, slog.LevelWarn, found[0].Level,
+		"an unresolvable template default_harness_config must warn on the scheduler path too")
+	fromTemplate, ok := recordAttr(found[0], "from_template_default")
+	require.True(t, ok)
+	assert.True(t, fromTemplate.Bool())
 }
 
 // Note: the scheduler's dispatch_agent payload has no harness-config field, so

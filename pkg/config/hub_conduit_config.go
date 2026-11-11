@@ -1,0 +1,667 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Conduit relay-peer authentication modes (server.hub.conduit.peer_auth).
+const (
+	ConduitPeerAuthAuto = "auto"
+	ConduitPeerAuthOIDC = "oidc"
+	ConduitPeerAuthHMAC = "hmac"
+)
+
+const (
+	// ConduitGrantKeyMinActivation is the lowest accepted
+	// grant_key_activation.
+	ConduitGrantKeyMinActivation = time.Minute
+	// ConduitGrantKeyNodeRefresh is the interval at which a hub node
+	// reloads the grant key ring. grant_key_activation must be at least
+	// this long, or a node could sign with a key other nodes' targets have
+	// not been sent yet. It mirrors the hub's ring cache interval (a hub
+	// test pins the two together).
+	ConduitGrantKeyNodeRefresh = time.Minute
+	// ConduitMaxReconnectWindow is the highest accepted reconnect_window.
+	ConduitMaxReconnectWindow = 5 * time.Minute
+	// ConduitMinAuthzRecheckInterval and ConduitMaxAuthzRecheckInterval
+	// bound authz_recheck_interval.
+	ConduitMinAuthzRecheckInterval = time.Second
+	ConduitMaxAuthzRecheckInterval = 10 * time.Minute
+	// ConduitDefaultLifetimeCap is the default lifetime_cap: under Cloud
+	// Run's 3600s request timeout with room for the GoAway lead.
+	ConduitDefaultLifetimeCap = 3500 * time.Second
+	// ConduitMinLifetimeCap and ConduitMaxLifetimeCap bound lifetime_cap.
+	// The minimum leaves room for the 60s GoAway lead and the 30s drain
+	// deadline that follows it.
+	ConduitMinLifetimeCap = 90 * time.Second
+	ConduitMaxLifetimeCap = 24 * time.Hour
+	// ConduitDefaultProxySessionMaxAge is the default
+	// proxy_session_max_age, and ConduitMinProxySessionMaxAge and
+	// ConduitMaxProxySessionMaxAge bound it.
+	ConduitDefaultProxySessionMaxAge = time.Hour
+	ConduitMinProxySessionMaxAge     = 5 * time.Minute
+	ConduitMaxProxySessionMaxAge     = time.Hour
+	// ConduitDefaultUserStreamAuthzMax is the default authorization
+	// interval of user-originated streams (stream_authz_max.user).
+	ConduitDefaultUserStreamAuthzMax = 8 * time.Hour
+	// ConduitDefaultServiceStreamAuthzMax is the default authorization
+	// interval of broker- and agent-originated streams
+	// (stream_authz_max.broker, stream_authz_max.agent).
+	ConduitDefaultServiceStreamAuthzMax = 24 * time.Hour
+	// ConduitMinStreamAuthzMax and ConduitMaxStreamAuthzMax bound every
+	// stream_authz_max value.
+	ConduitMinStreamAuthzMax = time.Minute
+	ConduitMaxStreamAuthzMax = 7 * 24 * time.Hour
+)
+
+// Conduit relay modes of the hub (server.hub.conduit.relay_mode).
+const (
+	// ConduitRelayModeInProcess: every hub process runs its own relay (the
+	// default).
+	ConduitRelayModeInProcess = "in_process"
+	// ConduitRelayModeExternal: the hub runs no relay; separate relay
+	// processes (scion server --role relay) hold the conduit sessions
+	// (design §3.9 "Separate relay").
+	ConduitRelayModeExternal = "external"
+)
+
+// Conduit ingress modes of a hub in external relay mode
+// (server.hub.conduit.ingress; design §3.9 "Ingress").
+const (
+	// ConduitIngressProxy: the hub reverse-proxies each conduit dial to
+	// the chosen relay (the default).
+	ConduitIngressProxy = "proxy"
+	// ConduitIngressRedirect: the hub answers each conduit dial with the
+	// chosen relay's public URL.
+	ConduitIngressRedirect = "redirect"
+)
+
+// Target-side stream deadline modes of the hub
+// (server.hub.conduit.target_stream_deadlines; design §3.5 Gating).
+const (
+	// ConduitTargetStreamDeadlinesOff: targets do not enforce stream
+	// authorization deadlines (the default).
+	ConduitTargetStreamDeadlinesOff = "off"
+	// ConduitTargetStreamDeadlinesEnforce: targets close a user stream
+	// at its authorization deadline unless a renewal grant moves it.
+	ConduitTargetStreamDeadlinesEnforce = "enforce"
+)
+
+// ConduitPeerSecretMinBytes is the shortest accepted
+// server.hub.conduit.peer_secret, in octets after NormalizePeerSecret
+// (design §3.9), and ConduitPeerSecretMinDistinct the fewest distinct
+// octets it may hold.
+const (
+	ConduitPeerSecretMinBytes    = 32
+	ConduitPeerSecretMinDistinct = 16
+)
+
+// ConduitPeerSecretKey is the settings key of the relay-peer secret. No
+// settings API reads or writes it.
+const ConduitPeerSecretKey = "server.hub.conduit.peer_secret"
+
+// ConduitMaxInstanceIDLen is the longest accepted instance_id.
+const ConduitMaxInstanceIDLen = 128
+
+// HubConduitConfig holds the conduit settings of the hub server
+// (server.hub.conduit). The values are kept as configured and checked by
+// Validate at startup, so a malformed value is a startup error rather than
+// a silently ignored one.
+type HubConduitConfig struct {
+	// GrantKeyActivation is the publish-before-sign delay of a new grant
+	// key ("" = the hub default, 15m).
+	GrantKeyActivation string `json:"grantKeyActivation,omitempty" yaml:"grantKeyActivation,omitempty" koanf:"grantKeyActivation"`
+	// TCPAllowedPorts lists additional agent-local ports a TCP stream
+	// grant may target besides the agent's exposed ports. The reserved
+	// ports (9810, 18380) are always refused. Empty: exposed ports only.
+	TCPAllowedPorts []int `json:"tcpAllowedPorts,omitempty" yaml:"tcpAllowedPorts,omitempty" koanf:"tcpAllowedPorts"`
+	// InternalListen is the host:port of the internal relay API listener
+	// ("" = none). It must be reachable only inside the cluster/VPC.
+	// Without InternalTLSCertFile it must be a loopback address
+	// (CheckRelayInternalListen).
+	InternalListen string `json:"internalListen,omitempty" yaml:"internalListen,omitempty" koanf:"internalListen"`
+	// InternalAdvertise is the base URL other nodes use to reach the
+	// internal listener ("" = derived). It must be https:// unless it is
+	// loopback (CheckRelayTransport).
+	InternalAdvertise string `json:"internalAdvertise,omitempty" yaml:"internalAdvertise,omitempty" koanf:"internalAdvertise"`
+	// InternalTLSCertFile and InternalTLSKeyFile are the PEM certificate
+	// chain and private key the internal listener serves TLS with. Set
+	// both or neither.
+	InternalTLSCertFile string `json:"internalTlsCertFile,omitempty" yaml:"internalTlsCertFile,omitempty" koanf:"internalTlsCertFile"`
+	InternalTLSKeyFile  string `json:"internalTlsKeyFile,omitempty" yaml:"internalTlsKeyFile,omitempty" koanf:"internalTlsKeyFile"`
+	// InternalTLSCAFile is the PEM CA bundle every internal hop client
+	// verifies peers with. When set it replaces the system roots; a
+	// private or internal CA requires it.
+	InternalTLSCAFile string `json:"internalTlsCaFile,omitempty" yaml:"internalTlsCaFile,omitempty" koanf:"internalTlsCaFile"`
+	// InternalTLSServerName is the name internal hop clients verify in
+	// the peer certificate instead of the dialed host ("" = the dialed
+	// host), so one certificate can serve every node.
+	InternalTLSServerName string `json:"internalTlsServerName,omitempty" yaml:"internalTlsServerName,omitempty" koanf:"internalTlsServerName"`
+	// PeerAuth is "auto" (or ""), "oidc" or "hmac". Requests are signed in
+	// every mode; oidc (and auto on GCP) also requires an OIDC ID token.
+	PeerAuth string `json:"peerAuth,omitempty" yaml:"peerAuth,omitempty" koanf:"peerAuth"`
+	// PeerServiceAccounts is the OIDC caller allow-list ("" = own SA).
+	PeerServiceAccounts []string `json:"peerServiceAccounts,omitempty" yaml:"peerServiceAccounts,omitempty" koanf:"peerServiceAccounts"`
+	// PeerAudience is the OIDC audience ("" = the fixed default).
+	PeerAudience string `json:"peerAudience,omitempty" yaml:"peerAudience,omitempty" koanf:"peerAudience"`
+	// ReconnectWindow is the jitter window sent as
+	// GoAway.reconnect_after_ms on a planned close ("" = the relay
+	// default, 5s; design v2.6 §3.3).
+	ReconnectWindow string `json:"reconnectWindow,omitempty" yaml:"reconnectWindow,omitempty" koanf:"reconnectWindow"`
+	// InstanceID is this node's relay instance id ("" = POD_NAME, else
+	// the host name plus a random per-process suffix). It must be unique
+	// among live hub processes.
+	InstanceID string `json:"instanceId,omitempty" yaml:"instanceId,omitempty" koanf:"instanceId"`
+	// AuthzRecheckInterval is the period of the re-check sweep of open
+	// user streams ("" = the hub default, 60s; design §3.5): a revoked
+	// stream is re-checked within one interval even if its revocation
+	// event is missed.
+	AuthzRecheckInterval string `json:"authzRecheckInterval,omitempty" yaml:"authzRecheckInterval,omitempty" koanf:"authzRecheckInterval"`
+	// LifetimeCap is the platform lifetime cap of a conduit session ("" =
+	// the default, 3500s; design §3.3). The relay sends GoAway 60s before
+	// it, and every drain deadline ends by it.
+	LifetimeCap string `json:"lifetimeCap,omitempty" yaml:"lifetimeCap,omitempty" koanf:"lifetimeCap"`
+	// ShutdownGrace is the time the platform allows between SIGTERM and
+	// killing the process (design §3.3). It has no default: unset, the
+	// SIGTERM drain deadline is the usual one (30s); set, it is cut to
+	// shutdown_grace - 2s (1ms at or below 2s). Read at startup.
+	ShutdownGrace string `json:"shutdownGrace,omitempty" yaml:"shutdownGrace,omitempty" koanf:"shutdownGrace"`
+	// ProxySessionMaxAge bounds how long a user conduit session admitted
+	// through trusted-proxy authentication (no bearer credential, so no
+	// expiry of its own) may open new tunnels, counted from admission
+	// ("" = the default, 1h; 5m-1h).
+	ProxySessionMaxAge string `json:"proxySessionMaxAge,omitempty" yaml:"proxySessionMaxAge,omitempty" koanf:"proxySessionMaxAge"`
+	// StreamAuthzMax is the authorization interval of open streams, per
+	// originating principal kind (design §3.5, Q6): when a stream reaches
+	// it, the hub re-checks the principal and renews the stream or closes
+	// it.
+	StreamAuthzMax HubConduitStreamAuthzMax `json:"streamAuthzMax,omitzero" yaml:"streamAuthzMax,omitempty" koanf:"streamAuthzMax"`
+	// RelayMode is "in_process" (or "", the default) or "external": in
+	// external mode the hub runs no relay and separate relay processes
+	// hold the conduit sessions (design §3.9).
+	RelayMode string `json:"relayMode,omitempty" yaml:"relayMode,omitempty" koanf:"relayMode"`
+	// Ingress is "proxy" (or "", the default) or "redirect": how a hub in
+	// external relay mode serves a conduit dial (design §3.9 "Ingress").
+	// Read at startup; ignored in in_process mode.
+	Ingress string `json:"ingress,omitempty" yaml:"ingress,omitempty" koanf:"ingress"`
+	// TargetStreamDeadlines is "off" (or "", the default) or "enforce":
+	// whether targets enforce user streams' authorization deadlines
+	// locally (design §3.5, Target-side deadlines). The value is published
+	// to targets with the grant keys (GET /api/v1/conduit/grant-keys).
+	// The hub renews hub-held user streams to renewal-capable targets in
+	// both modes. With enforce, an open the hub cannot keep renewed (a
+	// relay-held tunnel or an external-relay hub-held stream until relay
+	// renewals land, or a principal without a renewal path) is refused
+	// (503 unavailable, stream_renewal_unavailable).
+	TargetStreamDeadlines string `json:"targetStreamDeadlines,omitempty" yaml:"targetStreamDeadlines,omitempty" koanf:"targetStreamDeadlines"`
+	// PeerSecret is the dedicated relay-peer secret (design §3.9): the
+	// HMAC key of every relay-peer call is derived from it wherever a
+	// separate relay runs. It is required in external mode and on
+	// --role relay, independent of the session secret, and never logged,
+	// stored in the database or returned by any API ("" = unset). Every
+	// use of the secret, key derivation included, goes through
+	// PeerSecretValue() (one trailing newline removed), never this raw
+	// field; only IsZero looks at the raw value.
+	PeerSecret string `json:"peerSecret,omitempty" yaml:"peerSecret,omitempty" koanf:"peerSecret"`
+	// PeerKeyFile is this node's relay-peer private key file (a PEM
+	// PKCS #8 Ed25519 key, readable only by the server). When set, the
+	// node signs relay-peer calls with it, and its instance id must be
+	// set and listed in Peers with the matching public key; startup is
+	// refused otherwise ("" = unset: the node signs as before).
+	PeerKeyFile string `json:"peerKeyFile,omitempty" yaml:"peerKeyFile,omitempty" koanf:"peerKeyFile"`
+	// Peers lists the relay peers enrolled with their own keys: each
+	// peer's instance id, role (relay or hub) and public keys. A peer's
+	// key verifies only calls made under that peer's id. Read at startup.
+	Peers []HubConduitPeer `json:"peers,omitempty" yaml:"peers,omitempty" koanf:"peers"`
+}
+
+// HubConduitPeer is one enrolled relay peer (server.hub.conduit.peers).
+type HubConduitPeer struct {
+	// ID is the peer's instance id (its server.hub.conduit.instance_id).
+	ID string `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`
+	// Role is relay or hub.
+	Role string `json:"role,omitempty" yaml:"role,omitempty" koanf:"role"`
+	// Keys are the peer's public keys; more than one during a rotation.
+	Keys []HubConduitPeerKey `json:"keys,omitempty" yaml:"keys,omitempty" koanf:"keys"`
+}
+
+// HubConduitPeerKey is one enrolled public key of a relay peer.
+type HubConduitPeerKey struct {
+	// KeyID names the key ([A-Za-z0-9_-]{1,32}, unique per peer).
+	KeyID string `json:"keyId,omitempty" yaml:"keyId,omitempty" koanf:"keyId"`
+	// PublicKey is the Ed25519 public key, standard base64.
+	PublicKey string `json:"publicKey,omitempty" yaml:"publicKey,omitempty" koanf:"publicKey"`
+}
+
+// ConduitPeerRoleRelay and ConduitPeerRoleHub are the HubConduitPeer roles.
+const (
+	ConduitPeerRoleRelay = "relay"
+	ConduitPeerRoleHub   = "hub"
+)
+
+// HubConduitStreamAuthzMax holds the stream authorization interval per
+// originating principal kind (server.hub.conduit.stream_authz_max). Each
+// value is a duration ("" = the default: 8h for user, 24h for broker and
+// agent).
+type HubConduitStreamAuthzMax struct {
+	// User applies to user-originated streams (port proxy, PTY).
+	User string `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
+	// Broker applies to broker-originated streams.
+	Broker string `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	// Agent applies to agent-originated streams.
+	Agent string `json:"agent,omitempty" yaml:"agent,omitempty" koanf:"agent"`
+}
+
+// IsZero reports whether nothing is configured.
+func (m HubConduitStreamAuthzMax) IsZero() bool {
+	return m.User == "" && m.Broker == "" && m.Agent == ""
+}
+
+// ConduitStreamAuthzMax is the parsed stream authorization interval per
+// originating principal kind, with defaults applied.
+type ConduitStreamAuthzMax struct {
+	User, Broker, Agent time.Duration
+}
+
+// IsZero reports whether nothing is configured.
+func (c HubConduitConfig) IsZero() bool {
+	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
+		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
+		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
+		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero() &&
+		c.RelayMode == "" && c.Ingress == "" && c.TargetStreamDeadlines == "" && c.PeerSecret == "" &&
+		c.InternalTLSCertFile == "" && c.InternalTLSKeyFile == "" && c.InternalTLSCAFile == "" &&
+		c.InternalTLSServerName == "" && c.PeerKeyFile == "" && len(c.Peers) == 0
+}
+
+// InternalTLS reports whether the internal listener serves TLS (a
+// certificate and key are configured).
+func (c HubConduitConfig) InternalTLS() bool {
+	return c.InternalTLSCertFile != "" && c.InternalTLSKeyFile != ""
+}
+
+// IngressValue returns the ingress mode with the default applied.
+func (c HubConduitConfig) IngressValue() string {
+	if c.Ingress == "" {
+		return ConduitIngressProxy
+	}
+	return c.Ingress
+}
+
+// RelayModeValue returns the relay mode with the default applied.
+func (c HubConduitConfig) RelayModeValue() string {
+	if c.RelayMode == "" {
+		return ConduitRelayModeInProcess
+	}
+	return c.RelayMode
+}
+
+// TargetStreamDeadlinesValue returns the target-side stream deadline mode
+// with the default applied.
+func (c HubConduitConfig) TargetStreamDeadlinesValue() string {
+	if c.TargetStreamDeadlines == "" {
+		return ConduitTargetStreamDeadlinesOff
+	}
+	return c.TargetStreamDeadlines
+}
+
+// ExternalRelay reports whether the hub is in external-relay mode.
+func (c HubConduitConfig) ExternalRelay() bool {
+	return c.RelayModeValue() == ConduitRelayModeExternal
+}
+
+// NormalizePeerSecret returns the relay-peer secret as used: its raw
+// octets, with exactly one trailing newline removed (a secret file written
+// by openssl or echo ends in one); nothing else is trimmed or decoded.
+func NormalizePeerSecret(secret string) string {
+	return strings.TrimSuffix(secret, "\n")
+}
+
+// PeerSecretValue returns PeerSecret normalized (NormalizePeerSecret).
+func (c HubConduitConfig) PeerSecretValue() string {
+	return NormalizePeerSecret(c.PeerSecret)
+}
+
+// ValidatePeerSecret checks a relay-peer secret's strength on its
+// normalized octets: at least ConduitPeerSecretMinBytes of them, and at
+// least ConduitPeerSecretMinDistinct distinct ones. It names the setting
+// and never the value. An empty secret is unset and passes here; the modes
+// that require it check for it separately; so does a value that is only a
+// trailing newline, which normalizes to empty.
+func ValidatePeerSecret(secret string) error {
+	v := NormalizePeerSecret(secret)
+	if v == "" {
+		return nil
+	}
+	if len(v) < ConduitPeerSecretMinBytes {
+		return fmt.Errorf("invalid server.hub.conduit.peer_secret: shorter than %d octets", ConduitPeerSecretMinBytes)
+	}
+	var seen [256]bool
+	distinct := 0
+	for i := 0; i < len(v); i++ {
+		if !seen[v[i]] {
+			seen[v[i]] = true
+			distinct++
+		}
+	}
+	if distinct < ConduitPeerSecretMinDistinct {
+		return fmt.Errorf("invalid server.hub.conduit.peer_secret: fewer than %d distinct octets", ConduitPeerSecretMinDistinct)
+	}
+	return nil
+}
+
+// LifetimeCapDuration parses LifetimeCap ("" = ConduitDefaultLifetimeCap).
+// It applies the same bounds as Validate.
+func (c HubConduitConfig) LifetimeCapDuration() (time.Duration, error) {
+	if c.LifetimeCap == "" {
+		return ConduitDefaultLifetimeCap, nil
+	}
+	d, err := time.ParseDuration(c.LifetimeCap)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.lifetime_cap %q: %w", c.LifetimeCap, err)
+	}
+	if d < ConduitMinLifetimeCap || d > ConduitMaxLifetimeCap {
+		return 0, fmt.Errorf("invalid server.hub.conduit.lifetime_cap %q: must be between %s and %s (the relay sends GoAway 60s before the cap and drains for up to 30s)", c.LifetimeCap, ConduitMinLifetimeCap, ConduitMaxLifetimeCap)
+	}
+	return d, nil
+}
+
+// ShutdownGraceDuration parses ShutdownGrace. It has no default: unset
+// returns (0, false, nil). A set value must be a duration greater than 0.
+func (c HubConduitConfig) ShutdownGraceDuration() (grace time.Duration, set bool, err error) {
+	if c.ShutdownGrace == "" {
+		return 0, false, nil
+	}
+	d, err := time.ParseDuration(c.ShutdownGrace)
+	if err != nil {
+		return 0, true, fmt.Errorf("invalid server.hub.conduit.shutdown_grace %q: %w", c.ShutdownGrace, err)
+	}
+	if d <= 0 {
+		return 0, true, fmt.Errorf("invalid server.hub.conduit.shutdown_grace %q: must be greater than 0", c.ShutdownGrace)
+	}
+	return d, true, nil
+}
+
+// StreamAuthzMaxDurations parses StreamAuthzMax, applying the defaults
+// for unset values and the same bounds as Validate. Every invalid value
+// is reported.
+func (c HubConduitConfig) StreamAuthzMaxDurations() (ConduitStreamAuthzMax, error) {
+	parse := func(kind, v string, def time.Duration) (time.Duration, error) {
+		if v == "" {
+			return def, nil
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return 0, fmt.Errorf("invalid server.hub.conduit.stream_authz_max.%s %q: %w", kind, v, err)
+		}
+		if d < ConduitMinStreamAuthzMax || d > ConduitMaxStreamAuthzMax {
+			return 0, fmt.Errorf("invalid server.hub.conduit.stream_authz_max.%s %q: must be between %s and %s", kind, v, ConduitMinStreamAuthzMax, ConduitMaxStreamAuthzMax)
+		}
+		return d, nil
+	}
+	var out ConduitStreamAuthzMax
+	var errs []error
+	var err error
+	if out.User, err = parse("user", c.StreamAuthzMax.User, ConduitDefaultUserStreamAuthzMax); err != nil {
+		errs = append(errs, err)
+	}
+	if out.Broker, err = parse("broker", c.StreamAuthzMax.Broker, ConduitDefaultServiceStreamAuthzMax); err != nil {
+		errs = append(errs, err)
+	}
+	if out.Agent, err = parse("agent", c.StreamAuthzMax.Agent, ConduitDefaultServiceStreamAuthzMax); err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return ConduitStreamAuthzMax{}, errors.Join(errs...)
+	}
+	return out, nil
+}
+
+// ProxySessionMaxAgeDuration parses ProxySessionMaxAge ("" =
+// ConduitDefaultProxySessionMaxAge). It applies the same bounds as
+// Validate.
+func (c HubConduitConfig) ProxySessionMaxAgeDuration() (time.Duration, error) {
+	if c.ProxySessionMaxAge == "" {
+		return ConduitDefaultProxySessionMaxAge, nil
+	}
+	d, err := time.ParseDuration(c.ProxySessionMaxAge)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.proxy_session_max_age %q: %w", c.ProxySessionMaxAge, err)
+	}
+	if d < ConduitMinProxySessionMaxAge || d > ConduitMaxProxySessionMaxAge {
+		return 0, fmt.Errorf("invalid server.hub.conduit.proxy_session_max_age %q: must be between %s and %s", c.ProxySessionMaxAge, ConduitMinProxySessionMaxAge, ConduitMaxProxySessionMaxAge)
+	}
+	return d, nil
+}
+
+// AuthzRecheckIntervalDuration parses AuthzRecheckInterval ("" = 0,
+// meaning the hub default). It applies the same bounds as Validate.
+func (c HubConduitConfig) AuthzRecheckIntervalDuration() (time.Duration, error) {
+	if c.AuthzRecheckInterval == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.AuthzRecheckInterval)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.authz_recheck_interval %q: %w", c.AuthzRecheckInterval, err)
+	}
+	if d < ConduitMinAuthzRecheckInterval || d > ConduitMaxAuthzRecheckInterval {
+		return 0, fmt.Errorf("invalid server.hub.conduit.authz_recheck_interval %q: must be between %s and %s", c.AuthzRecheckInterval, ConduitMinAuthzRecheckInterval, ConduitMaxAuthzRecheckInterval)
+	}
+	return d, nil
+}
+
+// GrantKeyActivationDuration parses GrantKeyActivation ("" = 0, meaning
+// the hub default). It applies the same bounds as Validate.
+func (c HubConduitConfig) GrantKeyActivationDuration() (time.Duration, error) {
+	if c.GrantKeyActivation == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.GrantKeyActivation)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.grant_key_activation %q: %w", c.GrantKeyActivation, err)
+	}
+	minimum := ConduitGrantKeyMinActivation
+	if ConduitGrantKeyNodeRefresh > minimum {
+		minimum = ConduitGrantKeyNodeRefresh
+	}
+	if d < minimum {
+		return 0, fmt.Errorf("invalid server.hub.conduit.grant_key_activation %q: must be at least %s (the minimum activation and the grant key refresh interval)", c.GrantKeyActivation, minimum)
+	}
+	return d, nil
+}
+
+// ReconnectWindowDuration parses ReconnectWindow ("" = 0, meaning the
+// relay default). It applies the same bounds as Validate.
+func (c HubConduitConfig) ReconnectWindowDuration() (time.Duration, error) {
+	if c.ReconnectWindow == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.ReconnectWindow)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.reconnect_window %q: %w", c.ReconnectWindow, err)
+	}
+	if d < 0 || d > ConduitMaxReconnectWindow {
+		return 0, fmt.Errorf("invalid server.hub.conduit.reconnect_window %q: must be between 0s and %s", c.ReconnectWindow, ConduitMaxReconnectWindow)
+	}
+	return d, nil
+}
+
+// PeerAuthMode returns the normalized peer-auth mode ("" = auto).
+func (c HubConduitConfig) PeerAuthMode() string {
+	if c.PeerAuth == "" {
+		return ConduitPeerAuthAuto
+	}
+	return strings.ToLower(c.PeerAuth)
+}
+
+// Validate checks every conduit setting and returns all problems found.
+func (c HubConduitConfig) Validate() error {
+	var errs []error
+	if _, err := c.GrantKeyActivationDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.ReconnectWindowDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.AuthzRecheckIntervalDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.LifetimeCapDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, _, err := c.ShutdownGraceDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.ProxySessionMaxAgeDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.StreamAuthzMaxDurations(); err != nil {
+		errs = append(errs, err)
+	}
+	seen := map[int]bool{}
+	for _, p := range c.TCPAllowedPorts {
+		switch {
+		case p < 1 || p > 65535:
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.tcp_allowed_ports: port %d is outside 1-65535", p))
+		case seen[p]:
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.tcp_allowed_ports: port %d is listed twice", p))
+		}
+		seen[p] = true
+	}
+	if c.InternalListen != "" {
+		_, port, err := net.SplitHostPort(c.InternalListen)
+		if err == nil {
+			var n int
+			n, err = strconv.Atoi(port)
+			if err == nil && (n < 0 || n > 65535) {
+				err = errors.New("port out of range")
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.internal_listen %q: want host:port: %v", c.InternalListen, err))
+		}
+	}
+	if c.InternalAdvertise != "" {
+		u, err := url.Parse(c.InternalAdvertise)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.internal_advertise %q: want http(s)://host:port", c.InternalAdvertise))
+		} else if err := CheckRelayTransport(c.InternalAdvertise); err != nil {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.internal_advertise: %w", err))
+		}
+	}
+	errs = append(errs, c.validateInternalTLS()...)
+	switch c.PeerAuthMode() {
+	case ConduitPeerAuthAuto, ConduitPeerAuthOIDC, ConduitPeerAuthHMAC:
+	default:
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.peer_auth %q: want auto, oidc or hmac", c.PeerAuth))
+	}
+	for _, sa := range c.PeerServiceAccounts {
+		if !strings.Contains(sa, "@") || strings.TrimSpace(sa) != sa || strings.ContainsAny(sa, ", \t") {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.peer_service_accounts entry %q: want a service-account email", sa))
+		}
+	}
+	if id := c.InstanceID; id != "" {
+		if len(id) > ConduitMaxInstanceIDLen || strings.IndexFunc(id, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.instance_id %q: want at most %d printable ASCII characters without spaces", id, ConduitMaxInstanceIDLen))
+		}
+	}
+	switch c.RelayModeValue() {
+	case ConduitRelayModeInProcess, ConduitRelayModeExternal:
+	default:
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.relay_mode %q: want in_process or external", c.RelayMode))
+	}
+	switch c.IngressValue() {
+	case ConduitIngressProxy, ConduitIngressRedirect:
+	default:
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.ingress %q: want proxy or redirect", c.Ingress))
+	}
+	switch c.TargetStreamDeadlinesValue() {
+	case ConduitTargetStreamDeadlinesOff, ConduitTargetStreamDeadlinesEnforce:
+	default:
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.target_stream_deadlines %q: want off or enforce", c.TargetStreamDeadlines))
+	}
+	if err := ValidatePeerSecret(c.PeerSecret); err != nil {
+		errs = append(errs, err)
+	}
+	errs = append(errs, validateConduitPeers(c.Peers)...)
+	return errors.Join(errs...)
+}
+
+// validateConduitPeers checks the shape of server.hub.conduit.peers: each
+// entry has an id (once), a role of relay or hub, and at least one key with
+// a key id (once per peer) and a public key. The keys themselves are
+// decoded when relay-peer auth is built.
+func validateConduitPeers(peers []HubConduitPeer) []error {
+	var errs []error
+	ids := map[string]bool{}
+	for i, p := range peers {
+		switch {
+		case p.ID == "":
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers[%d]: id is required", i))
+			continue
+		case ids[p.ID]:
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers: id %q is listed twice", p.ID))
+			continue
+		}
+		ids[p.ID] = true
+		if p.Role != ConduitPeerRoleRelay && p.Role != ConduitPeerRoleHub {
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: role %q: want relay or hub", p.ID, p.Role))
+		}
+		if len(p.Keys) == 0 {
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: at least one key is required", p.ID))
+		}
+		kids := map[string]bool{}
+		for _, k := range p.Keys {
+			if k.KeyID == "" || k.PublicKey == "" {
+				errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: every key needs keyId and publicKey", p.ID))
+				continue
+			}
+			if kids[k.KeyID] {
+				errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: key id %q is listed twice", p.ID, k.KeyID))
+			}
+			kids[k.KeyID] = true
+		}
+	}
+	return errs
+}
+
+// validateInternalTLS checks the internal hop TLS settings: the
+// certificate and key are set together, the server name is a bare host
+// name, and an internal listener without TLS binds loopback
+// (CheckRelayInternalListen). The files themselves are read when the
+// listener and the hop clients are built.
+func (c HubConduitConfig) validateInternalTLS() []error {
+	var errs []error
+	if (c.InternalTLSCertFile == "") != (c.InternalTLSKeyFile == "") {
+		errs = append(errs, errors.New("server.hub.conduit.internal_tls_cert_file and internal_tls_key_file must be set together"))
+	}
+	if n := c.InternalTLSServerName; n != "" && (strings.ContainsAny(n, "/: \t") || strings.TrimSpace(n) != n) {
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.internal_tls_server_name %q: want a host name", n))
+	}
+	if c.InternalListen != "" {
+		if err := CheckRelayInternalListen("server.hub.conduit.internal_listen", c.InternalListen, c.InternalTLS()); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}

@@ -16,32 +16,17 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 func TestBrokerInfoResponse_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{
-			"brokerId": "b1",
-			"version": "1.0",
-			"groves": [{"projectId": "p1", "projectName": "Project 1"}]
-		}`
-		var resp BrokerInfoResponse
-		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if len(resp.Projects) != 1 {
-			t.Fatalf("Expected 1 project, got %d", len(resp.Projects))
-		}
-		if resp.Projects[0].ProjectID != "p1" {
-			t.Errorf("ProjectID = %q, want %q", resp.Projects[0].ProjectID, "p1")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		resp := BrokerInfoResponse{
 			BrokerID: "b1",
 			Version:  "1.0",
@@ -62,28 +47,37 @@ func TestBrokerInfoResponse_JSON(t *testing.T) {
 		if _, ok := m["projects"]; !ok {
 			t.Errorf("Missing 'projects' field")
 		}
-		if _, ok := m["groves"]; !ok {
-			t.Errorf("Missing 'groves' field")
+		if _, ok := m["groves"]; ok {
+			t.Errorf("legacy 'groves' field present in marshal output")
+		}
+
+		var roundTripped BrokerInfoResponse
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(roundTripped.Projects) != 1 || roundTripped.Projects[0].ProjectID != "p1" {
+			t.Errorf("round-trip Projects = %+v", roundTripped.Projects)
+		}
+	})
+
+	t.Run("legacy groves field is not honoured", func(t *testing.T) {
+		jsonData := `{
+			"brokerId": "b1",
+			"version": "1.0",
+			"groves": [{"projectId": "p1", "projectName": "Project 1"}]
+		}`
+		var resp BrokerInfoResponse
+		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(resp.Projects) != 0 {
+			t.Errorf("expected no projects from legacy 'groves' field, got %+v", resp.Projects)
 		}
 	})
 }
 
 func TestProjectInfo_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{"groveId": "legacy-id", "groveName": "legacy-name"}`
-		var info ProjectInfo
-		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if info.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", info.ProjectID, "legacy-id")
-		}
-		if info.ProjectName != "legacy-name" {
-			t.Errorf("ProjectName = %q, want %q", info.ProjectName, "legacy-name")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		info := ProjectInfo{
 			ProjectID:   "my-id",
 			ProjectName: "my-name",
@@ -98,28 +92,39 @@ func TestProjectInfo_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
-			t.Errorf("ID fields mismatch: projectId=%v, groveId=%v", m["projectId"], m["groveId"])
+		if m["projectId"] != "my-id" || m["projectName"] != "my-name" {
+			t.Errorf("canonical fields mismatch: %v", m)
 		}
-		if m["projectName"] != "my-name" || m["groveName"] != "my-name" {
-			t.Errorf("Name fields mismatch: projectName=%v, groveName=%v", m["projectName"], m["groveName"])
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("legacy 'groveId' field present in marshal output")
+		}
+		if _, ok := m["groveName"]; ok {
+			t.Errorf("legacy 'groveName' field present in marshal output")
+		}
+
+		var roundTripped ProjectInfo
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped != info {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, info)
+		}
+	})
+
+	t.Run("legacy grove fields are not honoured", func(t *testing.T) {
+		jsonData := `{"groveId": "legacy-id", "groveName": "legacy-name"}`
+		var info ProjectInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.ProjectID != "" || info.ProjectName != "" {
+			t.Errorf("legacy grove fields were honoured: %+v", info)
 		}
 	})
 }
 
 func TestAgentResponse_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{"groveId": "legacy-id", "slug": "agent-1", "status": "running"}`
-		var resp AgentResponse
-		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if resp.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", resp.ProjectID, "legacy-id")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		resp := AgentResponse{
 			ProjectID: "my-id",
 			Slug:      "agent-1",
@@ -135,36 +140,36 @@ func TestAgentResponse_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
-			t.Errorf("ID fields mismatch: projectId=%v, groveId=%v", m["projectId"], m["groveId"])
+		if m["projectId"] != "my-id" {
+			t.Errorf("projectId = %v, want %v", m["projectId"], "my-id")
+		}
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("legacy 'groveId' field present in marshal output")
+		}
+
+		var roundTripped AgentResponse
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.ProjectID != resp.ProjectID || roundTripped.Slug != resp.Slug || roundTripped.Status != resp.Status {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, resp)
+		}
+	})
+
+	t.Run("legacy groveId field is not honoured", func(t *testing.T) {
+		jsonData := `{"groveId": "legacy-id", "slug": "agent-1", "status": "running"}`
+		var resp AgentResponse
+		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if resp.ProjectID != "" {
+			t.Errorf("legacy groveId field was honoured: ProjectID = %q", resp.ProjectID)
 		}
 	})
 }
 
 func TestCreateAgentRequest_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{
-			"groveId": "legacy-id",
-			"grovePath": "/legacy/path",
-			"groveSlug": "legacy-slug",
-			"name": "agent-1"
-		}`
-		var req CreateAgentRequest
-		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if req.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "legacy-id")
-		}
-		if req.ProjectPath != "/legacy/path" {
-			t.Errorf("ProjectPath = %q, want %q", req.ProjectPath, "/legacy/path")
-		}
-		if req.ProjectSlug != "legacy-slug" {
-			t.Errorf("ProjectSlug = %q, want %q", req.ProjectSlug, "legacy-slug")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip", func(t *testing.T) {
 		req := CreateAgentRequest{
 			ProjectID:   "my-id",
 			ProjectPath: "/my/path",
@@ -181,31 +186,43 @@ func TestCreateAgentRequest_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
-			t.Errorf("ID fields mismatch")
+		if m["projectId"] != "my-id" || m["projectPath"] != "/my/path" || m["projectSlug"] != "my-slug" {
+			t.Errorf("canonical fields mismatch: %v", m)
 		}
-		if m["projectPath"] != "/my/path" || m["grovePath"] != "/my/path" {
-			t.Errorf("Path fields mismatch")
+		for _, legacyKey := range []string{"groveId", "grovePath", "groveSlug"} {
+			if _, ok := m[legacyKey]; ok {
+				t.Errorf("legacy key %q present in marshal output", legacyKey)
+			}
 		}
-		if m["projectSlug"] != "my-slug" || m["groveSlug"] != "my-slug" {
-			t.Errorf("Slug fields mismatch")
+
+		var roundTripped CreateAgentRequest
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.ProjectID != req.ProjectID || roundTripped.ProjectPath != req.ProjectPath || roundTripped.ProjectSlug != req.ProjectSlug {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, req)
+		}
+	})
+
+	t.Run("legacy grove fields are not honoured", func(t *testing.T) {
+		jsonData := `{
+			"groveId": "legacy-id",
+			"grovePath": "/legacy/path",
+			"groveSlug": "legacy-slug",
+			"name": "agent-1"
+		}`
+		var req CreateAgentRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" || req.ProjectPath != "" || req.ProjectSlug != "" {
+			t.Errorf("legacy grove fields were honoured: %+v", req)
 		}
 	})
 }
 
 func TestMessageRequest_JSON(t *testing.T) {
-	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
-		jsonData := `{"grove_id": "legacy-id", "message": "hello"}`
-		var req MessageRequest
-		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if req.ProjectID != "legacy-id" {
-			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "legacy-id")
-		}
-	})
-
-	t.Run("marshal dual fields", func(t *testing.T) {
+	t.Run("canonical round-trip, with legacy snake_case alias", func(t *testing.T) {
 		req := MessageRequest{
 			ProjectID: "my-id",
 			Message:   "hello",
@@ -220,8 +237,30 @@ func TestMessageRequest_JSON(t *testing.T) {
 			t.Fatalf("Unmarshal back failed: %v", err)
 		}
 
-		if m["project_id"] != "my-id" || m["grove_id"] != "my-id" {
-			t.Errorf("ID fields mismatch")
+		if m["projectId"] != "my-id" || m["project_id"] != "my-id" {
+			t.Errorf("ID fields mismatch: %v", m)
+		}
+		if _, ok := m["grove_id"]; ok {
+			t.Errorf("legacy 'grove_id' field present in marshal output")
+		}
+
+		var roundTripped MessageRequest
+		if err := json.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if roundTripped.ProjectID != req.ProjectID || roundTripped.Message != req.Message {
+			t.Errorf("round-trip = %+v, want %+v", roundTripped, req)
+		}
+	})
+
+	t.Run("legacy grove_id field is not honoured", func(t *testing.T) {
+		jsonData := `{"grove_id": "legacy-id", "message": "hello"}`
+		var req MessageRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "" {
+			t.Errorf("legacy grove_id field was honoured: ProjectID = %q", req.ProjectID)
 		}
 	})
 }
@@ -391,6 +430,68 @@ func TestAgentInfoToResponse(t *testing.T) {
 	}
 }
 
+// TestAgentInfoToResponse_EffectiveConfig (WP1 slice 3 addendum v12
+// section 5): the response carries the template hash, harness and model
+// Start resolved, and the broker's own build.
+func TestAgentInfoToResponse_EffectiveConfig(t *testing.T) {
+	resp := AgentInfoToResponse(api.AgentInfo{
+		Name: "agent-eff", Phase: "running", TemplateHash: "sha256:tmpl", Harness: "claude-code", Model: "model-x-1",
+		ConfigResolved: true,
+	})
+	if resp.TemplateHash != "sha256:tmpl" || resp.Harness != "claude-code" || resp.Model != "model-x-1" {
+		t.Errorf("effective fields = %q %q %q", resp.TemplateHash, resp.Harness, resp.Model)
+	}
+	if resp.BrokerBuild == "" || resp.BrokerBuild != version.Short() {
+		t.Errorf("BrokerBuild = %q, want version.Short() %q", resp.BrokerBuild, version.Short())
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"templateHash":"sha256:tmpl"`, `"harness":"claude-code"`, `"model":"model-x-1"`, `"brokerBuild":`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("wire form lacks %s: %s", key, data)
+		}
+	}
+}
+
+// TestAgentInfoToResponse_NoBrokerBuildWithoutResolution (review
+// wp1s3-r1 R1, O1): an entry no start resolved (no Harness: an
+// already-running start, a list or get entry) carries no brokerBuild, so
+// the hub sees no effective-only field and records nothing.
+func TestAgentInfoToResponse_NoBrokerBuildWithoutResolution(t *testing.T) {
+	// Even a Harness on the entry does not count: only the explicit marker
+	// says a start resolved the configuration (review wp1s3-r2 O-1).
+	resp := AgentInfoToResponse(api.AgentInfo{Name: "agent-listed", Phase: "running", RunID: "run-b", Template: "tmpl", Harness: "listed"})
+	if resp.BrokerBuild != "" {
+		t.Errorf("BrokerBuild = %q, want empty", resp.BrokerBuild)
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "brokerBuild") {
+		t.Errorf("wire form carries brokerBuild: %s", data)
+	}
+}
+
+// TestAgentInfoToResponse_BrokerBuildFollowsTheMarker (review wp1s3-r2
+// O-1): a start that resolved its configuration gets brokerBuild even with
+// an empty Harness (an agent whose stored config names no harness).
+func TestAgentInfoToResponse_BrokerBuildFollowsTheMarker(t *testing.T) {
+	resp := AgentInfoToResponse(api.AgentInfo{Name: "agent-noharness", Phase: "running", Model: "model-x-1", ConfigResolved: true})
+	if resp.BrokerBuild != version.Short() {
+		t.Errorf("BrokerBuild = %q, want %q", resp.BrokerBuild, version.Short())
+	}
+	data, err := json.Marshal(api.AgentInfo{Name: "a", ConfigResolved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(data)), "resolved") {
+		t.Errorf("ConfigResolved must never be on the wire: %s", data)
+	}
+}
+
 func TestAgentInfoToResponseHarnessConfig(t *testing.T) {
 	info := api.AgentInfo{
 		Name:          "agent-harness",
@@ -418,6 +519,54 @@ func TestAgentInfoToResponseProfile(t *testing.T) {
 	resp := AgentInfoToResponse(info)
 	if resp.Profile != "docker-dev" {
 		t.Errorf("Profile = %q, want %q", resp.Profile, "docker-dev")
+	}
+}
+
+// TestAgentInfoToResponseWarnings checks only the hub-only env drop
+// warnings reach the hub-facing response, and the field is omitted when
+// there are none (older hubs see no new key).
+func TestAgentInfoToResponseWarnings(t *testing.T) {
+	info := api.AgentInfo{
+		Name:               "agent-warn",
+		Phase:              "running",
+		Warnings:           []string{"some local-only warning", "Warning: TZ dropped"},
+		HubOnlyEnvWarnings: []string{"Warning: TZ dropped"},
+	}
+	resp := AgentInfoToResponse(info)
+	if len(resp.Warnings) != 1 || resp.Warnings[0] != "Warning: TZ dropped" {
+		t.Errorf("Warnings = %v, want only the hub-only env warning", resp.Warnings)
+	}
+
+	data, err := json.Marshal(AgentInfoToResponse(api.AgentInfo{Name: "quiet", Phase: "running"}))
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), `"warnings"`) {
+		t.Errorf("warnings must be omitted when empty, got %s", data)
+	}
+}
+
+// TestAgentInfoToResponseRelayedWarnings checks that start warnings meant
+// for the user reach the hub-facing response after the hub-only env
+// warnings, while local-only warnings stay out.
+func TestAgentInfoToResponseRelayedWarnings(t *testing.T) {
+	relayed := "Warning: relayed to the user"
+	info := api.AgentInfo{
+		Name:               "agent-relay",
+		Phase:              "running",
+		Warnings:           []string{"some local-only warning", "Warning: TZ dropped", relayed},
+		HubOnlyEnvWarnings: []string{"Warning: TZ dropped"},
+		RelayedWarnings:    []string{relayed},
+	}
+	resp := AgentInfoToResponse(info)
+	want := []string{"Warning: TZ dropped", relayed}
+	if !reflect.DeepEqual(resp.Warnings, want) {
+		t.Errorf("Warnings = %v, want %v", resp.Warnings, want)
+	}
+
+	resp = AgentInfoToResponse(api.AgentInfo{Name: "only-relayed", Phase: "running", RelayedWarnings: []string{relayed}})
+	if !reflect.DeepEqual(resp.Warnings, []string{relayed}) {
+		t.Errorf("Warnings = %v, want only the relayed warning", resp.Warnings)
 	}
 }
 

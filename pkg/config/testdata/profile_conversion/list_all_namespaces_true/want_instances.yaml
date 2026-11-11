@@ -1,0 +1,8 @@
+server:
+  broker:
+    instances:
+      - key: k8s-team
+        name: k8s-team
+        runtime_target:
+          type: kubernetes
+          namespace: team

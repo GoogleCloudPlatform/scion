@@ -1,4 +1,22 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import type { ScionPageAdminServerConfig } from './admin-server-config.js';
+import {
+  isLayer0Key,
+  owningSection,
+  registrySchemaResponse,
+  unknownPayloadKeys,
+  valueAtPath,
+  type PayloadScope,
+} from './__fixtures__/settings-registry.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+
+// A runtime type switch that clears fields asks first; the tests accept.
+vi.mock('../shared/confirm-dialog.js', () => ({
+  showConfirm: vi.fn(() => Promise.resolve(true)),
+}));
 
 // ── Shared mock data builders ──
 
@@ -46,6 +64,7 @@ const SCHEMA_RESPONSE = {
       koanf_paths: [
         'server.hub.admin_emails',
         'server.auth.user_access_mode',
+        'server.auth.default_user_role',
         'server.auth.authorized_domains',
       ],
     },
@@ -56,7 +75,13 @@ const SCHEMA_RESPONSE = {
         'server.hub.soft_delete_retain_files',
       ],
     },
-    endpoints: { koanf_paths: ['server.hub.public_url', 'image_registry'] },
+    endpoints: {
+      koanf_paths: [
+        'server.hub.public_url',
+        'image_registry',
+        'server.hub.monitoring_dashboard_url',
+      ],
+    },
     agent_defaults: {
       koanf_paths: [
         'default_template',
@@ -65,6 +90,7 @@ const SCHEMA_RESPONSE = {
         'default_max_model_calls',
         'default_max_duration',
         'default_resources',
+        'default_timezone',
       ],
     },
     telemetry: {
@@ -92,6 +118,12 @@ const SCHEMA_RESPONSE = {
         'server.github_app.private_key_path',
       ],
     },
+    agent_secrets: {
+      koanf_paths: ['agent_secrets.user_scope_only'],
+    },
+    gcp_iam: {
+      koanf_paths: ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'],
+    },
   },
 };
 
@@ -101,9 +133,12 @@ function createFetchHandler(
     schemaResponse?: Record<string, unknown> | null;
     putHandler?: (body: Record<string, unknown>) => {
       status: number;
-      body: Record<string, unknown>;
+      body: unknown;
     };
     messagingResponse?: Record<string, unknown>;
+    /** update-status body; null answers 403, undefined uses a default. */
+    updateStatusResponse?: Record<string, unknown> | null;
+    onOperationRun?: (path: string, body: unknown) => void;
   }
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -170,6 +205,33 @@ function createFetchHandler(
       );
     }
 
+    if (path.includes('/api/v1/admin/maintenance/update-status')) {
+      if (opts?.updateStatusResponse === null) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { code: 'forbidden', message: 'forbidden' } }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(opts?.updateStatusResponse ?? makeUpdateStatus()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }
+
+    if (path.includes('/api/v1/admin/maintenance/operations/') && path.endsWith('/run')) {
+      opts?.onOperationRun?.(path, init?.body ? JSON.parse(init.body as string) : undefined);
+      return Promise.resolve(
+        new Response(JSON.stringify({ runId: 'run-1', status: 'running' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }
+
     if (path.includes('/api/v1/github-app/installations')) {
       return Promise.resolve(
         new Response(JSON.stringify([]), {
@@ -197,9 +259,21 @@ function createFetchHandler(
   };
 }
 
+/** A minimal GET /api/v1/admin/maintenance/update-status body. */
+function makeUpdateStatus(version = 'nightly-20261101', channel = 'nightly') {
+  return {
+    current: { version, channel, commit: 'abc123', isGitBuild: false },
+    mode: { effective: 'release', repoConfigured: false },
+    channel: { effective: channel, configured: channel, source: 'config' },
+    pin: 'latest',
+    installer: { strategy: 'symlink', supported: true },
+    updatePolicy: 'notify',
+    pendingUpdate: null,
+    lastUpdate: null,
+  };
+}
+
 // Import the component module once so the custom element is only registered once.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageAdminServerConfig: any;
 
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -213,6 +287,28 @@ async function createComponent(
   await new Promise((resolve) => setTimeout(resolve, 200));
   await el.updateComplete;
   return el;
+}
+
+/**
+ * Changes one agent default so a DB-tier save has a dirty section to send:
+ * the page sends only the sections changed since load (ptone/scion#3922),
+ * so an untouched form sends no PUT. Tests about the save response use this
+ * to get a PUT; tests about which keys are sent assert on the other
+ * sections.
+ */
+async function markDirty(el: HTMLElement): Promise<void> {
+  (el as any).defaultMaxTurns = ((el as any).defaultMaxTurns || 0) + 7;
+  await (el as any).updateComplete;
+}
+
+/**
+ * Sends the full Layer-1 payload the form builds, as before section-level
+ * saves: clears the load baseline, so a DB-tier save does not filter to the
+ * changed sections. For tests of the payload builders and of the save
+ * response; the section filter has its own tests.
+ */
+function withoutSectionFilter(el: HTMLElement): void {
+  (el as any).layer1Baseline = null;
 }
 
 function shadowText(el: HTMLElement): string {
@@ -234,8 +330,7 @@ describe('scion-page-admin-server-config', () => {
 
   beforeAll(async () => {
     vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
-    const mod = await import('./admin-server-config.js');
-    ScionPageAdminServerConfig = mod.ScionPageAdminServerConfig;
+    await import('./admin-server-config.js');
   });
 
   afterEach(() => {
@@ -249,7 +344,8 @@ describe('scion-page-admin-server-config', () => {
   it('renders without errors', async () => {
     element = await createComponent(createFetchHandler(makeBaseConfig()));
     expect(element.shadowRoot).toBeTruthy();
-    expect(shadowText(element)).toContain('0.1.0-test');
+    // The version line shows update-status's version (default mock).
+    expect(shadowText(element)).toContain('nightly-20261101');
   });
 
   it('calls the config API on connect', async () => {
@@ -284,6 +380,56 @@ describe('scion-page-admin-server-config', () => {
       expect(metaText).toContain('Database');
       expect(metaText).toContain('rev 5');
       expect(metaText).toContain('admin@test.com');
+    });
+
+    it('section metadata time renders in the display zone, 24-hour, with a zone label (tz-refactor task 20)', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        section_metadata: {
+          // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+          endpoints: { source: 'db', revision: 5, updated_at: '2026-07-01T15:00:00Z' },
+        },
+      });
+      setPreferredTimeZone('Asia/Tokyo');
+      try {
+        element = await createComponent(createFetchHandler(config));
+        const metaText = () => query(element!, '.section-meta')?.textContent ?? '';
+        expect(metaText()).toContain('Jul 2, 2026, 00:00 (Asia/Tokyo)');
+
+        setPreferredTimeZone('UTC');
+        await element.updateComplete;
+        expect(metaText()).toContain('Jul 1, 2026, 15:00 (UTC)');
+      } finally {
+        setPreferredTimeZone('');
+      }
+    });
+
+    it('build time renders in the display zone with the raw value as its title (tz-refactor task 20)', async () => {
+      const buildTime = (el: HTMLElement) =>
+        Array.from(el.shadowRoot?.querySelectorAll('.version-item') ?? [])
+          .find(
+            (item) => item.querySelector('.version-label')?.textContent?.trim() === 'Build Time'
+          )
+          ?.querySelector('.version-value') ?? null;
+      setPreferredTimeZone('Asia/Tokyo');
+      try {
+        // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ scion_build_time: '2026-07-01T15:00:00Z' }))
+        );
+        const value = buildTime(element);
+        expect(value?.textContent?.trim()).toBe('Jul 2, 2026, 00:00 (Asia/Tokyo)');
+        expect(value?.getAttribute('title')).toBe('2026-07-01T15:00:00Z');
+
+        element.remove();
+        // A value that is not an instant is shown unchanged.
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ scion_build_time: 'unknown' }))
+        );
+        expect(buildTime(element)?.textContent?.trim()).toBe('unknown');
+      } finally {
+        setPreferredTimeZone('');
+      }
     });
 
     it('section metadata renders source:File for file-sourced sections', async () => {
@@ -346,6 +492,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      withoutSectionFilter(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       expect(saveBtn).not.toBeNull();
@@ -384,6 +532,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -391,6 +541,94 @@ describe('scion-page-admin-server-config', () => {
 
       expect(putCalled).toBe(true);
       expect(query(element, '.safety-net-notice')).toBeNull();
+    });
+  });
+
+  // ptone/scion#5311: the public settings are cached per page load; a save
+  // here can change them, so a successful save drops the cache and a failed
+  // one keeps it.
+  describe('public settings cache', () => {
+    async function saveWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config, {
+        putHandler: () =>
+          status < 400
+            ? { status, body: { reload: { applied: [] } } }
+            : { status, body: { error: { code: 'validation_error', message: 'bad' } } },
+      });
+      element = await createComponent((url, init) =>
+        requestUrl(url).includes('/api/v1/settings/public')
+          ? Promise.resolve(new Response('{}', { status: 200 }))
+          : handler(url, init)
+      );
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      withoutSectionFilter(element);
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful save makes the next public settings read fetch again', async () => {
+      expect(await saveWith(200)).toBe(1);
+    });
+
+    it('a failed save keeps the cached public settings', async () => {
+      expect(await saveWith(422)).toBe(0);
+    });
+
+    /** Like saveWith, for a section reset (DELETE /admin/server-config/sections/{name}). */
+    async function resetWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config);
+      element = await createComponent((url, init) => {
+        if (requestUrl(url).includes('/api/v1/settings/public')) {
+          return Promise.resolve(new Response('{}', { status: 200 }));
+        }
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(new Response(status < 400 ? '{}' : 'bad', { status }));
+        }
+        return handler(url, init);
+      });
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      await (
+        element as unknown as { handleResetSection(name: string): Promise<void> }
+      ).handleResetSection('telemetry');
+      expect(
+        fetchMock.mock.calls.some(
+          ([u, init]) =>
+            init?.method === 'DELETE' &&
+            requestUrl(u).includes('/api/v1/admin/server-config/sections/telemetry')
+        )
+      ).toBe(true);
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful section reset makes the next public settings read fetch again', async () => {
+      expect(await resetWith(200)).toBe(1);
+    });
+
+    it('a failed section reset keeps the cached public settings', async () => {
+      expect(await resetWith(500)).toBe(0);
     });
   });
 
@@ -456,6 +694,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -473,6 +713,561 @@ describe('scion-page-admin-server-config', () => {
       expect(server?.broker).toBeUndefined();
       expect(server?.message_broker).toBeUndefined();
     });
+  });
+
+  // ── Workstation hubs (layer0_editable): Layer-0 editable on the DB tier ──
+
+  describe('DB mode on a workstation hub (layer0_editable)', () => {
+    it('Layer-0 fields are editable: no deployment-configuration badges', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('deployment configuration'))).toBe(false);
+      const values = queryAll(element, '.read-only-value').map((el) => el.textContent?.trim());
+      expect(values).not.toContain('postgres');
+      expect(values).not.toContain('8080');
+    });
+
+    it('env-pinned fields stay read-only', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        layer0_editable: true,
+        env_overrides: ['server.hub.port'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+    });
+
+    async function capturePut(
+      config: Record<string, unknown>,
+      mutate: (el: any) => void
+    ): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      mutate(element as any);
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      withoutSectionFilter(element);
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      return captured!;
+    }
+
+    it('changed Layer-0 fields go in the PUT payload for the server to split', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.logLevel = 'debug';
+          el.dbDriver = 'sqlite';
+        }
+      );
+      const server = payload.server as Record<string, unknown> | undefined;
+      expect(server?.log_level).toBe('debug');
+      expect((server?.database as Record<string, unknown> | undefined)?.driver).toBe('sqlite');
+      // The masked database URL is left out so the stored value is kept.
+      expect((server?.database as Record<string, unknown> | undefined)?.url).toBeUndefined();
+    });
+
+    it('a minimal workstation GET with no user change sends no Layer-0 leaves', async () => {
+      // The GET a hub returns for a stock workstation settings.yaml.
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: {
+          hub: { soft_delete_retain_files: false, auto_suspend_stalled: false },
+          broker: { broker_id: 'b-1', broker_token: '********' },
+          auth: {},
+          github_app: {},
+        },
+      };
+      const payload = await capturePut(minimal, () => {});
+      expect(payload).not.toHaveProperty('active_profile');
+      expect(payload).not.toHaveProperty('workspace_path');
+      const server = (payload.server ?? {}) as Record<string, Record<string, unknown>>;
+      for (const block of [
+        'broker',
+        'database',
+        'storage',
+        'secrets',
+        'message_broker',
+        'native_chat',
+      ]) {
+        expect(server).not.toHaveProperty(block);
+      }
+      expect(server.hub ?? {}).not.toHaveProperty('port');
+      expect(server.auth ?? {}).not.toHaveProperty('dev_token');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('changing one Layer-0 field sends exactly that leaf', async () => {
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: { hub: {}, broker: { broker_id: 'b-1', broker_token: '********' }, auth: {} },
+      };
+      const payload = await capturePut(minimal, (el) => {
+        el.storageBucket = 'my-bucket';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.storage).toEqual({ bucket: 'my-bucket' });
+      expect(server).not.toHaveProperty('broker');
+      expect(payload).not.toHaveProperty('active_profile');
+    });
+
+    it('auto_provide shows as on when GET omits it', async () => {
+      element = await createComponent(
+        createFetchHandler({
+          schema_version: '1',
+          settings_tier: 'db',
+          layer0_editable: true,
+          server: { broker: { broker_id: 'b-1' } },
+        })
+      );
+      expect((element as any).brokerAutoProvide).toBe(true);
+    });
+
+    it('clearing authorized_domains and public_url sends [] and ""', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.authAuthorizedDomains = '';
+          el.hubPublicUrl = '';
+        }
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.auth.authorized_domains).toEqual([]);
+      expect(server.hub.public_url).toBe('');
+      // The unchanged Layer-0 port is not sent.
+      expect(server.hub).not.toHaveProperty('port');
+    });
+
+    it('cleared and switched-off Layer-0 fields are sent explicitly', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.storage.bucket = 'old-bucket';
+      base.server.message_broker = { enabled: true, type: 'inprocess' };
+      const payload = await capturePut(base, (el) => {
+        el.logLevel = '';
+        el.storageBucket = '';
+        el.messageBrokerEnabled = false;
+      });
+      const server = payload.server as Record<string, Record<string, unknown> | string>;
+      expect(server.log_level).toBe('');
+      expect(server.storage).toEqual({ bucket: '' });
+      expect(server.message_broker).toEqual({ enabled: false });
+    });
+
+    it('defaulted fields GET omitted are not sent from an untouched form', async () => {
+      // makeBaseConfig has no gcp_iam_* and no native_chat.
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        () => {}
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server).not.toHaveProperty('native_chat');
+    });
+
+    it('defaulted fields are sent only when the user changed them', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.nativeChatEnabled = false;
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      // Unchanged since GET (even though GET had it): not sent.
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server.native_chat).toEqual({ enabled: false });
+    });
+
+    it('a hosted save leaves out unchanged gcp_iam keys', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      base.server.hub.gcp_iam_deny_unknown_policy = 'fail-closed';
+      const payload = await capturePut(base, () => {});
+      const hub = (payload.server as Record<string, Record<string, unknown>> | undefined)?.hub;
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_check_mode');
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+    });
+
+    it('a hosted save sends a changed gcp_iam key in the Layer-1 payload', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.hubGcpIamDenyUnknownPolicy = 'fail-closed';
+      });
+      const hub = (payload.server as Record<string, Record<string, unknown>>).hub;
+      expect(hub.gcp_iam_deny_unknown_policy).toBe('fail-closed');
+      expect(hub).not.toHaveProperty('gcp_iam_check_mode');
+    });
+
+    it('gcp_iam selects show the reported value and an env badge when env-pinned', async () => {
+      const base = makeBaseConfig({
+        settings_tier: 'db',
+        env_overrides: ['server.hub.gcp_iam_check_mode'],
+      }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'IAM Check Mode'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-select')?.getAttribute('value')).toBe('enforce');
+      expect(field.querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it('gcp_iam selects are read-only on a hosted hub without the gcp_iam section', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const schema = JSON.parse(JSON.stringify(SCHEMA_RESPONSE));
+      delete schema.sections.gcp_iam;
+      element = await createComponent(createFetchHandler(base, { schemaResponse: schema }));
+      const labels = queryAll(element, 'label').filter((l) =>
+        ['IAM Check Mode', 'Deny Policy Fallback'].includes(l.textContent?.trim() ?? '')
+      );
+      expect(labels).toHaveLength(2);
+      for (const label of labels) {
+        const field = label.closest('.form-field')!;
+        expect(field.querySelector('sl-select')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'deployment configuration'
+        );
+      }
+    });
+
+    it('GCP replication locations are read-only on a hosted hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      expect(label).toBeDefined();
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('us-east1');
+    });
+
+    it('GCP replication locations stay editable on a workstation hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).not.toBeNull();
+    });
+
+    it('flag-managed workstation fields are read-only and not sent', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      const payload = await capturePut(config, () => {});
+      const badgeTexts = queryAll(element!, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('workstation startup defaults'))).toBe(true);
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.enabled).toBeUndefined();
+      expect(server.auth?.dev_mode).toBeUndefined();
+      expect(server.storage?.provider).toBeUndefined();
+      expect(server.hub?.host).toBeUndefined();
+    });
+
+    function brokerHostField(el: HTMLElement): Element {
+      const label = queryAll(el, 'sl-tab-panel[name="broker"] label').find(
+        (l) => l.textContent?.trim() === 'Host'
+      );
+      expect(label).toBeDefined();
+      return label!.closest('.form-field')!;
+    }
+
+    const workstation = { settings_tier: 'db', layer0_editable: true };
+
+    function withBrokerHost(host: string | undefined, overrides: Record<string, unknown>) {
+      const base = makeBaseConfig(overrides) as any;
+      base.server.broker = host === undefined ? { enabled: true } : { enabled: true, host };
+      return base;
+    }
+
+    it('runtime broker host is editable on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('10.0.0.5', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 127.0.0.1 on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, workstation)));
+      const field = brokerHostField(element);
+      const input = field.querySelector('sl-input')!;
+      expect(input.getAttribute('value')).toBe('');
+      expect(input.getAttribute('placeholder')).toBe('127.0.0.1');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('a 0.0.0.0 runtime broker host counts as unset on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('0.0.0.0', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('an untouched empty runtime broker host is not sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), () => {});
+      const server = payload.server as Record<string, Record<string, unknown>> | undefined;
+      expect(server?.broker?.host).toBeUndefined();
+    });
+
+    it('a typed runtime broker host is sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), (el) => {
+        el.brokerHost = '10.0.0.5';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.host).toBe('10.0.0.5');
+    });
+
+    it('an env-pinned runtime broker host shows no effective hint', async () => {
+      const config = withBrokerHost(undefined, {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'environment variable'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('—');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an env-pinned runtime broker host shows the loaded value', async () => {
+      const config = withBrokerHost('10.0.0.5', {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    // ptone/scion#4418: the env-pin keys are the koanf keys
+    // server.broker.broker_name and broker_nickname, so an environment
+    // override locks those fields.
+    for (const [key, label, value] of [
+      ['server.broker.broker_name', 'Broker Name', 'env-broker'],
+      ['server.broker.broker_nickname', 'Broker Nickname', 'env-nick'],
+    ] as const) {
+      it(`an env override of ${key} locks the ${label} field`, async () => {
+        const config = withBrokerHost(undefined, { ...workstation, env_overrides: [key] });
+        config.server.broker[key.split('.').pop()!] = value;
+        element = await createComponent(createFetchHandler(config));
+        const fieldLabel = queryAll(element, 'sl-tab-panel[name="broker"] label').find(
+          (l) => l.textContent?.trim() === label
+        );
+        expect(fieldLabel).toBeDefined();
+        const field = fieldLabel!.closest('.form-field')!;
+        expect(field.querySelector('sl-input')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'environment variable'
+        );
+        expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe(value);
+      });
+    }
+
+    it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a hosted hub', async () => {
+      const config = withBrokerHost(undefined, { settings_tier: 'db' });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
+    // every Layer-1 field the page shows must be sent explicitly when it is
+    // cleared: "" / [] / null / false, never left out.
+    it('a hosted save sends every cleared Layer-1 field explicitly', async () => {
+      // Every Layer-1 key the page edits, so none is read-only.
+      const sections = SCHEMA_RESPONSE.sections as Record<string, { koanf_paths: string[] }>;
+      const schema = {
+        sections: {
+          ...sections,
+          lifecycle: {
+            koanf_paths: [...sections.lifecycle.koanf_paths, 'server.hub.stalled_threshold'],
+          },
+          agent_defaults: {
+            koanf_paths: [
+              ...sections.agent_defaults.koanf_paths,
+              'default_model',
+              'default_thinking_level',
+              'default_runtime_broker',
+            ],
+          },
+          telemetry: {
+            koanf_paths: [...sections.telemetry.koanf_paths, 'telemetry.cloud.gcp_project_id'],
+          },
+          auto_expose_ports: { koanf_paths: ['auto_expose_ports.enabled'] },
+          quotas: { koanf_paths: ['quotas.enforce_broker_quotas'] },
+        },
+      };
+      let captured: Record<string, unknown> | null = null;
+      // default_runtime_broker is stored so clearing it is a change: the
+      // page sends it only when it differs from the loaded value
+      // (ptone/scion#3913).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', default_runtime_broker: 'broker-1' }),
+          {
+            schemaResponse: schema,
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      const el = element as any;
+      el.defaultTemplate = '';
+      el.imageRegistry = '';
+      el.defaultMaxDuration = '';
+      el.defaultModelSelection = '';
+      el.defaultRuntimeBroker = '';
+      el.defaultTimezone = '';
+      el.defaultThinkingLevel = null;
+      el.hubPublicUrl = '';
+      el.hubAdminEmails = '';
+      el.hubSoftDeleteRetention = '';
+      el.hubSoftDeleteRetainFiles = false;
+      el.hubAutoSuspendStalled = false;
+      el.hubStalledThreshold = '';
+      el.authUserAccessMode = '';
+      el.authDefaultUserRole = '';
+      el.authAuthorizedDomains = '';
+      el.autoExposePortsEnabled = false;
+      el.enforceBrokerQuotas = false;
+      el.agentSecretsUserScopeOnly = false;
+      withoutSectionFilter(element);
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      const payload = captured! as Record<string, unknown>;
+      expect(payload).toMatchObject({
+        default_template: '',
+        image_registry: '',
+        default_max_duration: '',
+        default_model: '',
+        default_runtime_broker: '',
+        default_timezone: '',
+        default_thinking_level: null,
+        default_resources: null,
+        auto_expose_ports: { enabled: false },
+        quotas: { enforce_broker_quotas: false },
+        agent_secrets: { user_scope_only: false },
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).toMatchObject({
+        public_url: '',
+        admin_emails: [],
+        soft_delete_retention: '',
+        soft_delete_retain_files: false,
+        auto_suspend_stalled: false,
+        stalled_threshold: '',
+      });
+      expect(server.auth).toMatchObject({
+        user_access_mode: '',
+        default_user_role: '',
+        authorized_domains: [],
+      });
+      const telemetry = payload.telemetry as Record<string, Record<string, unknown>>;
+      expect(telemetry.cloud).toHaveProperty('gcp_project_id', null);
+    });
+  });
+
+  describe('agent-default fields the hub cannot save (ptone/scion#3067)', () => {
+    for (const tier of [
+      { settings_tier: 'db' },
+      { settings_tier: 'db', layer0_editable: true },
+      { settings_tier: 'file' },
+    ]) {
+      it(`are not sent and not editable (${JSON.stringify(tier)})`, async () => {
+        const config = makeBaseConfig({ ...tier, default_agent_role: 'full' });
+        let captured: Record<string, unknown> | null = null;
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+        expect(shadowText(element)).toContain('ptone/scion#3067');
+        await markDirty(element);
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(captured).not.toBeNull();
+        expect(captured!).not.toHaveProperty('default_agent_role');
+        expect(captured!).not.toHaveProperty('default_max_agent_role');
+        expect(captured!).not.toHaveProperty('default_harness_auth');
+      });
+    }
+  });
+
+  describe('save errors that name keys', () => {
+    for (const code of ['unpersisted_keys_rejected', 'unclassified_keys_rejected']) {
+      it(`${code} shows the message and the keys`, async () => {
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+            putHandler: () => ({
+              status: 422,
+              body: { error: code, message: 'Not saved.', keys: ['server.hub.bogus', 'x.y'] },
+            }),
+          })
+        );
+        await markDirty(element);
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+        const text = shadowText(element);
+        expect(text).toContain('Not saved.');
+        expect(text).toContain('server.hub.bogus');
+        expect(text).toContain('x.y');
+      });
+    }
   });
 
   // ── Criterion 6: File mode ──
@@ -569,6 +1364,169 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Agent Defaults card: default_timezone (tz-refactor task 12) ──
+
+  describe('Agent Defaults card — default_timezone', () => {
+    function timezonePicker(el: HTMLElement): Element | null {
+      return query(el, 'scion-timezone-picker');
+    }
+
+    function emitTimezoneChange(el: HTMLElement, timezone: string): void {
+      timezonePicker(el)!.dispatchEvent(
+        new CustomEvent('timezone-change', { detail: { timezone } })
+      );
+    }
+
+    it('loads the current default_timezone into the picker', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: 'Asia/Tokyo' });
+      element = await createComponent(createFetchHandler(config));
+
+      const picker = timezonePicker(element);
+      expect(picker).not.toBeNull();
+      expect((picker as HTMLElement & { value: string }).value).toBe('Asia/Tokyo');
+    });
+
+    it('DB mode: PUT payload includes the edited default_timezone', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: '' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, 'Europe/Berlin');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.default_timezone).toBe('Europe/Berlin');
+    });
+
+    it('DB mode: clearing default_timezone sends an explicit empty string', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: 'Asia/Tokyo' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, '');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.default_timezone).toBe('');
+    });
+
+    it('file mode: clearing default_timezone sends an explicit empty string, not an omitted key', async () => {
+      // Regression guard: unlike default_runtime_broker (`|| undefined`),
+      // default_timezone must send "" explicitly on clear, because the
+      // backend's *string field treats an omitted key as "no change" and
+      // only an explicit "" as "clear" (see admin_settings.go).
+      const config = makeBaseConfig({ settings_tier: 'file', default_timezone: 'Asia/Tokyo' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, '');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect('default_timezone' in capturedPayload!).toBe(true);
+      expect(capturedPayload!.default_timezone).toBe('');
+    });
+
+    it('file mode: PUT payload includes the edited default_timezone', async () => {
+      const config = makeBaseConfig({ settings_tier: 'file', default_timezone: '' });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      emitTimezoneChange(element, 'Asia/Kathmandu');
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.default_timezone).toBe('Asia/Kathmandu');
+    });
+
+    it('an env-overridden default_timezone renders read-only with the env badge, in file mode', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'file',
+        default_timezone: 'Asia/Tokyo',
+        env_overrides: ['default_timezone'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      expect(timezonePicker(element)).toBeNull();
+      const readOnlyValues = queryAll(element, '.read-only-value');
+      const values = readOnlyValues.map((el) => el.textContent?.trim());
+      expect(values).toContain('Asia/Tokyo');
+    });
+
+    it('shows an inline error for a name isValidTimeZone rejects, without blocking the field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: '' });
+      element = await createComponent(createFetchHandler(config));
+
+      emitTimezoneChange(element, 'Not/A/Timezone');
+      await (element as any).updateComplete;
+
+      expect(shadowText(element)).toContain('is not a recognized timezone');
+    });
+
+    it('shows no inline error for a valid zone or for the empty (UTC) value', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', default_timezone: '' });
+      element = await createComponent(createFetchHandler(config));
+
+      expect(shadowText(element)).not.toContain('is not a recognized timezone');
+
+      emitTimezoneChange(element, 'Asia/Tokyo');
+      await (element as any).updateComplete;
+      expect(shadowText(element)).not.toContain('is not a recognized timezone');
+    });
+  });
+
   // ── Criterion 8: Structured errors ──
 
   describe('Criterion 8 — Structured error handling', () => {
@@ -589,6 +1547,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -600,6 +1560,82 @@ describe('scion-page-admin-server-config', () => {
       const errText = errorsEl!.textContent ?? '';
       expect(errText).toContain('invalid email format');
       expect(errText).toContain('admin_emails');
+    });
+
+    it('422 validation_error entries render inline errors (ptone/scion#4450)', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message: 'server.hub.admin_emails: invalid email format',
+                details: {
+                  field: 'server.hub.admin_emails',
+                  errors: [
+                    {
+                      section: 'access',
+                      field: 'server.hub.admin_emails',
+                      path: '/admin_emails',
+                      message: 'invalid email format',
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const errorsEl = query(element, '.validation-errors');
+      expect(errorsEl).not.toBeNull();
+      const errText = errorsEl!.textContent ?? '';
+      expect(errText).toContain('invalid email format');
+      expect(errText).toContain('admin_emails');
+    });
+
+    it('a nested 409 revision_conflict renders the conflict banner', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: {
+                code: 'revision_conflict',
+                message: 'One or more sections have been modified since the expected revision.',
+                details: {
+                  conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+                },
+              },
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const bannerEl = query(element, '.conflict-banner');
+      expect(bannerEl).not.toBeNull();
+      expect(bannerEl!.textContent ?? '').toContain('access');
     });
 
     it('409 revision_conflict renders conflict banner with Reload button', async () => {
@@ -618,6 +1654,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -632,6 +1670,83 @@ describe('scion-page-admin-server-config', () => {
       const reloadBtn = bannerEl!.querySelector('sl-button');
       expect(reloadBtn).not.toBeNull();
       expect(reloadBtn!.textContent).toContain('Reload');
+    });
+
+    // ptone/scion#4467: the sections written before the conflict stay
+    // saved, so the banner lists their keys, a restart-required one included.
+    it('409 revision_conflict lists the keys saved before the conflict', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              message: 'One or more sections have been modified since the expected revision.',
+              applied: { endpoints: 4 },
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: ['server.hub.hub_name'],
+              pending_restart: ['server.hub.public_url'],
+              skipped: [{ key: 'server.notifications.slack', reason: 'invalid webhook URL' }],
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const bannerEl = query(element, '.conflict-banner');
+      expect(bannerEl).not.toBeNull();
+      const saved = bannerEl!.querySelector('.conflict-saved');
+      expect(saved).not.toBeNull();
+      expect(saved!.querySelector('.pending-restart')?.textContent).toContain(
+        'applies after restart: server.hub.public_url'
+      );
+      expect(saved!.querySelector('.applied-keys')?.textContent).toContain(
+        'Applied now: server.hub.hub_name'
+      );
+      const skipped = saved!.querySelector('.skipped-keys')?.textContent ?? '';
+      expect(skipped).toContain('server.notifications.slack');
+      expect(skipped).toContain('invalid webhook URL');
+      // The changed sections and the Reload action are still there.
+      expect(bannerEl!.textContent).toContain('access');
+      expect(bannerEl!.querySelector('sl-button')?.textContent).toContain('Reload');
+    });
+
+    it('409 revision_conflict without saved keys shows no saved-keys block', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: [],
+              pending_restart: [],
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      expect(query(element, '.conflict-banner')).not.toBeNull();
+      expect(query(element, '.conflict-saved')).toBeNull();
     });
 
     it('422 layer0_rejected renders safety net notice and logs keys', async () => {
@@ -649,6 +1764,8 @@ describe('scion-page-admin-server-config', () => {
           }),
         })
       );
+
+      await markDirty(element);
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
@@ -686,6 +1803,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -694,6 +1813,78 @@ describe('scion-page-admin-server-config', () => {
 
       expect(shadowText(element)).toContain('Something went terribly wrong');
     });
+
+    // handleSaveError's default case must handle more than a flat
+    // {error: "<string>", ...} shape. The real Go writeError() helper
+    // (pkg/hub/errors.go), used by
+    // every plain field-validation 400/422 on this page — including
+    // default_timezone's — responds with {error: {code, message, details}}.
+    // Before the fix, body.error being an object meant the switch never
+    // matched a case, body.message was undefined (nested at
+    // body.error.message instead), and the real message was replaced by the
+    // generic fallback. This is the shape the handler actually sends, unlike
+    // the idealized flat-string shapes the other Criterion 8 tests above use
+    // for validation_failed/revision_conflict/layer0_rejected.
+    it('a real writeError()-shaped 422 (nested error.message) renders its message, not the generic fallback', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message:
+                  'invalid default_timezone "Not/A/Timezone": unknown time zone Not/A/Timezone',
+              },
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('invalid default_timezone "Not/A/Timezone"');
+      expect(text).not.toContain('An unexpected error occurred');
+    });
+
+    // A JSON error body that is not an object (null, a bare string, an
+    // array) has no error code or message to read; handleSaveError must
+    // treat it like a non-JSON body instead of dereferencing it.
+    for (const [label, errBody] of [
+      ['null', null],
+      ['a bare string', 'upstream proxy error'],
+      ['an array', ['boom']],
+    ] as const) {
+      it(`a non-object JSON error body (${label}) shows the save-failed message`, async () => {
+        const config = makeBaseConfig({ settings_tier: 'db' });
+
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: () => ({ status: 502, body: errBody }),
+          })
+        );
+
+        await markDirty(element);
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+
+        const text = shadowText(element);
+        expect(text).toContain('Failed to save settings');
+        expect(text).not.toContain('An unexpected error occurred');
+      });
+    }
   });
 
   // ── Schema fallback ──
@@ -761,7 +1952,478 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('Regression ptone/scion#2535 — clearing string fields in file mode', () => {
+    const clearable: Array<[string, string]> = [
+      ['active_profile', 'activeProfile'],
+      ['default_template', 'defaultTemplate'],
+      // default_harness_auth and the agent role defaults are not sent at all
+      // until ptone/scion#3067 is fixed (see the #3067 describe block).
+      ['image_registry', 'imageRegistry'],
+      ['workspace_path', 'workspacePath'],
+      ['default_runtime_broker', 'defaultRuntimeBroker'],
+    ];
+
+    it('buildFilePayload sends cleared string fields as "" (not omitted)', async () => {
+      // default_runtime_broker is sent only when it differs from the loaded
+      // value (ptone/scion#3913), so it is stored here for the clear to be
+      // a change.
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'file', default_runtime_broker: 'broker-1' })
+        )
+      );
+      const el = element as any;
+      for (const [, prop] of clearable) el[prop] = '';
+      el.harnessConfigSelection = '';
+      el.customHarnessConfig = '';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      for (const [key] of clearable) {
+        expect(payload, key).toHaveProperty(key, '');
+      }
+      expect(payload).toHaveProperty('default_harness_config', '');
+    });
+
+    it('buildFilePayload still sends non-empty string values', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      for (const [, prop] of clearable) el[prop] = `v-${prop}`;
+      el.harnessConfigSelection = '__other__';
+      el.customHarnessConfig = 'x';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      for (const [key, prop] of clearable) {
+        expect(payload, key).toHaveProperty(key, `v-${prop}`);
+      }
+      expect(payload).toHaveProperty('default_harness_config', 'x');
+    });
+
+    it('buildFilePayload sends GCP identity defaults when set', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'assign');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it('buildFilePayload sends cleared GCP identity defaults as ""', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = '';
+      el.defaultGCPIdentitySAID = '';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', '');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    it('buildFilePayload clears the GCP service account when mode is not assign', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = 'block';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    it('buildFilePayload clears the GCP service account when mode is empty', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = '';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', '');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    it('buildFilePayload omits an env-pinned default_gcp_identity_mode', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'file',
+            env_overrides: ['default_gcp_identity_mode'],
+          })
+        )
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    // ptone/scion#2720: with the mode env-pinned, the form mode holds the
+    // settings-file value, not the effective one, so it must not drive
+    // clearing of the account. An unchanged account is left out of the
+    // payload, so the server neither clears nor re-checks it.
+    const pinnedFileConfig = (formMode: string, said: string) =>
+      makeBaseConfig({
+        settings_tier: 'file',
+        env_overrides: ['default_gcp_identity_mode'],
+        default_gcp_identity_mode: formMode,
+        default_gcp_identity_service_account_id: said,
+      });
+
+    it.each(['', 'block', 'passthrough', 'assign'])(
+      'buildFilePayload omits an unchanged GCP service account when the mode is env-pinned (form mode=%j)',
+      async (formMode) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig(formMode, 'sa-123')));
+        const el = element as any;
+        expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+      }
+    );
+
+    it.each([
+      ['changed', 'sa-456'],
+      ['cleared', ''],
+    ])(
+      'buildFilePayload sends an edited GCP service account when the mode is env-pinned (%s)',
+      async (_label, edited) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+        const el = element as any;
+        el.defaultGCPIdentitySAID = edited;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', edited);
+      }
+    );
+
+    it('buildFilePayload compares the GCP service account with the latest load when the mode is env-pinned', async () => {
+      element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+      const el = element as any;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+      // Reload (as after a save) with a different stored account.
+      vi.stubGlobal('fetch', vi.fn(createFetchHandler(pinnedFileConfig('assign', 'sa-789'))));
+      await el.loadConfig();
+      await el.updateComplete;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-789');
+      expect(el.readOnlyReason('default_gcp_identity_mode')).not.toBeNull();
+
+      // Unchanged since the reload: omitted.
+      let payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+
+      // Back to the first-load value: now an edit, so it is sent.
+      el.defaultGCPIdentitySAID = 'sa-123';
+      payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it.each([
+      ['assign', 'sa-123'],
+      ['block', ''],
+    ])(
+      'buildFilePayload sends the loaded GCP service account when the mode is editable (mode=%j)',
+      async (mode, expected) => {
+        element = await createComponent(
+          createFetchHandler(
+            makeBaseConfig({
+              settings_tier: 'file',
+              default_gcp_identity_mode: mode,
+              default_gcp_identity_service_account_id: 'sa-123',
+            })
+          )
+        );
+        const el = element as any;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).toHaveProperty('default_gcp_identity_mode', mode);
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', expected);
+      }
+    );
+
+    // The db-tier test schema does not list the GCP identity keys, so the
+    // tests set the Layer-1 key set the page uses to decide editability.
+    const GCP_KEYS = ['default_gcp_identity_mode', 'default_gcp_identity_service_account_id'];
+
+    it('buildLayer1Payload sends the GCP service account in assign mode', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'assign');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it('buildLayer1Payload clears the GCP service account when mode is not assign', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'block';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    // In the db tier env vars do not lock Layer-1 fields. Both GCP keys
+    // are in one settings section, so they are Layer-1 together or
+    // deployment-managed together; the page never reaches the read-only
+    // mode branch of the account helper there. When both are locked,
+    // neither key is sent.
+    it('buildLayer1Payload omits both GCP keys when they are not Layer-1', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set();
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+    });
+  });
+
+  describe('unset values are sent as null (ptone/scion#3898)', () => {
+    // A DB-backed save keeps the stored value of a key the body leaves
+    // out, so an unset value must be sent as an explicit null to clear it.
+    const KEYS = [
+      'default_thinking_level',
+      'default_resources',
+      'telemetry.enabled',
+      'telemetry.cloud.enabled',
+    ];
+
+    it('buildLayer1Payload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultThinkingLevel = null;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+
+      el.defaultThinkingLevel = 30;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', 30);
+    });
+
+    it('treats a loaded thinking level of 0 as unset', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', default_thinking_level: 0 }))
+      );
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      expect(el.defaultThinkingLevel).toBeNull();
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildFilePayload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultThinkingLevel = null;
+      expect(el.buildFilePayload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildLayer1Payload sends null default_resources when every resource field is empty', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultResCpuReq = '';
+      el.defaultResMemReq = '';
+      el.defaultResCpuLim = '';
+      el.defaultResMemLim = '';
+      el.defaultResDisk = '';
+      expect(el.buildLayer1Payload()).toHaveProperty('default_resources', null);
+
+      el.defaultResCpuReq = '500m';
+      expect(el.buildLayer1Payload().default_resources).toEqual({
+        requests: { cpu: '500m', memory: undefined },
+      });
+    });
+
+    it('buildLayer1Payload sends null for an empty telemetry cloud GCP project ID', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.telemetryCloudGcpProjectId = '';
+      const cloud = (el.buildLayer1Payload().telemetry as Record<string, unknown>).cloud as Record<
+        string,
+        unknown
+      >;
+      expect(cloud).toHaveProperty('gcp_project_id', null);
+    });
+  });
+
+  describe('telemetry.local is not edited (ptone/scion#4103)', () => {
+    // Nothing reads telemetry.local, so the page shows no controls for it.
+    // A DB-backed save merges key by key, so the omitted key keeps its stored
+    // value; a file-mode save replaces the whole telemetry object, so the
+    // stored value is echoed back unchanged.
+    const storedLocal = { enabled: true, file: '/tmp/t.jsonl', console: true };
+    const withLocal = (tier: string) =>
+      makeBaseConfig({
+        settings_tier: tier,
+        telemetry: {
+          enabled: true,
+          cloud: { enabled: false },
+          hub: { enabled: true },
+          local: storedLocal,
+        },
+      });
+
+    it('renders no Local Debug Output controls', async () => {
+      element = await createComponent(createFetchHandler(withLocal('db')));
+      expect(shadowText(element)).toContain('Report Interval');
+      expect(shadowText(element)).not.toContain('Local Debug Output');
+      expect(shadowText(element)).not.toContain('Enable Local Output');
+    });
+
+    it('buildLayer1Payload omits telemetry.local', async () => {
+      element = await createComponent(createFetchHandler(withLocal('db')));
+      const el = element as any;
+      el.layer1Keys = new Set([
+        'telemetry.enabled',
+        'telemetry.hub.enabled',
+        'telemetry.local.enabled',
+        'telemetry.local.file',
+        'telemetry.local.console',
+      ]);
+      const telemetry = el.buildLayer1Payload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry).not.toHaveProperty('local');
+    });
+
+    it('buildFilePayload echoes the stored telemetry.local unchanged', async () => {
+      element = await createComponent(createFetchHandler(withLocal('file')));
+      const el = element as any;
+      // A telemetry edit, so the save sends telemetry: an untouched file save
+      // leaves it out (ptone/scion#3913).
+      el.telemetryHubReportInterval = '30s';
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry.local).toEqual(storedLocal);
+    });
+
+    it('buildFilePayload sends no telemetry.local when none is stored', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'file',
+            telemetry: { enabled: true, cloud: { enabled: false }, hub: { enabled: true } },
+          })
+        )
+      );
+      const el = element as any;
+      el.telemetryHubReportInterval = '30s';
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry).not.toHaveProperty('local');
+    });
+  });
+
+  describe('server.log_format is not edited (ptone/scion#4103)', () => {
+    // server.log_format is accepted but ignored; guard against the no-op
+    // Log Format control coming back.
+    it('renders no Log Format control', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(shadowText(element)).toContain('Log Level');
+      expect(shadowText(element)).not.toContain('Log Format');
+    });
+
+    it('DB-mode builders never send server.log_format', async () => {
+      // buildLayer1Payload carries no server leaves; on a workstation hub the
+      // server fields go through buildLayer0Candidate instead.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', layer0_editable: true }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const layer1Server = (el.buildLayer1Payload().server ?? {}) as Record<string, unknown>;
+      expect(layer1Server).not.toHaveProperty('log_format');
+      const server = el.buildLayer0Candidate().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('buildFilePayload never sends server.log_format', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
+    });
+  });
+
   // ── Cross-project messaging (D1) ──
+
+  describe('File mode server sections keep omitted fields (ptone/scion#2938)', () => {
+    // The file-mode PUT deep-merges each server section, so an omitted
+    // field keeps its stored value; a field the form shows must be sent as
+    // an explicit empty value to be cleared.
+    it('buildFilePayload sends cleared server fields as explicit empties', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = '';
+      el.hubPort = 0;
+      el.hubHost = '';
+      el.hubPublicUrl = '';
+      el.brokerHost = '';
+      el.brokerPort = 0;
+      el.dbDriver = '';
+      el.dbUrl = '';
+      el.authDevToken = '';
+      el.storageBucket = '';
+      el.secretsBackend = '';
+      el.secretsGCPProjectId = '';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.log_level).toBe('');
+      expect(server.hub).toMatchObject({ port: 0, host: '', public_url: '' });
+      expect(server.broker).toMatchObject({ port: 0, host: '' });
+      expect(server.database).toEqual({ driver: '', url: '' });
+      expect(server.auth).toHaveProperty('dev_token', '');
+      expect(server.storage).toHaveProperty('bucket', '');
+      expect(server.secrets).toMatchObject({ backend: '', gcp_project_id: '' });
+    });
+
+    it('buildFilePayload leaves out masked credentials so the stored values are kept', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.dbUrl = '********';
+      el.authDevToken = '********';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.database).not.toHaveProperty('url');
+      expect(server.auth).not.toHaveProperty('dev_token');
+    });
+  });
 
   describe('Cross-project messaging section', () => {
     it('renders cross-project messaging section in hub server tab', async () => {
@@ -868,5 +2530,4998 @@ describe('scion-page-admin-server-config', () => {
       // Error message should indicate conflict
       expect((element as any).crossProjectMessagingError).toContain('another administrator');
     });
+  });
+
+  // ── Default User Role help text (default_user_role, design §5.F) ──
+
+  describe('Default User Role help text', () => {
+    function helpText(el: HTMLElement): string {
+      return (query(el, '.default-user-role-help')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    }
+
+    it('renders the final explanation of the setting', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      const text = helpText(element);
+      expect(text).toContain('Default role for new users.');
+      expect(text).toContain(
+        'Applies when a user first signs in, including invited and allow-listed users ' +
+          '(their role is assigned at first sign-in, not when the invite is created).'
+      );
+      expect(text).toContain('Changing it does not affect users who have already signed in.');
+      expect(text).not.toContain('invite, or allow-list entry');
+      expect(text).toContain('Users listed in Admin Emails are always admins.');
+      expect(text).toContain(
+        'Member: can create projects, and works in any project they are added to.'
+      );
+      expect(text).toContain(
+        'Viewer: the same as Member, but cannot create projects (including cloning). ' +
+          'Viewers can still be added to projects and work there according to their project role.'
+      );
+      expect(text).toContain(
+        'This is also the role given to an admin who is removed from Admin Emails.'
+      );
+      expect(text).toContain("Change an individual user's role on Admin > Users.");
+    });
+
+    it('links to Admin > Users', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(query(element, '.default-user-role-help a[href="/admin/users"]')).not.toBeNull();
+    });
+
+    it('no longer shows the old one-line hint', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(shadowText(element)).not.toContain(
+        'Role assigned to new users who are not in the admin emails list.'
+      );
+    });
+  });
+
+  // ── Agent Secrets card (design ptone/scion#2291 §8, §10 test 10) ──
+
+  describe('Agent Secrets card', () => {
+    function agentSecretsSwitch(el: HTMLElement): HTMLElement | undefined {
+      return queryAll(el, 'sl-switch').find((s) =>
+        (s.textContent ?? '').includes('Restrict agent-written secrets to profile scope')
+      ) as HTMLElement | undefined;
+    }
+
+    it('shows the card with its explanatory hint', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(shadowText(element)).toContain('Agent Secrets');
+      expect(shadowText(element)).toContain(
+        'Project-scope writes from agents are rejected. Existing project secrets are'
+      );
+      expect(shadowText(element)).toContain('not removed. Users can still manage project secrets.');
+    });
+
+    it('switch loads unchecked when agent_secrets is absent', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      const sw = agentSecretsSwitch(element);
+      expect(sw).not.toBeUndefined();
+      expect(sw!.hasAttribute('checked')).toBe(false);
+    });
+
+    it('switch loads checked when agent_secrets.user_scope_only is true', async () => {
+      const config = makeBaseConfig({ agent_secrets: { user_scope_only: true } });
+      element = await createComponent(createFetchHandler(config));
+
+      const sw = agentSecretsSwitch(element);
+      expect(sw).not.toBeUndefined();
+      expect(sw!.hasAttribute('checked')).toBe(true);
+    });
+
+    // Round-1 review R2: parameterised over both settings tiers, since
+    // 'file' alone only exercises buildFilePayload() — settingsTier === 'db'
+    // is what routes save through the separate buildLayer1Payload() builder
+    // (admin-server-config.ts's handleSave: `this.settingsTier === 'db' ?
+    // this.buildLayer1Payload() : this.buildFilePayload()`).
+    it.each(['file', 'db'] as const)(
+      'both payload builders send agent_secrets.user_scope_only only when changed (settings_tier=%s)',
+      async (settingsTier) => {
+        let capturedPayload: Record<string, unknown> | null = null;
+        const config = makeBaseConfig({
+          settings_tier: settingsTier,
+          agent_secrets: { user_scope_only: true },
+        });
+
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+
+        const clickSave = async () => {
+          capturedPayload = null;
+          const buttons = queryAll(element!, 'sl-button[variant="primary"]');
+          withoutSectionFilter(element!);
+          const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+          (saveBtn as HTMLElement).click();
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          expect(capturedPayload).not.toBeNull();
+        };
+
+        // Untouched: the stored value is kept by omission (ptone/scion#3913).
+        await clickSave();
+        expect(capturedPayload!).not.toHaveProperty('agent_secrets');
+
+        (element as any).agentSecretsUserScopeOnly = false;
+        await clickSave();
+        expect(capturedPayload!.agent_secrets).toEqual({ user_scope_only: false });
+      }
+    );
+
+    it('env-overridden agent_secrets.user_scope_only renders read-only with env badge', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'file',
+        agent_secrets: { user_scope_only: true },
+        env_overrides: ['agent_secrets.user_scope_only'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badges = queryAll(element, '.read-only-badge');
+      const badgeTexts = badges.map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+
+      // The switch itself must not render while the field is env-pinned.
+      expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
+
+  // ── Per-field env badges on map sections and the GCP IAM tab (ptone/scion#389) ──
+
+  describe('env badges on runtimes, profiles and GCP IAM fields', () => {
+    function envBadgeCount(el: HTMLElement): number {
+      return queryAll(el, '.env-badge').length;
+    }
+
+    it('renders no env badge when nothing is overridden', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    it('badges the runtimes and profiles sections from leaf env keys under them', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['runtimes.docker.host', 'profiles.local.runtime'],
+          })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(2);
+    });
+
+    it('does not badge a section from a key that only shares its name prefix', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profilesx.local.runtime'] })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    const gcpIamEnv = ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'];
+
+    it('badges the GCP IAM check mode and deny policy fields on a hosted DB hub', async () => {
+      // gcp_iam is Layer-1, so the selects stay editable and carry the env badge.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+      // The selects stay editable: both render, and neither is env-pinned.
+      expect(panel?.querySelectorAll('sl-select').length).toBe(2);
+      expect(panel?.querySelectorAll('.read-only-badge').length).toBe(0);
+    });
+
+    it('shows the GCP IAM fields as env-pinned on a file-tier hub', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      const pinned = Array.from(panel?.querySelectorAll('.read-only-badge') ?? []).filter((b) =>
+        (b.textContent ?? '').includes('environment variable')
+      );
+      expect(pinned.length).toBe(2);
+    });
+  });
+
+  // ── image_registry: one badge from the server's provenance (ptone/scion#3916) ──
+
+  describe('image_registry provenance badge and inherited hint', () => {
+    const generic = 'Overridden by environment on this node';
+    function texts(el: HTMLElement, sel: string): string[] {
+      return queryAll(el, sel).map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim());
+    }
+
+    it('names the startup env instead of the generic badge', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['image_registry'],
+            image_registry_provenance: { source: 'file', value: 's.example' },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('SCION_SERVER_IMAGEREGISTRY at startup');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('lists a broker that reports a node env', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              node_env_overrides: [
+                { broker_id: 'b1', broker_name: 'gpu-pool', value: 'n.example', differs: true },
+              ],
+            },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('Runtime Broker gpu-pool sets SCION_IMAGE_REGISTRY=n.example');
+    });
+
+    it('describes a profile image_registry env value as a startup value', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profiles.k8s.image_registry'] })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('a saved profile value replaces it');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('shows what a profile without a saved registry inherits', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            profiles: { k8s: { runtime: 'docker' } },
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              profiles: { k8s: { source: 'hub_db', value: 'db.example' } },
+            },
+          })
+        )
+      );
+      expect(texts(element, '.image-registry-inherited')).toEqual([
+        'Inherited: db.example (saved hub value).',
+      ]);
+    });
+  });
+
+  // ── Experiments tab (ptone/scion#2217) ──
+
+  describe('Experiments tab', () => {
+    function showTab(el: HTMLElement, name: string): void {
+      const tabGroup = query(el, 'sl-tab-group');
+      tabGroup?.dispatchEvent(new CustomEvent('sl-tab-show', { detail: { name } }));
+    }
+
+    // The top-level Save & Reload / Reset bar is a direct child of the
+    // shadow root; the GitHub App tab has its own unrelated ".actions" div
+    // nested inside its (always-rendered, visibility-toggled) panel, so a
+    // plain `.actions` query would match both.
+    function topLevelActions(el: HTMLElement): Element | null {
+      const candidates = el.shadowRoot?.querySelectorAll('.actions') ?? [];
+      return Array.from(candidates).find((c) => c.parentNode === el.shadowRoot) ?? null;
+    }
+
+    it('appears last in the tab nav', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      // Scope to the outer tab group's direct children — the Runtimes &
+      // Profiles panel nests its own sl-tab-group for agent-defaults, whose
+      // tabs also carry slot="nav" but belong to a different tab group.
+      const outerTabGroup = query(element, 'sl-tab-group');
+      const tabs = Array.from(outerTabGroup?.querySelectorAll(':scope > sl-tab[slot="nav"]') ?? []);
+      expect(tabs[tabs.length - 1].getAttribute('panel')).toBe('experiments');
+    });
+
+    it('renders <scion-admin-experiments> in its panel', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      expect(
+        query(element, 'sl-tab-panel[name="experiments"] scion-admin-experiments')
+      ).not.toBeNull();
+    });
+
+    it('hides the actions bar and the harness-config error message while the Experiments tab is active', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      // Force the harness-config error message's condition on, as if the
+      // Runtimes & Profiles tab had an invalid JSON entry, so we can prove
+      // it is specifically hidden on the Experiments tab, not just absent.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (element as any).harnessConfigErrors = { profileA: 'invalid json' };
+      element.requestUpdate();
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).not.toBeNull();
+      expect(shadowText(element)).toContain('Cannot save');
+
+      showTab(element, 'experiments');
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).toBeNull();
+      expect(shadowText(element)).not.toContain('Cannot save');
+
+      showTab(element, 'general');
+      await element.updateComplete;
+
+      expect(topLevelActions(element)).not.toBeNull();
+      expect(shadowText(element)).toContain('Cannot save');
+    });
+
+    it('sets .active on <scion-admin-experiments> only while its tab is shown', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+      const experimentsEl = query(element, 'scion-admin-experiments') as HTMLElement & {
+        active: boolean;
+      };
+      expect(experimentsEl.active).toBe(false);
+
+      showTab(element, 'experiments');
+      await element.updateComplete;
+      expect(experimentsEl.active).toBe(true);
+
+      showTab(element, 'general');
+      await element.updateComplete;
+      expect(experimentsEl.active).toBe(false);
+    });
+  });
+
+  describe('safe_to_evict on runtimes and profiles', () => {
+    function steConfig() {
+      return makeBaseConfig({
+        runtimes: { k8s: { type: 'kubernetes', safe_to_evict: false } },
+        profiles: {
+          gke: { runtime: 'k8s' },
+          evictable: { runtime: 'k8s', safe_to_evict: true },
+        },
+      });
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    it('shows false, true and unset distinctly', async () => {
+      element = await createComponent(createFetchHandler(steConfig()));
+      const values = queryAll(element, 'sl-select.safe-to-evict').map((s) =>
+        s.getAttribute('value')
+      );
+      // runtime k8s, then profiles gke and evictable
+      expect(values).toEqual(['false', '', 'true']);
+    });
+
+    it('labels the select as ignored on non-Kubernetes runtimes', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            runtimes: {
+              k8s: { type: 'kubernetes' },
+              docker: { type: 'docker', safe_to_evict: false },
+              remote: {},
+              plain: {},
+            },
+            profiles: {
+              gke: { runtime: 'k8s' },
+              local: { runtime: 'docker' },
+              far: { runtime: 'remote' },
+            },
+          })
+        )
+      );
+      await (element as any).updateComplete;
+      const card = (name: string) =>
+        queryAll(element!, '.runtime-card').find(
+          (c) => c.querySelector('strong')?.textContent?.trim() === name
+        ) as HTMLElement;
+      // The untyped runtime with a non-Kubernetes name shows the select,
+      // labelled ignored; so does the profile that uses the docker runtime.
+      expect(card('plain').querySelector('.safe-to-evict-ignored')).not.toBeNull();
+      expect(card('local').querySelector('.safe-to-evict-ignored')).not.toBeNull();
+      // The docker runtime card leaves out the Kubernetes-only fields
+      // (ptone/scion#2649); the Kubernetes runtimes show no ignored label.
+      expect(card('docker').querySelector('sl-select.safe-to-evict')).toBeNull();
+      for (const name of ['k8s', 'remote', 'docker']) {
+        expect(card(name).querySelector('.safe-to-evict-ignored')).toBeNull();
+      }
+      expect(queryAll(element, '.safe-to-evict-ignored').length).toBe(2);
+    });
+
+    it('sends booleans, and clearing removes the key', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(steConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const [runtimeSel, gkeSel, evictableSel] = queryAll(
+        element,
+        'sl-select.safe-to-evict'
+      ) as (HTMLElement & { value: string })[];
+      gkeSel.value = 'false';
+      gkeSel.dispatchEvent(new Event('sl-change'));
+      evictableSel.value = '';
+      evictableSel.dispatchEvent(new Event('sl-change'));
+      expect(runtimeSel).toBeDefined();
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.runtimes.k8s.safe_to_evict).toBe(false);
+      expect(capturedPayload!.profiles.gke.safe_to_evict).toBe(false);
+      expect('safe_to_evict' in capturedPayload!.profiles.evictable).toBe(false);
+    });
+  });
+
+  // ── Read-only version line (hub-update-channels Phase 6) ──
+  // The server-config page used to dispatch update-binary / rebuild-server
+  // itself, guessing the tier from check-updates. Updates are managed on the
+  // Maintenance page only; this page shows the version and links there.
+
+  describe('Read-only version line and Manage updates link', () => {
+    it('shows the update-status version and effective channel', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          updateStatusResponse: makeUpdateStatus('v0.3.0-preview.4', 'preview'),
+        })
+      );
+
+      const line = query(element, '.version-line');
+      expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'Scion version: v0.3.0-preview.4 (preview)'
+      );
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v1/admin/maintenance/update-status'),
+        expect.any(Object)
+      );
+    });
+
+    it('links to the Maintenance page', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      const link = query(element, 'a.manage-updates-link');
+      expect(link?.getAttribute('href')).toBe('/admin/maintenance');
+      expect(link?.textContent).toContain('Manage updates');
+    });
+
+    it('falls back to the server-config version without a channel when update-status fails', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), { updateStatusResponse: null })
+      );
+
+      const line = query(element, '.version-line');
+      expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Scion version: 0.1.0-test');
+      expect(query(element, 'a.manage-updates-link')).not.toBeNull();
+    });
+
+    // A 200 with a partial body is not trusted (fallback, no channel); an
+    // empty effective channel renders the version without "()".
+    it.each([
+      [
+        'no channel object',
+        { ...makeUpdateStatus('v0.3.0-preview.4', 'preview'), channel: undefined },
+        'Scion version: 0.1.0-test',
+      ],
+      ['an empty effective channel', makeUpdateStatus('v0.3.0', ''), 'Scion version: v0.3.0'],
+    ])('renders the line for a 200 with %s', async (_name, body, expected) => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), { updateStatusResponse: body })
+      );
+
+      const line = query(element, '.version-line');
+      expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe(expected);
+      expect(line?.textContent).not.toContain('(');
+    });
+
+    it('has no update controls and never checks for updates or runs an operation', async () => {
+      let ran = false;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          onOperationRun: () => {
+            ran = true;
+          },
+        })
+      );
+
+      const text = shadowText(element);
+      expect(text).not.toContain('Check for Updates');
+      expect(text).not.toContain('Update Now');
+      expect(text).not.toContain('Update & Restart');
+      expect(query(element, '.update-banner')).toBeNull();
+      const urls = vi
+        .mocked(fetch)
+        .mock.calls.map(([input]) =>
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        );
+      expect(urls.some((u) => u.includes('/maintenance/check-updates'))).toBe(false);
+      expect(urls.some((u) => u.includes('/maintenance/operations/'))).toBe(false);
+      expect(ran).toBe(false);
+      expect((element as any).checkForUpdates).toBeUndefined();
+      expect((element as any).triggerUpdate).toBeUndefined();
+    });
+  });
+
+  describe('removed storage overrides on runtimes and profiles', () => {
+    function overridesConfig() {
+      return makeBaseConfig({
+        runtimes: {
+          k8s: {
+            type: 'kubernetes',
+            shared_dir_storage_backend: 'nfs',
+            home_storage_backend: 'nfs',
+            home_storage_leaf: 'broker',
+          },
+        },
+        profiles: {
+          gke: {
+            runtime: 'k8s',
+            shared_dir_storage_backend: 'nfs',
+            shared_dir_storage_backends: { cache: 'local' },
+            home_storage_backend: 'nfs',
+            home_storage_leaf: 'pod',
+            timezone: 'UTC',
+          },
+        },
+      });
+    }
+
+    it('shows no editor for them and never sends them back', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(overridesConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      await (element as any).updateComplete;
+      expect(queryAll(element, 'sl-select.shared-dir-storage-backend').length).toBe(0);
+      expect(queryAll(element, 'sl-select.home-storage-backend').length).toBe(0);
+      expect(queryAll(element, 'sl-select.home-storage-leaf').length).toBe(0);
+
+      const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
+        | (HTMLElement & { value: string })
+        | null;
+      expect(registry).not.toBeNull();
+      registry!.value = 'registry.example.com/team';
+      registry!.dispatchEvent(new Event('sl-input'));
+      await (element as any).updateComplete;
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      const gke = capturedPayload!.profiles.gke;
+      expect(gke.image_registry).toBe('registry.example.com/team');
+      expect(gke.timezone).toBe('UTC');
+      for (const key of [
+        'shared_dir_storage_backend',
+        'shared_dir_storage_backends',
+        'home_storage_backend',
+        'home_storage_leaf',
+      ]) {
+        expect(key in gke).toBe(false);
+        expect(key in capturedPayload!.runtimes.k8s).toBe(false);
+      }
+    });
+  });
+
+  describe('Cloud Run runtime editor field names (ptone/scion#3475)', () => {
+    function cloudRunConfig(
+      tier: Record<string, unknown>,
+      runtime: Record<string, unknown> = {
+        type: 'cloudrun',
+        cloudrun: { project_id: 'proj-a', location: 'us-central1' },
+      }
+    ) {
+      return makeBaseConfig({ ...tier, runtimes: { crun: runtime } });
+    }
+
+    function cloudRunInputs(el: HTMLElement): {
+      project: HTMLElement & { value: string };
+      location: HTMLElement & { value: string };
+    } {
+      const fields = queryAll(el, '.form-field');
+      const byLabel = (label: string) => {
+        const field = fields.find((f) => f.querySelector('label')?.textContent?.trim() === label);
+        return field?.querySelector('sl-input') as HTMLElement & { value: string };
+      };
+      return { project: byLabel('GCP Project'), location: byLabel('GCP Region') };
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    for (const [mode, tier] of [
+      ['file', {}],
+      ['db', { settings_tier: 'db' }],
+    ] as const) {
+      it(`${mode} mode: reads and sends project_id and location`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(cloudRunConfig(tier), {
+            schemaResponse: {
+              sections: {
+                ...SCHEMA_RESPONSE.sections,
+                runtimes: { koanf_paths: ['runtimes'] },
+              },
+            },
+            putHandler: (body) => {
+              if ('runtimes' in body) capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun).toEqual({
+          project_id: 'proj-b',
+          location: 'europe-west1',
+        });
+        expect('cloudrun_instances' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      it(`${mode} mode: cloudrun-instances reads and sends the cloudrun_instances block`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(
+            cloudRunConfig(tier, {
+              type: 'cloudrun-instances',
+              cloudrun_instances: { project_id: 'proj-a', region: 'us-central1' },
+            }),
+            {
+              schemaResponse: {
+                sections: {
+                  ...SCHEMA_RESPONSE.sections,
+                  runtimes: { koanf_paths: ['runtimes'] },
+                },
+              },
+              putHandler: (body) => {
+                if ('runtimes' in body) capturedPayload = body;
+                return { status: 200, body: { reload: { applied: [] } } };
+              },
+            }
+          )
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun_instances).toEqual({
+          project_id: 'proj-b',
+          region: 'europe-west1',
+        });
+        expect('cloudrun' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      for (const [from, to, fromBlock, toBlock, toFields] of [
+        [
+          'cloudrun',
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          { project_id: 'proj-b', region: 'europe-west1' },
+        ],
+        [
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          'cloudrun',
+          { project_id: 'proj-b', location: 'europe-west1' },
+        ],
+      ] as const) {
+        it(`${mode} mode: switching ${from} to ${to} drops the ${fromBlock} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          const fromFields =
+            from === 'cloudrun'
+              ? { project_id: 'proj-a', location: 'us-central1' }
+              : { project_id: 'proj-a', region: 'us-central1' };
+          element = await createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, {
+                type: from,
+                sync: 'tar',
+                env: { FOO: 'bar' },
+                [fromBlock]: fromFields,
+              }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) capturedPayload = body;
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          vi.mocked(showConfirm).mockClear();
+          typeSelect.value = to;
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          // The switch clears the loaded block, so it is confirmed first.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          expect(showConfirm).toHaveBeenCalledTimes(1);
+          expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain(fromBlock);
+          await (element as any).updateComplete;
+
+          const { project, location } = cloudRunInputs(element);
+          expect(project.getAttribute('value')).toBe('');
+          expect(location.getAttribute('value')).toBe('');
+          project.value = 'proj-b';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = 'europe-west1';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(to);
+          // A key removed from a loaded entry is sent as null, so the hub
+          // clears it (ptone/scion#6580).
+          expect(crun[fromBlock]).toBeNull();
+          expect(crun[toBlock]).toEqual(toFields);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+          expect(crun.sync).toBe('tar');
+        });
+      }
+
+      for (const [type, block, fields] of [
+        ['cloudrun', 'cloudrun', { project_id: 'proj-a', location: 'us-central1' }],
+        [
+          'cloudrun-instances',
+          'cloudrun_instances',
+          { project_id: 'proj-a', region: 'us-central1' },
+        ],
+      ] as const) {
+        const loadRuntime = async (onPut: (body: Record<string, any>) => void) =>
+          createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, { type, env: { FOO: 'bar' }, [block]: fields }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) onPut(body);
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+        it(`${mode} mode: clearing both ${type} fields drops the ${block} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          const { project, location } = cloudRunInputs(element);
+          project.value = '';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = '';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(type);
+          expect(crun[block]).toBeNull();
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+
+        it(`${mode} mode: switching ${type} to docker drops both Cloud Run blocks`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = 'docker';
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe('docker');
+          // The loaded block is sent as null; the other was never set.
+          expect(crun[block]).toBeNull();
+          const other = block === 'cloudrun' ? 'cloudrun_instances' : 'cloudrun';
+          expect(other in crun).toBe(false);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+      }
+    }
+  });
+
+  describe('runtime keys and resource quantities (ptone/scion#6580, ptone/scion#6581)', () => {
+    const k8sRuntime = {
+      type: 'kubernetes',
+      namespace: 'agents',
+      node_selector: { 'scion.dev/pool': 'agents' },
+      tolerations: [
+        { key: 'scion.dev/pool', operator: 'Equal', value: 'agents', effect: 'NoSchedule' },
+      ],
+      kubernetes_service_account_mappings: { 'sa@example.iam.gserviceaccount.com': 'agent-ksa' },
+    };
+
+    async function clickSave(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      saveBtn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    // Shoelace is not loaded in these tests, so read the disabled attribute
+    // Lit's ?disabled binding sets.
+    function saveDisabled(el: HTMLElement): boolean {
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      return btn.hasAttribute('disabled');
+    }
+
+    function inputByLabel(el: HTMLElement, label: string): HTMLElement & { value: string } {
+      const field = queryAll(el, '.runtime-card .form-field').find(
+        (f) => f.querySelector('label')?.textContent?.trim() === label
+      );
+      return field?.querySelector('sl-input') as HTMLElement & { value: string };
+    }
+
+    for (const [mode, tier] of [
+      ['file', {}],
+      ['db', { settings_tier: 'db' }],
+    ] as const) {
+      it(`${mode} mode: a save keeps unrendered keys and sends null for a cleared field`, async () => {
+        let captured: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ ...tier, runtimes: { gke: k8sRuntime } }), {
+            schemaResponse: {
+              sections: { ...SCHEMA_RESPONSE.sections, runtimes: { koanf_paths: ['runtimes'] } },
+            },
+            putHandler: (body) => {
+              if ('runtimes' in body) captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+        const ns = inputByLabel(element, 'Namespace');
+        expect(ns.getAttribute('value')).toBe('agents');
+        ns.value = '';
+        ns.dispatchEvent(new Event('sl-input'));
+        await clickSave(element);
+
+        expect(captured).not.toBeNull();
+        const gke = captured!.runtimes.gke;
+        expect(gke.namespace).toBeNull();
+        expect(gke.type).toBe('kubernetes');
+        expect(gke.node_selector).toEqual(k8sRuntime.node_selector);
+        expect(gke.tolerations).toEqual(k8sRuntime.tolerations);
+        expect(gke.kubernetes_service_account_mappings).toEqual(
+          k8sRuntime.kubernetes_service_account_mappings
+        );
+      });
+    }
+
+    it('a removed runtime is left out of the payload', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ runtimes: { gke: k8sRuntime, local: { type: 'docker' } } }),
+          {
+            putHandler: (body) => {
+              if ('runtimes' in body) captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      const removeBtn = queryAll(
+        element,
+        '.runtime-card sl-button[variant="danger"]'
+      )[1] as HTMLElement;
+      removeBtn.click();
+      await clickSave(element);
+      expect(Object.keys(captured!.runtimes)).toEqual(['gke']);
+    });
+
+    it('cancelling a type switch that clears fields keeps the runtime as it was', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes: { gke: k8sRuntime } }), {
+          putHandler: (body) => {
+            if ('runtimes' in body) captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      vi.mocked(showConfirm).mockClear();
+      vi.mocked(showConfirm).mockResolvedValueOnce(false);
+      const typeSelect = queryAll(element, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      typeSelect.value = 'cloudrun';
+      typeSelect.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(showConfirm).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain('namespace');
+      await (element as any).updateComplete;
+      expect(typeSelect.value).toBe('kubernetes');
+      await clickSave(element);
+      expect(captured!.runtimes.gke.type).toBe('kubernetes');
+      expect(captured!.runtimes.gke.namespace).toBe('agents');
+    });
+
+    it('a type switch that clears nothing does not ask', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes: { d: { type: 'docker' } } }))
+      );
+      vi.mocked(showConfirm).mockClear();
+      const typeSelect = queryAll(element, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      typeSelect.value = 'kubernetes';
+      typeSelect.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(showConfirm).not.toHaveBeenCalled();
+    });
+
+    function profileConfig(memory: string) {
+      return makeBaseConfig({
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { gke: { runtime: 'gke', resources: { limits: { memory } } } },
+      });
+    }
+
+    it('a unitless memory value below 1Mi is an error that blocks Save', async () => {
+      element = await createComponent(createFetchHandler(profileConfig('16')));
+      await (element as any).updateComplete;
+      const err = query(
+        element,
+        '[data-quantity-error="profiles.gke.resources.limits.memory"]'
+      ) as HTMLElement | null;
+      expect(err).not.toBeNull();
+      expect(err!.textContent).toContain('16 bytes');
+      expect(err!.textContent).toContain('16Gi');
+      expect(saveDisabled(element)).toBe(true);
+      expect(query(element, '.resource-quantity-blocked')).not.toBeNull();
+    });
+
+    it('fixing the value enables Save again', async () => {
+      element = await createComponent(createFetchHandler(profileConfig('16')));
+      const input = query(element, 'sl-input[placeholder="e.g. 4Gi"]') as HTMLElement & {
+        value: string;
+      };
+      input.value = '16Gi';
+      input.dispatchEvent(new Event('sl-input'));
+      await (element as any).updateComplete;
+      expect(query(element, '[data-quantity-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('a unitless byte count is a warning that allows Save', async () => {
+      element = await createComponent(createFetchHandler(profileConfig('2147483648')));
+      await (element as any).updateComplete;
+      const warn = query(
+        element,
+        '[data-quantity-warning="profiles.gke.resources.limits.memory"]'
+      ) as HTMLElement | null;
+      expect(warn).not.toBeNull();
+      expect(warn!.textContent).toContain('2Gi');
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('default resources are checked too', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ default_resources: { requests: { memory: '512Ki' } } }))
+      );
+      await (element as any).updateComplete;
+      expect(
+        query(element, '[data-quantity-error="default_resources.requests.memory"]')
+      ).not.toBeNull();
+      expect(saveDisabled(element)).toBe(true);
+    });
+
+    it('shows the warnings a save returns', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes: { gke: k8sRuntime } }), {
+          putHandler: () => ({
+            status: 200,
+            body: {
+              reload: { applied: [] },
+              warnings: ['runtimes.gke.resources is not a runtime setting and has no effect'],
+            },
+          }),
+        })
+      );
+      await clickSave(element);
+      await (element as any).updateComplete;
+      const notice = query(element, '.save-warnings-notice');
+      expect(notice).not.toBeNull();
+      expect(notice!.textContent).toContain('runtimes.gke.resources');
+    });
+  });
+
+  describe('Kubernetes placement and identity fields (ptone/scion#6580)', () => {
+    const k8s = {
+      type: 'kubernetes',
+      namespace: 'agents',
+      node_selector: { 'scion.dev/pool': 'agents' },
+      tolerations: [
+        { key: 'scion.dev/pool', operator: 'Equal', value: 'agents', effect: 'NoSchedule' },
+      ],
+      kubernetes_service_account_mappings: { 'sa@p.iam.gserviceaccount.com': 'agent-ksa' },
+    };
+
+    async function save(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      withoutSectionFilter(el);
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    function saveDisabled(el: HTMLElement): boolean {
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      return btn.hasAttribute('disabled');
+    }
+
+    function load(runtimes: Record<string, unknown>, onPut?: (b: Record<string, any>) => void) {
+      return createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes }), {
+          putHandler: (body) => {
+            if ('runtimes' in body && onPut) onPut(body as Record<string, any>);
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+    }
+
+    it('renders only for Kubernetes runtimes, with the stored values', async () => {
+      element = await load({ gke: k8s, local: { type: 'docker' } });
+      await (element as any).updateComplete;
+      const sections = queryAll(element, 'details.k8s-placement');
+      expect(sections.length).toBe(1);
+      expect(sections[0].hasAttribute('open')).toBe(true);
+      const keys = queryAll(element, '[data-k8s-field="node_selector"] sl-input.k8s-key');
+      expect(keys.map((k) => k.getAttribute('value'))).toEqual(['scion.dev/pool']);
+      const gsa = queryAll(
+        element,
+        '[data-k8s-field="kubernetes_service_account_mappings"] sl-input.k8s-key'
+      );
+      expect(gsa.map((k) => k.getAttribute('value'))).toEqual(['sa@p.iam.gserviceaccount.com']);
+      expect(queryAll(element, 'sl-input.tol-key').map((k) => k.getAttribute('value'))).toEqual([
+        'scion.dev/pool',
+      ]);
+    });
+
+    it('editing rows updates the payload; removing the last row sends null', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: k8s }, (b) => (captured = b));
+      const value = query(
+        element,
+        '[data-k8s-field="node_selector"] sl-input.k8s-value'
+      ) as HTMLElement & { value: string };
+      value.value = 'batch';
+      value.dispatchEvent(new Event('sl-input'));
+      (query(element, '[data-k8s-field="node_selector"] sl-button.k8s-add') as HTMLElement).click();
+      await (element as any).updateComplete;
+      const keys = queryAll(
+        element,
+        '[data-k8s-field="node_selector"] sl-input.k8s-key'
+      ) as (HTMLElement & {
+        value: string;
+      })[];
+      const values = queryAll(
+        element,
+        '[data-k8s-field="node_selector"] sl-input.k8s-value'
+      ) as (HTMLElement & {
+        value: string;
+      })[];
+      keys[1].value = 'zone';
+      keys[1].dispatchEvent(new Event('sl-input'));
+      values[1].value = 'us-west2';
+      values[1].dispatchEvent(new Event('sl-input'));
+      const rm = query(
+        element,
+        '[data-k8s-field="kubernetes_service_account_mappings"] sl-icon-button.k8s-remove'
+      ) as HTMLElement;
+      rm.click();
+      await save(element);
+      expect(captured!.runtimes.gke.node_selector).toEqual({
+        'scion.dev/pool': 'batch',
+        zone: 'us-west2',
+      });
+      expect(captured!.runtimes.gke.kubernetes_service_account_mappings).toBeNull();
+      expect(captured!.runtimes.gke.tolerations).toEqual(k8s.tolerations);
+    });
+
+    it('a toleration can be added and the runtime class set', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: { type: 'kubernetes' } }, (b) => (captured = b));
+      (query(element, '[data-k8s-field="tolerations"] sl-button.k8s-add') as HTMLElement).click();
+      await (element as any).updateComplete;
+      const op = query(element, 'sl-select.tol-operator') as HTMLElement & { value: string };
+      op.value = 'Exists';
+      op.dispatchEvent(new Event('sl-change'));
+      const cls = query(element, 'sl-input.k8s-runtime_class_name') as HTMLElement & {
+        value: string;
+      };
+      cls.value = 'gvisor';
+      cls.dispatchEvent(new Event('sl-input'));
+      await save(element);
+      expect(captured!.runtimes.gke.tolerations).toEqual([{ operator: 'Exists' }]);
+      expect(captured!.runtimes.gke.runtime_class_name).toBe('gvisor');
+    });
+
+    it('an invalid value the form sets blocks Save', async () => {
+      element = await load({ gke: { type: 'kubernetes' } });
+      const cls = query(element, 'sl-input.k8s-runtime_class_name') as HTMLElement & {
+        value: string;
+      };
+      cls.value = 'Not_Valid';
+      cls.dispatchEvent(new Event('sl-input'));
+      await (element as any).updateComplete;
+      expect(
+        query(element, '[data-placement-error="runtimes.gke.runtime_class_name"]')
+      ).not.toBeNull();
+      expect(saveDisabled(element)).toBe(true);
+      expect(query(element, '.placement-blocked')).not.toBeNull();
+    });
+
+    it('a stored invalid value the form does not touch is a warning and Save stays enabled', async () => {
+      element = await load({ gke: { type: 'kubernetes', runtime_class_name: 'Not_Valid' } });
+      await (element as any).updateComplete;
+      expect(
+        query(element, '[data-placement-warning="runtimes.gke.runtime_class_name"]')
+      ).not.toBeNull();
+      expect(query(element, '[data-placement-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('a type switch to Cloud Run names the Kubernetes keys it clears', async () => {
+      element = await load({
+        gke: { ...k8s, shared_dir_storage_class: 'rwx-class', shared_dir_size: '10Gi' },
+      });
+      vi.mocked(showConfirm).mockClear();
+      vi.mocked(showConfirm).mockResolvedValueOnce(false);
+      const typeSelect = queryAll(element, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      typeSelect.value = 'cloudrun';
+      typeSelect.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const msg = vi.mocked(showConfirm).mock.calls[0][0] as string;
+      for (const k of [
+        'node_selector',
+        'tolerations',
+        'kubernetes_service_account_mappings',
+        'shared_dir_storage_class',
+        'shared_dir_size',
+      ]) {
+        expect(msg).toContain(k);
+      }
+    });
+
+    // The shared-dir PVC defaults are Kubernetes-only and follow the other
+    // Kubernetes keys: a switch to Cloud Run clears them.
+    for (const [key, value] of [
+      ['shared_dir_storage_class', 'rwx-class'],
+      ['shared_dir_size', '10Gi'],
+    ] as const) {
+      it(`a type switch to Cloud Run clears ${key}`, async () => {
+        let captured: Record<string, any> | null = null;
+        element = await load({ gke: { ...k8s, [key]: value } }, (b) => (captured = b));
+        vi.mocked(showConfirm).mockClear();
+        const typeSelect = queryAll(element, 'sl-select').find((s) =>
+          s.querySelector('sl-option[value="cloudrun-instances"]')
+        ) as HTMLElement & { value: string };
+        typeSelect.value = 'cloudrun';
+        typeSelect.dispatchEvent(new Event('sl-change'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(showConfirm).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain(key);
+        await save(element);
+        expect(captured).not.toBeNull();
+        expect(captured!.runtimes.gke.type).toBe('cloudrun');
+        expect(captured!.runtimes.gke[key] ?? null).toBeNull();
+        expect(JSON.stringify(captured!.runtimes.gke)).not.toContain(value);
+      });
+    }
+  });
+
+  describe('switching a runtime to docker or podman (ptone/scion#2649)', () => {
+    const K8S_ONLY = [
+      'namespace',
+      'gke',
+      'list_all_namespaces',
+      'safe_to_evict',
+      'node_selector',
+      'tolerations',
+      'runtime_class_name',
+      'kubernetes_service_account_mappings',
+      'kubernetes_block_service_account',
+      'priority_class_name',
+      'shared_dir_storage_class',
+      'shared_dir_size',
+    ];
+    // A Kubernetes entry with the shared fields and every Kubernetes-only
+    // field set.
+    const fullK8s = {
+      type: 'kubernetes',
+      host: 'ssh://builder',
+      context: 'build-ctx',
+      sync: 'mutagen',
+      env: { FOO: 'bar' },
+      namespace: 'agents',
+      gke: true,
+      list_all_namespaces: true,
+      safe_to_evict: false,
+      node_selector: { 'scion.dev/pool': 'agents' },
+      tolerations: [
+        { key: 'scion.dev/pool', operator: 'Equal', value: 'agents', effect: 'NoSchedule' },
+      ],
+      runtime_class_name: 'gvisor',
+      kubernetes_service_account_mappings: { 'gsa-ref': 'agent-ksa' },
+      kubernetes_block_service_account: 'default',
+      priority_class_name: 'agents-low',
+      shared_dir_storage_class: 'rwx-class',
+      shared_dir_size: '10Gi',
+    };
+
+    function typeSelectOf(el: HTMLElement): HTMLElement & { value: string } {
+      const sel = queryAll(el, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      );
+      return sel as HTMLElement & { value: string };
+    }
+
+    async function switchType(el: HTMLElement, to: string): Promise<void> {
+      const sel = typeSelectOf(el);
+      sel.value = to;
+      sel.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await (el as any).updateComplete;
+    }
+
+    async function save(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      withoutSectionFilter(el);
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    function load(
+      runtimes: Record<string, unknown>,
+      onPut?: (b: Record<string, any>) => void,
+      tier: Record<string, unknown> = {}
+    ) {
+      return createComponent(
+        createFetchHandler(makeBaseConfig({ ...tier, runtimes }), {
+          schemaResponse: {
+            sections: {
+              ...SCHEMA_RESPONSE.sections,
+              runtimes: { koanf_paths: ['runtimes'] },
+            },
+          },
+          putHandler: (body) => {
+            if ('runtimes' in body && onPut) onPut(body as Record<string, any>);
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+    }
+
+    // The Kubernetes-only controls a runtime card renders, by label.
+    function k8sControls(el: HTMLElement): string[] {
+      const found: string[] = [];
+      const card = query(el, '.runtime-card') as HTMLElement;
+      const labels = Array.from(card.querySelectorAll('.form-field > label')).map((l) =>
+        l.textContent?.trim()
+      );
+      const switches = Array.from(card.querySelectorAll('sl-switch')).map((s) =>
+        s.textContent?.trim()
+      );
+      if (labels.includes('Namespace')) found.push('Namespace');
+      if (switches.includes('GKE cluster')) found.push('GKE cluster');
+      if (switches.includes('List all namespaces')) found.push('List all namespaces');
+      if (card.querySelector('sl-select.safe-to-evict')) found.push('Safe to Evict');
+      if (card.querySelector('details.k8s-placement')) found.push('placement');
+      return found;
+    }
+
+    function hostAndContextShown(el: HTMLElement): boolean {
+      const card = query(el, '.runtime-card') as HTMLElement;
+      const labels = Array.from(card.querySelectorAll('.form-field > label')).map((l) =>
+        l.textContent?.trim()
+      );
+      return labels.includes('Host') && labels.includes('Context');
+    }
+
+    for (const to of ['docker', 'podman']) {
+      // Fails without the fix: the base returns only the two Cloud Run blocks.
+      it(`switch keys for ${to}: every Kubernetes-only key, not host or context`, async () => {
+        const { runtimeTypeSwitchKeys } = await import('./admin-server-config.js');
+        const keys = runtimeTypeSwitchKeys(to);
+        for (const k of [...K8S_ONLY, 'cloudrun', 'cloudrun_instances']) {
+          expect(keys).toContain(k);
+        }
+        for (const k of ['host', 'context', 'sync', 'env', 'type']) {
+          expect(keys).not.toContain(k);
+        }
+      });
+    }
+
+    // Guard: passes on the base too. Kubernetes types and no type clear only
+    // the Cloud Run blocks; the Cloud Run switches still clear host and context.
+    it('switch keys keep the Kubernetes, empty-type and Cloud Run branches', async () => {
+      const { runtimeTypeSwitchKeys } = await import('./admin-server-config.js');
+      for (const t of ['kubernetes', 'k8s', 'remote', '']) {
+        expect(runtimeTypeSwitchKeys(t)).toEqual(['cloudrun', 'cloudrun_instances']);
+      }
+      for (const t of ['cloudrun', 'cloudrun-instances']) {
+        const keys = runtimeTypeSwitchKeys(t);
+        for (const k of ['host', 'context', ...K8S_ONLY]) expect(keys).toContain(k);
+      }
+    });
+
+    // Fails without the fix: the base returns [] for a switch to docker.
+    it('runtimeTypeSwitchClears names the Kubernetes-only keys holding a value', async () => {
+      const { runtimeTypeSwitchClears } = await import('./admin-server-config.js');
+      expect([...runtimeTypeSwitchClears(fullK8s, 'docker')].sort()).toEqual([...K8S_ONLY].sort());
+    });
+
+    for (const to of ['docker', 'podman']) {
+      for (const [mode, tier] of [
+        ['file', {}],
+        ['db', { settings_tier: 'db' }],
+      ] as const) {
+        // Fails without the fix: the base asks nothing and sends every
+        // Kubernetes-only key back. The host, context, sync and env checks
+        // are guards that pass on the base too.
+        it(`${mode} mode: kubernetes -> ${to} clears K8s-only keys, keeps host`, async () => {
+          let captured: Record<string, any> | null = null;
+          element = await load({ gke: fullK8s }, (b) => (captured = b), tier);
+          vi.mocked(showConfirm).mockClear();
+          await switchType(element, to);
+          expect(showConfirm).toHaveBeenCalledTimes(1);
+          const msg = vi.mocked(showConfirm).mock.calls[0][0] as string;
+          for (const k of [
+            'namespace',
+            'node_selector',
+            'tolerations',
+            'kubernetes_service_account_mappings',
+            'shared_dir_storage_class',
+          ]) {
+            expect(msg).toContain(k);
+          }
+          expect(msg).not.toContain('host');
+          expect(msg).not.toContain('context');
+          await save(element);
+          expect(captured).not.toBeNull();
+          const sent = captured!.runtimes.gke;
+          expect(sent.type).toBe(to);
+          expect(sent.host).toBe('ssh://builder');
+          expect(sent.context).toBe('build-ctx');
+          expect(sent.sync).toBe('mutagen');
+          expect(sent.env).toEqual({ FOO: 'bar' });
+          for (const k of K8S_ONLY) {
+            expect(sent).toHaveProperty(k, null);
+          }
+          const json = JSON.stringify(sent);
+          for (const stale of ['agents', 'gvisor', 'agent-ksa', 'rwx-class', '10Gi']) {
+            expect(json).not.toContain(stale);
+          }
+        });
+      }
+    }
+
+    // Fails without the fix: the base never asks, so showConfirm is not called.
+    it('cancelling a switch to docker keeps the Kubernetes runtime as it was', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: fullK8s }, (b) => (captured = b));
+      vi.mocked(showConfirm).mockClear();
+      vi.mocked(showConfirm).mockResolvedValueOnce(false);
+      await switchType(element, 'docker');
+      expect(showConfirm).toHaveBeenCalledTimes(1);
+      expect(typeSelectOf(element).value).toBe('kubernetes');
+      await save(element);
+      const sent = captured!.runtimes.gke;
+      expect(sent.type).toBe('kubernetes');
+      expect(sent.namespace).toBe('agents');
+      expect(sent.node_selector).toEqual({ 'scion.dev/pool': 'agents' });
+      expect(sent.shared_dir_size).toBe('10Gi');
+    });
+
+    // Fails on the base (the key is never cleared) and with a fix that does
+    // not drop the cached map rows (the stale rows render again).
+    it('kubernetes -> docker -> kubernetes shows no stale node selector rows', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: fullK8s }, (b) => (captured = b));
+      await (element as any).updateComplete;
+      const before = queryAll(element, '[data-k8s-field="node_selector"] sl-input.k8s-key');
+      expect(before.map((k) => k.getAttribute('value'))).toEqual(['scion.dev/pool']);
+      await switchType(element, 'docker');
+      await switchType(element, 'kubernetes');
+      const after = queryAll(element, '[data-k8s-field="node_selector"] sl-input.k8s-key');
+      expect(after.map((k) => k.getAttribute('value')).filter((v) => v)).toEqual([]);
+      await save(element);
+      expect(captured!.runtimes.gke.type).toBe('kubernetes');
+      expect(captured!.runtimes.gke).toHaveProperty('node_selector', null);
+    });
+
+    // Guard (passes on the base too): docker -> kubernetes asks nothing and
+    // keeps host and context.
+    it('docker -> kubernetes keeps host and context', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load(
+        { d: { type: 'docker', host: 'ssh://builder', context: 'build-ctx' } },
+        (b) => (captured = b)
+      );
+      vi.mocked(showConfirm).mockClear();
+      await switchType(element, 'kubernetes');
+      expect(showConfirm).not.toHaveBeenCalled();
+      await save(element);
+      expect(captured!.runtimes.d.type).toBe('kubernetes');
+      expect(captured!.runtimes.d.host).toBe('ssh://builder');
+      expect(captured!.runtimes.d.context).toBe('build-ctx');
+    });
+
+    for (const t of ['docker', 'podman']) {
+      // Fails without the change: the base renders Namespace, GKE, List all
+      // namespaces and Safe to Evict on every non-Cloud-Run card.
+      it(`a ${t} card leaves out the Kubernetes-only controls`, async () => {
+        element = await load({ c: { type: t } });
+        await (element as any).updateComplete;
+        expect(k8sControls(element)).toEqual([]);
+        expect(hostAndContextShown(element)).toBe(true);
+      });
+    }
+
+    // Fails without the change for the docker step (the base still renders
+    // the fields after the switch); the kubernetes card is a guard.
+    it('a kubernetes card shows them, and a switch to docker hides them', async () => {
+      element = await load({ gke: fullK8s });
+      await (element as any).updateComplete;
+      expect(k8sControls(element)).toEqual([
+        'Namespace',
+        'GKE cluster',
+        'List all namespaces',
+        'Safe to Evict',
+        'placement',
+      ]);
+      await switchType(element, 'docker');
+      expect(k8sControls(element)).toEqual([]);
+      expect(hostAndContextShown(element)).toBe(true);
+    });
+
+    // Guard: an untyped entry (Kubernetes by its name, or not) keeps today's
+    // rendering of the container fields.
+    it('an untyped entry keeps the container fields', async () => {
+      element = await load({ local: {} });
+      await (element as any).updateComplete;
+      expect(k8sControls(element)).toEqual([
+        'Namespace',
+        'GKE cluster',
+        'List all namespaces',
+        'Safe to Evict',
+      ]);
+      // Not Kubernetes by its name, so the select is labelled ignored.
+      expect(query(element, '.runtime-card .safe-to-evict-ignored')).not.toBeNull();
+    });
+  });
+
+  describe('shared-dir PVC inputs (ptone/scion#2649 item 1)', () => {
+    const SIZE_ERROR =
+      'shared_dir_size must be a positive Kubernetes quantity, such as 10Gi or 1Ti.';
+
+    type Input = HTMLElement & { value: string };
+
+    function load(config: Record<string, unknown>, onPut?: (b: Record<string, any>) => void) {
+      return createComponent(
+        createFetchHandler(makeBaseConfig(config), {
+          putHandler: (body) => {
+            if (onPut) onPut(body as Record<string, any>);
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+    }
+
+    // Runtime and profile cards share the runtime-card class; names are unique per test.
+    function card(el: HTMLElement, name: string): HTMLElement {
+      return queryAll(el, '.runtime-card').find(
+        (c) => c.querySelector('strong')?.textContent?.trim() === name
+      ) as HTMLElement;
+    }
+
+    function sharedInputs(el: HTMLElement, name: string) {
+      const c = card(el, name);
+      return {
+        storageClass: c.querySelector('sl-input.shared-dir-storage-class') as Input | null,
+        size: c.querySelector('sl-input.shared-dir-size') as Input | null,
+      };
+    }
+
+    async function enter(el: HTMLElement, input: Input, value: string): Promise<void> {
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+      await (el as any).updateComplete;
+    }
+
+    async function switchType(el: HTMLElement, to: string): Promise<void> {
+      const sel = queryAll(el, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      sel.value = to;
+      sel.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await (el as any).updateComplete;
+    }
+
+    async function save(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      withoutSectionFilter(el);
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    // Shoelace is not loaded in these tests, so read the disabled attribute
+    // Lit's ?disabled binding sets.
+    function saveDisabled(el: HTMLElement): boolean {
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      return btn.hasAttribute('disabled');
+    }
+
+    const k8sWithValues = {
+      type: 'kubernetes',
+      shared_dir_storage_class: 'rwx-class',
+      shared_dir_size: '10Gi',
+    };
+
+    // ── Runtime cards ──
+
+    it('a Kubernetes runtime card shows both shared-dir inputs with the stored values', async () => {
+      element = await load({ runtimes: { gke: k8sWithValues } });
+      await (element as any).updateComplete;
+      const { storageClass, size } = sharedInputs(element, 'gke');
+      expect(storageClass).not.toBeNull();
+      expect(size).not.toBeNull();
+      expect(storageClass!.getAttribute('value')).toBe('rwx-class');
+      expect(size!.getAttribute('value')).toBe('10Gi');
+    });
+
+    it('setting the shared-dir inputs writes both keys on save', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: { type: 'kubernetes' } } }, (b) => (captured = b));
+      const { storageClass, size } = sharedInputs(element, 'gke');
+      await enter(element, storageClass!, 'premium-rwx');
+      await enter(element, size!, '20Gi');
+      await save(element);
+      expect(captured).not.toBeNull();
+      expect(captured!.runtimes.gke.shared_dir_storage_class).toBe('premium-rwx');
+      expect(captured!.runtimes.gke.shared_dir_size).toBe('20Gi');
+    });
+
+    // The page sends null for a key removed from a loaded runtime entry
+    // (runtimesPayload), as it does for Namespace; never an empty string.
+    it('clearing a shared-dir input removes the key, not an empty string', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: k8sWithValues } }, (b) => (captured = b));
+      const { storageClass, size } = sharedInputs(element, 'gke');
+      await enter(element, storageClass!, '');
+      await enter(element, size!, '');
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.runtimes.gke;
+      expect(sent).toHaveProperty('shared_dir_storage_class', null);
+      expect(sent).toHaveProperty('shared_dir_size', null);
+      const json = JSON.stringify(sent);
+      expect(json).not.toContain('"shared_dir_storage_class":""');
+      expect(json).not.toContain('"shared_dir_size":""');
+    });
+
+    it('an untyped runtime card shows the shared-dir inputs, as it shows Namespace', async () => {
+      element = await load({ runtimes: { plain: {} } });
+      await (element as any).updateComplete;
+      const { storageClass, size } = sharedInputs(element, 'plain');
+      expect(storageClass).not.toBeNull();
+      expect(size).not.toBeNull();
+    });
+
+    // Guard (passes on the base too): docker and podman cards leave them out.
+    it('docker and podman cards show no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: {
+          dock: { type: 'docker', shared_dir_size: '10Gi' },
+          pod: { type: 'podman', shared_dir_size: '10Gi' },
+        },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['dock', 'pod']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    // Guard (passes on the base too): Cloud Run cards leave them out.
+    it('Cloud Run cards show no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: {
+          cr: { type: 'cloudrun' },
+          cri: { type: 'cloudrun-instances' },
+        },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['cr', 'cri']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    // Fails on the base for the "before" step (no inputs). The clear after
+    // the switch already passes from ef50e964 and is kept as a regression guard.
+    it('switching kubernetes -> docker with both keys set clears them and hides the inputs', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: k8sWithValues } }, (b) => (captured = b));
+      await (element as any).updateComplete;
+      const before = sharedInputs(element, 'gke');
+      expect(before.storageClass).not.toBeNull();
+      expect(before.size).not.toBeNull();
+      await switchType(element, 'docker');
+      const after = sharedInputs(element, 'gke');
+      expect(after.storageClass).toBeNull();
+      expect(after.size).toBeNull();
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.runtimes.gke;
+      expect(sent.type).toBe('docker');
+      expect(sent).toHaveProperty('shared_dir_storage_class', null);
+      expect(sent).toHaveProperty('shared_dir_size', null);
+      const json = JSON.stringify(sent);
+      expect(json).not.toContain('rwx-class');
+      expect(json).not.toContain('10Gi');
+    });
+
+    // ── Validation ──
+
+    // The hub's verdict per row (config.ValidateSharedDirSize, resource.ParseQuantity
+    // plus a positive sign). Rows marked "Go test" are asserted in
+    // pkg/config TestValidateSharedDirSizes; the others follow the Kubernetes
+    // quantity grammar (sign, digits, ".digits", "digits.digits", binary or
+    // decimal SI suffix, or an e<signedNumber> exponent).
+    const PARITY: Array<[string, boolean, string]> = [
+      ['10Gi', true, 'Go test'],
+      ['1Ti', true, 'Go test'],
+      ['500Mi', true, 'Go test: binary SI suffix'],
+      ['1G', true, 'Go test: decimal SI suffix'],
+      ['+1Gi', true, 'explicit + sign'],
+      ['.5Gi', true, '".digits" number, positive'],
+      ['1e3', true, 'decimal exponent suffix'],
+      ['1.5Gi', true, '"digits.digits" number'],
+      ['10GB', false, 'Go test: not a suffix; same class as 1TB'],
+      ['1TB', false, 'Go test'],
+      ['-1Gi', false, 'Go test: not positive'],
+      ['0', false, 'Go test: not positive'],
+      ['abc', false, 'Go test: not a number; same class as "lots"'],
+      ['1e-400', true, 'Go test: positive, below the float64 range'],
+      ['0e5', false, 'Go test: zero mantissa'],
+      ['0.000', false, 'Go test: zero'],
+      ['1e400', true, 'positive, above the float64 range (Infinity as a number)'],
+      ['00', false, 'zero, more than one digit'],
+      ['', true, 'Go test: empty is unset (the UI removes the key)'],
+    ];
+
+    it.each(PARITY)(
+      'sharedDirSizeError matches the hub validator on the parity table: %s',
+      async (value, valid) => {
+        const { sharedDirSizeError } = await import('./admin-server-config.js');
+        const got = sharedDirSizeError(value);
+        if (valid) {
+          expect(got).toBeNull();
+        } else {
+          // The exact fixed text: the message never depends on the value.
+          expect(got).toBe(SIZE_ERROR);
+          // A value that is part of the fixed text itself ("0", in "10Gi")
+          // cannot be absent from it; for every other value, check it is.
+          if (!SIZE_ERROR.includes(value)) expect(got).not.toContain(value);
+        }
+      }
+    );
+
+    it('a bad shared_dir_size blocks save with an inline error that names the field, not the value', async () => {
+      element = await load({ runtimes: { gke: { type: 'kubernetes' } } });
+      const { size } = sharedInputs(element, 'gke');
+      await enter(element, size!, 'ten-gigs');
+      const err = query(
+        element,
+        '[data-quantity-error="runtimes.gke.shared_dir_size"]'
+      ) as HTMLElement | null;
+      expect(err).not.toBeNull();
+      expect(err!.textContent).toContain('shared_dir_size');
+      expect(err!.textContent).not.toContain('ten-gigs');
+      expect(saveDisabled(element)).toBe(true);
+      const banner = query(element, '.resource-quantity-blocked') as HTMLElement | null;
+      expect(banner).not.toBeNull();
+      expect(banner!.textContent).toContain('runtimes.gke.shared_dir_size');
+      expect(banner!.textContent).not.toContain('ten-gigs');
+    });
+
+    it('a valid shared_dir_size such as 10Gi or 1Ti saves', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ runtimes: { gke: { type: 'kubernetes' } } }, (b) => (captured = b));
+      const { size } = sharedInputs(element, 'gke');
+      for (const value of ['10Gi', '1Ti']) {
+        await enter(element, size!, value);
+        expect(query(element, '[data-quantity-error]')).toBeNull();
+        expect(saveDisabled(element)).toBe(false);
+      }
+      await save(element);
+      expect(captured).not.toBeNull();
+      expect(captured!.runtimes.gke.shared_dir_size).toBe('1Ti');
+    });
+
+    // Guard (passes on the base too): a stored value on an entry that hides
+    // the inputs does not block save; the hub stays the authority for it.
+    it('a hidden shared_dir_size (docker runtime with a stored bad value) does not block save', async () => {
+      element = await load({
+        runtimes: { dock: { type: 'docker', shared_dir_size: 'lots' } },
+        profiles: { pd: { runtime: 'dock', shared_dir_size: 'lots' } },
+      });
+      await (element as any).updateComplete;
+      expect(query(element, '[data-quantity-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('a read-only runtime and profile disable both shared-dir inputs', async () => {
+      element = await load({
+        env_overrides: ['runtimes', 'profiles'],
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { pk: { runtime: 'gke' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['gke', 'pk']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).not.toBeNull();
+        expect(size).not.toBeNull();
+        expect(storageClass!.hasAttribute('disabled')).toBe(true);
+        expect(size!.hasAttribute('disabled')).toBe(true);
+      }
+    });
+
+    // Guard (passes on the base too): a stored value on a profile that hides
+    // the inputs does not block save.
+    it('a hidden shared_dir_size on a profile (docker runtime) does not block save', async () => {
+      element = await load({
+        runtimes: { dock: { type: 'docker' } },
+        profiles: { pd: { runtime: 'dock', shared_dir_size: 'lots' } },
+      });
+      await (element as any).updateComplete;
+      expect(query(element, '[data-quantity-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    // ── Profile cards ──
+
+    it('a profile on a Kubernetes runtime shows both shared-dir inputs; setting writes and clearing removes the keys', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load(
+        {
+          runtimes: { gke: { type: 'kubernetes' } },
+          profiles: {
+            pk: { runtime: 'gke', shared_dir_storage_class: 'old-class', shared_dir_size: '1Gi' },
+          },
+        },
+        (b) => (captured = b)
+      );
+      await (element as any).updateComplete;
+      const { storageClass, size } = sharedInputs(element, 'pk');
+      expect(storageClass).not.toBeNull();
+      expect(size).not.toBeNull();
+      expect(storageClass!.getAttribute('value')).toBe('old-class');
+      expect(size!.getAttribute('value')).toBe('1Gi');
+      await enter(element, storageClass!, 'p-class');
+      await enter(element, size!, '');
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.profiles.pk;
+      expect(sent.shared_dir_storage_class).toBe('p-class');
+      expect('shared_dir_size' in sent).toBe(false);
+      expect(JSON.stringify(sent)).not.toContain('"shared_dir_size":""');
+    });
+
+    // Guard (passes on the base too).
+    it('a profile on a docker or podman runtime shows no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { dock: { type: 'docker' }, pod: { type: 'podman' } },
+        profiles: { pd: { runtime: 'dock' }, pp: { runtime: 'pod' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['pd', 'pp']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    // Guard (passes on the base too).
+    it('a profile on a Cloud Run runtime shows no shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { cr: { type: 'cloudrun' }, cri: { type: 'cloudrun-instances' } },
+        profiles: { pc: { runtime: 'cr' }, pci: { runtime: 'cri' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['pc', 'pci']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).toBeNull();
+        expect(size).toBeNull();
+      }
+    });
+
+    it('a profile with no runtime set shows the shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { pnone: {}, pempty: { runtime: '' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['pnone', 'pempty']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).not.toBeNull();
+        expect(size).not.toBeNull();
+      }
+    });
+
+    it('a profile on an unknown or untyped runtime shows the shared-dir inputs', async () => {
+      element = await load({
+        runtimes: { plain: {} },
+        profiles: { punknown: { runtime: 'missing' }, puntyped: { runtime: 'plain' } },
+      });
+      await (element as any).updateComplete;
+      for (const name of ['punknown', 'puntyped']) {
+        const { storageClass, size } = sharedInputs(element, name);
+        expect(storageClass).not.toBeNull();
+        expect(size).not.toBeNull();
+      }
+    });
+
+    // Guard (passes on the base too): the profile runtime select clears no
+    // shared-dir key; the inputs hide on a docker runtime and the values stay.
+    it('a profile runtime change clears neither shared-dir key', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load(
+        {
+          runtimes: { gke: { type: 'kubernetes' }, dock: { type: 'docker' } },
+          profiles: {
+            pk: { runtime: 'gke', shared_dir_storage_class: 'p-class', shared_dir_size: '5Gi' },
+          },
+        },
+        (b) => (captured = b)
+      );
+      await (element as any).updateComplete;
+      const runtimeSelect = card(element, 'pk').querySelector('sl-select') as Input;
+      runtimeSelect.value = 'dock';
+      runtimeSelect.dispatchEvent(new Event('sl-change'));
+      await (element as any).updateComplete;
+      expect(sharedInputs(element, 'pk').size).toBeNull();
+      await save(element);
+      expect(captured).not.toBeNull();
+      const sent = captured!.profiles.pk;
+      expect(sent.runtime).toBe('dock');
+      expect(sent.shared_dir_storage_class).toBe('p-class');
+      expect(sent.shared_dir_size).toBe('5Gi');
+    });
+
+    it('a bad shared_dir_size on a profile blocks save with an inline error at profiles.NAME.shared_dir_size that names the field, not the value', async () => {
+      element = await load({
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { pk: { runtime: 'gke', shared_dir_size: 'lots' } },
+      });
+      await (element as any).updateComplete;
+      const err = query(
+        element,
+        '[data-quantity-error="profiles.pk.shared_dir_size"]'
+      ) as HTMLElement | null;
+      expect(err).not.toBeNull();
+      expect(err!.textContent).toContain('shared_dir_size');
+      expect(err!.textContent).not.toContain('lots');
+      expect(saveDisabled(element)).toBe(true);
+    });
+  });
+
+  describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
+    const maskedServer = {
+      notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
+      oauth: { web: { github: { client_id: 'cid', client_secret: '********' } } },
+      github_app: { app_id: 42, private_key: '********', webhook_secret: '********' },
+    };
+    const withServer = (tier: string, extra: Record<string, unknown>) => {
+      const base = makeBaseConfig({ settings_tier: tier });
+      return { ...base, server: { ...base.server, ...extra } };
+    };
+
+    it('DB mode payload omits unedited masked notification_channels and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('db', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server).toBeDefined();
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildLayer1Payload())).not.toContain('********');
+    });
+
+    it('file mode payload omits unedited masked notification_channels, oauth and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('file', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.oauth).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildFilePayload())).not.toContain('********');
+    });
+
+    it('DB mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        github_app: { app_id: 42, webhooks_enabled: true },
+      };
+      element = await createComponent(createFetchHandler(withServer('db', plain)));
+      const el = element as any;
+      // Pin github_app: loadGitHubAppConfig may replace it after load.
+      el.rawConfig.server.github_app = plain.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.github_app).toEqual(plain.github_app);
+    });
+
+    it('file mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        oauth: { web: { github: { client_id: 'cid' } } },
+      };
+      element = await createComponent(createFetchHandler(withServer('file', plain)));
+      const server = (element as any).buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.oauth).toEqual(plain.oauth);
+    });
+  });
+  describe('Monitoring Dashboard URL field (ptone/scion#3597)', () => {
+    const URL_A = 'https://console.cloud.google.com/monitoring/dashboards/builder/hub?project=p';
+
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find(
+        (l) => l.textContent?.trim() === 'Monitoring Dashboard URL'
+      );
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function type(el: HTMLElement, value: string): void {
+      const input = field(el).querySelector('sl-input') as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+    }
+
+    async function savePayload(
+      config: Record<string, unknown>,
+      edit: (el: HTMLElement) => void | Promise<void>
+    ): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      await edit(element);
+      await (element as any).updateComplete;
+      withoutSectionFilter(element);
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      return captured!;
+    }
+
+    function hubOf(payload: Record<string, unknown>): Record<string, unknown> {
+      return ((payload.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+    }
+
+    function withUrl(tier: string, url?: string, extra: Record<string, unknown> = {}) {
+      const base = makeBaseConfig({ settings_tier: tier, ...extra }) as any;
+      if (url !== undefined) base.server.hub.monitoring_dashboard_url = url;
+      return base;
+    }
+
+    it('shows the loaded value in an editable field', async () => {
+      element = await createComponent(createFetchHandler(withUrl('db', URL_A)));
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(URL_A);
+      expect(field(element).querySelector('.env-badge')).toBeNull();
+    });
+
+    it('shows the env badge when the key is overridden by environment', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withUrl('db', URL_A, { env_overrides: ['server.hub.monitoring_dashboard_url'] })
+        )
+      );
+      expect(field(element).querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it.each(['db', 'file'])('an untouched form does not send the key (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier, URL_A), () => {});
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it.each(['db', 'file'])('an unset key is not materialised on save (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier), (el) => {
+        (el as any).hubPublicUrl = 'https://other.example.com';
+      });
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it.each(['db', 'file'])('an edited value is sent, trimmed (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier), (el) => type(el, `  ${URL_A}  `));
+      expect(hubOf(payload).monitoring_dashboard_url).toBe(URL_A);
+    });
+
+    it('a cleared field is sent as "" so the setting is cleared', async () => {
+      const payload = await savePayload(withUrl('db', URL_A), (el) => type(el, ''));
+      expect(hubOf(payload)).toHaveProperty('monitoring_dashboard_url', '');
+    });
+
+    it('an edit back to the loaded value is not sent', async () => {
+      const payload = await savePayload(withUrl('db', URL_A), (el) => {
+        type(el, 'https://x.example.com');
+        type(el, URL_A);
+      });
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it('hints when the value is not an http(s) URL', async () => {
+      element = await createComponent(createFetchHandler(withUrl('db')));
+      type(element, 'javascript:alert(1)');
+      await (element as any).updateComplete;
+      expect(field(element).querySelector('.monitoring-url-invalid')).not.toBeNull();
+      type(element, URL_A);
+      await (element as any).updateComplete;
+      expect(field(element).querySelector('.monitoring-url-invalid')).toBeNull();
+    });
+  });
+
+  // ── Content URL status row (ptone/scion#7107) ──
+
+  describe('Content URL status row (ptone/scion#7107)', () => {
+    function withContentUrl(contentUrl: string, status: Record<string, unknown> | undefined) {
+      const cfg = makeBaseConfig({ settings_tier: 'db', content_url_status: status }) as any;
+      cfg.server.hub.content_url = contentUrl;
+      return cfg;
+    }
+
+    function row(el: HTMLElement): Element | null {
+      const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === 'Content URL');
+      return label ? label.closest('.form-field') : null;
+    }
+
+    it.each([
+      ['unset', '', {}, 'Not set', 'No content host'],
+      [
+        'in_effect',
+        'https://links.example.net',
+        { effective: 'https://links.example.net' },
+        'In effect',
+        'Shared artifacts are served from https://links.example.net.',
+      ],
+      ['ignored_invalid', 'ftp://links.example.net', {}, 'Ignored', 'The value is invalid'],
+      [
+        'refused_same_host',
+        'https://hub.example.com:8443',
+        {},
+        'Refused',
+        "on the hub's own host name",
+      ],
+      [
+        'ignored_same_site',
+        'https://links.example.com',
+        { override_key: 'server.hub.content_url_allow_same_site' },
+        'Ignored',
+        'or set server.hub.content_url_allow_same_site.',
+      ],
+      [
+        'ignored_agent_endpoint_host',
+        'https://agents.example.net',
+        {},
+        'Ignored',
+        'on the host name of server.hub.agent_endpoint',
+      ],
+    ])(
+      'shows the stored value, badge and reason for %s',
+      async (state, value, extra, badge, reason) => {
+        element = await createComponent(
+          createFetchHandler(withContentUrl(value, { state, ...extra }))
+        );
+        const f = row(element);
+        expect(f).not.toBeNull();
+        expect(f!.querySelector('sl-input')).toBeNull();
+        expect(f!.querySelector('.read-only-value')?.textContent).toContain(value || '—');
+        expect(f!.querySelector('sl-badge')?.textContent?.trim()).toBe(badge);
+        expect(f!.querySelector('.content-url-status-reason')?.textContent).toContain(reason);
+      }
+    );
+
+    it('is not shown when the hub reports no status', async () => {
+      element = await createComponent(createFetchHandler(withContentUrl('', undefined)));
+      expect(row(element)).toBeNull();
+    });
+
+    it('never sends content_url on save', async () => {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          withContentUrl('https://links.example.net', {
+            state: 'in_effect',
+            effective: 'https://links.example.net',
+          }),
+          {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
+      (element as any).monitoringDashboardUrlTouched = true;
+      await (element as any).updateComplete;
+      await markDirty(element);
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      expect(body).not.toHaveProperty('content_url_status');
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(hub).not.toHaveProperty('content_url');
+    });
+  });
+
+  // ── Public URL pinned state (ptone/scion#3905) ──
+
+  describe('Public URL field (ptone/scion#3905)', () => {
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === 'Public URL');
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function withStatus(tier: string, status: Record<string, unknown>) {
+      return makeBaseConfig({ settings_tier: tier, public_url_status: status });
+    }
+
+    it.each([
+      ['db', 'SCION_SERVER_HUB_ENDPOINT'],
+      ['db', '--base-url'],
+      ['db', 'SCION_SERVER_BASE_URL'],
+    ])('is read-only and names the pinning setting (%s mode, %s)', async (tier, pin) => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus(tier, { effective: 'https://env.example.com', source: 'env', pinned_by: pin })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(`Set by ${pin}`);
+      expect(f.querySelector('.read-only-value')?.textContent).toContain('https://env.example.com');
+      expect(f.querySelector('.public-url-in-effect')).toBeNull();
+    });
+
+    it('a pinned public URL is not sent on save', async () => {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', {
+            effective: 'https://env.example.com',
+            source: 'env',
+            pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+          }),
+          {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      (element as any).hubPublicUrl = 'https://other.example.com';
+      (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
+      await (element as any).updateComplete;
+      await markDirty(element);
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(hub).not.toHaveProperty('public_url');
+    });
+
+    it('is editable when not pinned and shows the value in effect and its source', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', { effective: 'https://db.example.com', source: 'database' })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')?.getAttribute('value')).toBe('https://hub.example.com');
+      expect(f.querySelector('.read-only-badge')).toBeNull();
+      const hint = f.querySelector('.public-url-in-effect')?.textContent ?? '';
+      expect(hint).toContain('https://db.example.com');
+      expect(hint).toContain('from database');
+    });
+
+    it('is read-only in file mode when SCION_SERVER_HUB_ENDPOINT sets it', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: ['server.hub.public_url'] }))
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(
+        'Set via environment variable'
+      );
+    });
+
+    it('is editable when the hub reports no status', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(field(element).querySelector('sl-input')).not.toBeNull();
+    });
+
+    const supersededPublicUrl = {
+      endpoints: [
+        { key: 'server.hub.public_url', source: 'server_env' },
+        { key: 'image_registry', source: 'yaml' },
+      ],
+    };
+
+    function panelText(el: HTMLElement): string {
+      return query(el, '.superseded-panel')?.textContent ?? '';
+    }
+
+    async function clickSave(el: HTMLElement): Promise<void> {
+      const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      expect(saveBtn).toBeTruthy();
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    it('a pinned public URL is not listed as superseded by database settings', async () => {
+      // While a setting pins the public URL, the hub leaves it out of
+      // superseded_keys (computeSupersededKeys); the page shows the list
+      // as the hub sends it (ptone/scion#4707).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: {
+              effective: 'https://env.example.com',
+              source: 'env',
+              pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+            },
+            superseded_keys: { endpoints: [{ key: 'image_registry', source: 'yaml' }] },
+          })
+        )
+      );
+      expect(panelText(element)).not.toContain('Public URL');
+      expect(panelText(element)).toContain('Image Registry');
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+    });
+
+    it('an unpinned public URL the database value supersedes is listed', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: { effective: 'https://file.example.com', source: 'file' },
+            superseded_keys: supersededPublicUrl,
+          })
+        )
+      );
+      expect(panelText(element)).toContain('Public URL');
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+    });
+
+    it('names the layer each superseded value comes from', async () => {
+      // The hub reports a key that only the coded defaults set with source
+      // "default", and a seed value equal to the default with "seed_env"
+      // (ptone/scion#4983).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            superseded_keys: {
+              agent_defaults: [
+                { key: 'default_template', source: 'seed_env' },
+                { key: 'default_harness_config', source: 'yaml' },
+              ],
+              access: [{ key: 'server.hub.admin_emails', source: 'default' }],
+            },
+          })
+        )
+      );
+      const text = panelText(element);
+      expect(text).toContain('(from built-in default)');
+      expect(text).toContain('(from SCION_SEED_*)');
+      expect(text).toContain('(from settings.yaml)');
+    });
+
+    it('the Superseded badge goes away after the public URL is cleared', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://file.example.com', source: 'file' },
+        superseded_keys: { endpoints: [{ key: 'server.hub.public_url', source: 'yaml' }] },
+      }) as Record<string, any>;
+      cfg.server.hub.public_url = 'https://saved.example.com';
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: () => {
+            // After the clear the hub reports the bootstrap value in effect
+            // and nothing superseded.
+            delete cfg.superseded_keys;
+            cfg.server.hub.public_url = 'https://file.example.com';
+            return {
+              status: 200,
+              body: { reload: { applied_keys: [], pending_restart: ['server.hub.public_url'] } },
+            };
+          },
+        })
+      );
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+
+      (element as any).hubPublicUrl = '';
+      await (element as any).updateComplete;
+      await clickSave(element);
+
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+      expect(query(element, '.superseded-panel')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://file.example.com'
+      );
+    });
+
+    it('an echo save keeps the value in effect and reports no pending restart', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://hub.example.com', source: 'file' },
+      }) as Record<string, any>;
+      let sent: unknown;
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: (body) => {
+            sent = (body.server as Record<string, any> | undefined)?.hub?.public_url;
+            return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+          },
+        })
+      );
+      withoutSectionFilter(element);
+      await clickSave(element);
+
+      expect(sent).toBe('https://hub.example.com');
+      expect(query(element, '.pending-restart')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://hub.example.com'
+      );
+    });
+  });
+
+  // ── Structured save errors at the field/section (ptone/scion#3923) ──
+
+  describe('Structured save errors shown at the field and section (ptone/scion#3923)', () => {
+    async function clickButton(el: HTMLElement, label: string): Promise<void> {
+      const btn = queryAll(el, 'sl-button').find((b) => b.textContent?.trim() === label);
+      expect(btn, `button "${label}"`).toBeDefined();
+      (btn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    function fieldError(el: HTMLElement, key: string): string[] {
+      return queryAll(el, `[data-field-error="${key}"]`).map((e) =>
+        (e.textContent ?? '').replace(/\s+/g, ' ').trim()
+      );
+    }
+
+    /** Wraps createFetchHandler to answer PUT /api/v1/github-app. */
+    function withGitHubAppPut(
+      base: ReturnType<typeof createFetchHandler>,
+      result: { status: number; body: unknown },
+      onGet?: () => void,
+      onPut?: (body: Record<string, unknown>) => void
+    ) {
+      return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/github-app')) {
+          if (init?.method === 'PUT') {
+            onPut?.(JSON.parse(init.body as string));
+            return Promise.resolve(
+              new Response(JSON.stringify(result.body), {
+                status: result.status,
+                headers: { 'Content-Type': 'application/json' },
+              })
+            );
+          }
+          onGet?.();
+        }
+        return base(url, init);
+      };
+    }
+
+    it("validation_failed with the hub's capitalized Path/Message shows the message at the field and a section summary", async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: {
+                endpoints: [{ Path: 'public_url', Message: 'must be an absolute URL' }],
+              },
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+      await clickButton(element, 'Save & Reload');
+
+      expect(fieldError(element, 'server.hub.public_url')).toEqual(['must be an absolute URL']);
+      const summary = query(element, '[data-section-errors="endpoints"]');
+      expect(summary).not.toBeNull();
+      expect(summary!.textContent).toContain('server.hub.public_url');
+      expect(summary!.textContent).toContain('must be an absolute URL');
+      const top = query(element, '.validation-errors')!.textContent ?? '';
+      expect(top).toContain('must be an absolute URL');
+      expect(top).not.toContain('[object Object]');
+    });
+
+    it('a nested validation_error with no field shows the message in the summary only', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message: 'invalid default_timezone "Not/A/Zone": unknown time zone Not/A/Zone',
+              },
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+      await clickButton(element, 'Save & Reload');
+
+      const top = query(element, '.validation-errors')!.textContent ?? '';
+      expect(top).toContain('General');
+      expect(top).toContain('invalid default_timezone "Not/A/Zone"');
+      expect(queryAll(element, '[data-field-error]')).toHaveLength(0);
+      expect(shadowText(element)).not.toContain('An unexpected error occurred');
+    });
+
+    it('revision_conflict shows the changed-since-loaded notice; Reload refetches and clears stale errors', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const base = createFetchHandler(config, {
+        putHandler: () => ({
+          status: 409,
+          body: {
+            error: 'revision_conflict',
+            message: 'One or more sections have been modified since the expected revision.',
+            applied: {},
+            conflicted: [{ section: 'endpoints', expected_revision: 2, current_revision: 3 }],
+          },
+        }),
+      });
+      let configGets = 0;
+      element = await createComponent((url, init) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/admin/server-config') && init?.method !== 'PUT') configGets++;
+        return base(url, init);
+      });
+
+      await markDirty(element);
+      await clickButton(element, 'Save & Reload');
+
+      const banner = query(element, '.conflict-banner');
+      expect(banner).not.toBeNull();
+      expect(banner!.textContent).toContain('changed since you loaded');
+      expect(banner!.textContent).toContain('endpoints');
+
+      const getsBefore = configGets;
+      await clickButton(element, 'Reload');
+      expect(configGets).toBe(getsBefore + 1);
+      expect(query(element, '.conflict-banner')).toBeNull();
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('layer0_rejected names the deployment-managed key at its field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: 'layer0_rejected',
+              message:
+                'Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.',
+              keys: ['server.mode'],
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+      await clickButton(element, 'Save & Reload');
+
+      const [msg] = fieldError(element, 'server.mode');
+      expect(msg).toContain('server.mode');
+      expect(msg).toContain('managed by deployment configuration and cannot be changed here');
+      expect(query(element, '.safety-net-notice')!.textContent).toContain('server.mode');
+    });
+
+    it('an unknown error keeps the generic message and adds the server message text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 500,
+            body: { error: { code: 'internal_error', message: 'Failed to update section "x"' } },
+          }),
+        })
+      );
+
+      await markDirty(element);
+      await clickButton(element, 'Save & Reload');
+
+      expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
+        'Failed to save settings: Failed to update section "x"'
+      );
+      expect(queryAll(element, '[data-field-error]')).toHaveLength(0);
+    });
+
+    it('a malformed error body (validation code, no usable entries) falls back to the generic message', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: { error: 'validation_failed', errors: { endpoints: [42] } },
+          }),
+        })
+      );
+
+      await markDirty(element);
+      await clickButton(element, 'Save & Reload');
+
+      expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
+        'Failed to save settings'
+      );
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('GitHub App card: a validation error shows inline at the field and in the card summary', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 422,
+          body: {
+            error: {
+              code: 'validation_error',
+              message: 'must be a PEM-encoded key',
+              details: { field: 'private_key' },
+            },
+          },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      expect(fieldError(element, 'server.github_app.private_key')).toEqual([
+        'must be a PEM-encoded key',
+      ]);
+      const summary = query(element, '[data-section-errors="github_app_card"]');
+      expect(summary!.textContent).toContain('must be a PEM-encoded key');
+    });
+
+    it('GitHub App card: revision_conflict offers Reload, which refetches the card', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      let appGets = 0;
+      element = await createComponent(
+        withGitHubAppPut(
+          createFetchHandler(config),
+          {
+            status: 409,
+            body: { error: 'revision_conflict', message: 'changed', conflicted: [] },
+          },
+          () => appGets++
+        )
+      );
+
+      const el = element as any;
+      el.githubAppPrivateKey = '-----BEGIN RSA PRIVATE KEY-----';
+      el.githubAppWebhookSecret = 'whsec_typed';
+      await el.updateComplete;
+
+      await clickButton(element, 'Save GitHub App Configuration');
+      const notice = query(element, '[data-settings-conflict]');
+      expect(notice!.textContent).toContain('Settings changed since you loaded them');
+
+      const before = appGets;
+      (notice!.querySelector('[data-settings-reload]') as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+      expect(appGets).toBe(before + 1);
+      expect(query(element, '[data-settings-conflict]')).toBeNull();
+      // The typed secrets are not kept across Reload.
+      expect(el.githubAppPrivateKey).toBe('');
+      expect(el.githubAppWebhookSecret).toBe('');
+      const panel = query(element, 'sl-tab-panel[name="github-app"]') ?? element.shadowRoot!;
+      expect((panel.querySelector('sl-textarea') as any).value).toBe('');
+      expect((panel.querySelector('sl-input[type="password"]') as any).value).toBe('');
+    });
+
+    it('GitHub App card: the save payload is unchanged by the error handling', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const bodies: Record<string, unknown>[] = [];
+      element = await createComponent(
+        withGitHubAppPut(
+          createFetchHandler(config),
+          { status: 422, body: { error: 'layer0_rejected', keys: ['server.github_app.app_id'] } },
+          undefined,
+          (b) => bodies.push(b)
+        )
+      );
+      const el = element as any;
+      el.githubAppId = 42;
+      el.githubAppApiBaseUrl = 'https://ghe.example.com/api/v3';
+      el.githubAppWebhooksEnabled = true;
+      el.githubAppInstallationUrl = 'https://github.com/apps/x/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      el.githubAppWebhookSecret = 'whsec';
+      await el.updateComplete;
+
+      await clickButton(element, 'Save GitHub App Configuration');
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      const expected = {
+        app_id: 42,
+        api_base_url: 'https://ghe.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/x/installations/new',
+        private_key: 'PEM',
+        webhook_secret: 'whsec',
+      };
+      expect(bodies).toEqual([expected, expected]);
+    });
+
+    it('main save: the exact payload is sent by a failed save and by the save that follows it', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const payloads: Record<string, unknown>[] = [];
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            payloads.push(body);
+            return payloads.length === 1
+              ? {
+                  status: 400,
+                  body: {
+                    error: 'validation_failed',
+                    errors: { endpoints: [{ Path: 'public_url', Message: 'bad' }] },
+                  },
+                }
+              : { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      withoutSectionFilter(element);
+      await clickButton(element, 'Save & Reload');
+      await clickButton(element, 'Save & Reload');
+
+      // The exact body the main save sends for makeBaseConfig in the db tier.
+      const expected = {
+        default_template: 'gemini',
+        default_harness_config: '',
+        image_registry: 'ghcr.io/test',
+        default_max_turns: 0,
+        default_max_model_calls: 0,
+        default_max_duration: '',
+        default_resources: null,
+        default_timezone: '',
+        server: {
+          hub: {
+            public_url: 'https://hub.example.com',
+            admin_emails: ['admin@example.com'],
+            soft_delete_retention: '72h',
+            soft_delete_retain_files: true,
+            auto_suspend_stalled: false,
+          },
+          auth: {
+            user_access_mode: 'open',
+            default_user_role: 'member',
+            authorized_domains: [],
+          },
+          // Empty GitHub App fields are echoed as explicit clears
+          // (ptone/scion#4416).
+          github_app: { app_id: 0, api_base_url: '', installation_url: '' },
+        },
+        // The telemetry switches and agent_secrets are tri-state and were
+        // not changed, so they are left out (ptone/scion#3724).
+        telemetry: {
+          cloud: {
+            endpoint: '',
+            protocol: '',
+            provider: '',
+            gcp_project_id: null,
+          },
+          hub: { report_interval: '' },
+        },
+      };
+      expect(payloads).toEqual([expected, expected]);
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('server message text containing markup renders as text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const markup = '<img src=x onerror="window.__xss=1">';
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: { endpoints: [{ Path: 'public_url', Message: markup }] },
+            },
+          }),
+        })
+      );
+
+      await markDirty(element);
+      await clickButton(element, 'Save & Reload');
+
+      expect(element.shadowRoot!.querySelector('img')).toBeNull();
+      expect(fieldError(element, 'server.hub.public_url')).toEqual([markup]);
+    });
+
+    it('GitHub App card: layer0_rejected names the key and shows it at the field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 422,
+          body: { error: 'layer0_rejected', keys: ['server.github_app.api_base_url'] },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      const notice = query(element, '[data-settings-layer0]');
+      expect(notice!.textContent).toContain('cannot be changed here');
+      expect(notice!.textContent).toContain('server.github_app.api_base_url');
+      expect(fieldError(element, 'server.github_app.api_base_url')[0]).toContain(
+        'managed by deployment configuration'
+      );
+    });
+
+    it('GitHub App card: an unknown error keeps the generic message plus the server text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 500,
+          body: { error: { code: 'internal_error', message: 'failed to store private key' } },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      expect(shadowText(element)).toContain(
+        'Failed to save GitHub App configuration: failed to store private key'
+      );
+    });
+  });
+
+  describe('hub default service account and mapping state (ptone/scion#4391)', () => {
+    it('does not ask for or show a mapping state, and says why', async () => {
+      const saUrls: string[] = [];
+      const base = createFetchHandler(
+        makeBaseConfig({
+          default_gcp_identity_mode: 'assign',
+          default_gcp_identity_service_account_id: 'sa-1',
+        })
+      );
+      element = await createComponent((url, init) => {
+        const raw = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (raw.includes('/gcp-service-accounts')) {
+          saUrls.push(raw);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    id: 'sa-1',
+                    scope: 'hub',
+                    email: 'sa-1@example.com',
+                    displayName: '',
+                    verified: true,
+                  },
+                ],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return base(url, init);
+      });
+
+      expect(saUrls.length).toBeGreaterThan(0);
+      for (const raw of saUrls) {
+        const u = new URL(raw, 'http://hub.example.com');
+        expect(u.searchParams.has('assignStatus')).toBe(false);
+        expect(u.searchParams.has('profile')).toBe(false);
+      }
+
+      const field = queryAll(element, '.form-field').find(
+        (f) =>
+          f.querySelector('label')?.textContent?.trim() === 'Default GCP Identity Service Account'
+      );
+      expect(field).toBeDefined();
+      for (const o of Array.from(field!.querySelectorAll('sl-option'))) {
+        expect(o.hasAttribute('data-assign-state')).toBe(false);
+        expect(o.querySelector('.assign-status')).toBeNull();
+      }
+      const hint = (field!.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ');
+      expect(hint).toContain(
+        'applies to any project and runtime profile that has no default of its own, so no mapping state is shown here'
+      );
+    });
+  });
+
+  // ── Save payloads against the settings registry (ptone/scion#3924) ──
+  //
+  // For each payload builder: every field the page shows as editable is in
+  // the save payload, explicitly, when it is cleared ("omitted means keep"
+  // must never drop a clear), and every key the payload carries is one the
+  // server's settings registry knows. The registry comes from
+  // pkg/config/opsettings/testdata/web_registry_fixture.json (generated from
+  // registry.go; see __fixtures__/settings-registry.ts). The set of shown
+  // fields is taken from the render itself (every koanf key the page asks
+  // readOnlyReason about and renders editable), so a new field fails here
+  // until it is listed in CLEAR and sent by the builder.
+  describe('save payloads against the settings registry (ptone/scion#3924)', () => {
+    /** A GET with every field the page edits set, so each one renders and clearing it is a change. */
+    function makeFullConfig(overrides: Record<string, unknown>): Record<string, unknown> {
+      return {
+        schema_version: '1',
+        active_profile: 'default',
+        workspace_path: '/srv/workspace',
+        default_template: 'gemini',
+        default_harness_config: 'gemini',
+        image_registry: 'ghcr.io/test',
+        default_max_turns: 10,
+        default_max_model_calls: 20,
+        default_max_duration: '1h',
+        default_resources: {
+          requests: { cpu: '1', memory: '1Gi' },
+          limits: { cpu: '2', memory: '2Gi' },
+          disk: '10Gi',
+        },
+        default_model: 'large',
+        default_thinking_level: 2,
+        default_runtime_broker: 'broker-1',
+        default_timezone: 'Europe/Paris',
+        default_gcp_identity_mode: 'assign',
+        default_gcp_identity_service_account_id: 'sa-1',
+        server: {
+          mode: 'standalone',
+          log_level: 'info',
+          hub: {
+            port: 8080,
+            host: '0.0.0.0',
+            public_url: 'https://hub.example.com',
+            monitoring_dashboard_url: 'https://monitoring.example.com',
+            read_timeout: '30s',
+            write_timeout: '30s',
+            admin_emails: ['admin@example.com'],
+            soft_delete_retention: '72h',
+            soft_delete_retain_files: true,
+            auto_suspend_stalled: true,
+            stalled_threshold: '10m',
+            start_claim_lease_ttl: '2m',
+            start_max_duration: '15m',
+            start_unconfirmed_hold: '18m',
+            start_create_unconfirmed_hold: '17m',
+            gcp_iam_check_mode: 'enforce',
+            gcp_iam_deny_unknown_policy: 'fail-closed',
+            observability: { metrics_enabled: true, tracing_enabled: false },
+          },
+          broker: {
+            enabled: true,
+            port: 9090,
+            host: '0.0.0.0',
+            hub_endpoint: 'http://hub.internal',
+            container_hub_endpoint: 'http://hub.container',
+            broker_name: 'broker-a',
+            broker_nickname: 'nick',
+            auto_provide: true,
+          },
+          database: { driver: 'postgres', url: '********' },
+          auth: {
+            dev_mode: false,
+            dev_token: '********',
+            user_access_mode: 'invite',
+            default_user_role: 'admin',
+            authorized_domains: ['example.com'],
+          },
+          storage: { provider: 'gcs', bucket: 'bucket-a', local_path: '/data' },
+          secrets: {
+            backend: 'gcpsm',
+            gcp_project_id: 'secrets-project',
+            gcp_replication_locations: ['us-east1'],
+          },
+          message_broker: { enabled: true, type: 'inprocess' },
+          native_chat: { enabled: true },
+        },
+        telemetry: {
+          enabled: true,
+          cloud: {
+            enabled: true,
+            endpoint: 'otel.example.com:4317',
+            protocol: 'grpc',
+            provider: 'gcp',
+            gcp_project_id: 'telemetry-project',
+            cloud_logging: true,
+          },
+          hub: { enabled: true, report_interval: '30s' },
+        },
+        auto_expose_ports: { enabled: true },
+        quotas: { enforce_broker_quotas: true },
+        agent_secrets: { user_scope_only: true },
+        runtimes: { docker: { type: 'docker' } },
+        profiles: { default: { runtime: 'docker' } },
+        harness_configs: { gemini: { harness: 'gemini' } },
+        ...overrides,
+      };
+    }
+
+    /**
+     * How to clear each field the page can show, and the value a cleared
+     * field must be sent as. bodyPath is the PUT body path when it differs
+     * from the koanf key.
+     */
+    interface ClearSpec {
+      clear: (el: any) => void;
+      expected: unknown;
+      bodyPath?: string[];
+    }
+    const CLEAR: Record<string, ClearSpec> = {
+      // agent_defaults / endpoints
+      default_template: { clear: (el) => (el.defaultTemplate = ''), expected: '' },
+      default_harness_config: {
+        clear: (el) => {
+          el.harnessConfigSelection = '';
+          el.customHarnessConfig = '';
+        },
+        expected: '',
+      },
+      image_registry: { clear: (el) => (el.imageRegistry = ''), expected: '' },
+      default_max_turns: { clear: (el) => (el.defaultMaxTurns = 0), expected: 0 },
+      default_max_model_calls: { clear: (el) => (el.defaultMaxModelCalls = 0), expected: 0 },
+      default_max_duration: { clear: (el) => (el.defaultMaxDuration = ''), expected: '' },
+      default_resources: {
+        clear: (el) => {
+          el.defaultResCpuReq = '';
+          el.defaultResMemReq = '';
+          el.defaultResCpuLim = '';
+          el.defaultResMemLim = '';
+          el.defaultResDisk = '';
+        },
+        expected: null,
+      },
+      default_model: {
+        clear: (el) => {
+          el.defaultModelSelection = '';
+          el.defaultCustomModelId = '';
+        },
+        expected: '',
+      },
+      default_thinking_level: { clear: (el) => (el.defaultThinkingLevel = null), expected: null },
+      default_runtime_broker: { clear: (el) => (el.defaultRuntimeBroker = ''), expected: '' },
+      default_timezone: { clear: (el) => (el.defaultTimezone = ''), expected: '' },
+      default_gcp_identity_mode: { clear: (el) => (el.defaultGCPIdentityMode = ''), expected: '' },
+      default_gcp_identity_service_account_id: {
+        clear: (el) => (el.defaultGCPIdentitySAID = ''),
+        expected: '',
+      },
+      'server.hub.public_url': { clear: (el) => (el.hubPublicUrl = ''), expected: '' },
+      'server.hub.monitoring_dashboard_url': {
+        clear: (el) => {
+          el.hubMonitoringDashboardUrl = '';
+          el.monitoringDashboardUrlTouched = true;
+        },
+        expected: '',
+      },
+      // access
+      'server.hub.admin_emails': { clear: (el) => (el.hubAdminEmails = ''), expected: [] },
+      'server.auth.user_access_mode': { clear: (el) => (el.authUserAccessMode = ''), expected: '' },
+      'server.auth.default_user_role': {
+        clear: (el) => (el.authDefaultUserRole = ''),
+        expected: '',
+      },
+      'server.auth.authorized_domains': {
+        clear: (el) => (el.authAuthorizedDomains = ''),
+        expected: [],
+      },
+      // lifecycle
+      'server.hub.soft_delete_retention': {
+        clear: (el) => (el.hubSoftDeleteRetention = ''),
+        expected: '',
+      },
+      'server.hub.soft_delete_retain_files': {
+        clear: (el) => (el.hubSoftDeleteRetainFiles = false),
+        expected: false,
+      },
+      'server.hub.auto_suspend_stalled': {
+        clear: (el) => (el.hubAutoSuspendStalled = false),
+        expected: false,
+      },
+      'server.hub.stalled_threshold': {
+        clear: (el) => (el.hubStalledThreshold = ''),
+        expected: '',
+      },
+      'server.hub.start_claim_lease_ttl': {
+        clear: (el) => (el.hubStartTimings = { ...el.hubStartTimings, start_claim_lease_ttl: '' }),
+        expected: '',
+      },
+      'server.hub.start_max_duration': {
+        clear: (el) => (el.hubStartTimings = { ...el.hubStartTimings, start_max_duration: '' }),
+        expected: '',
+      },
+      'server.hub.start_unconfirmed_hold': {
+        clear: (el) => (el.hubStartTimings = { ...el.hubStartTimings, start_unconfirmed_hold: '' }),
+        expected: '',
+      },
+      'server.hub.start_create_unconfirmed_hold': {
+        clear: (el) =>
+          (el.hubStartTimings = { ...el.hubStartTimings, start_create_unconfirmed_hold: '' }),
+        expected: '',
+      },
+      // gcp_iam: selects with no empty option; "cleared" is the default.
+      'server.hub.gcp_iam_check_mode': {
+        clear: (el) => (el.hubGcpIamCheckMode = 'off'),
+        expected: 'off',
+      },
+      'server.hub.gcp_iam_deny_unknown_policy': {
+        clear: (el) => (el.hubGcpIamDenyUnknownPolicy = 'fail-open'),
+        expected: 'fail-open',
+      },
+      // auto_expose_ports / quotas / agent_secrets
+      'auto_expose_ports.enabled': {
+        clear: (el) => (el.autoExposePortsEnabled = false),
+        expected: false,
+      },
+      'quotas.enforce_broker_quotas': {
+        clear: (el) => (el.enforceBrokerQuotas = false),
+        expected: false,
+      },
+      'agent_secrets.user_scope_only': {
+        clear: (el) => (el.agentSecretsUserScopeOnly = false),
+        expected: false,
+      },
+      // hub_observability: "cleared" is unset (Use default), sent as null.
+      'server.hub.observability.metrics_enabled': {
+        clear: (el) => (el.hubMetricsEnabled = null),
+        expected: null,
+      },
+      'server.hub.observability.tracing_enabled': {
+        clear: (el) => (el.hubTracingEnabled = null),
+        expected: null,
+      },
+      // telemetry
+      'telemetry.enabled': { clear: (el) => (el.telemetryEnabled = false), expected: false },
+      'telemetry.cloud.enabled': {
+        clear: (el) => (el.telemetryCloudEnabled = false),
+        expected: false,
+      },
+      'telemetry.cloud.endpoint': { clear: (el) => (el.telemetryCloudEndpoint = ''), expected: '' },
+      'telemetry.cloud.protocol': { clear: (el) => (el.telemetryCloudProtocol = ''), expected: '' },
+      'telemetry.cloud.provider': { clear: (el) => (el.telemetryCloudProvider = ''), expected: '' },
+      'telemetry.cloud.gcp_project_id': {
+        clear: (el) => (el.telemetryCloudGcpProjectId = ''),
+        expected: null,
+      },
+      'telemetry.cloud.cloud_logging': {
+        clear: (el) => (el.telemetryCloudCloudLogging = false),
+        expected: false,
+      },
+      'telemetry.hub.enabled': { clear: (el) => (el.telemetryHubEnabled = false), expected: false },
+      'telemetry.hub.report_interval': {
+        clear: (el) => (el.telemetryHubReportInterval = ''),
+        expected: '',
+      },
+      // map sections
+      runtimes: { clear: (el) => (el.runtimes = {}), expected: {} },
+      profiles: { clear: (el) => (el.profiles = {}), expected: {} },
+      harness_configs: { clear: (el) => (el.harnessConfigsMap = {}), expected: {} },
+      // Layer-0 and settings.yaml-only fields (editable on a workstation hub)
+      active_profile: { clear: (el) => (el.activeProfile = ''), expected: '' },
+      workspace_path: { clear: (el) => (el.workspacePath = ''), expected: '' },
+      'server.mode': { clear: (el) => (el.serverMode = ''), expected: '' },
+      'server.log_level': { clear: (el) => (el.logLevel = ''), expected: '' },
+      'server.hub.port': { clear: (el) => (el.hubPort = 0), expected: 0 },
+      'server.hub.host': { clear: (el) => (el.hubHost = ''), expected: '' },
+      'server.hub.read_timeout': { clear: (el) => (el.hubReadTimeout = ''), expected: '' },
+      'server.hub.write_timeout': { clear: (el) => (el.hubWriteTimeout = ''), expected: '' },
+      'server.broker.enabled': { clear: (el) => (el.brokerEnabled = false), expected: false },
+      'server.broker.port': { clear: (el) => (el.brokerPort = 0), expected: 0 },
+      'server.broker.host': { clear: (el) => (el.brokerHost = ''), expected: '' },
+      'server.broker.hub_endpoint': { clear: (el) => (el.brokerHubEndpoint = ''), expected: '' },
+      'server.broker.container_hub_endpoint': {
+        clear: (el) => (el.brokerContainerHubEndpoint = ''),
+        expected: '',
+      },
+      'server.broker.broker_name': {
+        clear: (el) => (el.brokerName = ''),
+        expected: '',
+        bodyPath: ['server', 'broker', 'broker_name'],
+      },
+      'server.broker.broker_nickname': {
+        clear: (el) => (el.brokerNickname = ''),
+        expected: '',
+        bodyPath: ['server', 'broker', 'broker_nickname'],
+      },
+      'server.broker.auto_provide': {
+        clear: (el) => (el.brokerAutoProvide = false),
+        expected: false,
+      },
+      'server.database.driver': { clear: (el) => (el.dbDriver = ''), expected: '' },
+      'server.database.url': { clear: (el) => (el.dbUrl = ''), expected: '' },
+      'server.auth.dev_mode': { clear: (el) => (el.authDevMode = false), expected: false },
+      'server.auth.dev_token': { clear: (el) => (el.authDevToken = ''), expected: '' },
+      'server.storage.provider': { clear: (el) => (el.storageProvider = ''), expected: '' },
+      'server.storage.bucket': { clear: (el) => (el.storageBucket = ''), expected: '' },
+      'server.storage.local_path': { clear: (el) => (el.storageLocalPath = ''), expected: '' },
+      'server.secrets.backend': { clear: (el) => (el.secretsBackend = ''), expected: '' },
+      'server.secrets.gcp_project_id': {
+        clear: (el) => (el.secretsGCPProjectId = ''),
+        expected: '',
+      },
+      'server.secrets.gcp_replication_locations': {
+        clear: (el) => (el.secretsGCPReplicationLocations = ''),
+        expected: [],
+      },
+      'server.message_broker.enabled': {
+        clear: (el) => (el.messageBrokerEnabled = false),
+        expected: false,
+      },
+      'server.message_broker.type': { clear: (el) => (el.messageBrokerType = ''), expected: '' },
+      'server.native_chat.enabled': {
+        clear: (el) => (el.nativeChatEnabled = false),
+        expected: false,
+      },
+    };
+
+    /**
+     * Fields on the GitHub App tab. They are saved by the tab's own button
+     * (PUT /api/v1/github-app), not by Save & Reload, so they are checked
+     * against that request.
+     */
+    const GITHUB_APP_CLEAR: Record<string, ClearSpec> = {
+      // PUT /api/v1/github-app reads null as "keep", so app_id clears as 0.
+      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: 0 },
+      'server.github_app.api_base_url': {
+        clear: (el) => (el.githubAppApiBaseUrl = ''),
+        expected: '',
+      },
+      'server.github_app.webhooks_enabled': {
+        clear: (el) => (el.githubAppWebhooksEnabled = false),
+        expected: false,
+      },
+      'server.github_app.installation_url': {
+        clear: (el) => (el.githubAppInstallationUrl = ''),
+        expected: '',
+      },
+    };
+
+    /**
+     * Known payload gaps: GitHub App fields left out of the save when
+     * cleared. The three reported on ptone/scion#3924 (app_id, api_base_url,
+     * installation_url) were fixed in ptone/scion#4416. The test asserts this
+     * exact list, so a new gap fails it.
+     */
+    const KNOWN_GITHUB_APP_GAPS: string[] = [];
+
+    const READ_ONLY_PROBE = 'readOnlyReason';
+
+    /**
+     * Renders the page and returns the koanf keys it shows as editable: the
+     * keys the render asks readOnlyReason about whose answer is null. All
+     * tab panels render at once, so one render covers every tab.
+     */
+    async function renderShownKeys(
+      config: Record<string, unknown>,
+      opts: {
+        putHandler?: (body: Record<string, unknown>) => { status: number; body: unknown };
+      } = {}
+    ): Promise<{ el: any; shown: string[]; puts: Array<{ path: string; body: any }> }> {
+      const puts: Array<{ path: string; body: any }> = [];
+      const base = createFetchHandler(config, {
+        schemaResponse: registrySchemaResponse(),
+        ...(opts.putHandler ? { putHandler: opts.putHandler } : {}),
+      });
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (init?.method === 'PUT') {
+          puts.push({ path, body: JSON.parse(init.body as string) });
+          if (!path.includes('/api/v1/admin/server-config')) {
+            return Promise.resolve(new Response('{}', { status: 200 }));
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify({ reload: { applied: [] } }), { status: 200 })
+          );
+        }
+        return base(url, init);
+      };
+      element = await createComponent(handler);
+      const el = element as any;
+      const proto = Object.getPrototypeOf(el);
+      const spy = vi.spyOn(proto, READ_ONLY_PROBE);
+      el.requestUpdate();
+      await el.updateComplete;
+      const shown = new Set<string>();
+      spy.mock.calls.forEach((call, i) => {
+        if (spy.mock.results[i]?.value === null) shown.add(call[0] as string);
+      });
+      spy.mockRestore();
+      return { el, shown: [...shown].sort(), puts };
+    }
+
+    async function clickSave(el: any, label: string): Promise<void> {
+      await el.updateComplete;
+      const btn = queryAll(el, 'sl-button').find((b) => b.textContent?.trim() === label);
+      expect(btn, `button "${label}"`).toBeDefined();
+      (btn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    /** Clears every shown field, saves, and checks the payload. */
+    async function checkClearedSave(
+      config: Record<string, unknown>,
+      scope: PayloadScope,
+      opts: { mutate?: (payload: Record<string, unknown>) => void } = {}
+    ): Promise<{ shown: string[]; payload: Record<string, unknown> }> {
+      const { el, shown, puts } = await renderShownKeys(config);
+      const mainShown = shown.filter((k) => !(k in GITHUB_APP_CLEAR));
+      expect(
+        mainShown.filter((k) => !(k in CLEAR)),
+        'shown fields with no CLEAR entry (list the field and send it from the builder)'
+      ).toEqual([]);
+      for (const key of mainShown) CLEAR[key]!.clear(el);
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(put).toBeDefined();
+      const payload = put!.body as Record<string, unknown>;
+      opts.mutate?.(payload);
+
+      const notSent: string[] = [];
+      const wrongValue: string[] = [];
+      for (const key of mainShown) {
+        const spec = CLEAR[key]!;
+        const { present, value } = valueAtPath(payload, spec.bodyPath ?? key.split('.'));
+        if (!present) notSent.push(key);
+        else if (JSON.stringify(value) !== JSON.stringify(spec.expected))
+          wrongValue.push(`${key}=${JSON.stringify(value)}`);
+      }
+      expect(notSent, 'shown fields missing from the cleared save payload').toEqual([]);
+      expect(wrongValue, 'cleared fields not sent as their explicit empty value').toEqual([]);
+      expect(unknownPayloadKeys(payload, scope), 'payload keys not in the registry').toEqual([]);
+      return { shown, payload };
+    }
+
+    it('hosted (Layer-1) save: every shown field is sent when cleared, and every key is in the registry', async () => {
+      const { shown } = await checkClearedSave(makeFullConfig({ settings_tier: 'db' }), 'layer1');
+      // Hosted shows only registry keys as editable.
+      expect(shown.filter((k) => owningSection(k) === '')).toEqual([]);
+      expect(shown.length).toBeGreaterThan(30);
+    });
+
+    it('workstation save: every shown field is sent when cleared, and every key is a registry, Layer-0 or settings.yaml key', async () => {
+      const { shown } = await checkClearedSave(
+        makeFullConfig({ settings_tier: 'db', layer0_editable: true }),
+        'settings'
+      );
+      // The workstation form adds Layer-0 fields to the hosted set.
+      expect(shown.some((k) => isLayer0Key(k))).toBe(true);
+    });
+
+    it('workstation save with nothing changed sends only registry, Layer-0 or settings.yaml keys', async () => {
+      const { el, puts } = await renderShownKeys(
+        makeFullConfig({ settings_tier: 'db', layer0_editable: true })
+      );
+      await markDirty(element);
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(unknownPayloadKeys(put!.body, 'settings')).toEqual([]);
+    });
+
+    it('file-mode save sends only registry, Layer-0 or settings.yaml keys', async () => {
+      const { el, puts } = await renderShownKeys(makeFullConfig({ settings_tier: 'file' }));
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(unknownPayloadKeys(put!.body, 'settings')).toEqual([]);
+    });
+
+    it('GitHub App save: every shown field is sent when cleared (known gaps listed), and every key is in the registry', async () => {
+      const { el, shown, puts } = await renderShownKeys(makeFullConfig({ settings_tier: 'db' }));
+      // Loaded values, so clearing each one is a change.
+      el.githubAppId = 123;
+      el.githubAppApiBaseUrl = 'https://ghe.example.com/api/v3';
+      el.githubAppWebhooksEnabled = true;
+      el.githubAppInstallationUrl = 'https://github.com/apps/x/installations/new';
+      const ghShown = shown.filter((k) => k.startsWith('server.github_app.'));
+      expect(
+        ghShown.filter((k) => !(k in GITHUB_APP_CLEAR)),
+        'GitHub App fields with no GITHUB_APP_CLEAR entry'
+      ).toEqual([]);
+      expect(ghShown.length).toBeGreaterThan(0);
+      for (const key of ghShown) GITHUB_APP_CLEAR[key]!.clear(el);
+      await clickSave(el, 'Save GitHub App Configuration');
+      const put = puts.find((p) => p.path.includes('/api/v1/github-app'));
+      expect(put).toBeDefined();
+      const body = put!.body as Record<string, unknown>;
+
+      const notSent = ghShown.filter((k) => !(k.slice('server.github_app.'.length) in body));
+      expect(notSent.sort(), 'GitHub App fields dropped on clear').toEqual(KNOWN_GITHUB_APP_GAPS);
+      for (const key of ghShown.filter((k) => !notSent.includes(k))) {
+        expect(body[key.slice('server.github_app.'.length)], key).toEqual(
+          GITHUB_APP_CLEAR[key]!.expected
+        );
+      }
+      // Secrets (private_key, webhook_secret) go to the hub secret store,
+      // not settings; every other key is a server.github_app registry key.
+      const unknown = Object.keys(body)
+        .filter((k) => k !== 'private_key' && k !== 'webhook_secret')
+        .map((k) => `server.github_app.${k}`)
+        .filter((k) => owningSection(k) !== 'github_app');
+      expect(unknown).toEqual([]);
+    });
+  });
+  describe('GitHub App card sends explicit clears (ptone/scion#4416)', () => {
+    const LOADED = {
+      app_id: 123,
+      api_base_url: 'https://ghe.example.com/api/v3',
+      webhooks_enabled: true,
+      installation_url: 'https://github.com/apps/x/installations/new',
+    };
+
+    /** Ways the mock hub can fail a request. */
+    interface MockFailures {
+      /** GET /api/v1/admin/server-config answers 500. */
+      configGet?: boolean;
+      /** GET /api/v1/github-app answers 500, or throws (network error). */
+      githubAppGet?: 'status' | 'throw';
+      /** PUT /api/v1/github-app answers 500 and stores nothing. */
+      githubAppPut?: boolean;
+      /** A GET /api/v1/github-app after a PUT waits for this to settle. */
+      holdGetAfterPut?: Promise<void>;
+    }
+
+    const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+    /**
+     * A fetch handler whose GET /api/v1/github-app returns the stored
+     * config and whose PUT applies the sent non-secret keys to it, as the
+     * hub does (a sent "" or 0 replaces the stored value; an omitted key
+     * keeps it). The GET leaves out empty URLs, as the hub's omitempty does.
+     */
+    function statefulGitHubApp(
+      config: Record<string, unknown>,
+      fail: MockFailures = {}
+    ): {
+      handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+      puts: Array<Record<string, unknown>>;
+      stored: Record<string, unknown>;
+    } {
+      const stored: Record<string, unknown> = { ...LOADED };
+      const puts: Array<Record<string, unknown>> = [];
+      const base = createFetchHandler(config);
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        const isPut = init?.method === 'PUT';
+        if (fail.configGet && !isPut && path.includes('/api/v1/admin/server-config')) {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        }
+        if (!path.endsWith('/api/v1/github-app')) return base(url, init);
+        if (isPut) {
+          const body = JSON.parse(init.body as string) as Record<string, unknown>;
+          puts.push(body);
+          if (fail.githubAppPut) return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+          for (const k of ['app_id', 'api_base_url', 'webhooks_enabled', 'installation_url']) {
+            if (k in body) stored[k] = body[k];
+          }
+        } else if (fail.holdGetAfterPut && puts.length > 0) {
+          return fail.holdGetAfterPut.then(storedResponse);
+        } else if (fail.githubAppGet === 'status') {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        } else if (fail.githubAppGet === 'throw') {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return storedResponse();
+      };
+      function storedResponse(): Promise<Response> {
+        const res: Record<string, unknown> = { ...stored, configured: true };
+        for (const k of ['api_base_url', 'installation_url']) {
+          if (!res[k]) delete res[k];
+        }
+        return jsonResponse(res);
+      }
+      return { handler, puts, stored };
+    }
+
+    /** The page members these tests drive. */
+    interface CardElement {
+      [state: string]: unknown;
+      handleSaveGitHubApp(): Promise<void>;
+      buildLayer1Payload(): { server?: { github_app?: Record<string, unknown> } };
+      buildFilePayload(): { server?: { github_app?: Record<string, unknown> } };
+    }
+
+    function saveButton(el: HTMLElement): HTMLElement {
+      const btn = query(el, 'sl-button[data-action="save-github-app"]');
+      expect(btn, 'card Save button').not.toBeNull();
+      return btn as HTMLElement;
+    }
+
+    const FIELDS = [
+      { state: 'githubAppId', key: 'app_id', cleared: 0 },
+      { state: 'githubAppApiBaseUrl', key: 'api_base_url', cleared: '' },
+      { state: 'githubAppInstallationUrl', key: 'installation_url', cleared: '' },
+    ] as const;
+
+    for (const field of FIELDS) {
+      it(`clearing ${field.key} sends ${JSON.stringify(field.cleared)}, the stored value is removed, and the other fields are unchanged`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' })
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el[field.state]).toEqual(LOADED[field.key]);
+
+        el[field.state] = field.cleared;
+        await el.handleSaveGitHubApp();
+
+        expect(puts).toHaveLength(1);
+        expect(puts[0]![field.key]).toBe(field.cleared);
+        expect(stored[field.key]).toBe(field.cleared);
+        // Untouched fields go back as loaded.
+        for (const other of FIELDS.filter((f) => f !== field)) {
+          expect(puts[0]![other.key], other.key).toEqual(LOADED[other.key]);
+        }
+        expect(puts[0]!.webhooks_enabled).toBe(true);
+        // Secrets are sent only when typed in.
+        expect('private_key' in puts[0]!).toBe(false);
+        expect('webhook_secret' in puts[0]!).toBe(false);
+        // The main save's echo carries the clear too.
+        const echo = el.buildLayer1Payload().server!.github_app!;
+        expect(echo[field.key]).toBe(field.cleared);
+      });
+    }
+
+    it('a set value is sent as entered', async () => {
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 456;
+      el.githubAppApiBaseUrl = 'https://ghe2.example.com/api/v3';
+      el.githubAppInstallationUrl = 'https://github.com/apps/y/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      await el.handleSaveGitHubApp();
+      expect(puts[0]).toEqual({
+        app_id: 456,
+        api_base_url: 'https://ghe2.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/y/installations/new',
+        private_key: 'PEM',
+      });
+    });
+
+    // A card save bumps the github_app section's revision outside the main
+    // form (ptone/scion#3922): the main save must not treat github_app as
+    // changed, and a later real change must carry the new revision.
+    describe('card save and the main section-level save', () => {
+      function withMainPuts(config: Record<string, unknown>): {
+        handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+        mainPuts: Array<Record<string, unknown>>;
+      } {
+        const { handler: gh } = statefulGitHubApp(config);
+        const mainPuts: Array<Record<string, unknown>> = [];
+        const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+          const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+          if (path.endsWith('/api/v1/github-app') && init?.method === 'PUT') {
+            // The hub bumps the section's revision on the card's save.
+            const meta = config.section_metadata as Record<string, { revision?: number }>;
+            meta.github_app = {
+              ...meta.github_app,
+              revision: (meta.github_app?.revision ?? 0) + 1,
+            };
+          }
+          if (
+            path.includes('/api/v1/admin/server-config') &&
+            !path.includes('/schema') &&
+            init?.method === 'PUT'
+          ) {
+            mainPuts.push(JSON.parse(init.body as string) as Record<string, unknown>);
+            return jsonResponse({ reload: { applied: [] } });
+          }
+          return gh(url, init);
+        };
+        return { handler, mainPuts };
+      }
+
+      const config = (): Record<string, unknown> =>
+        makeBaseConfig({
+          settings_tier: 'db',
+          section_metadata: {
+            github_app: { source: 'db', revision: 3 },
+            agent_defaults: { source: 'db', revision: 5 },
+          },
+        });
+
+      it('after a card save the main save sends no github_app and no github_app revision', async () => {
+        const { handler, mainPuts } = withMainPuts(config());
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        el.githubAppApiBaseUrl = 'https://ghe-new.example.com/api/v3';
+        await el.handleSaveGitHubApp();
+
+        await markDirty(element);
+        const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save & Reload'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        expect(mainPuts).toHaveLength(1);
+        const server = mainPuts[0]!.server as Record<string, unknown> | undefined;
+        expect(server?.github_app).toBeUndefined();
+        expect(mainPuts[0]!.expected_revisions).toEqual({ agent_defaults: 5 });
+      });
+
+      it('control: after a card save an unchanged form says there is nothing to save', async () => {
+        const { handler, mainPuts } = withMainPuts(config());
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        el.githubAppApiBaseUrl = 'https://ghe-new.example.com/api/v3';
+        await el.handleSaveGitHubApp();
+
+        const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save & Reload'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+
+        expect(mainPuts).toHaveLength(0);
+        expect(shadowText(element)).toContain('No changes to save');
+      });
+
+      it('a later github_app change carries the revision the card save left', async () => {
+        const { handler, mainPuts } = withMainPuts(config());
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        el.githubAppApiBaseUrl = 'https://ghe-new.example.com/api/v3';
+        await el.handleSaveGitHubApp();
+        expect((element as any).loadedRevisions.github_app).toBe(4);
+
+        // A github_app value the main save sends that differs from the
+        // baseline (the echo is the only way the main form carries it).
+        (element as any).rawConfig.server.github_app = {
+          ...(element as any).rawConfig.server.github_app,
+          installation_url: 'https://github.com/apps/z/installations/new',
+        };
+        const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save & Reload'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        expect(mainPuts).toHaveLength(1);
+        expect(mainPuts[0]!.expected_revisions).toEqual({ github_app: 4 });
+      });
+    });
+
+    // A card that did not load holds defaults (app_id 0, empty URLs), not
+    // the stored config. Saving them would clear the stored App, so the
+    // card cannot be saved and the main save leaves github_app out.
+    const LOAD_FAILURES: Array<{ name: string; fail: MockFailures }> = [
+      { name: 'GET server-config answers 500', fail: { configGet: true } },
+      { name: 'GET github-app answers 500', fail: { githubAppGet: 'status' } },
+      { name: 'GET github-app throws', fail: { githubAppGet: 'throw' } },
+    ];
+
+    for (const { name, fail } of LOAD_FAILURES) {
+      it(`${name}: the card cannot be saved and sends no PUT`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' }),
+          fail
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el.githubAppLoaded).toBe(false);
+        expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+        expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+
+        // Even a direct call (or a typed secret) sends nothing.
+        el.githubAppPrivateKey = 'PEM';
+        await el.handleSaveGitHubApp();
+        expect(puts).toEqual([]);
+        expect(stored).toEqual(LOADED);
+      });
+    }
+
+    for (const { name, fail } of LOAD_FAILURES.filter((f) => !f.fail.configGet)) {
+      for (const tier of ['db', 'file'] as const) {
+        it(`${name}: the ${tier} main save leaves github_app out`, async () => {
+          // The server-config GET carries a github_app block, so the
+          // payload would echo it if the card's load were not checked.
+          const base = makeBaseConfig({ settings_tier: tier });
+          const config = {
+            ...base,
+            server: { ...(base.server as Record<string, unknown>), github_app: { app_id: 123 } },
+          };
+          const { handler } = statefulGitHubApp(config, fail);
+          element = await createComponent(handler);
+          const el = element as unknown as CardElement;
+          const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+          expect(payload.server?.github_app).toBeUndefined();
+        });
+      }
+    }
+
+    it('a loaded card can be saved', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      expect((element as unknown as CardElement).githubAppLoaded).toBe(true);
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+    });
+
+    it('the reload after a card save does not show the "did not load" hint while in flight', async () => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        holdGetAfterPut: hold,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & { updateComplete: Promise<boolean> };
+      el.githubAppApiBaseUrl = '';
+      const saving = el.handleSaveGitHubApp();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await el.updateComplete;
+      // The PUT is done and the reload GET is held.
+      expect(puts).toHaveLength(1);
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+
+      release();
+      await saving;
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+    });
+
+    it('a reload that fails after a loaded card disables Save and shows the hint', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & {
+        updateComplete: Promise<boolean>;
+        loadGitHubAppConfig(): Promise<void>;
+      };
+      expect(el.githubAppLoaded).toBe(true);
+      vi.mocked(fetch).mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+      await el.loadGitHubAppConfig();
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+    });
+
+    it('main save with the card untouched echoes the loaded values', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    it('main save after a failed card save still echoes the loaded values', async () => {
+      const { handler, puts, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        githubAppPut: true,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 0;
+      el.githubAppApiBaseUrl = '';
+      await el.handleSaveGitHubApp();
+      expect(puts).toHaveLength(1);
+      expect(stored).toEqual(LOADED);
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    for (const tier of ['db', 'file'] as const) {
+      it(`${tier} mode main save echoes empty GitHub App fields as explicit clears`, async () => {
+        const { handler, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: tier }));
+        stored.app_id = 0;
+        stored.api_base_url = '';
+        stored.installation_url = '';
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+        expect(payload.server!.github_app).toEqual({
+          app_id: 0,
+          api_base_url: '',
+          webhooks_enabled: true,
+          installation_url: '',
+        });
+      });
+    }
+  });
+});
+
+// ── Save report: keys applied now vs pending a restart (ptone/scion#3904) ──
+
+describe('save report', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function saveWith(reload: Record<string, unknown>): Promise<HTMLElement> {
+    const el = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+        putHandler: () => ({ status: 200, body: { status: 'saved', reload } }),
+      })
+    );
+    withoutSectionFilter(el);
+    const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    expect(saveBtn).toBeDefined();
+    (saveBtn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+    return el;
+  }
+
+  it('shows "Saved; applies after restart" for keys pending a restart', async () => {
+    element = await saveWith({
+      applied: ['endpoints', 'lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.hub_name', 'server.hub.soft_delete_retention'],
+      pending_restart: ['server.hub.public_url'],
+    });
+    const pending = query(element, '.reload-info .pending-restart');
+    expect(pending).not.toBeNull();
+    expect(pending!.textContent).toContain('Saved; applies after restart');
+    expect(pending!.textContent).toContain('server.hub.public_url');
+    expect(pending!.textContent).not.toContain('server.hub.hub_name');
+
+    const applied = query(element, '.reload-info .applied-keys');
+    expect(applied).not.toBeNull();
+    expect(applied!.textContent).toContain('server.hub.hub_name');
+    expect(applied!.textContent).toContain('server.hub.soft_delete_retention');
+
+    // The section-level line is replaced by the key-level lists.
+    expect(shadowText(element)).not.toContain('Reloaded:');
+  });
+
+  it('keeps the "Reloaded:" line for settings.yaml changes applied live', async () => {
+    element = await saveWith({
+      applied: ['lifecycle', 'log_level'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+      file_applied: ['log_level'],
+    });
+    const lines = queryAll(element, '.reload-info .applied:not(.applied-keys)');
+    expect(lines.length).toBe(1);
+    expect(lines[0].textContent).toContain('Reloaded: log_level');
+    expect(lines[0].textContent).not.toContain('lifecycle');
+  });
+
+  it('shows the section-level line when the response has no key-level lists', async () => {
+    element = await saveWith({ applied: ['log_level'], requires_restart: [] });
+    expect(shadowText(element)).toContain('Reloaded: log_level');
+  });
+
+  it('lists skipped keys with their reasons apart from the applied keys', async () => {
+    element = await saveWith({
+      applied: ['endpoints', 'notifications'],
+      requires_restart: [],
+      applied_keys: ['server.hub.hub_name'],
+      pending_restart: [],
+      skipped: [
+        {
+          key: 'server.notification_channels',
+          reason: 'Notification channel 2 of 2 failed validation and is not in use.',
+        },
+      ],
+    });
+    const skipped = query(element, '.reload-info .skipped-keys');
+    expect(skipped).not.toBeNull();
+    expect(skipped!.textContent).toContain('Saved but not applied');
+    expect(skipped!.textContent).toContain('server.notification_channels');
+    expect(skipped!.textContent).toContain('Notification channel 2 of 2 failed validation');
+
+    const applied = query(element, '.reload-info .applied-keys');
+    expect(applied).not.toBeNull();
+    expect(applied!.textContent).toContain('server.hub.hub_name');
+    expect(applied!.textContent).not.toContain('server.notification_channels');
+  });
+
+  it('shows no "Applied now" line when every changed key was skipped', async () => {
+    element = await saveWith({
+      applied: ['federation'],
+      requires_restart: [],
+      applied_keys: [],
+      pending_restart: [],
+      skipped: [{ key: 'server.federation.enabled', reason: 'Could not be applied.' }],
+    });
+    expect(query(element, '.reload-info .applied-keys')).toBeNull();
+    expect(query(element, '.reload-info .skipped-keys')).not.toBeNull();
+  });
+
+  it('shows no skipped notice when nothing was skipped', async () => {
+    element = await saveWith({
+      applied: ['lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+      skipped: [],
+    });
+    expect(query(element, '.reload-info .skipped-keys')).toBeNull();
+  });
+
+  it('shows no restart notice when every changed key applied live', async () => {
+    element = await saveWith({
+      applied: ['lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+    });
+    expect(query(element, '.reload-info .pending-restart')).toBeNull();
+    expect(query(element, '.reload-info .applied-keys')).not.toBeNull();
+  });
+});
+
+// ── Hub observability export switches (ptone/scion#4914) ──
+
+describe('hub observability export switches', () => {
+  let element: HTMLElement | null = null;
+  const METRICS_KEY = 'server.hub.observability.metrics_enabled';
+  const TRACING_KEY = 'server.hub.observability.tracing_enabled';
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const EXPORT_STATUS = {
+    project: { id: 'meta-project', source: 'metadata' },
+    metrics: {
+      exporter: 'metrics',
+      setting: true,
+      enabled: true,
+      basis: 'setting',
+      reason: 'server.hub.observability.metrics_enabled=true',
+      project: { id: 'meta-project', source: 'metadata' },
+    },
+    tracing: {
+      exporter: 'tracing',
+      setting: null,
+      enabled: false,
+      basis: 'legacy',
+      reason:
+        'server.hub.observability.tracing_enabled unset; off because SCION_TRACING_ENABLED is not set',
+      project: {},
+    },
+  };
+
+  /** A hosted DB-tier GET with the given switches and export status. */
+  function obsConfig(
+    observability: Record<string, unknown> | undefined,
+    extra: Record<string, unknown> = {}
+  ): Record<string, any> {
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      observability_export: EXPORT_STATUS,
+      ...extra,
+    }) as Record<string, any>;
+    if (observability) cfg.server.hub.observability = observability;
+    return cfg;
+  }
+
+  async function render(
+    cfg: Record<string, unknown>,
+    putHandler?: (body: Record<string, unknown>) => { status: number; body: unknown }
+  ): Promise<HTMLElement> {
+    return createComponent(
+      createFetchHandler(cfg, {
+        schemaResponse: registrySchemaResponse(),
+        ...(putHandler ? { putHandler } : {}),
+      })
+    );
+  }
+
+  function exportSwitch(el: HTMLElement, key: string): HTMLElement | null {
+    return query(el, `sl-switch.hub-export-switch[data-key="${key}"]`) as HTMLElement | null;
+  }
+
+  async function save(el: HTMLElement): Promise<void> {
+    await (el as any).updateComplete;
+    withoutSectionFilter(el);
+    const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    expect(btn).toBeDefined();
+    (btn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+  }
+
+  it('shows a toggle per exporter, checked from the saved switch', async () => {
+    element = await render(obsConfig({ metrics_enabled: true, tracing_enabled: false }));
+    const metrics = exportSwitch(element, METRICS_KEY);
+    const tracing = exportSwitch(element, TRACING_KEY);
+    expect(metrics).not.toBeNull();
+    expect(tracing).not.toBeNull();
+    expect(metrics!.hasAttribute('checked')).toBe(true);
+    expect(tracing!.hasAttribute('checked')).toBe(false);
+    expect(metrics!.textContent).toContain('Export hub metrics');
+    expect(tracing!.textContent).toContain('Export hub traces');
+    // A set switch can be returned to the default rule.
+    expect(query(element, `.hub-export-default[data-key="${METRICS_KEY}"]`)).not.toBeNull();
+  });
+
+  it('an unset switch shows the state in effect and the default rule', async () => {
+    element = await render(obsConfig(undefined));
+    // Metrics runs at startup, so the unset toggle shows on; tracing is off.
+    expect(exportSwitch(element, METRICS_KEY)!.hasAttribute('checked')).toBe(true);
+    expect(exportSwitch(element, TRACING_KEY)!.hasAttribute('checked')).toBe(false);
+    expect(query(element, `.hub-export-default[data-key="${METRICS_KEY}"]`)).toBeNull();
+    const hint = query(element, `.hub-export-restart[data-key="${TRACING_KEY}"]`);
+    expect(hint!.textContent).toContain('Not set: on when SCION_TRACING_ENABLED');
+  });
+
+  it('says each switch applies after a restart', async () => {
+    element = await render(obsConfig({ metrics_enabled: false }));
+    for (const key of [METRICS_KEY, TRACING_KEY]) {
+      const hint = query(element, `.hub-export-restart[data-key="${key}"]`);
+      expect(hint, key).not.toBeNull();
+      expect(hint!.textContent).toContain('Applies after restart.');
+    }
+  });
+
+  it('shows the exporters in effect and the export project with its source, read-only', async () => {
+    element = await render(obsConfig({ metrics_enabled: true }));
+    const project = query(element, '.hub-export-project');
+    expect(project).not.toBeNull();
+    expect(project!.textContent).toContain('meta-project');
+    expect(project!.textContent).toContain('(source: metadata)');
+    // No editable control for the project, endpoint or credentials.
+    const section = query(element, '.section.hub-observability')!;
+    expect(section.querySelectorAll('sl-input').length).toBe(0);
+    expect(section.textContent).toContain('Not editable here.');
+
+    const metricsInEffect = query(element, `.hub-export-in-effect[data-key="${METRICS_KEY}"]`);
+    expect(metricsInEffect!.textContent).toContain('In effect: on');
+    const tracingInEffect = query(element, `.hub-export-in-effect[data-key="${TRACING_KEY}"]`);
+    expect(tracingInEffect!.textContent).toContain('In effect: off');
+    expect(tracingInEffect!.textContent).toContain('SCION_TRACING_ENABLED is not set');
+  });
+
+  it('shows the source of an operator-set project and when none resolved', async () => {
+    element = await render(
+      obsConfig(undefined, {
+        observability_export: { ...EXPORT_STATUS, project: { id: 'env-project', source: 'env' } },
+      })
+    );
+    expect(query(element, '.hub-export-project')!.textContent).toContain('(source: env)');
+    element.remove();
+
+    element = await render(
+      obsConfig(undefined, {
+        observability_export: {
+          ...EXPORT_STATUS,
+          project: { detail: 'server.hub.gcp_project_id is not set' },
+        },
+      })
+    );
+    expect(query(element, '.hub-export-project')!.textContent).toContain('None resolved');
+    expect(shadowText(element)).toContain('server.hub.gcp_project_id is not set');
+    expect(query(element, '.hub-export-project-remedy')!.textContent).toContain(
+      'Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud.'
+    );
+  });
+
+  it('marks an env-set switch with the env badge', async () => {
+    element = await render(
+      obsConfig({ metrics_enabled: true }, { settings_tier: 'db', env_overrides: [METRICS_KEY] })
+    );
+    const sw = exportSwitch(element, METRICS_KEY);
+    expect(sw).not.toBeNull();
+    const badge = sw!.previousElementSibling;
+    expect(badge?.classList.contains('env-badge')).toBe(true);
+    const tracingBadge = exportSwitch(element, TRACING_KEY)!.previousElementSibling;
+    expect(tracingBadge?.classList.contains('env-badge') ?? false).toBe(false);
+  });
+
+  it('sends only a changed switch, and null to return it to the default', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig({ metrics_enabled: true }), (body) => {
+      bodies.push(body);
+      return {
+        status: 200,
+        body: { reload: { applied_keys: [], pending_restart: [METRICS_KEY, TRACING_KEY] } },
+      };
+    });
+    const el = element as any;
+
+    // Nothing changed: the switches are not sent.
+    await save(element);
+    expect(bodies[0]?.server?.hub?.observability).toBeUndefined();
+
+    el.hubTracingEnabled = true;
+    el.hubMetricsEnabled = null;
+    await save(element);
+    expect(bodies[1].server.hub.observability).toEqual({
+      metrics_enabled: null,
+      tracing_enabled: true,
+    });
+
+    // The save report lists both keys as applying after a restart.
+    const pending = query(element, '.reload-info .pending-restart');
+    expect(pending).not.toBeNull();
+    expect(pending!.textContent).toContain('Saved; applies after restart');
+    expect(pending!.textContent).toContain(METRICS_KEY);
+    expect(pending!.textContent).toContain(TRACING_KEY);
+  });
+
+  it('labels an unset switch as the default next to the toggle', async () => {
+    element = await render(obsConfig(undefined));
+    const metrics = query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`);
+    const tracing = query(element, `.hub-export-default-state[data-key="${TRACING_KEY}"]`);
+    expect(metrics!.textContent).toContain('Default (on)');
+    expect(tracing!.textContent).toContain('Default (off)');
+  });
+
+  it('labels an unset switch as not reported when the hub gives no status, not as off', async () => {
+    element = await render(obsConfig(undefined, { observability_export: undefined }));
+    for (const key of [METRICS_KEY, TRACING_KEY]) {
+      const label = query(element, `.hub-export-default-state[data-key="${key}"]`);
+      expect(label, key).not.toBeNull();
+      expect(label!.textContent).toContain('Default (state not reported)');
+      expect(label!.textContent).not.toContain('Default (off)');
+    }
+  });
+
+  it('toggling an unset switch twice leaves it unset and sends nothing', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig(undefined), (body) => {
+      bodies.push(body);
+      return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+    });
+    // Metrics runs at startup, so the unset toggle starts checked.
+    const sw = exportSwitch(element, METRICS_KEY)! as HTMLInputElement;
+    sw.checked = false;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBe(false);
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBeNull();
+    expect(query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`)).not.toBeNull();
+    await save(element);
+    expect(bodies[0]?.server?.hub?.observability).toBeUndefined();
+  });
+
+  it('toggling the switch sets the value that is saved', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig(undefined), (body) => {
+      bodies.push(body);
+      return {
+        status: 200,
+        body: { reload: { applied_keys: [], pending_restart: [TRACING_KEY] } },
+      };
+    });
+    const sw = exportSwitch(element, TRACING_KEY)! as HTMLInputElement;
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect(query(element, `.hub-export-default[data-key="${TRACING_KEY}"]`)).not.toBeNull();
+    await save(element);
+    expect(bodies[0].server.hub.observability).toEqual({ tracing_enabled: true });
+  });
+});
+
+// Tri-state switches, stale values after a save, and the default runtime
+// broker (ptone/scion#3724, ptone/scion#3913): a save sends only what the
+// user changed, an unset switch stays unset, and a reload shows what GET
+// returns now.
+describe('settings the page must not write unless changed (ptone/scion#3913)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  /** Schema with every tri-state section editable in the db tier. */
+  function triStateSchema(): Record<string, unknown> {
+    const sections = SCHEMA_RESPONSE.sections as Record<string, { koanf_paths: string[] }>;
+    return {
+      sections: {
+        ...sections,
+        telemetry: {
+          koanf_paths: [...sections.telemetry.koanf_paths, 'telemetry.cloud.cloud_logging'],
+        },
+        auto_expose_ports: { koanf_paths: ['auto_expose_ports.enabled'] },
+        quotas: { koanf_paths: ['quotas.enforce_broker_quotas'] },
+        agent_secrets: { koanf_paths: ['agent_secrets.user_scope_only'] },
+        agent_defaults: {
+          koanf_paths: [...sections.agent_defaults.koanf_paths, 'default_runtime_broker'],
+        },
+      },
+    };
+  }
+
+  /** A GET with no telemetry, auto_expose_ports, quotas or agent_secrets. */
+  function unsetConfig(tier: 'db' | 'file', extra: Record<string, unknown> = {}) {
+    const cfg = makeBaseConfig({ settings_tier: tier, ...extra }) as Record<string, unknown>;
+    delete cfg.telemetry;
+    return cfg;
+  }
+
+  async function render(
+    cfg: Record<string, unknown>,
+    bodies: Array<Record<string, any>>,
+    brokers: unknown[] = []
+  ): Promise<HTMLElement> {
+    const base = createFetchHandler(cfg, {
+      schemaResponse: triStateSchema(),
+      putHandler: (body) => {
+        bodies.push(body);
+        return { status: 200, body: { reload: { applied: [] } } };
+      },
+    });
+    return createComponent((url, init) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (path.includes('/api/v1/runtime-brokers')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ brokers }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return base(url, init);
+    });
+  }
+
+  async function save(el: HTMLElement): Promise<void> {
+    withoutSectionFilter(el);
+    const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    (btn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+  }
+
+  const TRI_STATE_FIELDS = [
+    'autoExposePortsEnabled',
+    'enforceBrokerQuotas',
+    'agentSecretsUserScopeOnly',
+    'telemetryEnabled',
+    'telemetryCloudEnabled',
+    'telemetryCloudCloudLogging',
+    'telemetryHubEnabled',
+  ];
+
+  it.each(['db', 'file'] as const)(
+    'untouched unset switches load as null and are not sent (settings_tier=%s)',
+    async (tier) => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(unsetConfig(tier), bodies);
+      const el = element as any;
+      for (const f of TRI_STATE_FIELDS) expect(el[f], f).toBeNull();
+
+      await save(element);
+      expect(bodies).toHaveLength(1);
+      const body = bodies[0]!;
+      expect(body).not.toHaveProperty('auto_expose_ports');
+      expect(body).not.toHaveProperty('quotas');
+      expect(body).not.toHaveProperty('agent_secrets');
+      expect(body.telemetry ?? {}).not.toHaveProperty('enabled');
+      expect(body.telemetry?.cloud ?? {}).not.toHaveProperty('enabled');
+      expect(body.telemetry?.cloud ?? {}).not.toHaveProperty('cloud_logging');
+      expect(body.telemetry?.hub ?? {}).not.toHaveProperty('enabled');
+    }
+  );
+
+  it('a file-mode save with nothing set sends no empty telemetry blocks', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(unsetConfig('file'), bodies);
+    await save(element);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toHaveProperty('telemetry');
+
+    (element as any).telemetryCloudEndpoint = 'otel.example.com:4317';
+    await save(element);
+    expect(bodies[1]!.telemetry).toEqual({ cloud: { endpoint: 'otel.example.com:4317' } });
+  });
+
+  it('a file-mode save keeps a telemetry block that holds only false or null', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    // unsetConfig drops telemetry, so the stored block is set afterwards.
+    const cfg = unsetConfig('file');
+    cfg.telemetry = { cloud: { enabled: true } };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.telemetryCloudEnabled).toBe(true);
+    // Use default on the stored cloud switch, and set the unset hub switch off.
+    el.telemetryCloudEnabled = null;
+    el.telemetryHubEnabled = false;
+    await save(element);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.telemetry.cloud).toEqual({ enabled: null });
+    expect(bodies[0]!.telemetry.hub).toEqual({ enabled: false });
+  });
+
+  it.each([
+    ['db', false],
+    ['db', true],
+  ] as const)(
+    'cloud_logging is read-only and never sent on a database-backed hub (settings_tier=%s, layer0_editable=%s)',
+    async (tier, layer0Editable) => {
+      const bodies: Array<Record<string, any>> = [];
+      const cfg = unsetConfig(tier, { layer0_editable: layer0Editable });
+      cfg.telemetry = { cloud: { enabled: true, cloud_logging: true } };
+      element = await render(cfg, bodies);
+      const el = element as any;
+      expect(el.telemetryCloudCloudLogging).toBe(true);
+      expect(el.readOnlyReason('telemetry.cloud.cloud_logging')).toBe('startup');
+      // Even a changed value is left out of the save (ptone/scion#5664).
+      el.telemetryCloudCloudLogging = false;
+      el.telemetryCloudEnabled = false;
+      await save(element);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]!.telemetry.cloud.enabled).toBe(false);
+      expect(bodies[0]!.telemetry.cloud).not.toHaveProperty('cloud_logging');
+    }
+  );
+
+  it('cloud_logging stays editable and is sent when changed in settings.yaml mode', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const cfg = unsetConfig('file');
+    cfg.telemetry = { cloud: { enabled: true, cloud_logging: true } };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.readOnlyReason('telemetry.cloud.cloud_logging')).toBeNull();
+    el.telemetryCloudCloudLogging = false;
+    await save(element);
+    expect(bodies[0]!.telemetry.cloud.cloud_logging).toBe(false);
+  });
+
+  it('an unset switch says it is not set; toggling it twice leaves it unset', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(unsetConfig('db'), bodies);
+    expect(
+      query(element, '[data-tristate-unset="auto_expose_ports.enabled"]')?.textContent
+    ).toContain('Not set');
+    const sw = query(element, 'sl-switch[data-tristate="auto_expose_ports.enabled"]') as
+      | (HTMLElement & { checked: boolean })
+      | null;
+    expect(sw).not.toBeNull();
+    sw!.checked = true;
+    sw!.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).autoExposePortsEnabled).toBe(true);
+    sw!.checked = false;
+    sw!.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).autoExposePortsEnabled).toBeNull();
+
+    await save(element);
+    expect(bodies[0]).not.toHaveProperty('auto_expose_ports');
+  });
+
+  it('setting an unset switch sends its value', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(unsetConfig('db'), bodies);
+    (element as any).autoExposePortsEnabled = false;
+    (element as any).telemetryCloudEnabled = true;
+    await save(element);
+    expect(bodies[0]!.auto_expose_ports).toEqual({ enabled: false });
+    expect(bodies[0]!.telemetry.cloud.enabled).toBe(true);
+  });
+
+  it.each(['db', 'file'] as const)(
+    'Use default on a stored switch sends null, which clears it (settings_tier=%s)',
+    async (tier) => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(
+        unsetConfig(tier, {
+          auto_expose_ports: { enabled: true },
+          quotas: { enforce_broker_quotas: false },
+        }),
+        bodies
+      );
+      expect((element as any).autoExposePortsEnabled).toBe(true);
+      const useDefault = query(
+        element,
+        'sl-button[data-tristate-default="auto_expose_ports.enabled"]'
+      ) as HTMLElement | null;
+      expect(useDefault).not.toBeNull();
+      useDefault!.click();
+      await (element as any).updateComplete;
+      expect((element as any).autoExposePortsEnabled).toBeNull();
+
+      await save(element);
+      expect(bodies[0]!.auto_expose_ports).toEqual({ enabled: null });
+      // The other stored switch was not touched and is left out.
+      expect(bodies[0]).not.toHaveProperty('quotas');
+    }
+  );
+
+  it('a reload after a save that removed sub-blocks shows them as unset, not the old values', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      auto_expose_ports: { enabled: true },
+      telemetry: {
+        enabled: true,
+        cloud: { enabled: true, endpoint: 'otel.example.com:4317' },
+        hub: { enabled: true, report_interval: '30s' },
+      },
+    }) as Record<string, any>;
+    cfg.server.broker = { broker_name: 'old-broker', port: 9800 };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.autoExposePortsEnabled).toBe(true);
+    expect(el.telemetryCloudEndpoint).toBe('otel.example.com:4317');
+    expect(el.brokerName).toBe('old-broker');
+
+    // The server no longer returns these blocks after the save.
+    delete cfg.auto_expose_ports;
+    delete cfg.telemetry;
+    delete cfg.server.broker;
+    el.defaultTemplate = 'claude';
+    await save(element);
+    expect(bodies).toHaveLength(1);
+
+    for (const f of TRI_STATE_FIELDS.filter((f) => f !== 'enforceBrokerQuotas')) {
+      expect(el[f], f).toBeNull();
+    }
+    expect(el.telemetryCloudEndpoint).toBe('');
+    expect(el.telemetryHubReportInterval).toBe('');
+    expect(el.brokerName).toBe('');
+    expect(el.brokerPort).toBe(0);
+  });
+
+  describe('default runtime broker', () => {
+    const BROKERS = [
+      { id: 'b-1111', name: 'My Laptop', slug: 'my-laptop', status: 'online' },
+      { id: 'b-2222', name: 'Build Box', slug: 'build-box', status: 'online' },
+    ];
+
+    it.each(['db', 'file'] as const)(
+      'a stored slug shows as the broker ID but an unrelated save does not rewrite it (settings_tier=%s)',
+      async (tier) => {
+        const bodies: Array<Record<string, any>> = [];
+        element = await render(
+          unsetConfig(tier, { default_runtime_broker: 'my-laptop' }),
+          bodies,
+          BROKERS
+        );
+        const el = element as any;
+        expect(el.defaultRuntimeBroker).toBe('b-1111');
+
+        el.defaultTemplate = 'claude';
+        await save(element);
+        expect(bodies).toHaveLength(1);
+        expect(bodies[0]!.default_template).toBe('claude');
+        expect(bodies[0]).not.toHaveProperty('default_runtime_broker');
+      }
+    );
+
+    it('a changed selection is sent', async () => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(
+        unsetConfig('db', { default_runtime_broker: 'my-laptop' }),
+        bodies,
+        BROKERS
+      );
+      (element as any).defaultRuntimeBroker = 'b-2222';
+      await save(element);
+      expect(bodies[0]!.default_runtime_broker).toBe('b-2222');
+    });
+
+    it('clearing a stored value sends ""', async () => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(
+        unsetConfig('db', { default_runtime_broker: 'my-laptop' }),
+        bodies,
+        BROKERS
+      );
+      (element as any).defaultRuntimeBroker = '';
+      await save(element);
+      expect(bodies[0]!.default_runtime_broker).toBe('');
+    });
+  });
+});
+
+describe('env values in effect (env_values)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  function fieldByLabel(el: HTMLElement, text: string): Element {
+    const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === text);
+    expect(label, `label ${text}`).toBeDefined();
+    return label!.closest('.form-field')!;
+  }
+
+  function dbConfig(extra: Record<string, unknown>) {
+    const cfg = makeBaseConfig({ settings_tier: 'db', ...extra }) as any;
+    cfg.server.auth.authorized_domains = ['saved.example'];
+    cfg.server.hub.admin_emails = ['db@example.com'];
+    return cfg;
+  }
+
+  it('shows the environment value in effect as the primary value, the saved one as not in effect', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.auth.authorized_domains'],
+          env_values: {
+            'server.auth.authorized_domains': {
+              value: ['env-a.example', 'env-b.example'],
+              in_effect: true,
+              saved_differs: true,
+            },
+          },
+          // Even if listed, a key whose env value is in effect is not superseded.
+          superseded_keys: {
+            access: [{ key: 'server.auth.authorized_domains', source: 'server_env' }],
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-value-in-effect')?.textContent).toContain(
+      'env-a.example, env-b.example'
+    );
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-saved-label')?.textContent).toContain(
+      'not in effect on this node'
+    );
+    expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('saved.example');
+    expect(field.querySelector('.superseded-badge')).toBeNull();
+  });
+
+  it('says when the saved value wins over the environment value', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.admin_emails'],
+          env_values: {
+            'server.hub.admin_emails': { value: ['env@example.com'], in_effect: false },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Admin Emails');
+    expect(field.querySelector('.env-value-not-in-effect')?.textContent).toContain(
+      'env@example.com'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    const badge = field.querySelector('.env-badge')?.textContent ?? '';
+    expect(badge).toContain('superseded by the saved setting');
+    expect(badge).not.toContain('Overridden by environment');
+    expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('db@example.com');
+  });
+
+  it('a masked entry (no in-effect state) keeps the plain badge and shows nothing raw', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.auth.authorized_domains'],
+          env_values: {
+            // The server sends neither in_effect nor saved_differs for a
+            // masked key; even if a value slipped in, the page must not show it.
+            'server.auth.authorized_domains': { value: 'not-the-placeholder', masked: true },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-not-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-saved-label')).toBeNull();
+    expect(shadowText(element)).not.toContain('not-the-placeholder');
+  });
+
+  it('a read-only env-pinned field shows the value in effect, the stored value as secondary', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'file',
+      env_overrides: ['server.hub.port'],
+      env_values: { 'server.hub.port': { value: 9090, in_effect: true, saved_differs: true } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Port');
+    expect(field.querySelector('.read-only-badge')?.textContent).toContain('environment variable');
+    expect(field.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain(
+      'settings.yaml value, not in effect on this node'
+    );
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain('8080');
+  });
+
+  it('a hosted DB-tier Layer-0 field shows the environment value in effect with its badge', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      layer0_editable: false,
+      env_overrides: ['server.hub.port'],
+      env_values: { 'server.hub.port': { value: 9090, in_effect: true, saved_differs: true } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Port');
+    expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+      'Managed via deployment configuration'
+    );
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain(
+      'settings.yaml value, not in effect on this node: 8080'
+    );
+  });
+
+  it('never labels a default or an equal value as saved', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.port', 'server.auth.authorized_domains'],
+          layer0_editable: false,
+          env_values: {
+            'server.hub.port': { value: 9090, in_effect: true },
+            'server.auth.authorized_domains': { value: ['saved.example'], in_effect: true },
+          },
+        })
+      )
+    );
+    const port = fieldByLabel(element, 'Port');
+    expect(port.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(port.querySelector('.env-value-saved')).toBeNull();
+    const domains = fieldByLabel(element, 'Authorized Domains');
+    expect(domains.querySelector('.env-value-in-effect')).not.toBeNull();
+    expect(domains.querySelector('.env-value-saved-label')).toBeNull();
+  });
+
+  it('a read-only env-pinned field whose environment value is not in effect drops the env lock', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'file',
+      env_overrides: ['server.hub.host'],
+      env_values: { 'server.hub.host': { value: '10.0.0.1', in_effect: false } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Host');
+    expect(field.querySelector('.read-only-badge')).toBeNull();
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Environment value not in effect on this node'
+    );
+    expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('0.0.0.0');
+    // The value shown is the configured one, not the start-up value in effect.
+    expect(field.querySelector('.env-value-configured-label')?.textContent).toContain(
+      'Configured value (settings.yaml or default), not the value in effect'
+    );
+    const line = field.querySelector('.env-value-not-in-effect')?.textContent ?? '';
+    expect(line).toContain('10.0.0.1');
+    expect(line).toContain('a start-up default or flag wins');
+  });
+
+  it('a value a saved setting wins with is not labelled as merely configured', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.admin_emails'],
+          env_values: {
+            'server.hub.admin_emails': { value: ['env@example.com'], in_effect: false },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Admin Emails');
+    expect(field.querySelector('.env-value-configured-label')).toBeNull();
+  });
+
+  it('the profiles section badge reflects env_values', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['profiles.local.runtime'],
+          env_values: {
+            // Profile keys are always masked, so the server reports no
+            // in-effect state for them.
+            'profiles.local.runtime': { value: '********', masked: true },
+          },
+        })
+      )
+    );
+    const items = queryAll(element, '.env-values-under li').map((li) => li.textContent ?? '');
+    const item = items.find((t) => t.includes('profiles.local.runtime'));
+    expect(item).toBeDefined();
+    expect(item).toContain('masked: whether it is in effect is not reported');
+    const badges = queryAll(element, '.env-badge').map((b) => b.textContent ?? '');
+    expect(badges.some((t) => t.includes('Overridden by environment on this node'))).toBe(true);
+    expect(badges.some((t) => t.includes('superseded by the saved setting'))).toBe(false);
+  });
+
+  it('without env_values the field renders as before', async () => {
+    element = await createComponent(
+      createFetchHandler(dbConfig({ env_overrides: ['server.auth.authorized_domains'] }))
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-not-in-effect')).toBeNull();
+  });
+});
+
+// ── Section-level saves with revisions (ptone/scion#3922) ──
+
+describe('scion-page-admin-server-config — section-level saves with revisions', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const META = {
+    access: { source: 'db', revision: 4 },
+    endpoints: { source: 'db', revision: 9 },
+    telemetry: { source: 'db', revision: 2 },
+    agent_defaults: { source: 'default' },
+  };
+
+  async function clickSaveButton(el: HTMLElement): Promise<void> {
+    const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    (saveBtn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+  }
+
+  it('sends only the changed section, whole, with its revision; untouched sections are not sent', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db', section_metadata: META }), {
+        putHandler: (body) => {
+          captured = body;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    (element as any).hubPublicUrl = 'https://changed.example.com';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+
+    expect(captured).not.toBeNull();
+    const body = captured!;
+    expect(body.expected_revisions).toEqual({ endpoints: 9 });
+    const server = body.server as Record<string, Record<string, unknown>>;
+    expect(server.hub.public_url).toBe('https://changed.example.com');
+    // The endpoints section is sent whole (its other field too).
+    expect(body.image_registry).toBe('ghcr.io/test');
+    // Untouched sections are not sent.
+    expect(server.hub).not.toHaveProperty('admin_emails');
+    expect(server.hub).not.toHaveProperty('soft_delete_retention');
+    expect(server).not.toHaveProperty('auth');
+    expect(body).not.toHaveProperty('telemetry');
+    expect(body).not.toHaveProperty('default_template');
+  });
+
+  it('a section with no stored row at load is sent with revision 0 (create-only)', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db', section_metadata: META }), {
+        putHandler: (body) => {
+          captured = body;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    await markDirty(element);
+    await clickSaveButton(element);
+    expect(captured).not.toBeNull();
+    expect(captured!.expected_revisions).toEqual({ agent_defaults: 0 });
+  });
+
+  it('an unchanged form sends no PUT and says there is nothing to save', async () => {
+    let puts = 0;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db', section_metadata: META }), {
+        putHandler: () => {
+          puts++;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    await clickSaveButton(element);
+    expect(puts).toBe(0);
+    expect(shadowText(element)).toContain('No changes to save');
+  });
+
+  it('a stale section shows the reload banner; Reload re-baselines and the next save sends the new revision', async () => {
+    const config = makeBaseConfig({
+      settings_tier: 'db',
+      section_metadata: { ...META, endpoints: { source: 'db', revision: 9 } },
+    });
+    const bodies: Record<string, unknown>[] = [];
+    element = await createComponent(
+      createFetchHandler(config, {
+        putHandler: (body) => {
+          bodies.push(body);
+          return bodies.length === 1
+            ? {
+                status: 409,
+                body: {
+                  error: {
+                    code: 'revision_conflict',
+                    message: 'One or more sections have been modified since the expected revision.',
+                    details: {
+                      conflicted: [
+                        { section: 'endpoints', expected_revision: 9, current_revision: 10 },
+                      ],
+                    },
+                  },
+                },
+              }
+            : { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    (element as any).hubPublicUrl = 'https://mine.example.com';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+
+    const banner = query(element, '.conflict-banner');
+    expect(banner).not.toBeNull();
+    expect(banner!.textContent ?? '').toContain('endpoints');
+    expect((bodies[0] as Record<string, unknown>).expected_revisions).toEqual({ endpoints: 9 });
+
+    // Another admin's save is now the stored state.
+    (config as Record<string, unknown>).section_metadata = {
+      ...META,
+      endpoints: { source: 'db', revision: 10 },
+    };
+    ((config.server as Record<string, unknown>).hub as Record<string, unknown>).public_url =
+      'https://theirs.example.com';
+    (banner!.querySelector('sl-button') as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (element as any).updateComplete;
+    expect(query(element, '.conflict-banner')).toBeNull();
+    expect((element as any).hubPublicUrl).toBe('https://theirs.example.com');
+
+    (element as any).hubPublicUrl = 'https://mine-again.example.com';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+    expect(bodies).toHaveLength(2);
+    expect((bodies[1] as Record<string, unknown>).expected_revisions).toEqual({ endpoints: 10 });
+  });
+
+  it('the file tier sends the full payload with no expected_revisions', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'file' }), {
+        putHandler: (body) => {
+          captured = body;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    await clickSaveButton(element);
+    expect(captured).not.toBeNull();
+    expect(captured!).not.toHaveProperty('expected_revisions');
+    expect(captured!).toHaveProperty('server');
+  });
+
+  it('a workstation save still sends a changed Layer-0 field when no Layer-1 section changed', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true, section_metadata: META }),
+        {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        }
+      )
+    );
+    (element as any).logLevel = 'debug';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+    expect(captured).not.toBeNull();
+    expect((captured!.server as Record<string, unknown>).log_level).toBe('debug');
+    expect(captured!).not.toHaveProperty('expected_revisions');
   });
 });

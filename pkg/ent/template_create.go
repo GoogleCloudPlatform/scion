@@ -84,30 +84,16 @@ func (_c *TemplateCreate) SetNillableDefaultHarnessConfig(v *string) *TemplateCr
 	return _c
 }
 
-// SetImage sets the "image" field.
-func (_c *TemplateCreate) SetImage(v string) *TemplateCreate {
-	_c.mutation.SetImage(v)
+// SetAgentConfig sets the "agent_config" field.
+func (_c *TemplateCreate) SetAgentConfig(v string) *TemplateCreate {
+	_c.mutation.SetAgentConfig(v)
 	return _c
 }
 
-// SetNillableImage sets the "image" field if the given value is not nil.
-func (_c *TemplateCreate) SetNillableImage(v *string) *TemplateCreate {
+// SetNillableAgentConfig sets the "agent_config" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableAgentConfig(v *string) *TemplateCreate {
 	if v != nil {
-		_c.SetImage(*v)
-	}
-	return _c
-}
-
-// SetConfig sets the "config" field.
-func (_c *TemplateCreate) SetConfig(v string) *TemplateCreate {
-	_c.mutation.SetConfig(v)
-	return _c
-}
-
-// SetNillableConfig sets the "config" field if the given value is not nil.
-func (_c *TemplateCreate) SetNillableConfig(v *string) *TemplateCreate {
-	if v != nil {
-		_c.SetConfig(*v)
+		_c.SetAgentConfig(*v)
 	}
 	return _c
 }
@@ -210,6 +196,20 @@ func (_c *TemplateCreate) SetNillableStoragePath(v *string) *TemplateCreate {
 	return _c
 }
 
+// SetLayout sets the "layout" field.
+func (_c *TemplateCreate) SetLayout(v string) *TemplateCreate {
+	_c.mutation.SetLayout(v)
+	return _c
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableLayout(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetLayout(*v)
+	}
+	return _c
+}
+
 // SetFiles sets the "files" field.
 func (_c *TemplateCreate) SetFiles(v string) *TemplateCreate {
 	_c.mutation.SetFiles(v)
@@ -308,20 +308,6 @@ func (_c *TemplateCreate) SetNillableSourceURL(v *string) *TemplateCreate {
 	return _c
 }
 
-// SetVisibility sets the "visibility" field.
-func (_c *TemplateCreate) SetVisibility(v string) *TemplateCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *TemplateCreate) SetNillableVisibility(v *string) *TemplateCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
-	}
-	return _c
-}
-
 // SetCreated sets the "created" field.
 func (_c *TemplateCreate) SetCreated(v time.Time) *TemplateCreate {
 	_c.mutation.SetCreated(v)
@@ -403,13 +389,13 @@ func (_c *TemplateCreate) defaults() {
 		v := template.DefaultScope
 		_c.mutation.SetScope(v)
 	}
+	if _, ok := _c.mutation.Layout(); !ok {
+		v := template.DefaultLayout
+		_c.mutation.SetLayout(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := template.DefaultStatus
 		_c.mutation.SetStatus(v)
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		v := template.DefaultVisibility
-		_c.mutation.SetVisibility(v)
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := template.DefaultCreated()
@@ -456,9 +442,6 @@ func (_c *TemplateCreate) check() error {
 		if err := template.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Template.status": %w`, err)}
 		}
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Template.visibility"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Template.created"`)}
@@ -526,13 +509,9 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 		_spec.SetField(template.FieldDefaultHarnessConfig, field.TypeString, value)
 		_node.DefaultHarnessConfig = value
 	}
-	if value, ok := _c.mutation.Image(); ok {
-		_spec.SetField(template.FieldImage, field.TypeString, value)
-		_node.Image = value
-	}
-	if value, ok := _c.mutation.Config(); ok {
-		_spec.SetField(template.FieldConfig, field.TypeString, value)
-		_node.Config = value
+	if value, ok := _c.mutation.AgentConfig(); ok {
+		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)
+		_node.AgentConfig = value
 	}
 	if value, ok := _c.mutation.ContentHash(); ok {
 		_spec.SetField(template.FieldContentHash, field.TypeString, value)
@@ -562,6 +541,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 		_spec.SetField(template.FieldStoragePath, field.TypeString, value)
 		_node.StoragePath = value
 	}
+	if value, ok := _c.mutation.Layout(); ok {
+		_spec.SetField(template.FieldLayout, field.TypeString, value)
+		_node.Layout = value
+	}
 	if value, ok := _c.mutation.Files(); ok {
 		_spec.SetField(template.FieldFiles, field.TypeString, value)
 		_node.Files = value
@@ -589,10 +572,6 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SourceURL(); ok {
 		_spec.SetField(template.FieldSourceURL, field.TypeString, value)
 		_node.SourceURL = value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(template.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(template.FieldCreated, field.TypeTime, value)
@@ -744,39 +723,21 @@ func (u *TemplateUpsert) ClearDefaultHarnessConfig() *TemplateUpsert {
 	return u
 }
 
-// SetImage sets the "image" field.
-func (u *TemplateUpsert) SetImage(v string) *TemplateUpsert {
-	u.Set(template.FieldImage, v)
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsert) SetAgentConfig(v string) *TemplateUpsert {
+	u.Set(template.FieldAgentConfig, v)
 	return u
 }
 
-// UpdateImage sets the "image" field to the value that was provided on create.
-func (u *TemplateUpsert) UpdateImage() *TemplateUpsert {
-	u.SetExcluded(template.FieldImage)
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateAgentConfig() *TemplateUpsert {
+	u.SetExcluded(template.FieldAgentConfig)
 	return u
 }
 
-// ClearImage clears the value of the "image" field.
-func (u *TemplateUpsert) ClearImage() *TemplateUpsert {
-	u.SetNull(template.FieldImage)
-	return u
-}
-
-// SetConfig sets the "config" field.
-func (u *TemplateUpsert) SetConfig(v string) *TemplateUpsert {
-	u.Set(template.FieldConfig, v)
-	return u
-}
-
-// UpdateConfig sets the "config" field to the value that was provided on create.
-func (u *TemplateUpsert) UpdateConfig() *TemplateUpsert {
-	u.SetExcluded(template.FieldConfig)
-	return u
-}
-
-// ClearConfig clears the value of the "config" field.
-func (u *TemplateUpsert) ClearConfig() *TemplateUpsert {
-	u.SetNull(template.FieldConfig)
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsert) ClearAgentConfig() *TemplateUpsert {
+	u.SetNull(template.FieldAgentConfig)
 	return u
 }
 
@@ -900,6 +861,24 @@ func (u *TemplateUpsert) ClearStoragePath() *TemplateUpsert {
 	return u
 }
 
+// SetLayout sets the "layout" field.
+func (u *TemplateUpsert) SetLayout(v string) *TemplateUpsert {
+	u.Set(template.FieldLayout, v)
+	return u
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateLayout() *TemplateUpsert {
+	u.SetExcluded(template.FieldLayout)
+	return u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *TemplateUpsert) ClearLayout() *TemplateUpsert {
+	u.SetNull(template.FieldLayout)
+	return u
+}
+
 // SetFiles sets the "files" field.
 func (u *TemplateUpsert) SetFiles(v string) *TemplateUpsert {
 	u.Set(template.FieldFiles, v)
@@ -1017,18 +996,6 @@ func (u *TemplateUpsert) UpdateSourceURL() *TemplateUpsert {
 // ClearSourceURL clears the value of the "source_url" field.
 func (u *TemplateUpsert) ClearSourceURL() *TemplateUpsert {
 	u.SetNull(template.FieldSourceURL)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *TemplateUpsert) SetVisibility(v string) *TemplateUpsert {
-	u.Set(template.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *TemplateUpsert) UpdateVisibility() *TemplateUpsert {
-	u.SetExcluded(template.FieldVisibility)
 	return u
 }
 
@@ -1200,45 +1167,24 @@ func (u *TemplateUpsertOne) ClearDefaultHarnessConfig() *TemplateUpsertOne {
 	})
 }
 
-// SetImage sets the "image" field.
-func (u *TemplateUpsertOne) SetImage(v string) *TemplateUpsertOne {
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsertOne) SetAgentConfig(v string) *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
-		s.SetImage(v)
+		s.SetAgentConfig(v)
 	})
 }
 
-// UpdateImage sets the "image" field to the value that was provided on create.
-func (u *TemplateUpsertOne) UpdateImage() *TemplateUpsertOne {
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateAgentConfig() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateImage()
+		s.UpdateAgentConfig()
 	})
 }
 
-// ClearImage clears the value of the "image" field.
-func (u *TemplateUpsertOne) ClearImage() *TemplateUpsertOne {
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsertOne) ClearAgentConfig() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
-		s.ClearImage()
-	})
-}
-
-// SetConfig sets the "config" field.
-func (u *TemplateUpsertOne) SetConfig(v string) *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetConfig(v)
-	})
-}
-
-// UpdateConfig sets the "config" field to the value that was provided on create.
-func (u *TemplateUpsertOne) UpdateConfig() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateConfig()
-	})
-}
-
-// ClearConfig clears the value of the "config" field.
-func (u *TemplateUpsertOne) ClearConfig() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.ClearConfig()
+		s.ClearAgentConfig()
 	})
 }
 
@@ -1382,6 +1328,27 @@ func (u *TemplateUpsertOne) ClearStoragePath() *TemplateUpsertOne {
 	})
 }
 
+// SetLayout sets the "layout" field.
+func (u *TemplateUpsertOne) SetLayout(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateLayout() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *TemplateUpsertOne) ClearLayout() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearLayout()
+	})
+}
+
 // SetFiles sets the "files" field.
 func (u *TemplateUpsertOne) SetFiles(v string) *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
@@ -1519,20 +1486,6 @@ func (u *TemplateUpsertOne) UpdateSourceURL() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearSourceURL() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *TemplateUpsertOne) SetVisibility(v string) *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *TemplateUpsertOne) UpdateVisibility() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateVisibility()
 	})
 }
 
@@ -1873,45 +1826,24 @@ func (u *TemplateUpsertBulk) ClearDefaultHarnessConfig() *TemplateUpsertBulk {
 	})
 }
 
-// SetImage sets the "image" field.
-func (u *TemplateUpsertBulk) SetImage(v string) *TemplateUpsertBulk {
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsertBulk) SetAgentConfig(v string) *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
-		s.SetImage(v)
+		s.SetAgentConfig(v)
 	})
 }
 
-// UpdateImage sets the "image" field to the value that was provided on create.
-func (u *TemplateUpsertBulk) UpdateImage() *TemplateUpsertBulk {
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateAgentConfig() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateImage()
+		s.UpdateAgentConfig()
 	})
 }
 
-// ClearImage clears the value of the "image" field.
-func (u *TemplateUpsertBulk) ClearImage() *TemplateUpsertBulk {
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsertBulk) ClearAgentConfig() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
-		s.ClearImage()
-	})
-}
-
-// SetConfig sets the "config" field.
-func (u *TemplateUpsertBulk) SetConfig(v string) *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetConfig(v)
-	})
-}
-
-// UpdateConfig sets the "config" field to the value that was provided on create.
-func (u *TemplateUpsertBulk) UpdateConfig() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateConfig()
-	})
-}
-
-// ClearConfig clears the value of the "config" field.
-func (u *TemplateUpsertBulk) ClearConfig() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.ClearConfig()
+		s.ClearAgentConfig()
 	})
 }
 
@@ -2055,6 +1987,27 @@ func (u *TemplateUpsertBulk) ClearStoragePath() *TemplateUpsertBulk {
 	})
 }
 
+// SetLayout sets the "layout" field.
+func (u *TemplateUpsertBulk) SetLayout(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateLayout() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *TemplateUpsertBulk) ClearLayout() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearLayout()
+	})
+}
+
 // SetFiles sets the "files" field.
 func (u *TemplateUpsertBulk) SetFiles(v string) *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
@@ -2192,20 +2145,6 @@ func (u *TemplateUpsertBulk) UpdateSourceURL() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearSourceURL() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *TemplateUpsertBulk) SetVisibility(v string) *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *TemplateUpsertBulk) UpdateVisibility() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateVisibility()
 	})
 }
 

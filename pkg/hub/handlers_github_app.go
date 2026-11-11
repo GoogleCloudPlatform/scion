@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -154,13 +156,14 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.GitHubAppConfig
 	s.mu.Unlock()
 
-	// Persist the non-sensitive config. In Postgres mode the durable home for
-	// these fields is the DB-owned `github_app` opsettings section; writing only
-	// to settings.yaml loses the change on restart (ephemeral filesystems) and
-	// lets any later ApplySnapshot revert it to the stale DB value. File/SQLite
-	// mode has no OperationalSettings service, so settings.yaml remains the
-	// durable home and the write stays best-effort.
-	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+	// Persist the non-sensitive config. Whenever OperationalSettings is wired
+	// (every DB driver, SQLite included, since #1432) the durable home for
+	// these fields is the DB-owned `github_app` opsettings section: writing
+	// only to settings.yaml loses the change on restart (ephemeral
+	// filesystems) and lets the next ops.Update / ApplySnapshot revert it to
+	// the stale DB value (ptone/scion#1091). Only a hub with no OperationalSettings
+	// service keeps settings.yaml as the durable home (best-effort write).
+	if ops := s.GetOperationalSettings(); ops != nil {
 		// A failed DB write is fatal to the request even though the in-memory
 		// config and the secrets are already committed: the DB is the sole
 		// durable store, so the next refreshAndApply reverts the value. Reporting
@@ -220,14 +223,18 @@ func (s *Server) loadGitHubAppSecret(ctx context.Context, name string) (string, 
 	}
 
 	// Fallback: read directly from the database
-	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	stored, err := s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	if err != nil {
+		return "", err
+	}
+	return s.openHubSecret(ctx, stored)
 }
 
 // persistGitHubAppConfigToDB writes the non-sensitive GitHub App configuration
-// to the DB-owned `github_app` opsettings section (Postgres mode). The error is
-// returned rather than swallowed: in Postgres mode the DB is the only durable
-// store for these fields, so a failed write silently loses the change at the
-// next refresh and the caller must be told.
+// to the DB-owned `github_app` opsettings section (any DB driver with
+// OperationalSettings). The error is returned rather than swallowed: the DB is
+// the only durable store for these fields, so a failed write silently loses
+// the change at the next refresh and the caller must be told.
 func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *OperationalSettings, cfg GitHubAppServerConfig, updatedBy string) error {
 	// WebhooksEnabled is a *bool in the section so an explicit false is
 	// distinguishable from an omitted field; cfg always carries a resolved value.
@@ -266,8 +273,9 @@ func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *Operationa
 }
 
 // persistGitHubAppConfig writes the non-sensitive GitHub App configuration
-// fields to settings.yaml. Sensitive values (private key, webhook secret) are
-// stored via the secrets system and are NOT written to settings.yaml.
+// fields to settings.yaml. Used only when the hub has no OperationalSettings.
+// Sensitive values (private key, webhook secret) are stored via the secrets
+// system and are NOT written to settings.yaml.
 func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -275,6 +283,13 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	// Held from the read to the write (see config.LockSettingsDir).
+	lock, err := config.LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	var raw map[string]interface{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
@@ -327,7 +342,7 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, newData, 0644)
+	return config.WriteSettingsFileLocked(lock, settingsPath, newData)
 }
 
 func (s *Server) handleListGitHubAppInstallations(w http.ResponseWriter, r *http.Request) {
@@ -355,12 +370,15 @@ func (s *Server) handleCreateGitHubAppInstallation(w http.ResponseWriter, r *htt
 		return
 	}
 
+	var missing []settingsFieldError
 	if installation.InstallationID == 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "installation_id is required", nil)
-		return
+		missing = append(missing, settingsFieldError{Field: "installation_id", Message: "installation_id is required"})
 	}
 	if installation.AccountLogin == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "account_login is required", nil)
+		missing = append(missing, settingsFieldError{Field: "account_login", Message: "account_login is required"})
+	}
+	if len(missing) > 0 {
+		writeSettingsValidation(w, missing[0].Message, missing, nil)
 		return
 	}
 
@@ -387,8 +405,58 @@ func parseInstallationIDFromPath(r *http.Request) (int64, error) {
 	return strconv.ParseInt(path, 10, 64)
 }
 
-// handleGitHubAppInstallationByIDRead handles GET /api/v1/github-app/installations/{id}.
+// handleGitHubAssociationReport serves the cached admin association report
+// (githubAssociationReport). ?refresh=true asks for a full rebuild, which is
+// refused with 429 and Retry-After inside the rebuild interval.
+func (s *Server) handleGitHubAssociationReport(w http.ResponseWriter, r *http.Request) {
+	refresh := false
+	if v := r.URL.Query().Get("refresh"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "refresh must be true or false", nil)
+			return
+		}
+		refresh = b
+	}
+	report, retryAfter, err := s.githubAssociationReport(r.Context(), refresh)
+	if errors.Is(err, errGitHubAssociationReportRateLimited) {
+		seconds := int((retryAfter + time.Second - 1) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
+			"the association report was rebuilt recently; retry later", map[string]interface{}{"retry_after_seconds": seconds})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to build association report", nil)
+		return
+	}
+	unauthorized := 0
+	for _, e := range report.Entries {
+		if !e.Authorized {
+			unauthorized++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"associations": report.Entries,
+		"total":        len(report.Entries),
+		"unauthorized": unauthorized,
+		"generated_at": report.GeneratedAt.UTC().Format(time.RFC3339),
+		"truncated":    report.Truncated,
+	})
+}
+
+// handleGitHubAppInstallationByIDRead handles GET /api/v1/github-app/installations/{id}
+// and the read-only association report at
+// GET /api/v1/github-app/installations/association-report (same hub-admin
+// route guard: hub.github_app.read).
 func (s *Server) handleGitHubAppInstallationByIDRead(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/github-app/installations/"), "/") == githubAssociationReportPath {
+		s.handleGitHubAssociationReport(w, r)
+		return
+	}
 	installationID, err := parseInstallationIDFromPath(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid installation ID", nil)
@@ -460,106 +528,15 @@ func (s *Server) handleGitHubAppInstallationByID(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
-// handleProjectGitHubInstallation handles PUT and DELETE /api/v1/projects/{id}/github-installation.
-func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.Request, projectID string) {
-	switch r.Method {
-	case http.MethodPut:
-		var req struct {
-			InstallationID int64 `json:"installation_id"`
-		}
-		if err := readJSON(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
-			return
-		}
-		if req.InstallationID == 0 {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "installation_id is required", nil)
-			return
-		}
-
-		// Verify installation exists
-		if _, err := s.store.GetGitHubInstallation(r.Context(), req.InstallationID); err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "installation not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to verify installation", nil)
-			return
-		}
-
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
-		project.GitHubInstallationID = &req.InstallationID
-		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-			State:       store.GitHubAppStateUnchecked,
-			LastChecked: timeNow(),
-		}
-
-		if err := s.store.UpdateProject(r.Context(), project); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
-			return
-		}
-		s.events.PublishProjectUpdated(r.Context(), project)
-
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"project_id":      projectID,
-			"installation_id": req.InstallationID,
-			"status":          "associated",
-		})
-
-	case http.MethodDelete:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
-		project.GitHubInstallationID = nil
-		project.GitHubAppStatus = nil
-
-		if err := s.store.UpdateProject(r.Context(), project); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
-			return
-		}
-		s.events.PublishProjectUpdated(r.Context(), project)
-
-		w.WriteHeader(http.StatusNoContent)
-
-	default:
-		MethodNotAllowed(w)
-	}
-}
-
-// handleProjectGitHubStatus handles GET and POST /api/v1/projects/{id}/github-status.
-// GET returns the current status. POST actively verifies the installation by
-// checking with GitHub and attempting a token mint, then returns the updated status.
-func (s *Server) handleProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
-	switch r.Method {
-	case http.MethodGet:
-		s.handleGetProjectGitHubStatus(w, r, projectID)
-	case http.MethodPost:
-		s.handleCheckProjectGitHubStatus(w, r, projectID)
-	default:
-		MethodNotAllowed(w)
-	}
-}
-
-func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
+// handleProjectGitHubRoutes dispatches the project GitHub App and git identity
+// settings subtrees (github-installation, github-status, github-permissions,
+// git-identity). The project is loaded and authorized once here; the leaf
+// handlers receive the authorized project.
+func (s *Server) handleProjectGitHubRoutes(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
 	project, err := s.store.GetProject(r.Context(), projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
@@ -570,8 +547,186 @@ func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// SECURITY-GATE: CheckAccess — reads need project read access; every
+	// other method (including the github-status POST check, which refreshes
+	// stored status) needs project update access.
+	if !s.authorize(w, r, projectResource(project), projectGitHubRouteAction(r.Method)) {
+		return
+	}
+
+	switch subPath {
+	case "github-installation":
+		s.handleProjectGitHubInstallation(w, r, project)
+	case "github-status":
+		s.handleProjectGitHubStatus(w, r, project)
+	case "github-permissions":
+		s.handleProjectGitHubPermissions(w, r, project)
+	case "git-identity":
+		s.handleProjectGitIdentity(w, r, project)
+	default:
+		NotFound(w, "Project resource")
+	}
+}
+
+// projectGitHubRouteAction maps an HTTP method on the project GitHub settings
+// routes to the action required on the project.
+func projectGitHubRouteAction(method string) Action {
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		return ActionRead
+	default:
+		return ActionUpdate
+	}
+}
+
+// githubInstallationBindPermission is the permission a caller needs to bind
+// a GitHub App installation to a project: the same hub GitHub App update
+// permission the hub-admin GitHub App routes require. Binding is admin-only;
+// a non-admin project gets an installation token only through the
+// creator-access proof (authorizeGitHubAppAssociation).
+var githubInstallationBindPermission = RouteMetadata{
+	RouteID:    "projects.githubInstallation.bind",
+	Permission: "hub.github_app.update",
+	Resource:   "hub",
+	Action:     "update",
+}
+
+// handleProjectGitHubInstallation handles PUT and DELETE /api/v1/projects/{id}/github-installation.
+//
+// PUT is an explicit admin binding: the caller must hold
+// githubInstallationBindPermission (in addition to project update, checked
+// by the router), the project's remote must be on the configured GitHub
+// host, and the installation must be active and belong to the remote's
+// owner. The binding is recorded in githubInstallationBindingAnnotation and
+// re-validated at every token mint. DELETE removes the association and any
+// binding; it needs only project update access.
+func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.Request, project *store.Project) {
+	switch r.Method {
+	case http.MethodPut:
+		if !s.enforceRoutePermission(w, r, githubInstallationBindPermission) {
+			return
+		}
+		var req struct {
+			InstallationID int64 `json:"installation_id"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+			return
+		}
+		if req.InstallationID == 0 {
+			writeSettingsFieldError(w, "installation_id", "installation_id is required")
+			return
+		}
+
+		// Verify installation exists
+		inst, err := s.store.GetGitHubInstallation(r.Context(), req.InstallationID)
+		if err != nil {
+			if err == store.ErrNotFound {
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "installation not found", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to verify installation", nil)
+			return
+		}
+
+		// An admin binding still has to name the right host and the
+		// installation of the repository's owner.
+		host := s.githubAppWebHost()
+		owner, _, ok := githubapp.RemoteOwnerRepo(project.GitRemote, host)
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("project git remote is not an owner/repo on the configured GitHub host %q", host), nil)
+			return
+		}
+		if inst.Status != store.GitHubInstallationStatusActive {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, "installation is not active", nil)
+			return
+		}
+		if inst.AccountLogin == "" || !strings.EqualFold(inst.AccountLogin, owner) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("installation belongs to account %q, not the repository owner %q", inst.AccountLogin, owner), nil)
+			return
+		}
+
+		boundBy := ""
+		if user := GetUserIdentityFromContext(r.Context()); user != nil {
+			boundBy = user.ID()
+		}
+		if boundBy == "" {
+			Forbidden(w)
+			return
+		}
+		binding, err := json.Marshal(githubInstallationBinding{
+			InstallationID: req.InstallationID,
+			Remote:         util.NormalizeGitRemote(project.GitRemote),
+			BoundBy:        boundBy,
+			BoundAt:        timeNow().UTC(),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to record binding", nil)
+			return
+		}
+		if project.Annotations == nil {
+			project.Annotations = make(map[string]string)
+		}
+		project.Annotations[githubInstallationBindingAnnotation] = string(binding)
+		s.setGitHubInstallationAssociation(project, req.InstallationID)
+
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
+			return
+		}
+		// Again after the write, so a report read between the two cannot
+		// keep the pre-change outcome.
+		s.invalidateGitHubAssociation(project.ID)
+		s.events.PublishProjectUpdated(r.Context(), project)
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"project_id":      project.ID,
+			"installation_id": req.InstallationID,
+			"status":          "associated",
+		})
+
+	case http.MethodDelete:
+		project.GitHubInstallationID = nil
+		project.GitHubAppStatus = nil
+		// When the binding is present the map stays non-nil (possibly
+		// empty), so the store writes it, clearing the binding; delete is a
+		// no-op on a nil map.
+		delete(project.Annotations, githubInstallationBindingAnnotation)
+		s.invalidateGitHubAssociation(project.ID)
+
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
+			return
+		}
+		s.invalidateGitHubAssociation(project.ID)
+		s.events.PublishProjectUpdated(r.Context(), project)
+
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		MethodNotAllowed(w, http.MethodPut, http.MethodDelete)
+	}
+}
+
+// handleProjectGitHubStatus handles GET and POST /api/v1/projects/{id}/github-status.
+// GET returns the current status. POST actively verifies the installation by
+// checking with GitHub and attempting a token mint, then returns the updated status.
+func (s *Server) handleProjectGitHubStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetProjectGitHubStatus(w, r, project)
+	case http.MethodPost:
+		s.handleCheckProjectGitHubStatus(w, r, project)
+	default:
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	resp := map[string]interface{}{
-		"project_id":      projectID,
+		"project_id":      project.ID,
 		"installation_id": project.GitHubInstallationID,
 		"status":          project.GitHubAppStatus,
 	}
@@ -582,18 +737,8 @@ func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Req
 // handleCheckProjectGitHubStatus actively verifies the project's GitHub App
 // installation by checking the installation on GitHub and attempting to mint
 // a token. The project's status is updated to reflect the result.
-func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	ctx := r.Context()
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-		return
-	}
 
 	if project.GitHubInstallationID == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "project has no GitHub App installation", nil)
@@ -605,14 +750,14 @@ func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.R
 	_, _, mintErr := s.mintGitHubAppToken(ctx, project)
 
 	// Re-read the project to get the updated status (mintGitHubAppToken updates it)
-	project, err = s.store.GetProject(ctx, projectID)
+	project, err := s.store.GetProject(ctx, project.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to re-read project after check", nil)
 		return
 	}
 
 	resp := map[string]interface{}{
-		"project_id":      projectID,
+		"project_id":      project.ID,
 		"installation_id": project.GitHubInstallationID,
 		"status":          project.GitHubAppStatus,
 		"permissions":     project.GitHubPermissions,
@@ -625,19 +770,9 @@ func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.R
 }
 
 // handleProjectGitHubPermissions handles GET, PUT, DELETE /api/v1/projects/{id}/github-permissions.
-func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	switch r.Method {
 	case http.MethodGet:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
 		perms := project.GitHubPermissions
 		if perms == nil {
 			// Return defaults
@@ -650,19 +785,17 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, perms)
 
 	case http.MethodPut:
+		// Only the known fields, each "", "read" or "write". The mint
+		// never requests an empty set (githubTokenPermissionsForGrant), but
+		// an invalid body is refused here rather than stored.
 		var perms store.GitHubTokenPermissions
-		if err := readJSON(r, &perms); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		if err := readJSONStrict(r, &perms); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: only contents, pull_requests, issues, metadata, checks and actions are accepted", nil)
 			return
 		}
-
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
+		if field, ok := validateGitHubTokenPermissions(perms); !ok {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				fmt.Sprintf("%s must be \"read\", \"write\" or empty", field), nil)
 			return
 		}
 
@@ -675,16 +808,6 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, perms)
 
 	case http.MethodDelete:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
-
 		project.GitHubPermissions = nil
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
@@ -694,23 +817,14 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
 // handleProjectGitIdentity handles GET, PUT, DELETE /api/v1/projects/{id}/git-identity.
-func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request, projectID string) {
+func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	switch r.Method {
 	case http.MethodGet:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
 		identity := project.GitIdentity
 		if identity == nil {
 			identity = &store.GitIdentityConfig{Mode: "bot"}
@@ -726,20 +840,19 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 		switch identity.Mode {
 		case "bot", "custom", "co-authored":
 		default:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "mode must be 'bot', 'custom', or 'co-authored'", nil)
+			writeSettingsFieldError(w, "mode", "mode must be 'bot', 'custom', or 'co-authored'")
 			return
 		}
 		if identity.Mode == "custom" && (identity.Name == "" || identity.Email == "") {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "name and email are required when mode is 'custom'", nil)
-			return
-		}
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
+			const msg = "name and email are required when mode is 'custom'"
+			var missing []settingsFieldError
+			if identity.Name == "" {
+				missing = append(missing, settingsFieldError{Field: "name", Message: msg})
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
+			if identity.Email == "" {
+				missing = append(missing, settingsFieldError{Field: "email", Message: msg})
+			}
+			writeSettingsValidation(w, msg, missing, nil)
 			return
 		}
 		project.GitIdentity = &identity
@@ -750,15 +863,6 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, identity)
 
 	case http.MethodDelete:
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
-			return
-		}
 		project.GitIdentity = nil
 		if err := s.store.UpdateProject(r.Context(), project); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
@@ -767,7 +871,7 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -780,7 +884,7 @@ var timeNow = func() time.Time { return time.Now() }
 // permissions the app no longer has.
 func (s *Server) handleGitHubAppSyncPermissions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

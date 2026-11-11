@@ -51,6 +51,8 @@ list|show|upgrade|reset|sync|pull`.
   scion_harness.py   # vendored shared library imported by provision.py
   capture_auth.py    # thin shim: sys.exit(scion_harness.capture_auth_main())
   dialect.yaml       # optional — data-driven hook-event dialect
+  agent-plugins.yaml # optional — native Agent Plugins support (see Capabilities)
+  no-auth-env.yaml   # optional — env added only in no-auth mode (see no_auth)
   home/              # seeded into the agent home at install time
     .bashrc
     .<tool>/...      # native client settings, hook wiring, notify scripts
@@ -61,7 +63,7 @@ list|show|upgrade|reset|sync|pull`.
 ```
 
 At install time, `provision.py`, `scion_harness.py`, `capture_auth.py`,
-`dialect.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
+`dialect.yaml`, `agent-plugins.yaml`, `no-auth-env.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
 bundle root; everything under `home/` is copied into the harness-config's
 `home/` directory verbatim. `Dockerfile`, `cloudbuild.yaml`, `README.md`,
 `provision_test.py`, `.gitkeep`, and `init-firewall.sh` are not installed.
@@ -184,24 +186,31 @@ model_aliases:
 Templates reference abstract sizes. Provide all four conventional aliases.
 
 Scion delivers the agent's model to the container in the `SCION_MODEL` env
-var — that is the only live channel. (`ctx.model_resolution` reads a manifest
-key that the Go side never writes; see changelog 2026-07-20. Don't build on
-it.) `SCION_MODEL` may still carry a raw tier name, so resolve it in
-`provision.py`:
+var — that is the only live channel. `SCION_MODEL` may still carry a raw tier
+name (e.g. on resume/restart paths where the Go side had no alias table to
+resolve against), so resolve it in `provision.py` with the shared helper:
 
 ```python
-raw = os.environ.get("SCION_MODEL", "").strip()
-aliases = ctx.harness_config.get("model_aliases") or {}
-model = aliases.get(raw.lower(), raw) or "<your default>"
+model = scion_harness.resolve_model(ctx) or "<your default>"
 ```
 
-Mirror `config.NormalizeModelAlias` / `config.ResolveModelAlias`
-(`pkg/config/templates.go`) when you normalize: Scion also passes
-`--model <resolved>` on the CLI command line when the agent has a model
-configured, and a harness-side spelling the Go side does not accept would
-make the two disagree. Then write the result to the tool's native settings
-file or the env overlay. Do **not** pin the tool's model env var in the `env`
-block below — see the precedence note there.
+`scion_harness.resolve_model(ctx)` (`harnesses/scion_harness.py`) is a Python
+port of `config.NormalizeModelAlias` / `config.ResolveModelAlias`
+(`pkg/config/templates.go`): it reads `SCION_MODEL`, normalizes shorthand
+(s/m/l/xl and case) the same way Go does to recognize a size tier, and maps
+a recognized tier through `ctx.harness_config["model_aliases"]`, returning
+`""` when nothing is set. Concrete, non-tier names are returned with their
+original case — unlike Go, which lower-cases them too — because `SCION_MODEL`
+can arrive un-normalized from a path Go never touches (an explicit
+template/hub `env:` entry), and case-sensitive concrete IDs are real (e.g.
+OpenAI fine-tuned model suffixes). Scion also passes `--model <resolved>` on
+the CLI command line when the agent has a model configured, so a harness-side
+spelling the Go side does not accept for a *tier* would make the two
+disagree — that is why tier normalization must stay in lockstep with the Go
+side, which `resolve_model` already does for you. Then write the result to
+the tool's native settings file or the env overlay.
+Do **not** pin the tool's model env var in the `env` block below — see the
+precedence note there.
 
 ### Environment
 
@@ -252,6 +261,69 @@ dependent vars); put the default in `provision.py` instead.
 multi-key interrupt, `interrupt_signal: sequence` +
 `interrupt_sequence: [Escape, C-c]` (each entry sent as a separate key).
 
+### Readiness and delivery
+
+Two optional blocks describe when the tool is ready for a pasted message and
+how a pasted message is submitted. Durations are Go duration strings
+(`300ms`, `1.5s`, `1m30s`). Durations need a unit, so write zero as `0s`:
+the schema rejects a bare `0`. Only the units `ns`, `us`, `ms`, `s`, `m`
+and `h` are accepted (not `µs`).
+
+```yaml
+ready:
+  strategy: hook      # hook | delay (default delay)
+  settle: 1.5s        # 0 to 60s; default 8s for delay, 1.5s for hook
+  timeout: 90s        # hook only, 10s to 10m; default 90s
+delivery:
+  submit_keys: [Enter]      # 1 to 4 tmux key names; default [Enter]
+  extra_submits: 2          # 0 to 5; default 2
+  extra_submit_delay: 300ms # 0 to 5s; default 300ms
+```
+
+**`ready`.** One rule: the tool is ready at *signal time + `settle`*.
+
+- `hook`: the signal is the ready marker that a session-start hook writes
+  for the current run. Use it only when the tool fires a session-start hook
+  at startup, before any user input. `timeout` is the deadline from launch:
+  when it passes, the message is pasted anyway.
+- `delay`: the signal is the creation of the tmux session. Use it when the
+  tool has no early hook. `timeout` is not allowed with `delay`.
+
+The broker passes the resolved `ready` block (project, template and hub
+harness-config overrides included) to the container, and both readiness
+readers use it: `sciontool init`, which ends the agent's initializing state,
+and the broker's wait before it pastes a held message. A session-start from
+`/clear` or `/compact` never counts as the hook signal. The built-in bundles
+use `hook` for claude, gemini-cli and grok-build, and `delay` 8s for every
+other harness; change a value only with evidence that the tool reads its
+input by then. The copilot bundle uses `delay` because its `sessionStart`
+fires only when the first prompt is submitted, so `hook` held the first
+message of an agent started without a task for the whole `timeout`. A
+harness-config with no `ready` block gets the block of the built-in bundle
+for its `harness` type, or `delay` 8s if there is none.
+
+**`delivery`.** A message is loaded into a tmux buffer and pasted with
+bracketed paste. Then each key in `submit_keys` is sent with its own
+`tmux send-keys` call. After that, the whole `submit_keys` list is sent
+`extra_submits` more times, with `extra_submit_delay` before each pass. An
+empty message (a bare confirmation) sends `submit_keys` once, with no extra
+passes. The defaults give paste, Enter, then two more Enters 300ms apart.
+
+Each key must be 1 to 32 bytes, with no whitespace or control characters,
+and must not start with `-` (tmux would read it as a `send-keys` option).
+It must not end with `;` either: tmux strips a trailing `;` from the
+argument and treats it as a command separator, so `Enter;` would arrive as
+`Enter` and `;` would send nothing, with no error.
+
+Message delivery reads the embedded bundle's `delivery` block, the same as
+the interrupt keys. Project, template and hub harness-config overrides do not
+change it yet.
+
+Write both blocks out in full, even where they equal the defaults, so the
+values are visible to authors. If a value fails validation and the config
+reaches the runtime by a path that skips load-time validation, the runtime
+uses the default for that field and logs a warning.
+
 ### Capabilities
 
 An honest support matrix consumed by templates, preflight checks, and UIs:
@@ -297,6 +369,30 @@ one for anything but `yes`). What each signals:
   reflects whether project-scoped servers are honored or demoted to global.
 - **resume** — whether `resume_flag` genuinely restores a session.
 
+**Agent Plugins support goes in `agent-plugins.yaml`, not in `capabilities`.**
+The bundle file sits next to `config.yaml` and has the same shape as a
+capability field:
+
+```yaml
+support: "partial"
+reason: "Native install via local marketplace; Codex skips sse MCP servers"
+```
+
+It declares what this bundle's `provision.py` can install, so it is refreshed
+together with the provisioner scripts on seeding and `harness-config upgrade`.
+The harness reports it as the `agent_plugins` capability. A bundle without the
+file (and without the deprecated key below) has no plugin support: Scion
+reports it as predating Agent Plugins. An unreadable or invalid file (including
+a support level this Scion version does not know) is a warning, not a load
+error: Agent Plugins is treated as `no` with the error as the reason. Every
+bundled harness must ship a valid file; CI parses them strictly.
+`capabilities.agent_plugins` in `config.yaml` is deprecated: it is still read
+when the bundle has no `agent-plugins.yaml`, but hubs, brokers and CLIs built
+before Agent Plugins reject `config.yaml` with that key
+(ptone/scion#5196). The same applies to any new key: binaries already deployed
+validate `config.yaml` against their own schema, so data they do not need to
+read belongs in a separate bundle file.
+
 ### Auth
 
 ```yaml
@@ -338,10 +434,23 @@ auth:
   - `required`: broker must source the secret before dispatch (vs.
     documentary).
 - `autodetect` — maps discovered env vars / file secrets to an auth type when
-  the user didn't select one explicitly.
+  the user didn't select one explicitly. A file credential wins over an env
+  credential, except that when `default_type` is `api-key`, an env API key
+  wins over a `vertex-ai` file credential (for example `gcloud-adc`).
 
 Conventional type names — `api-key`, `oauth-token`, `auth-file`, `vertex-ai` —
 line up with the `capabilities.auth` matrix; use them.
+
+Declare every method your provisioner accepts, with the same name and the
+same credentials. On a broker start, Scion rejects the start before any
+container is created when the selected auth type is env-only (it declares
+`required_env` but no `required_files`) and none of its keys are staged. It
+does the same when no type is selected, the harness has no `no_auth`, and no
+declared type is satisfied. Types that declare `required_files`, and keys
+named `SCION_*`, are never rejected. A method your `provision.py` accepts but
+this block does not declare, or declares as env-only while the provisioner
+also accepts a file, can therefore be rejected on the broker even though the
+provisioner would accept it.
 
 ### no_auth
 
@@ -361,6 +470,28 @@ with your message. The user logs in interactively, then runs the staged
 the host from your `required_files` declarations) and stores each credential
 as a project secret via `sciontool secret set` — so the next agent starts
 authenticated.
+
+`command` is optional: without it the agent starts the shell with the message
+only.
+
+**Env for no-auth mode goes in `no-auth-env.yaml`, not in `config.yaml`.** The
+file sits next to `config.yaml` and holds one key, `env`, a map of variable
+names to literal values. Scion adds them to the container only when the agent
+runs in no-auth mode (the bundle needs a `no_auth` block), never for a start
+with credentials. An entry never replaces env set by settings, the agent or
+the hub, and names reserved for scion (`SCION_*`, `GCE_METADATA_*`, hub-only
+keys) and entries with an empty value are ignored with a warning, as is an
+invalid file; an entry whose name is empty or contains `=` is ignored without a
+warning. Like
+`agent-plugins.yaml`, it is kept out of `config.yaml` so older binaries can
+still validate `config.yaml`; they ignore the file. Copilot uses it to run
+without a session bus:
+
+```yaml
+# harnesses/copilot/no-auth-env.yaml
+env:
+  DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus
+```
 
 ### MCP (declarative mapping)
 
@@ -413,6 +544,7 @@ $HOME/.scion/harness/
   outputs/             # your script writes here
     resolved-auth.json
     env.json
+    status.json        # written by sciontool, not your script (see below)
   secrets/             # 0600 files, one per credential
     <ENV_VAR_NAME>
     <FILE_SECRET_NAME>
@@ -426,13 +558,21 @@ env vars are stripped from the script's process environment — read secret
 *values* from the staged files in `secrets/` (via the `ProvisionContext`
 helpers), never from `os.environ`.
 
+`outputs/status.json` is owned by `sciontool harness provision`; do not write
+it from your script. It holds the last run's outcome (`running`, `ok`, or
+`failed` with the error). On failure that error (secret-scrubbed, single
+line, capped at 1 KiB) is appended to the agent's "pre-start hook failed"
+status message, so make your `ProvisionError` messages say what is missing
+and never include credential values.
+
 `manifest.json` gives you: `schema_version`, `command` (`"provision"`),
 `agent_name`, `agent_home`, `agent_workspace`, `harness_bundle_dir`,
 `harness_config` (your parsed config.yaml — read `instructions_file`,
 `system_prompt_mode`, etc. from here rather than hardcoding), `inputs` /
-`outputs` paths, and `platform`. (`ProvisionContext.model_resolution` reads a
-`model_resolution` key that `ProvisionManifest` does not emit — it is always
-empty; use `SCION_MODEL` instead.)
+`outputs` paths, and `platform`. For the model, use
+`scion_harness.resolve_model(ctx)`, which reads `SCION_MODEL` and maps it
+through `harness_config["model_aliases"]` — see the Model resolution section
+above.
 
 ### What provision.py must do
 
@@ -492,7 +632,8 @@ assert scion_harness.INTERFACE_VERSION >= 2
 ```
 
 (Bundles inside the scion repo itself are kept in sync mechanically via
-`go generate ./harnesses/`, which stamps a `GENERATED FILE` header; external
+`go generate ./harnesses/` or, from the repo root, `go run ./harnesses/gen`;
+both stamp a `GENERATED FILE` header and produce identical output. External
 bundles just track the canonical file.)
 
 Key API surface:
@@ -503,15 +644,31 @@ Key API surface:
   unknown commands).
 - **`ProvisionContext`** — properties: `bundle_dir`, `inputs_dir`, `home`,
   `workspace`, `harness_config`, `candidates`, `explicit_type`, `env_keys`,
-  `file_paths`, `env_secret_files`, `file_secret_files`, `telemetry`,
-  `model_resolution` (always empty — see above). Methods:
-  `read_secret(name)` / `read_file_secret(name)`
+  `file_paths`, `env_secret_files`, `file_secret_files`, `telemetry`.
+  Methods: `read_secret(name)` / `read_file_secret(name)`
   (staged secret values, trailing newline stripped), `read_input_text(name)`,
   `select_auth(spec)`, `write_outputs(resolved, env=, extra=)`,
   `info()` / `warn()` (stderr).
+- **`resolve_model(ctx)`** — reads `SCION_MODEL`, normalizes shorthand (see
+  the Model resolution section above), and maps the result through
+  `ctx.harness_config["model_aliases"]`; returns `""` when nothing is set.
+- **`resolve_thinking(ctx)`** — reads `SCION_THINKING_LEVEL` (0-100), parses
+  and clamps it with `parse_thinking_level`, and maps it through
+  `ctx.harness_config["thinking"]` (the config.yaml `thinking:` block:
+  `levels: [{max, value}]` plus optional `default`) via `map_thinking_level`.
+  Returns the native value string, or `None` when the provisioner should emit
+  nothing. Writing the value to the harness's native knob stays in
+  provision.py. Requires `INTERFACE_VERSION >= 3`. Three writers ship as
+  examples: codex writes a TOML key (`model_reasoning_effort`), antigravity
+  adds a CLI flag in its wrapper script (`agy --effort`), and claude adds an
+  env var to the `write_outputs(env=...)` overlay (`CLAUDE_CODE_EFFORT_LEVEL`).
 - **Auth engine** — `AuthSpec(harness, [methods])` with
   `env_method(name, any_of=/all_of=, hint=, env_fallback=)` and
-  `file_method(name, path=, secret_key=, hint=)`. `select_auth` honors an
+  `file_method(name, path=, secret_key=, hint=, present_check=)`. A file
+  already in the container at `path` satisfies a file method unless
+  `present_check(path)` returns False; set it when that path can also hold
+  a non-credential file (copilot's `config.json` holds settings too). Staged
+  file secrets and candidate file mappings always satisfy it. `select_auth` honors an
   explicit user selection, otherwise tries methods **in declaration order**
   (your precedence), checking staged candidates/secrets before any env
   fallback; raises `ProvisionError` with the accumulated hints if nothing
@@ -531,9 +688,62 @@ Key API surface:
   (warn-and-skip per server, demotes project scope to global).
 - **File helpers** — `atomic_write_json`, `atomic_write_text` (tmp +
   `os.replace`), `expand_path`, `load_json`,
-  `read_json_skipping_comment_lines`; TOML emit/reconcile helpers:
-  `toml_escape`, `toml_inline_table`, `toml_string_array`,
-  `strip_toml_sections` (tomllib is read-only, so TOML editing is manual).
+  `read_json_skipping_comment_lines` and `drop_json_comment_lines` (the
+  host's `//` comment-line rule); TOML emit/reconcile helpers:
+  `toml_escape`, `toml_inline_table`, `toml_string_array` (tomllib is
+  read-only, so TOML editing is manual, line-oriented text surgery).
+  `strip_toml_sections(content, header_predicate)` removes whole
+  `[table]`/`[[table]]` sections whose (comment-stripped,
+  whitespace-normalized) header matches the predicate; it tracks
+  bracket-nesting depth so a nested-array element line isn't mistaken for a
+  header, and it tracks multi-line (`"""`/`'''`) strings across lines —
+  including escaped closing-delimiter sequences inside a multi-line *basic*
+  string — so a header-shaped line, or an unbalanced bracket in ordinary
+  prose, inside one of those is correctly treated as string content rather
+  than TOML structure. It is still not a full TOML tokenizer, so every TOML
+  writer must still validate before persisting: parse the original and the
+  edited content with `tomllib` and require everything you don't own to be
+  unchanged. Use `toml_edit_preserves(original, content, managed_keys)` for
+  the check alone, or `write_toml_if_preserves(ctx, path, original,
+  content, managed_keys, what=...)` to check-and-write-or-warn-and-leave-
+  untouched in one call. `managed_keys` accepts two kinds of entries:
+  a bare top-level key (`str`), exempting the whole top-level table or
+  value (e.g. `{"mcp_servers"}` for an MCP writer that fully replaces that
+  table each time); or a key-path (`tuple[str, ...]`, e.g.
+  `("model", "vertex-grok")`), exempting only that one nested subtree while
+  still requiring every sibling under the same parent to stay unchanged —
+  use a key-path whenever your write owns only one sub-table of a larger,
+  potentially-shared top-level table, so it can't be fooled into accepting
+  damage to an unrelated sibling (e.g. another tool's `[model.custom]`).
+  `what` is a short label (e.g. `"vertex-ai auth/model config"`) included
+  in the warning on a rejected write, alongside the managed keys, so the
+  log names which step failed and what it owned. `strip_toml_top_level_key
+  (content, key)` and `insert_toml_top_level_line(content, line)` do the
+  equivalent surgery for bare top-level `key = value` lines rather than
+  whole sections (codex uses these for `model`/`model_reasoning_effort`);
+  both also skip lines inside a multi-line string (including a
+  backslash-escaped closing-delimiter sequence inside a `"""` (basic)
+  string, on any line including the one that opens it — `'''` (literal)
+  strings have no escapes in TOML at all, so no such handling applies
+  there), and correctly consume the 1-2 extra content quote characters
+  TOML allows immediately before a closing delimiter (`""""`/`'''''`, e.g.
+  `"""say "hi""""` is the content `say "hi"`) instead of stopping after the
+  first 3-quote run. There are no known residual gaps in this scanner as of
+  ptone/scion#2427; the `tomllib` round-trip check above remains the
+  backstop regardless, since this is still a line-oriented scanner rather
+  than a full TOML tokenizer. A seeded, bounded fuzz test
+  (`TestTomlScannerFuzz` in `harnesses/scion_harness_test.py`) checks
+  `strip_toml_sections`'s output against a fresh `tomllib` parse across a
+  generated corpus of tricky multi-line-string/bracket/quote fragments on
+  every test run, to catch the next scanner edge automatically rather than
+  by manual review. See `harnesses/scion_harness_test.py`'s
+  `TestStripTomlSections` / `TestTomlEnteringArrayDepths` /
+  `TestTomlEditPreserves` / `TestWriteTomlIfPreserves` /
+  `TestTomlScannerFuzz` for worked examples, including the fragility repro
+  cases (trailing comments on headers, nested arrays, multi-line strings
+  with header-shaped lines, unbalanced brackets, escaped delimiters, or
+  extra closing quotes, header whitespace variants like `[ models ]`) this
+  API was hardened against (ptone/scion#2426, ptone/scion#2427).
 - **`capture_auth_main()`** — the whole capture-auth flow; your
   `capture_auth.py` is a two-line shim around it. Exit codes: 0 captured,
   1 error, 2 no credentials found, 3 conflict (secret exists; `--force`).
@@ -583,8 +793,17 @@ Map into the normalized event vocabulary: `session-start`, `session-end`,
 `prompt-submit`, `tool-start`, `tool-end`, `model-start`, `model-end`,
 `agent-end`, `subagent-end`, `response-complete`, `notification`.
 Extractable fields include `prompt`, `tool_name`, `tool_input`,
-`tool_output`, `message`, `session_id`, `success`, `error`, `assistant_text`,
-`file_path`, and `input_tokens` / `output_tokens` / `cached_tokens`.
+`tool_output`, `message`, `session_id`, `success`, `error`, `file_path`,
+and the token fields `input_tokens` (→ `input`), `output_tokens`
+(→ `output`), `cached_tokens` (→ `cache_read`), `cache_write_tokens` (→
+`cache_write`) and `reasoning_tokens` (→ `reasoning`, informational only).
+`output_tokens` must be the *total* output including reasoning (canonical
+usage contract, `.design/hosted/usage-telemetry.md` §3.2); a `fields`
+mapping is a pure path copy with no arithmetic, so if the tool reports
+output and reasoning as exclusive values, the hook/bridge script must sum
+them into the payload field your `output_tokens` mapping reads, before the
+payload reaches sciontool. YAML cannot do this. (A built-in Go dialect
+would sum them in Go instead.)
 
 Your `capabilities.limits` claims must match this wiring: `max_turns` needs
 `prompt-submit`, `max_model_calls` needs model start/end events.
@@ -706,7 +925,7 @@ permanent; check whether they've been fixed.
   line. Claude's simple mapping is the only project-scope path exercised.
 - **Version numbering is not unified**: `provisioner.interface_version` in
   config.yaml (1), the manifest `schema_version` (1), and
-  `scion_harness.INTERFACE_VERSION` (2) are three separate counters. Guard on
+  `scion_harness.INTERFACE_VERSION` (3) are three separate counters. Guard on
   the library's `INTERFACE_VERSION`; the other two are effectively constant
   today.
 - **`outputs/status.json`** is declared in the manifest outputs but nothing
@@ -730,8 +949,8 @@ permanent; check whether they've been fixed.
   dialects; bundled `dialect.yaml` dialects work but are undocumented there.
 - **Vendored-lib drift for external bundles** is manual: nothing warns when
   your vendored `scion_harness.py` falls behind the canonical copy (in-repo
-  bundles are covered by `go generate` + a sync test). The host logs the
-  staged `LIB_VERSION` at provision time — check it when debugging.
+  bundles are covered by `go run ./harnesses/gen` + a sync test). The host
+  logs the staged `LIB_VERSION` at provision time — check it when debugging.
 - **`HasSystemPrompt`** checks for the native system-prompt file on disk, but
   the file is only written at pre-start, so host-side checks before first
   start can misreport.

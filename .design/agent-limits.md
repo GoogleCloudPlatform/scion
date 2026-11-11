@@ -12,7 +12,7 @@ Agents need configurable limits on how long they run and how many LLM turns they
 
 Both settings are already defined in the configuration layer:
 
-- **Schema** (`agent-v1.schema.json`): `max_turns` (integer, min 1) and `max_duration` (string, pattern `^[0-9]+(s|m|h)$`), both gated on `schema_version: "1"`.
+- **Schema** (`agent-v1.schema.json`): `max_turns` (integer, min 1) and `max_duration` (string, pattern `^[0-9]+(s|m|h)$`), both gated on `schema_version: "1"`. (Superseded by ptone/scion#5605: `max_turns` and `max_model_calls` now allow 0, meaning no limit.)
 - **Go struct** (`pkg/api/types.go`): `ScionConfig.MaxTurns` and `ScionConfig.MaxDuration` with a `ParseMaxDuration()` helper.
 - **Environment injection** (`pkg/agent/run.go:280-286`): Both are injected into the container as `SCION_MAX_TURNS` and `SCION_MAX_DURATION`.
 
@@ -131,10 +131,12 @@ Turn and model call counting is implemented as a new handler registered in the h
 
 When a count-incrementing event is received and the count meets or exceeds the corresponding limit:
 
-1. Write a clear log entry to `agent.log`.
-2. Set agent status to `LIMITS_EXCEEDED` in `agent-info.json`.
-3. Report `limits_exceeded` to the Hub (if configured).
-4. Send `SIGTERM` to the harness process by signaling PID 1 (sciontool init).
+1. Set agent status to `LIMITS_EXCEEDED` in `agent-info.json`.
+2. Write a clear log entry to `agent.log`.
+3. Signal PID 1 (sciontool init): write the trigger file `/tmp/scion-limits-exceeded` holding the limit message, then send `SIGUSR1` as a fallback.
+4. Report the updated counts to the Hub (if configured).
+
+The hook does not report `limits_exceeded` to the Hub itself. Init does that when it sees the trigger file or `SIGUSR1`, using the message from the trigger file (ptone/scion#3610). The hook runs under the harness's hook timeout (antigravity 10s, opencode and grok-build 5s), so its Hub calls share one per-process budget (`hookHubBudget`, 3s), and the local actions above come before any Hub call so an unreachable Hub never delays shutdown. The calls share the budget in order, so a slow earlier call (the status update) can use it up and the later ones (counts, session-end metrics) are then dropped; this is accepted because `limits_exceeded` and the final stop status come from init.
 
 #### Signaling the Init Process
 
@@ -150,8 +152,8 @@ The reason for using a signal rather than having the hook process directly kill 
 │  Detects limit    │                  │  Receives signal   │
 │  Sets status      │                  │  Logs reason       │
 │  Logs event       │                  │  SIGTERM → child   │
-│  Reports to Hub   │                  │  Waits grace       │
-│  Sends SIGUSR1    │                  │  Exits             │
+│  Trigger file +   │                  │  Reports to Hub    │
+│  SIGUSR1          │                  │  Waits grace, exits│
 └──────────────────┘                  └──────────────────┘
 ```
 
@@ -178,13 +180,13 @@ All limit-related events produce structured log entries in `agent.log` using the
 #### When Duration Limit is Hit
 
 ```
-2026-02-22 14:30:00 [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_duration of 2h exceeded (started at 2026-02-22 12:30:00)
+2026-02-22T14:30:00Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_duration of 2h exceeded (started at 2026-02-22 12:30:00)
 ```
 
 #### When Turn Limit is Hit
 
 ```
-2026-02-22 14:30:00 [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_turns of 50 exceeded (completed 50 turns)
+2026-02-22T14:30:00Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_turns of 50 exceeded (completed 50 turns)
 ```
 
 #### When Neither Limit is Configured
@@ -239,7 +241,7 @@ The `LIMITS_EXCEEDED` state has specific interactions with the status system:
    - Maintains turn count and model call count in `~/agent-limits.json`.
    - Increments turn count on `agent-end` events.
    - Increments model call count on `model-end` events.
-   - When either limit is reached: updates status, logs, reports to Hub, sends `SIGUSR1` to PID 1.
+   - When either limit is reached: updates status, logs, writes the trigger file and sends `SIGUSR1` to PID 1. Init reports `limits_exceeded` to the Hub (see §3.4).
 2. Register `LimitsHandler` in the hook event pipeline in `cmd/sciontool/commands/hook.go`.
 3. Initialize `agent-limits.json` during `post-start` in `init.go` (counters reset on each start/resume).
 

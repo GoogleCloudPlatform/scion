@@ -1,0 +1,30 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (1):
+  func   report -> Report  (hub/move.go:3)
+
+Alias entries (1):
+  func  report = sub.Report
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (1) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 0. Errors: 1.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/move.go:3: moved file uses func writeError, which stays in hub (hub/stay.go:3); the target cannot import hub (the alias file makes hub import the target) - move it too, or invert the dependency first

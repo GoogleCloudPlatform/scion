@@ -44,7 +44,7 @@ func (EntitlementBinding) Fields() []ent.Field {
 		field.String("subject_id").
 			Default(""),
 		field.Enum("scope_type").
-			Values("system", "project"),
+			Values("system", "project", "broker"),
 		field.String("scope_id").
 			Default(""),
 		field.Int64("value"),

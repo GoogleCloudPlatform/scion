@@ -370,25 +370,17 @@ func classifyMentions(text string, botUserID string, knownAgents []string, userR
 	}
 }
 
-// agentFromReply extracts the agent slug from a referenced message.
-// When a user replies to a webhook message, the webhook username IS the agent
-// slug (since the Discord plugin uses per-agent webhooks with the agent slug
-// as the webhook username). When replying to a regular bot API message,
-// returns "" because the bot's own messages don't carry agent identity in
-// the username.
-func agentFromReply(ref *discordgo.Message, botUserID string) string {
-	if ref == nil {
+// agentFromReply returns the agent slug of a referenced message. The
+// plugin posts agent messages through its own per-channel webhook with
+// the agent slug as the username, so a slug is returned only when
+// ownsWebhook confirms ref.WebhookID is that webhook. Any other message
+// yields "".
+func agentFromReply(ref *discordgo.Message, ownsWebhook func(webhookID string) bool) string {
+	if ref == nil || ref.WebhookID == "" || ref.Author == nil || ownsWebhook == nil {
 		return ""
 	}
-
-	// Webhook messages have WebhookID set and the Author.Username is the
-	// agent slug (set when the webhook message was sent).
-	if ref.WebhookID != "" && ref.Author != nil {
-		return ref.Author.Username
+	if !ownsWebhook(ref.WebhookID) {
+		return ""
 	}
-
-	// Regular bot API messages — cannot determine which agent sent them
-	// from the message metadata alone. The bot user's username is the bot
-	// name, not the agent slug.
-	return ""
+	return ref.Author.Username
 }

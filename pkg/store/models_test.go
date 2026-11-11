@@ -14,7 +14,35 @@
 
 package store
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+func TestUserActivityTimestampsJSON(t *testing.T) {
+	for _, timestamp := range []time.Time{{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)} {
+		t.Run(timestamp.String(), func(t *testing.T) {
+			data, err := json.Marshal(User{LastLogin: timestamp, LastSeen: timestamp})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"lastLogin", "lastSeen"} {
+				value, present := fields[field]
+				if present == timestamp.IsZero() {
+					t.Fatalf("%s presence = %v for %v", field, present, timestamp)
+				}
+				if present && string(value) != `"2026-10-16T08:00:00Z"` {
+					t.Errorf("%s = %s", field, value)
+				}
+			}
+		})
+	}
+}
 
 func TestResolveWorkspaceSharingMode(t *testing.T) {
 	tests := []struct {
@@ -29,6 +57,7 @@ func TestResolveWorkspaceSharingMode(t *testing.T) {
 		// Canonical enum values (accepted as aliases)
 		{label: "shared-plain", want: SharingModeSharedPlain},
 		{label: "clone-per-agent", want: SharingModeClonePerAgent},
+		{label: "empty-per-agent", want: SharingModeEmptyPerAgent}, // round-trips through SCION_WORKSPACE_MODE
 
 		// Empty → default (shared-plain)
 		{label: "", want: SharingModeSharedPlain},
@@ -69,6 +98,9 @@ func TestWorkspaceSharingMode_Constants(t *testing.T) {
 	}
 	if SharingModeWorktreePerAgent != "worktree-per-agent" {
 		t.Errorf("SharingModeWorktreePerAgent = %q, want %q", SharingModeWorktreePerAgent, "worktree-per-agent")
+	}
+	if SharingModeEmptyPerAgent != "empty-per-agent" {
+		t.Errorf("SharingModeEmptyPerAgent = %q, want %q", SharingModeEmptyPerAgent, "empty-per-agent")
 	}
 	if WorkspaceModeWorktreePerAgent != "worktree-per-agent" {
 		t.Errorf("WorkspaceModeWorktreePerAgent = %q, want %q", WorkspaceModeWorktreePerAgent, "worktree-per-agent")
@@ -227,5 +259,176 @@ func TestGCPServiceAccount_ReachableFromProject(t *testing.T) {
 				t.Errorf("ReachableFromProject(%q) = %v, want %v. %s", tt.from, got, tt.want, tt.why)
 			}
 		})
+	}
+}
+
+// TestMessageExpiredStuckPendingReason_Value pins the exact string value of
+// MessageExpiredStuckPendingReason (nc-promote-busy round 4 Consider).
+// Production messages.dispatch_failure_reason rows already carry this exact
+// literal, written by pkg/hub/sweep.go before this constant existed. Do not
+// "fix" a failure here by updating this expected value: changing the
+// constant silently strands every existing row outside
+// BackfillNonAgentDispatchState's exact-match predicate. A real change to
+// this string must ship together with a data migration for existing rows,
+// and this test's expected literal must be updated only as part of that
+// migration.
+func TestMessageExpiredStuckPendingReason_Value(t *testing.T) {
+	const shipped = "expired: stuck in pending state beyond TTL"
+	if MessageExpiredStuckPendingReason != shipped {
+		t.Fatalf("MessageExpiredStuckPendingReason changed value: got %q, want %q (see this test's doc comment before changing either)",
+			MessageExpiredStuckPendingReason, shipped)
+	}
+}
+
+func TestResolveProjectSharingMode(t *testing.T) {
+	tests := []struct {
+		label string
+		isGit bool
+		want  WorkspaceSharingMode
+	}{
+		// Git projects: only "shared" selects the shared checkout; no
+		// label or an unknown one gets a per-agent clone, as agent create
+		// does (ptone/scion#3998).
+		{"", true, SharingModeClonePerAgent},
+		{"shared", true, SharingModeSharedPlain},
+		// Only the "shared" label selects the shared checkout, as in
+		// Project.IsSharedWorkspace.
+		{"shared-plain", true, SharingModeClonePerAgent},
+		{"per-agent", true, SharingModeClonePerAgent},
+		{"clone-per-agent", true, SharingModeClonePerAgent},
+		{"worktree-per-agent", true, SharingModeWorktreePerAgent},
+		{"bogus", true, SharingModeClonePerAgent},
+		// empty-per-agent is non-git only: a legacy raw label on a git
+		// project is treated like any unknown value.
+		{"empty-per-agent", true, SharingModeClonePerAgent},
+
+		// Non-git projects: per-agent means an empty private dir.
+		{"", false, SharingModeSharedPlain},
+		{"shared", false, SharingModeSharedPlain},
+		{"per-agent", false, SharingModeEmptyPerAgent},
+		{"empty-per-agent", false, SharingModeEmptyPerAgent},
+		{"worktree-per-agent", false, SharingModeSharedPlain},
+		{"clone-per-agent", false, SharingModeSharedPlain},
+		{"bogus", false, SharingModeSharedPlain},
+	}
+	for _, tt := range tests {
+		got := ResolveProjectSharingMode(tt.label, tt.isGit)
+		if got != tt.want {
+			t.Errorf("ResolveProjectSharingMode(%q, git=%v) = %q, want %q", tt.label, tt.isGit, got, tt.want)
+		}
+		// The canonical value must survive a round trip through the
+		// label-only resolver used by brokers/sciontool (env value).
+		if rt := ResolveWorkspaceSharingMode(string(got)); rt != got {
+			t.Errorf("round trip of %q via ResolveWorkspaceSharingMode = %q", got, rt)
+		}
+	}
+}
+
+func TestProjectSharingModeHelpers(t *testing.T) {
+	tests := []struct {
+		name          string
+		project       Project
+		want          WorkspaceSharingMode
+		wantEmptyPerA bool
+	}{
+		{"non-git no label", Project{}, SharingModeSharedPlain, false},
+		{"non-git shared", Project{Labels: map[string]string{LabelWorkspaceMode: "shared"}}, SharingModeSharedPlain, false},
+		{"non-git per-agent", Project{Labels: map[string]string{LabelWorkspaceMode: "per-agent"}}, SharingModeEmptyPerAgent, true},
+		{"git no label", Project{GitRemote: "github.com/a/b"}, SharingModeClonePerAgent, false},
+		{"git unknown label", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "bogus"}}, SharingModeClonePerAgent, false},
+		{"git shared", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "shared"}}, SharingModeSharedPlain, false},
+		{"git per-agent", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "per-agent"}}, SharingModeClonePerAgent, false},
+		{"git worktree", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "worktree-per-agent"}}, SharingModeWorktreePerAgent, false},
+		// Legacy raw canonical label (accepted verbatim before #2703): the
+		// helpers must agree with each other.
+		{"non-git legacy empty-per-agent label", Project{Labels: map[string]string{LabelWorkspaceMode: "empty-per-agent"}}, SharingModeEmptyPerAgent, true},
+		{"git legacy empty-per-agent label", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "empty-per-agent"}}, SharingModeClonePerAgent, false},
+	}
+	var nilProject *Project
+	if nilProject.IsEmptyPerAgent() {
+		t.Error("nil project must not be empty-per-agent")
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.project.SharingMode(); got != tt.want {
+				t.Errorf("SharingMode() = %q, want %q", got, tt.want)
+			}
+			if got := tt.project.IsEmptyPerAgent(); got != tt.wantEmptyPerA {
+				t.Errorf("IsEmptyPerAgent() = %v, want %v", got, tt.wantEmptyPerA)
+			}
+		})
+	}
+}
+
+func TestValidateWorkspaceMode(t *testing.T) {
+	tests := []struct {
+		mode    string
+		isGit   bool
+		wantErr bool
+	}{
+		{"", true, false},
+		{"", false, false},
+		{"shared", true, false},
+		{"shared", false, false},
+		{"per-agent", true, false},
+		{"per-agent", false, false},
+		{"worktree-per-agent", true, false},
+		{"worktree-per-agent", false, true},
+		{"bogus", true, true},
+		{"bogus", false, true},
+		// Canonical sharing-mode names are not API/label values.
+		{"empty-per-agent", false, true},
+		{"clone-per-agent", true, true},
+	}
+	for _, tt := range tests {
+		err := ValidateWorkspaceMode(tt.mode, tt.isGit)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ValidateWorkspaceMode(%q, git=%v) err = %v, wantErr %v", tt.mode, tt.isGit, err, tt.wantErr)
+		}
+	}
+}
+
+func TestIsProjectMembersGroup(t *testing.T) {
+	tests := []struct {
+		name  string
+		group *Group
+		want  bool
+	}{
+		{"nil", nil, false},
+		{"canonical key", &Group{ProjectID: "p", Annotations: map[string]string{AnnotationProjectMembersGroup: "true"}}, true},
+		{"legacy key", &Group{ProjectID: "p", Annotations: map[string]string{LegacyAnnotationProjectMembersGroup: "true"}}, true},
+		{"both keys", &Group{ProjectID: "p", Annotations: map[string]string{
+			AnnotationProjectMembersGroup: "true", LegacyAnnotationProjectMembersGroup: "true",
+		}}, true},
+		{"conflicting markers legacy true canonical false", &Group{ProjectID: "p", Annotations: map[string]string{
+			AnnotationProjectMembersGroup: "false", LegacyAnnotationProjectMembersGroup: "true",
+		}}, true},
+		{"no annotations", &Group{ProjectID: "p"}, false},
+		{"marker false", &Group{ProjectID: "p", Annotations: map[string]string{AnnotationProjectMembersGroup: "false"}}, false},
+		{"legacy marker false", &Group{ProjectID: "p", Annotations: map[string]string{LegacyAnnotationProjectMembersGroup: "false"}}, false},
+		{"marker without project", &Group{Annotations: map[string]string{AnnotationProjectMembersGroup: "true"}}, false},
+		{"other annotation", &Group{ProjectID: "p", Annotations: map[string]string{AnnotationProjectAgentsGroup: "true"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsProjectMembersGroup(tt.group); got != tt.want {
+				t.Errorf("IsProjectMembersGroup() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReincarnationInFlight(t *testing.T) {
+	for state, want := range map[string]bool{
+		ReincarnationStateNone:         false,
+		ReincarnationStateFailed:       false,
+		ReincarnationStatePending:      true,
+		ReincarnationStateStopping:     true,
+		ReincarnationStateProvisioning: true,
+		ReincarnationStateStarting:     true,
+	} {
+		if got := ReincarnationInFlight(state); got != want {
+			t.Errorf("ReincarnationInFlight(%q) = %v, want %v", state, got, want)
+		}
 	}
 }

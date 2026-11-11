@@ -62,7 +62,7 @@ var versionCmd = &cobra.Command{
 			return outputJSON(result)
 		}
 		if resolveMode() != ModeAgent {
-			fmt.Println(util.GetBanner())
+			fmt.Println(util.ColorFor(os.Stdout, util.GetBanner()))
 		}
 		fmt.Println(version.Get())
 

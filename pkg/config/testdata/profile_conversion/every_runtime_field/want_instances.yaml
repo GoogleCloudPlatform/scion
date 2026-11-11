@@ -1,0 +1,21 @@
+server:
+  broker:
+    instances:
+      - key: docker
+        name: docker
+        runtime_target:
+          type: docker
+      - key: k8s-kind-a-agents
+        name: k8s-kind-a-agents
+        runtime_target:
+          type: kubernetes
+          context: kind-a
+          namespace: agents
+          gke: true
+          priority_class_name: agents-high
+          shared_dir_storage_class: standard-rwx
+          shared_dir_size: 20Gi
+          safe_to_evict: false
+          kubernetes_service_account_mappings:
+            agent@proj.iam.gserviceaccount.com: ksa-agent
+          kubernetes_block_service_account: zero-priv

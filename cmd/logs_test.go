@@ -16,17 +16,13 @@ package cmd
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func TestLogsFollowValidation(t *testing.T) {
-	// --follow should be rejected in hub mode and non-interactive mode.
-	// These are integration-level checks; here we verify the flag exists.
-	flags := logsCmd.Flags()
-	f := flags.Lookup("follow")
-	if f == nil {
-		t.Fatal("expected --follow flag to be registered")
-	}
-	if f.Shorthand != "f" {
-		t.Errorf("expected --follow shorthand to be 'f', got %q", f.Shorthand)
-	}
+// TestLogsHasNoFollowFlag checks that --follow is gone: it only ever worked
+// for local agents, which were removed with local mode.
+func TestLogsHasNoFollowFlag(t *testing.T) {
+	assert.Nil(t, logsCmd.Flags().Lookup("follow"))
+	assert.Nil(t, logsCmd.Flags().ShorthandLookup("f"))
 }

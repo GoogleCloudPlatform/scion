@@ -454,7 +454,6 @@ type jsonEntry struct {
 	RecipientID string   `json:"recipient_id,omitempty"`
 	Type        string   `json:"type,omitempty"`
 	Plain       bool     `json:"plain,omitempty"`
-	Raw         bool     `json:"raw,omitempty"`
 	Urgent      bool     `json:"urgent,omitempty"`
 	Broadcasted bool     `json:"broadcasted,omitempty"`
 	Status      string   `json:"status,omitempty"`
@@ -484,7 +483,6 @@ func writeJSONLine(topic string, msg *messages.StructuredMessage, fullMsg bool, 
 	if includeField(fields, "type") {
 		e.Type = msg.Type
 		e.Plain = msg.Plain
-		e.Raw = msg.Raw
 		e.Urgent = msg.Urgent
 		e.Broadcasted = msg.Broadcasted
 	}
@@ -518,9 +516,6 @@ func flagsSummary(msg *messages.StructuredMessage) string {
 	var parts []string
 	if msg.Plain {
 		parts = append(parts, "plain")
-	}
-	if msg.Raw {
-		parts = append(parts, "raw")
 	}
 	if msg.Urgent {
 		parts = append(parts, "urgent")

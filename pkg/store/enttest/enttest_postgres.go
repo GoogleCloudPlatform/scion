@@ -30,6 +30,10 @@
 //     and points the Ent client's search_path at it, so every test gets a fresh,
 //     empty set of tables and cannot observe rows created by other tests. The
 //     schema is dropped (CASCADE) on test cleanup.
+//   - Each schema is migrated by replaying a snapshot of the statements one
+//     real entc.AutoMigrate run executed (captured once per test process; see
+//     schema_snapshot_postgres.go). Set SCION_TEST_POSTGRES_AUTOMIGRATE=1 to
+//     run entc.AutoMigrate for every schema instead.
 package enttest
 
 import (
@@ -46,6 +50,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 
 	// pgx stdlib driver registration ("pgx"). entc/driver_postgres.go also
 	// imports it, but we keep it explicit so this file is self-describing.
@@ -144,7 +149,9 @@ func newClient(t *testing.T) *ent.Client {
 	if err != nil {
 		t.Fatalf("enttest: building client URL: %v", err)
 	}
-	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 5, MaxIdleConns: 2})
+	// Diag runs Postgres store tests through the transaction diagnostics
+	// wrapper, as in production (output discarded).
+	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 5, MaxIdleConns: 2, Diag: txdiag.QuietConfig()})
 	if err != nil {
 		t.Fatalf("enttest: opening postgres ent client: %v", err)
 	}
@@ -155,7 +162,7 @@ func newClient(t *testing.T) *ent.Client {
 		}
 	})
 
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+	if err := migrateSchema(context.Background(), client); err != nil {
 		t.Fatalf("enttest: migrating postgres ent client: %v", err)
 	}
 	return client
@@ -176,9 +183,44 @@ func Active() bool { return active }
 // connection-pool stress tests (custom MaxOpenConns) and the multi-process tests
 // (a stable DSN shared with a forked child process). The schema is migrated once
 // here so every client opened against the returned URL sees the full table set.
+// Like NewClient, it migrates by replaying the schema snapshot (see
+// schema_snapshot_postgres.go).
 //
 // It skips the calling test when the Postgres backend is inactive.
 func NewSchemaURL(t *testing.T) string {
+	t.Helper()
+	clientURL, schema := newEmptySchema(t)
+
+	// Migrate once so the schema is fully provisioned; callers open their own
+	// clients/pools against clientURL afterwards.
+	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1, Diag: txdiag.QuietConfig()})
+	if err != nil {
+		t.Fatalf("enttest: opening migrate client for schema %s: %v", schema, err)
+	}
+	if err := migrateSchema(context.Background(), client); err != nil {
+		_ = client.Close()
+		t.Fatalf("enttest: migrating schema %s: %v", schema, err)
+	}
+	_ = client.Close()
+	return clientURL
+}
+
+// NewEmptySchemaURL is NewSchemaURL without the migration: it creates a fresh,
+// isolated, EMPTY schema inside the per-package ephemeral database and returns
+// a connection URL whose search_path points at it. Tests that exercise the
+// migration itself (for example concurrent first-boot migration across
+// replicas) start from this. Cleanup drops the schema (CASCADE).
+//
+// It skips the calling test when the Postgres backend is inactive.
+func NewEmptySchemaURL(t *testing.T) string {
+	t.Helper()
+	clientURL, _ := newEmptySchema(t)
+	return clientURL
+}
+
+// newEmptySchema creates an empty schema, registers its cleanup, and returns
+// the search_path-scoped URL and the schema name.
+func newEmptySchema(t *testing.T) (string, string) {
 	t.Helper()
 	if !active {
 		t.Skip("enttest: SCION_TEST_POSTGRES_URL not set; skipping Postgres-only integration test")
@@ -198,19 +240,7 @@ func NewSchemaURL(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("enttest: building schema URL: %v", err)
 	}
-
-	// Migrate once so the schema is fully provisioned; callers open their own
-	// clients/pools against clientURL afterwards.
-	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
-	if err != nil {
-		t.Fatalf("enttest: opening migrate client for schema %s: %v", schema, err)
-	}
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
-		_ = client.Close()
-		t.Fatalf("enttest: migrating schema %s: %v", schema, err)
-	}
-	_ = client.Close()
-	return clientURL
+	return clientURL, schema
 }
 
 // hexID returns a 32-char lowercase hex identifier safe to embed in a Postgres

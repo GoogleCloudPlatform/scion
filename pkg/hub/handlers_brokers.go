@@ -16,17 +16,39 @@
 package hub
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// handleBrokersEndpoint handles POST /api/v1/brokers.
-// Creates a new broker registration with join token.
-// Requires admin authentication.
+// handleBrokersEndpoint handles POST /api/v1/brokers: register a new broker,
+// or re-register an existing one (matched by name, then by ID), returning a
+// single-use join token. The caller must present an interactive session, a
+// dev credential, or a hub-boundary user access token whose ceiling contains
+// broker:create, and its user must currently hold broker.create (granted to
+// hub members). Broker on-behalf-of requests are not admitted. A new broker
+// is owned by the caller's user. Re-registration additionally requires that
+// user to be the broker's creator, or a super-admin presenting an
+// interactive session or dev credential. Turning on auto-provide
+// additionally requires broker.auto_provide. Because the response carries a
+// join token, the request must also arrive over TLS, from this host, or from a
+// listed proxy reporting https (requireConfidentialArrival, after the
+// authorization checks and before any lookup or mutation); otherwise it gets
+// 403 transport_not_confidential and no token is minted or replaced.
+// Registration never associates the broker with a project. The route is
+// RouteBrokerHMAC, so these checks run in the handler.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 	s.createBrokerRegistration(w, r)
@@ -41,10 +63,33 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Require authenticated user (any role can register a broker and become its owner)
+	// Require an authenticated user identity. This is deliberately
+	// GetUserIdentityFromContext rather than GetIdentityFromContext: a
+	// broker's own HMAC identity does not satisfy it, so broker-only
+	// self-registration is not admitted here (self-rotation is a distinct,
+	// separately authorized path — see handleBrokerRotateSecret).
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Unauthorized(w)
+		return
+	}
+
+	// SECURITY-GATE: broker.create is required for every user-credential path
+	// through this handler — first-time registration, re-registration, and
+	// re-mint of an existing broker's join token alike. This runs before
+	// FindExistingBroker so a caller lacking the permission is denied before
+	// any lookup or mutation, and before the additional target
+	// owner/super-admin check below, which applies only to the re-register
+	// case and is evaluated after this credential restriction.
+	if !s.authorizeBrokerCreate(w, r) {
+		return
+	}
+
+	// Transport policy: the response carries a join token, so a request
+	// that did not arrive over TLS or from this host
+	// (confidentialArrival) is refused before any lookup or mutation. No
+	// token is minted or replaced for it.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 
@@ -62,6 +107,15 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Test admin tier: only the co-located broker may register. Checked
+	// before any lookup or mutation.
+	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
+		return
+	}
+	if s.refuseTestAdminPluginLabel(w, req.Labels) {
+		return
+	}
+
 	// Validate GCP host SA email format if provided.
 	if req.GCPHostServiceAccountEmail != "" {
 		if !isValidServiceAccountEmail(req.GCPHostServiceAccountEmail) {
@@ -73,18 +127,530 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Create the broker registration
-	resp, err := s.brokerAuthService.CreateBrokerRegistration(r.Context(), req, user.ID())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to create broker registration: "+err.Error(), nil)
+	if !ValidJoinTokenTTLSeconds(req.JoinTokenTTLSeconds) {
+		ValidationError(w, ErrJoinTokenTTLOutOfRange.Error(), map[string]interface{}{
+			"field": "joinTokenTtlSeconds",
+		})
 		return
 	}
 
-	// Log audit event
-	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r))
+	// If this request matches an existing broker record (by name or by a
+	// caller-supplied ID), treat it as re-registration of that broker rather
+	// than a brand-new one. Re-registration mutates the existing record and
+	// issues a fresh join token, so on top of the broker.create gate above
+	// the caller's user must be the broker's creator, or a super-admin
+	// presenting an interactive session or dev credential
+	// (brokerRemintTargetAuthorized). A first-time registration (no existing
+	// match) requires only the broker.create gate above; the caller's user
+	// becomes the new broker's owner.
+	if req.RuntimeTarget != nil && (req.BrokerID == "" || req.RuntimeTarget.ID == "" || req.RuntimeTarget.Type == "") {
+		ValidationError(w, errFlatRegistrationIncomplete.Error(), map[string]interface{}{"field": "runtimeTarget"})
+		return
+	}
+	existingBroker, err := s.brokerAuthService.FindExistingBroker(r.Context(), req.Name, req.BrokerID, req.RuntimeTarget)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if existingBroker != nil && !s.brokerRemintTargetAuthorized(r.Context(), user, existingBroker) {
+		logAuthzDenial(r, user, Resource{Type: "broker", ID: existingBroker.ID}, Action("reregister"),
+			"caller is not the broker's creator or a super-admin with an interactive or dev credential")
+		Forbidden(w)
+		return
+	}
+
+	// Turning auto-provide on offers the broker to every project on the
+	// hub, so it needs broker.auto_provide in addition to registration.
+	// Keeping an existing auto-provide setting, or turning it off, needs
+	// nothing extra. A preserveSettings request never writes auto-provide,
+	// so its AutoProvide is forced off here (and again by the service) and
+	// it needs no broker.auto_provide check.
+	if req.PreserveSettings {
+		req.AutoProvide = false
+	}
+	autoProvideAuthorized := false
+	if req.AutoProvide && (existingBroker == nil || !existingBroker.AutoProvide) {
+		if !s.authorizeBrokerAutoProvide(w, r) {
+			return
+		}
+		autoProvideAuthorized = true
+	}
+
+	// A registration that writes the broker's host service account needs
+	// actAs for the registering user on the requested value. It is written
+	// on a new row, and on an existing row only while the stored pair is
+	// unset and was not set through the update API
+	// (registrationFillsGCPHost); otherwise the requested value is kept, so
+	// no decision is made. The decision is made here, where the caller's
+	// identity is, and enforced where the row is written, against the value
+	// actually stored. A preserveSettings request never writes it.
+	var hostSAVerdict hostSAClaimVerdict
+	if !req.PreserveSettings {
+		requested := hostSAClaim{
+			Email:     strings.ToLower(req.GCPHostServiceAccountEmail),
+			ProjectID: req.GCPHostProjectID,
+		}
+		if existingBroker == nil || registrationFillsGCPHost(existingBroker, requested.Email) {
+			hostSAVerdict = s.evaluateHostSAClaim(r.Context(), hostSAClaimOf(existingBroker), requested, SurfaceBrokerHostSARegister)
+		}
+	}
+
+	// Create the broker registration. Pin the mutation to what was just
+	// authorized above, so a lookup race between the authorization check
+	// and this call cannot redirect it onto a broker the caller was not
+	// authorized against — whether that means reusing a specific existing
+	// broker, or, when none matched, creating a genuinely new one. A
+	// re-registration that kept auto-provide on without the
+	// broker.auto_provide check is also pinned to the broker still having
+	// auto-provide on.
+	var resp *CreateBrokerRegistrationResponse
+	switch {
+	case req.RuntimeTarget != nil:
+		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker, autoProvideAuthorized, hostSAVerdict)
+	case existingBroker != nil:
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized, hostSAVerdict)
+	default:
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID(), hostSAVerdict)
+	}
+	if err != nil {
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
+		if errors.Is(err, ErrHostSAClaimStale) {
+			// The row read for the decision would not have been filled, so
+			// no decision was made, and it became fillable before the write.
+			Conflict(w, "the broker's host service account changed during registration; retry")
+			return
+		}
+		if errors.Is(err, ErrHostSAClaimNotAuthorized) {
+			if hostSAVerdict.Allowed {
+				// Not reachable from this handler: it makes a decision only
+				// against an unset prior (a new row, or a row registration
+				// would fill), and a decision that allows a non-empty value
+				// against an unset prior is always checked. A write site that
+				// refuses an allowed decision fails closed, as a conflict to
+				// retry.
+				Conflict(w, "the broker's host service account changed during registration; retry")
+				return
+			}
+			writeHostSAClaimDenied(w, hostSAVerdict)
+			return
+		}
+		writeBrokerRegistrationError(w, err)
+		return
+	}
+
+	// Log audit event, with the credential that carried the request and the
+	// issued join token's details.
+	operation := auditevent.BrokerRegisterNew
+	if existingBroker != nil {
+		operation = auditevent.BrokerRegisterReregister
+	}
+	details := brokerAuditCredentialDetails(r.Context())
+	for k, v := range joinTokenAuditDetails(resp) {
+		details[k] = v
+	}
+	kv := append([]string{"operation", string(operation)}, keptSettingsAuditDetails(resp.KeptSettings)...)
+	if resp.GCPHostSet {
+		kv = append(kv, "gcp_host_set", "true")
+	}
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
+		operation, mergeBrokerAuditDetails(details, kv...))
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// createFlatBrokerRegistration registers a flat Runtime Broker through the
+// shared flat registration path (pinned to the row the caller was authorized
+// against) and issues its join token. The response echoes the stored runtime
+// target as the activation acknowledgement.
+//
+// autoProvideAuthorized is the handler's broker.auto_provide decision; the
+// write is pinned to it as on the legacy path (flatRegistration.GateAutoProvide).
+//
+// hostSA is the handler's host service account decision
+// (flatRegistration.HostSAClaim).
+func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
+	requested := stripReservedBrokerLabels(req.Labels)
+	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
+	// PreserveSettings (GoogleCloudPlatform/scion#2702) applies as on the
+	// legacy path: a re-registration leaves the row's metadata as it is and
+	// only issues a new join token; a new row gets AutoProvide off and no
+	// GCP host fields, with only the labels applied.
+	preserve := req.PreserveSettings
+	// A refused fill of an existing row's host service account refuses the
+	// registration before anything is written.
+	if existing != nil && !preserve {
+		if err := registrationFillDenied(saEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
+		}
+	}
+	var keptLabels []KeptSetting
+	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
+		BrokerID:  req.BrokerID,
+		Name:      req.Name,
+		Target:    *req.RuntimeTarget,
+		CreatedBy: createdBy,
+		Existing:  existing,
+		// PreserveSettings already forced AutoProvide off (handler).
+		GateAutoProvide:       true,
+		RequestedAutoProvide:  req.AutoProvide,
+		AutoProvideAuthorized: autoProvideAuthorized,
+		HostSAClaim:           hostSA,
+		Apply: func(b *store.RuntimeBroker, created bool) {
+			if preserve && !created {
+				return
+			}
+			if !preserve {
+				b.AutoProvide = req.AutoProvide
+			}
+			if created {
+				// A new row takes the GCP host pair and labels from the
+				// request; the Hub sets the broker role.
+				if !preserve && (saEmail != "" || req.GCPHostProjectID != "") {
+					b.GCPHostServiceAccountEmail = saEmail
+					b.GCPHostProjectID = req.GCPHostProjectID
+					b.GCPHostSource = store.GCPHostSourceRegistration
+				}
+				b.Labels = registrationLabels(requested)
+				b.Labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
+				return
+			}
+			// An existing row keeps its GCP host pair here (filled below
+			// only while unset) and the value of its existing labels.
+			b.Labels, keptLabels = mergeRegistrationLabels(b.Labels, requested)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var gcp registrationGCPHostResult
+	if !created && !preserve {
+		if gcp, err = fillRegistrationGCPHost(ctx, s.store, row.ID, saEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
+		}
+	}
+	// A flat re-registration re-mints the join token: issueJoinToken's upsert
+	// replaces an outstanding one (for example left by a refused join).
+	resp, err := s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, req.JoinTokenTTLSeconds, row.RuntimeTarget)
+	if err != nil {
+		return nil, err
+	}
+	resp.KeptSettings = append(gcp.Kept, keptLabels...)
+	resp.GCPHostSet = gcp.Applied
+	return resp, nil
+}
+
+// joinTokenAuditDetails describes an issued join token for the register
+// audit event: when it expires, the lifetime it was issued with, and whether
+// it replaced an earlier token. The token itself is never included.
+func joinTokenAuditDetails(resp *CreateBrokerRegistrationResponse) map[string]string {
+	return map[string]string{
+		"join_token_expires_at": resp.ExpiresAt.UTC().Format(time.RFC3339),
+		"join_token_ttl":        resp.JoinTokenTTL.String(),
+		"reissued":              strconv.FormatBool(resp.Reissued),
+	}
+}
+
+// writeBrokerRegistrationError maps an error from
+// CreateBrokerRegistrationForAuthorizedMatch or
+// CreateBrokerRegistrationForAuthorizedNew to an HTTP response. A stale-pin
+// refusal (ErrBrokerRegistrationAuthorizationStale) means the broker match
+// changed between the authorization check and the mutation — a
+// client-observable conflict the caller can retry, not a server fault — so
+// it maps to 409 rather than the generic 500 used for everything else.
+func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrTestAdminRemoteBrokerRefused) {
+		writeTestAdminBrokerRefusal(w)
+		return
+	}
+	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
+		Conflict(w, err.Error())
+		return
+	}
+	if errors.Is(err, ErrJoinTokenTTLOutOfRange) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "joinTokenTtlSeconds"})
+		return
+	}
+	if errors.Is(err, ErrHostSAClaimNotAuthorized) {
+		// Not reachable today: the registration handler writes the
+		// decision-specific refusal first. This is the generic form for any
+		// other caller.
+		writeForbidden(w, "Setting gcpHostServiceAccountEmail on this broker is not authorized")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		"failed to create broker registration: "+err.Error(), nil)
+}
+
+// authorizeBrokerCreate is the single broker.create gate for every
+// user-credential path that creates or re-mints a broker's join token:
+// POST /api/v1/brokers (createBrokerRegistration) and the embedded-broker
+// path reached through POST /api/v1/projects/register
+// (handlers_projects_core.go). Both call this exact helper rather than
+// reproducing the check, so a future caller (e.g. ptone/scion#2107's
+// join-token mint) inherits the same gate instead of adding a parallel one.
+//
+// Admitted credentials: an interactive session, a dev credential, or a user
+// access token (see requireUserCredentialKind). A broker request acting on
+// behalf of a user, and every other credential kind, is denied with 403
+// before the permission check. A user access token is evaluated by the
+// standard bearer gate inside the fail-closed authorize() helper
+// (authorize.go): its boundary must allow the hub-level broker target (a
+// hub boundary), its ceiling must contain broker.create, and its user must
+// currently hold broker.create. authorize() writes 401 for no identity and
+// 403 when any of these checks fails.
+//
+// A hub test identity (kind test_fixture, ptone/scion#4240) never creates or
+// re-mints a broker: brokers carry no provenance stamp, so a fixture-made
+// broker could not be purged. The kind is read from the store
+// (lookupUserKind), never from token claims, and a read error refuses.
+func (s *Server) authorizeBrokerCreate(w http.ResponseWriter, r *http.Request) bool {
+	resource := Resource{Type: "broker"}
+	if !s.requireUserCredentialKind(w, r, resource, ActionCreate, true) {
+		return false
+	}
+	if user := GetUserIdentityFromContext(r.Context()); user != nil {
+		isFixture, _, err := lookupUserKind(r.Context(), s.store, user.ID())
+		if err != nil {
+			InternalError(w)
+			return false
+		}
+		if isFixture {
+			logAuthzDenial(r, user, resource, ActionCreate, "test identity cannot create brokers")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot create or register brokers",
+				map[string]interface{}{"reason": testIdentityReasonFixtureBroker})
+			return false
+		}
+	}
+	return s.authorize(w, r, resource, ActionCreate)
+}
+
+// brokerRemintTargetAuthorized reports whether the caller, already admitted
+// by authorizeBrokerCreate, may re-register (re-mint the join token of) the
+// existing broker: its live user must be the broker's recorded creator, or
+// a super-admin presenting an interactive session or dev credential. A user
+// access token therefore re-mints only a broker its own user created. It
+// runs only after the credential restrictions in authorizeBrokerCreate, so
+// a user access token reaches it only when its boundary and ceiling already
+// admit broker.create. It also requires an admitted user credential itself,
+// so a caller that skips authorizeBrokerCreate never gains the creator or
+// super-admin arms through a broker credential. An ownerless broker (empty
+// CreatedBy) matches no creator.
+func (s *Server) brokerRemintTargetAuthorized(ctx context.Context, user UserIdentity, broker *store.RuntimeBroker) bool {
+	if isNilIdentity(user) || broker == nil || user.ID() == "" {
+		return false
+	}
+	if !brokerUserCredentialKindAdmitted(ctx, user, true) {
+		return false
+	}
+	if broker.CreatedBy != "" && broker.CreatedBy == user.ID() {
+		return true
+	}
+	// The super-admin arm admits only an interactive session or a dev
+	// credential; a user access token is held to the creator arm above.
+	if !brokerUserCredentialKindAdmitted(ctx, user, false) {
+		return false
+	}
+	// Test identities with admin roles do not remint broker credentials
+	// (test-admin policy: key material).
+	return s.authzService.IsSystemAdmin(ctx, user.ID()) &&
+		!s.testAdminPolicyRefusesUser(ctx, user.ID(), "handlers_brokers.go:brokerRemintTargetAuthorized")
+}
+
+// authorizeBrokerAutoProvide reports whether the caller may turn on a
+// broker's auto-provide setting, which offers the broker to every project
+// on the hub. The caller must present an admitted user credential (see
+// requireUserCredentialKind) and hold broker.auto_provide (granted to
+// super-admins). broker.auto_provide has no user access token selector, so
+// a user access token is denied by its ceiling. Writes 401/403 and returns
+// false when the caller is not allowed.
+func (s *Server) authorizeBrokerAutoProvide(w http.ResponseWriter, r *http.Request) bool {
+	resource := Resource{Type: "broker"}
+	if !s.requireUserCredentialKind(w, r, resource, ActionAutoProvide, true) {
+		return false
+	}
+	return s.authorize(w, r, resource, ActionAutoProvide)
+}
+
+// brokerProvideDeniedMessage is the 403 body for a denied broker association.
+const brokerProvideDeniedMessage = "only the broker's owner or a super-admin may associate this broker with a project"
+
+// brokerProvideDecision decides the broker side of associating broker with a
+// project: the caller must present an admitted user credential (see
+// brokerUserCredentialKindAdmitted, user access tokens included) and hold
+// broker.update on this broker, which its owner and super-admins hold and
+// no hub role grants. Project-side authority (project.update) is checked
+// separately by each caller. It writes no response; it returns the denial
+// reason and stage for the caller's log and 403.
+func (s *Server) brokerProvideDecision(ctx context.Context, identity Identity, broker *store.RuntimeBroker) (bool, string, DeniedBy) {
+	if isNilIdentity(identity) || broker == nil {
+		return false, "no identity or broker", ""
+	}
+	if !brokerUserCredentialKindAdmitted(ctx, identity, true) {
+		return false, "credential kind not admitted for broker association", ""
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, brokerResource(broker), ActionUpdate)
+	return decision.Allowed, decision.Reason, decision.DeniedBy
+}
+
+// writeBrokerProvideDenial logs and writes the 403 for a denied broker
+// association. r may be nil when the caller has no request at hand.
+func writeBrokerProvideDenial(w http.ResponseWriter, r *http.Request, identity Identity, broker *store.RuntimeBroker, reason string, deniedBy DeniedBy) {
+	logAuthzDenial(r, identity, brokerResource(broker), ActionUpdate, reason)
+	writeForbiddenStructuredDenial(w, brokerProvideDeniedMessage, "broker", ActionUpdate, deniedBy)
+}
+
+// authorizeBrokerProvide decides whether the caller may associate broker
+// with a project (link it as a provider). Project-side authority
+// (project.update) is checked by the caller's existing gate; this adds the
+// broker side through brokerProvideDecision: the caller must hold
+// broker.update on this broker (its owner, or a super-admin). Registering a
+// broker, or holding project.update alone, is never enough. Every link site
+// calls this helper or brokerProvideDecision: POST
+// /api/v1/projects/{id}/providers, the brokerId branch of POST
+// /api/v1/projects/register, and the explicit-broker link during agent
+// creation. Writes 401/403 and returns false when the caller is not
+// allowed.
+func (s *Server) authorizeBrokerProvide(w http.ResponseWriter, r *http.Request, broker *store.RuntimeBroker) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	allowed, reason, deniedBy := s.brokerProvideDecision(r.Context(), identity, broker)
+	if !allowed {
+		writeBrokerProvideDenial(w, r, identity, broker, reason, deniedBy)
+		return false
+	}
+	return true
+}
+
+// brokerUserCredentialKindAdmitted reports whether the request credential
+// recorded in ctx is a user credential admitted for broker registration,
+// re-registration and secret rotation: an interactive session or a dev
+// credential, plus a user access token when allowUAT is set. A broker
+// request acting on behalf of a user (CredentialKindBroker), an agent,
+// delivery or federation credential, and an empty or unknown kind are not
+// admitted.
+//
+// The kind is read from the credential context the authentication
+// middleware recorded for this request, not re-derived from the request
+// identity, because an on-behalf-of identity is an ordinary user identity
+// while its credential is the broker's. Only when ctx carries no credential
+// context at all is the kind derived from the identity
+// (credentialContextForIdentity) before classification.
+//
+// The identity must also agree with the kind: a scoped user identity is
+// admitted only with a user access token kind, and a user access token kind
+// only with a scoped user identity.
+func brokerUserCredentialKindAdmitted(ctx context.Context, identity Identity, allowUAT bool) bool {
+	if isNilIdentity(identity) {
+		return false
+	}
+	kind := GetCredentialContextFromContext(ctx).Kind
+	if kind == "" {
+		kind = credentialContextForIdentity(identity).Kind
+	}
+	switch kind {
+	case CredentialKindInteractive, CredentialKindDev:
+	case CredentialKindUAT:
+		if !allowUAT {
+			return false
+		}
+	default:
+		return false
+	}
+	return IsScopedUserIdentity(identity) == (kind == CredentialKindUAT)
+}
+
+// requireUserCredentialKind writes a 403 and returns false unless the
+// request credential is admitted by brokerUserCredentialKindAdmitted for
+// the given allowUAT setting. It runs before any permission check, lookup
+// or mutation on the broker registration and rotation paths.
+func (s *Server) requireUserCredentialKind(w http.ResponseWriter, r *http.Request, resource Resource, action Action, allowUAT bool) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if brokerUserCredentialKindAdmitted(r.Context(), identity, allowUAT) {
+		return true
+	}
+	logAuthzDenial(r, identity, resource, action, "credential kind not admitted for broker registration")
+	Forbidden(w)
+	return false
+}
+
+// authorizedForBrokerRotate reports whether the caller may rotate the
+// secret of the broker identified by brokerID. Access is granted to any
+// one of:
+//   - the broker itself, authenticated via HMAC (brokerIdent), for its own
+//     brokerID only;
+//   - a system-scoped super-admin, or
+//   - the user recorded as the broker's creator (RuntimeBroker.CreatedBy),
+//
+// where the last two arms are evaluated only when the request credential
+// is an interactive session or a dev credential
+// (brokerUserCredentialKindAdmitted with allowUAT=false), so a broker
+// request acting on behalf of a user and a user access token never use
+// them. No user access token selector authorizes rotation. The broker self
+// arm depends only on the HMAC-verified broker identity, so it admits a
+// broker rotating its own secret whatever on-behalf-of user the request
+// names, and never admits another broker's ID.
+//
+// fetchBroker is only invoked when the earlier checks do not already grant
+// access, so callers that already have the broker record on hand can
+// return it directly instead of re-fetching.
+func (s *Server) authorizedForBrokerRotate(ctx context.Context, user UserIdentity, brokerIdent BrokerIdentity, brokerID string, fetchBroker func() (*store.RuntimeBroker, error)) (bool, error) {
+	if isNilIdentity(user) || !brokerUserCredentialKindAdmitted(ctx, user, false) {
+		user = nil
+	}
+
+	// Test identities with admin roles do not rotate broker secrets
+	// (test-admin policy: key material).
+	if user != nil && s.authzService.IsSystemAdmin(ctx, user.ID()) &&
+		!s.testAdminPolicyRefusesUser(ctx, user.ID(), "handlers_brokers.go:authorizedForBrokerRotate") {
+		return true, nil
+	}
+
+	// isNilIdentity, not brokerIdent != nil: BrokerIdentity embeds Identity, so
+	// a typed-nil concrete broker identity (see isNilIdentity) is a non-nil
+	// interface value and would otherwise reach brokerIdent.BrokerID() below.
+	if !isNilIdentity(brokerIdent) && brokerIdent.BrokerID() == brokerID {
+		return true, nil
+	}
+
+	if user != nil && user.ID() != "" {
+		broker, err := fetchBroker()
+		if err != nil {
+			return false, err
+		}
+		if broker != nil && broker.CreatedBy != "" && broker.CreatedBy == user.ID() {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// ownerForNewBroker returns the CreatedBy value to record for a newly
+// created broker: the caller's ID when non-empty, or "" otherwise. Called by
+// the register path's create-new-broker branch (handlers_projects_core.go).
+// The two-phase POST /brokers path sets CreatedBy directly in
+// createBrokerRegistration above, not through this helper.
+func ownerForNewBroker(callerUser UserIdentity) string {
+	if callerUser != nil && callerUser.ID() != "" {
+		return callerUser.ID()
+	}
+	return ""
+}
+
+// linkedByForProvider returns the ProjectProvider.LinkedBy value for a link
+// by callerUser: the caller's user ID, or "" when there is none. The
+// value is consent evidence for project members using the broker, so it
+// records the authorized user, never a placeholder.
+func linkedByForProvider(callerUser UserIdentity) string {
+	if isNilIdentity(callerUser) {
+		return ""
+	}
+	return callerUser.ID()
 }
 
 // handleBrokerJoin handles POST /api/v1/brokers/join.
@@ -92,7 +658,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 // This is an unauthenticated endpoint - the join token serves as authentication.
 func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -124,8 +690,30 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Transport policy: the response carries the broker's HMAC secret, so a
+	// join that did not arrive over TLS or from this host is refused before
+	// the token is consumed. Its token has crossed the network in the clear,
+	// so it is revoked when it is the broker's pending token (and only
+	// then: a wrong token revokes nothing).
+	if !config.ConfidentialArrival(r, s.transportTrustedNets) {
+		revoked, revokeErr := s.brokerAuthService.RevokeExposedJoinToken(r.Context(), req.BrokerID, req.JoinToken)
+		if revokeErr != nil {
+			slog.Error("Failed to revoke a join token sent without TLS", "brokerID", req.BrokerID, "error", revokeErr)
+		}
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false,
+			fmt.Sprintf("refused: not over TLS or from this host (join token revoked: %t)", revoked), auditevent.BrokerFailureRefused)
+		s.requireConfidentialArrival(w, r)
+		return
+	}
+
+	// Test admin tier: only the co-located broker may complete a join.
+	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
+		return
+	}
+
 	// Determine hub endpoint
-	hubEndpoint := s.config.HubEndpoint
+	hubEndpoint := s.HubEndpointFor(HubEndpointForJoinResponse)
 	if hubEndpoint == "" {
 		// Fall back to constructing from request
 		scheme := "http"
@@ -139,24 +727,33 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.brokerAuthService.CompleteBrokerJoin(r.Context(), req, hubEndpoint)
 	if err != nil {
 		// Log failed join attempt
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error())
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error(), brokerJoinFailureCode(err))
 
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		// Determine error type and return appropriate response
-		errMsg := err.Error()
-		switch errMsg {
-		case "invalid join token", "join token does not match broker":
-			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, errMsg, nil)
-		case "join token has expired":
-			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, errMsg, nil)
+		switch {
+		case errors.Is(err, ErrTestAdminRemoteBrokerRefused):
+			writeTestAdminBrokerRefusal(w)
+		case errors.Is(err, ErrJoinTokenInvalid), errors.Is(err, ErrJoinTokenBrokerMismatch):
+			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, err.Error(), nil)
+		case errors.Is(err, ErrJoinTokenExpired):
+			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, err.Error(), nil)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"failed to complete broker join: "+errMsg, nil)
+				"failed to complete broker join: "+err.Error(), nil)
 		}
 		return
 	}
 
 	// Log successful join
-	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
+	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "", "")
+	s.conduitBrokerCredentialChanged(req.BrokerID)
+	// Record the reservations of the agents the broker still runs (a broker
+	// registered again under the same ID), now that its row is written and
+	// before the join answers (BackfillBrokerOnRegistration).
+	s.BackfillBrokerOnRegistration(r.Context(), req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -188,10 +785,16 @@ func (s *Server) handleBrokerByIDRoutes(w http.ResponseWriter, r *http.Request) 
 
 // handleBrokerRotateSecret handles POST /api/v1/brokers/{id}/rotate-secret.
 // Rotates the HMAC secret for a broker.
-// Requires admin authentication or broker self-rotation.
+// Admitted credentials (see authorizedForBrokerRotate):
+//   - the broker's own HMAC credential, for its own ID only (self-rotation);
+//   - an interactive session or a dev credential whose user is a
+//     super-admin or the broker's recorded creator.
+//
+// A user access token and a broker request acting on behalf of a user are
+// not admitted for the creator or super-admin arms.
 func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request, brokerID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -202,34 +805,32 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Transport policy: the response carries the broker's new HMAC secret.
+	if !s.requireConfidentialArrival(w, r) {
+		return
+	}
+
 	// Check authorization - admin user, broker owner, or the broker itself
 	user := GetUserIdentityFromContext(r.Context())
 	brokerIdent := GetBrokerIdentityFromContext(r.Context())
 
-	authorized := false
-	if user != nil && s.authzService.Decide(r.Context(), AuthzRequest{
-		Principal:  principalContextForIdentity(user),
-		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "broker", ID: "hub"},
-		Action:     Action("read"),
-		Permission: "broker.read",
-	}).Allowed {
-		authorized = true
-	} else if brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
-		authorized = true
-	} else if user != nil {
-		// Check if user is the broker owner
-		broker, err := s.store.GetRuntimeBroker(r.Context(), brokerID)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if broker.CreatedBy == user.ID() {
-			authorized = true
-		}
+	authorized, err := s.authorizedForBrokerRotate(r.Context(), user, brokerIdent, brokerID,
+		func() (*store.RuntimeBroker, error) { return s.store.GetRuntimeBroker(r.Context(), brokerID) })
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	if !authorized {
+		var denyIdentity Identity
+		switch {
+		case user != nil:
+			denyIdentity = user
+		case brokerIdent != nil:
+			denyIdentity = brokerIdent
+		}
+		logAuthzDenial(r, denyIdentity, Resource{Type: "broker", ID: brokerID}, Action("rotate_secret"),
+			"caller is not the broker's creator, the broker itself, or a super-admin")
 		Forbidden(w)
 		return
 	}
@@ -256,6 +857,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 			"failed to rotate secret: "+err.Error(), nil)
 		return
 	}
+	s.conduitBrokerCredentialChanged(brokerID)
 
 	// Log audit event
 	actorID := ""
@@ -267,7 +869,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 		actorID = brokerIdent.BrokerID()
 		actorType = "broker"
 	}
-	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, getClientIP(r))
+	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, getClientIP(r), brokerAuditCredentialDetails(r.Context()))
 
 	writeJSON(w, http.StatusOK, resp)
 }

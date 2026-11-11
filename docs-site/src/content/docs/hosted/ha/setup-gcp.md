@@ -19,6 +19,18 @@ agent dispatch, and **Cloud SQL** for durable state.
 | Storage | GCS | Templates, artifacts, hub data |
 | Images | Artifact Registry | Container image repository |
 
+:::tip[Terraform alternative]
+This guide walks through the manual `gcloud`/`kubectl` steps. If you'd rather
+provision this same architecture declaratively — including support for
+multiple hubs sharing one project's shared infrastructure (network, Cloud
+SQL, Filestore, GKE Autopilot, Artifact Registry) — see
+[Multi-Hub HA with Terraform](/scion/hosted/ha/terraform/) and the Terraform
+module set at
+[`deploy/terraform/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/terraform/README.md)
+in the repository. It automates most of the steps below; the two approaches
+are not meant to be mixed against the same project.
+:::
+
 ---
 
 ## 0. Prerequisites & Deployer Identity
@@ -212,6 +224,7 @@ When creating a project through the Hub web UI, Scion includes a default **"scra
 - **The Catch:** GKE Autopilot's default storage class (`standard-rwo`) **only supports `ReadWriteOnce` (RWO)**. Attempting to dispatch an agent will fail with an opaque scheduling error: `VolumeCapabilities is invalid: specified multi writer with mount access type`, and the Hub will output `pods not found`.
 - **The Fix (Option A - Easiest):** If you do not require shared directories, navigate to your project settings in the Hub UI *after* installation and **remove or disable the default shared directory** (e.g., delete the scratchpad entry).
 - **The Fix (Option B - Production):** Set up Google Cloud Filestore or a compatible NFS server, configure the Filestore CSI driver, and define the custom storage class in your GKE runtime profile to support native ReadWriteMany volumes.
+- **The Fix (Option C - Shared NFS export):** Set [`server.project_storage.backend`](/scion/reference/server-config/#project-storage-serverproject_storage) to `nfs` with a static PVC (`pv_name`) bound to your Filestore or NFS export. This places workspaces on the export too. Pods then mount shared directories from that single claim by `subPath` instead of requesting a new RWX PVC per directory.
 :::
 
 Create the agent namespace:
@@ -264,8 +277,8 @@ account's ambient credentials. This works because the Hub SA has `roles/containe
 The Hub uses a 32-byte hex session signing key:
 
 ```bash
-export SESSION_SECRET=$(openssl rand -hex 32)
-echo "Session secret: $SESSION_SECRET"
+export SCION_SERVER_SESSION_SECRET=$(openssl rand -hex 32)
+echo "Session secret: $SCION_SERVER_SESSION_SECRET"
 # Save this — you'll use it in the deploy command.
 ```
 
@@ -408,6 +421,16 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 Without this permission, Policy Troubleshooter checks will return an indeterminate or unknown status (such as ACCESS_STATE_UNKNOWN_INFO_DENIED), which results in a **fail-closed** denial of service account assignment in Scion.
 
+The Hub's identity needs access to run the assignment check for each target service account; until it has that access, service account assignment is denied. If you assign service accounts from other GCP projects and have not granted the role at the organization level, grant it on each of those projects too (replace `$SA_PROJECT_ID` with the project that holds the service account):
+
+```bash
+gcloud projects add-iam-policy-binding $SA_PROJECT_ID \
+  --member="serviceAccount:$SA_HUB" \
+  --role="roles/iam.securityReviewer"
+```
+
+Without it, assigning a service account from that project is refused with a message that names the project and gives this command. Registering or verifying such an account returns the same message as a warning, so you can grant the role before the first assignment. If the check cannot run because of the Hub's identity, the admin health summary reports it (see [Hub Identity Access for the Assignment Check](/scion/hosted/ha/permissions/#hub-identity-access-for-the-assignment-check)).
+
 ### 2f. Transport SA — IAP Access
 
 The transport SA's identity is used in the IAP token. IAP must allow this identity to access
@@ -495,6 +518,170 @@ Pods dispatched to a different namespace (e.g. `default`) will fail with
 `PermissionDenied: secretmanager.versions.access denied`.
 :::
 
+### 2i. GKE Workload Identity for GCP Identity Mode Assign
+
+GCP identity mode **assign** on the Kubernetes runtime authenticates agent pods via
+Workload Identity, not via the sciontool metadata emulator used on Docker. Scion does
+not create, annotate, or bind Kubernetes ServiceAccounts (KSAs) for this — pre-provision
+each one yourself, then tell the broker about it in its own `settings.yaml`.
+
+This section covers the cluster side: the Workload Identity binding and the broker
+mapping. Registering the GSA with the Hub and granting the Hub token-creator on it come
+first; see the [setup checklist](/scion/hosted/ha/kubernetes/#setup-checklist-give-agents-a-gcp-identity)
+for the full order.
+
+**Cluster and node pool prerequisites** (once per cluster, if not already done for 2h):
+
+```bash
+# Enable Workload Identity Federation on the cluster.
+gcloud container clusters update CLUSTER_NAME \
+  --location=REGION \
+  --workload-pool=$PROJECT_ID.svc.id.goog
+
+# Enable GKE_METADATA on every node pool agent pods run on.
+gcloud container node-pools update NODE_POOL_NAME \
+  --cluster=CLUSTER_NAME \
+  --location=REGION \
+  --workload-metadata=GKE_METADATA
+```
+
+:::note[Autopilot clusters]
+GKE Autopilot has Workload Identity Federation enabled on every node by default and has
+no node pools to update — skip the `gcloud container node-pools update` command above on
+Autopilot.
+:::
+
+For every GCP service account (GSA) you plan to assign to agents on this cluster:
+
+```bash
+# Choose (or create) a KSA for this GSA, in the namespace agents dispatch to.
+export AGENT_GSA="agent-worker@$PROJECT_ID.iam.gserviceaccount.com"
+export AGENT_KSA="agent-worker-ksa"
+export AGENT_NAMESPACE="scion-agents"
+
+kubectl create serviceaccount $AGENT_KSA --namespace=$AGENT_NAMESPACE \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Annotate the KSA with the GSA it is bound to.
+kubectl annotate serviceaccount $AGENT_KSA \
+  --namespace=$AGENT_NAMESPACE \
+  iam.gke.io/gcp-service-account=$AGENT_GSA \
+  --overwrite
+
+# Grant the WI binding (KSA -> GSA), scoped to this namespace and KSA.
+gcloud iam service-accounts add-iam-policy-binding \
+  $AGENT_GSA \
+  --role=roles/iam.workloadIdentityUser \
+  --member="serviceAccount:$PROJECT_ID.svc.id.goog[$AGENT_NAMESPACE/$AGENT_KSA]" \
+  --project=$PROJECT_ID
+```
+
+:::note[If this agent also uses `gke: true` volumes]
+Once a pod authenticates as `$AGENT_KSA` via Workload Identity, CSI Secret Manager mounts
+and GCS FUSE volumes on that pod also authenticate as `$AGENT_GSA` — not as the `default`
+KSA's GSA from 2h. Grant `$AGENT_GSA` whatever those volumes need directly (for example
+`roles/secretmanager.secretAccessor` for CSI secrets, or bucket-level object access for
+FUSE), the same way 2h's GSA needed it. 2h's existing grant does not extend to this GSA.
+:::
+
+Then add the GSA-to-KSA mapping to the runtime broker's own **global** settings — never a
+project's own settings.yaml, which this mapping deliberately ignores — under the
+`kubernetes`-typed runtime entry, or under a profile in that same global source to
+override the runtime-level mapping for agents created under that profile only:
+
+```yaml
+runtimes:
+  remote:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: agent-worker-ksa
+```
+
+Where "global settings" lives depends on your deployment mode:
+
+- **File-only mode** (no database configured): this is `~/.scion/settings.yaml` on the
+  broker host, as shown above.
+- **Broker in the same process as a database-backed Hub** (the Cloud Run + Cloud SQL
+  setup in this guide, which starts the Hub and the Runtime Broker together): as
+  §3c below explains, `runtimes` and `profiles` are persisted to the database on first
+  boot and the database then takes over as the source of truth for those sections —
+  editing the `settings.yaml` secret afterward and redeploying has no effect on them,
+  the same way it has no effect on `admin_emails`. Set or update the mapping with
+  `PUT /api/v1/admin/server-config` (the Hub's Settings admin page sends this same
+  request) instead, sending the complete `runtimes` and/or `profiles` object you want in
+  effect — a mapping added only to the `settings.yaml` secret after first boot is
+  silently ignored, and every `assign` dispatch then fails with "no mapping" even though
+  the file looks correct.
+- **Standalone Runtime Broker** (running in a separate process from the Hub, even when the Hub
+  uses a database): the broker reads only its own `~/.scion/settings.yaml`; the Hub
+  database's `runtimes` and `profiles` do not apply to it.
+
+A Kubernetes dispatch with GCP identity mode `assign` whose GSA has no entry here fails
+at dispatch time with an actionable error naming this setting — it does not fall back to
+the emulator or to the pod's default identity. This mapping is authoritative: if the
+create or start request itself also names an explicit `kubernetes.serviceAccountName`
+that differs from the mapped KSA for that GSA, the dispatch is rejected rather than
+silently resolved either way. A `serviceAccountName` set only in a template (not on the
+request) is not a conflict — it is overridden by the mapping instead, the same way any
+other request-level value already overrides a template value.
+
+:::caution
+Each mapping is **namespace-scoped** by the WI binding's member string
+(`$PROJECT_ID.svc.id.goog[NAMESPACE/KSA]`), the same as 2h. An agent dispatched to a
+different namespace than the one you bound needs its own KSA, annotation, and binding —
+the `kubernetes_service_account_mappings` entry only names the KSA, not its namespace.
+:::
+
+The namespace an assign dispatch runs in comes only from the broker's global settings:
+the selected runtime entry's `namespace`, then the runtime's default namespace. Provision
+the mapped KSA in that namespace:
+
+```yaml
+runtimes:
+  remote:
+    type: kubernetes
+    namespace: scion-agents
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: agent-worker-ksa
+```
+
+Profiles have no namespace setting of their own. A profile that needs a different
+namespace selects its own runtime entry, which sets that namespace and the mapping for
+the KSA provisioned there:
+
+```yaml
+runtimes:
+  remote:
+    type: kubernetes
+    namespace: scion-agents
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: agent-worker-ksa
+  remote-team:
+    type: kubernetes
+    namespace: team-agents
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: team-worker-ksa
+profiles:
+  team:
+    runtime: remote-team
+```
+
+A create or start request that names a namespace explicitly is accepted only when it
+equals that resolved namespace.
+
+A project's own settings.yaml can still set `runtimes.<entry>.namespace` or
+`runtimes.<entry>.context` for the entry an assign dispatch selects, and the pod would be
+placed with the project's value. Such a dispatch is refused with 400, naming the runtime
+entry and both values; remove the project's override, or select another runtime entry.
+
+A broker whose server configuration forces a runtime (`ForceRuntime`, which skips
+profile resolution) does not consult profiles for this lookup either. It reads the
+mapping and the namespace from the runtime entry whose key is the forced runtime's type
+name, for example `runtimes: kubernetes:`. The forced Kubernetes runtime places pods in
+its own namespace, so that namespace must equal the entry's resolved namespace;
+otherwise the dispatch is refused with 400. The entry's `context` is not consulted in
+this case.
+
 ### IAM Verification
 
 ```bash
@@ -528,7 +715,7 @@ gcloud projects get-iam-policy $PROJECT_ID \
 | `scion-hub-runner` | `roles/container.developer` | Project | GKE agent dispatch |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On itself** | Generate GCS signed URLs |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On `scion-transport` SA** | Mint IAP tokens for agents |
-| `scion-hub-runner` | `roles/iam.securityReviewer` | Project/Org | Policy Troubleshooter (Optional, for SA assignment gates) |
+| `scion-hub-runner` | `roles/iam.securityReviewer` | Project/Org, plus each project that holds an assigned SA | Policy Troubleshooter (required for SA assignment when `gcp_iam_check_mode: enforce`) |
 | `scion-transport` | `roles/iap.httpsResourceAccessor` | Project | Allow IAP access to Hub |
 | `scion-transport` | `roles/run.invoker` | Hub service | Allow Cloud Run invocation |
 | `scion-discord-runner` | `roles/cloudsql.client` | Project | Cloud SQL connections |
@@ -563,7 +750,7 @@ For programmatic access to an IAP-protected Cloud Run service (which our GKE age
 Scion agent image building follows a strict dependency chain:
 $$\text{core-base} \longrightarrow \text{scion-base} \longrightarrow \text{harnesses (gemini-cli, etc.)}$$
 
-1. **`core-base`:** Contains core tools (Go compiler, Git from source, unix packages, GCS FUSE).
+1. **`core-base`:** Built on `node:24-trixie-slim` (Debian 13). Contains core tools (Go compiler, Git vendored from the Chainguard `git` image, unix packages, GCS FUSE).
 2. **`scion-base`:** Copies repository code (`cmd/`, `pkg/`, etc.) and builds the `scion` and `sciontool` binaries on top of `core-base`.
 3. **Harnesses:** Pulls `scion-base` and adds target agent packages (like `@google/gemini-cli`).
 
@@ -602,12 +789,18 @@ The default `.gcloudignore` excludes the `web/` frontend directory. Because the 
 
 #### 3. Build the Core Base Image
 ```bash
-gcloud builds submit . \
+gcloud builds submit image-build \
   --tag="$IMAGE_REGISTRY/core-base:latest" \
-  --dockerfile=image-build/core-base/Dockerfile \
+  --dockerfile=core-base/Dockerfile \
   --project=$PROJECT_ID \
   --quiet
 ```
+:::caution[Submit `image-build`, not the repository root]
+`core-base/Dockerfile` copies `image-build/lib/` (the shared toolchain and
+base-contract scripts it runs, also used by `thick-prep/Dockerfile`). Docker
+cannot read anything outside the build context, so the context has to be
+`image-build/` and the Dockerfile path is relative to it.
+:::
 
 #### 4. Build the Scion Base Image
 Create a single-arch temporary build file to inject the custom `BASE_IMAGE` cleanly:
@@ -715,6 +908,7 @@ server:
     gcp_project_id: PROJECT_ID
 
   hub:
+    hub_id: scion-hub-ha-prod           # Stable identity — see note below
     admin_emails:
       - your-admin@example.com          # Admin email addresses
     hub_name: scion-hub-ha
@@ -727,6 +921,30 @@ server:
     enabled: true
     host: 127.0.0.1
 ```
+
+:::note[Set a stable `hub_id`]
+`server.hub.hub_id` is a short string (recommended: lowercase letters,
+digits, hyphens — e.g. a project or environment slug such as
+`scion-hub-ha-prod`) that identifies this Hub instance. All Cloud Run
+replicas must resolve to the **same** value, and it should be unique
+among hubs that share a GCP project or bucket. Without an explicit
+`hub_id`, the Hub falls back to an implicit ID (a hash of the Cloud Run
+service name, or a per-host, hostname-derived value elsewhere). That
+value changes if the service is renamed or recreated under another
+name, and it differs for any process that does not run under the same
+service. The HA preflight therefore requires it to be pinned.
+
+The hub ID is permanent for the hub's lifetime: changing it changes the
+name prefix of every Secret Manager secret this hub writes
+(`scion-<sha256(hub_id)[:12]>-...`), the GCS prefix (`hubs/<hub_id>/...`)
+and hub-scoped database rows, orphaning anything namespaced under the
+old value — see
+[IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for the naming scheme. Set it once and keep every redeploy and revision
+on the same value. If `server.hub.hub_id` is missing on an HA deployment,
+the Hub refuses to start (`hosted HA deployment requires an explicit
+server.hub.hub_id`).
+:::
 
 :::caution[Critical: Distinguishing IAP Audiences]
 Configuring IAP requires two different audience formats used in separate contexts:
@@ -789,11 +1007,12 @@ gcloud run deploy scion-hub \
   --project=$PROJECT_ID \
   --service-account=scion-hub-runner@$PROJECT_ID.iam.gserviceaccount.com \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
-  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SESSION_SECRET=$SESSION_SECRET" \
+  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SCION_SERVER_SESSION_SECRET=$SCION_SERVER_SESSION_SECRET,SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true" \
   --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
-  --min-instances=1 \
+  --min-instances=2 \
   --max-instances=3 \
   --cpu=1 \
+  --no-cpu-throttling \
   --memory=512Mi \
   --port=8080 \
   --timeout=900 \
@@ -802,6 +1021,81 @@ gcloud run deploy scion-hub \
   --no-allow-unauthenticated \
   --quiet
 ```
+
+`--no-cpu-throttling` keeps CPU allocated outside requests. The Runtime Broker in this service needs it to finish asynchronous agent launches after the create response. `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` tells the server that CPU is always allocated, which silences its startup warning; remove the variable if you deploy with CPU throttling. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create).
+
+:::note[Why min-instances=2?]
+An HA Hub needs at least two running replicas, so that losing one instance
+(crash, host maintenance, scale-in) never leaves the Hub with zero warm
+replicas. With `--min-instances=1` there is no failover peer, and the
+deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)).
+`--max-instances=3` leaves room for Cloud Run to scale up under load.
+:::
+
+:::caution[More than one replica requires shared workspace storage]
+The `settings.yaml` above leaves
+[`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage)
+at its default `local` backend. With that backend each replica keeps
+hub-managed project workspaces on its own container storage, so replicas
+can see different workspace content, and the content is lost when an
+instance is replaced. On Cloud Run the Hub also refuses workspace writes
+(file edits, git clone) with `503 Service Unavailable` while the
+backend is `local` (see
+[Ephemeral Storage & 503 Safety Gate](/scion/reference/server-config/#ephemeral-storage--503-safety-gate)).
+
+Before running more than one replica, declare a shared volume on the
+Cloud Run service, mount it at `/mnt/<volume_name>`, and select it in
+`settings.yaml`.
+
+For example, to use a Filestore (NFS) share, export the service with
+`gcloud run services describe scion-hub --region=${REGION} --format export > service.yaml`,
+add the volume and its mount, and apply the file with
+`gcloud run services replace service.yaml`:
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2   # required for NFS volumes
+    spec:
+      containers:
+      - image: IMAGE_URL                 # keep the existing container entry
+        volumeMounts:
+        - name: VOLUME_NAME
+          mountPath: /mnt/VOLUME_NAME    # must be /mnt/ + volume_name in settings.yaml
+      volumes:
+      - name: VOLUME_NAME
+        nfs:
+          server: FILESTORE_IP           # Filestore instance IP address
+          path: /FILE_SHARE              # Filestore file share name
+          readOnly: false
+```
+
+The mount path must equal `/mnt/VOLUME_NAME`, where `VOLUME_NAME` is the
+`volume_name` setting below. The Cloud Run volume's own `name` can
+differ; using the same name for both just keeps it simple. NFS volumes require the second
+generation (`gen2`) execution environment. Do not use an in-memory
+volume here: it is local to each instance and not shared between
+replicas, even though the readiness check passes because the path is
+mounted.
+
+```yaml
+server:
+  project_storage:
+    backend: cloudrun-volume
+    cloudrun_volume:
+      volume_name: VOLUME_NAME       # the volume declared on the service
+      subpath_root: projects         # default
+```
+
+The Hub derives every workspace and shared-directory path from `/mnt/<volume_name>`. If the
+volume is not mounted there, `GET /readyz` returns `503` instead of the
+Hub writing workspaces to container storage. A missing `volume_name`
+stops the Hub at startup. See
+[Project Storage](/scion/reference/server-config/#project-storage-serverproject_storage)
+for all backends and fields.
+:::
 
 :::caution[Cloud Run Timeout Warning]
 We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this.
@@ -966,6 +1260,16 @@ gcloud run deploy scion-discord \
   --no-allow-unauthenticated \
   --quiet
 ```
+
+:::note[The Discord service is a singleton, not HA]
+`--min-instances=1 --max-instances=1` is intentional. The Discord plugin
+holds a single, unsharded Gateway connection per bot token; a second instance
+would receive and process every event twice, so the service runs as exactly
+one instance and is not replicated like the Hub. It is not covered by the HA
+guarantee. While it is down or restarting (for example during the redeploy
+checklist in Section 7a), the Hub keeps serving but the Discord integration is
+unavailable.
+:::
 
 ---
 
@@ -1138,6 +1442,31 @@ When redeploying the Hub with a new image:
      --region=$REGION --project=$PROJECT_ID --quiet
    ```
 
+### 7b. Secret Name Migration
+
+:::note
+This path has not been run against a live hub; it was checked against the code and
+`gcloud --help` only.
+:::
+
+Run `scion hub secret migrate-names` against a hub deployed with this guide from a
+one-off Cloud Run job, as described in §9 of
+[`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md#9-hubs-deployed-with-the-deploy-on-gcp-guide-public-ip-cloud-sql).
+The job uses the serving revision's image digest and runs as `scion-hub-runner`. It
+reaches this guide's public-IP Cloud SQL instance through the same Cloud Run Cloud
+SQL connection as the hub, so it needs no VPC configuration. The DSN is supplied
+only through Secret Manager: the job mounts the `scion-hub-settings` secret with
+`--set-secrets`, and no operator reads or handles the DSN. Do not run
+`migrate-names` from a workstation against this hub's database.
+
+The job takes the hub ID from `server.hub.hub_id` in that settings file (see
+[Set a stable `hub_id`](#3c-configure-and-store-settingsyaml) in §3c), and the
+command checks it against the hub's existing secret records. Sections 1, 4, 5, 6 and 8
+of the runbook apply to this guide's hubs, with the differences listed in its §9;
+section 7 (Terraform cleanup) does not. See
+[Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for what the command does in general, and `--help` for its flags.
+
 ---
 
 ## Appendix A: Complete settings.yaml Reference
@@ -1194,6 +1523,7 @@ server:
     gcp_project_id: your-project
 
   hub:
+    hub_id: hub-ha-prod                # Stable identity — see Section 3c
     admin_emails:
       - admin@example.com
     hub_name: hub-ha-prod

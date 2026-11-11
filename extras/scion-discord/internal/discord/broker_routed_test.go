@@ -160,6 +160,7 @@ func newDiscordRoutedFixture(t *testing.T) *discordRoutedFixture {
 
 	// Seed agent cache so legacy path resolves agents without a hub client.
 	require.NoError(t, f.store.SetProjectAgents(ctx, &ProjectAgents{
+		User:        "user:testuser@example.com",
 		ProjectID:   "proj-001",
 		AgentSlugs:  []string{"alpha", "beta", "gamma"},
 		RefreshedAt: time.Now(),
@@ -663,7 +664,9 @@ func TestRoutedEnabled_ContextSavedAfterPreflightExpiry(t *testing.T) {
 		},
 	}
 
-	f.broker.handleRoutedInbound(ctx, f.session, m, f.store, link, "C-TEST", "BOT123", "alpha")
+	mapping, err := f.store.GetUserMapping(context.Background(), "U-SENDER")
+	require.NoError(t, err)
+	f.broker.handleRoutedInbound(ctx, f.session, m, f.store, link, mapping, "C-TEST", "BOT123", "alpha")
 
 	// The context save must succeed despite the expired parent ctx, because
 	// handleRoutedInbound now creates a fresh bounded context for the store call.
@@ -1233,7 +1236,7 @@ func TestHubError_UserFacingMessage_NewCodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			he := &hubError{Code: tt.code, Message: "test"}
-			assert.Contains(t, he.userFacingMessage(), tt.contains)
+			assert.Contains(t, he.userFacingMessage("", ""), tt.contains)
 		})
 	}
 }
@@ -1407,4 +1410,62 @@ func TestRoutedDisabled_PlainTextWithDefault_RoutesToDefaultLegacy(t *testing.T)
 
 	require.Len(t, f.legacyCalls, 1, "plain text with default should route via legacy")
 	assert.Equal(t, "agent:alpha", f.legacyCalls[0].Message.Recipient)
+}
+
+// --- Attachment-only messages on the legacy path ---
+
+// attachmentOnlyMessage builds a channel message with an attachment and no
+// text from the given author.
+func attachmentOnlyMessage(authorID, authorUsername string, att *discordgo.MessageAttachment) *discordgo.MessageCreate {
+	return &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:          fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+			ChannelID:   "C-TEST",
+			GuildID:     "G-TEST",
+			Content:     "",
+			Author:      &discordgo.User{ID: authorID, Username: authorUsername},
+			Timestamp:   time.Now(),
+			Attachments: []*discordgo.MessageAttachment{att},
+			Type:        discordgo.MessageTypeDefault,
+		},
+	}
+}
+
+func TestRoutedDisabled_AttachmentOnly_RoutesToDefaultLegacy(t *testing.T) {
+	f := newDiscordRoutedFixture(t)
+	f.disableRouted()
+	f.broker.downloadsPath = filepath.Join(t.TempDir(), "downloads")
+
+	srv := attachmentServer(t)
+	att := &discordgo.MessageAttachment{ID: "att-1", Filename: "note.txt", URL: srv.URL + "/note.txt", Size: 16}
+	f.broker.handleIncomingMessage(f.session, attachmentOnlyMessage("U-SENDER", "testuser", att))
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	require.Len(t, f.legacyCalls, 1, "attachment-only message should route to the default agent via legacy")
+	assert.Equal(t, "agent:alpha", f.legacyCalls[0].Message.Recipient)
+	assert.Len(t, f.legacyCalls[0].Message.Attachments, 1)
+	assert.Empty(t, f.routedCalls)
+}
+
+func TestRoutedDisabled_AttachmentOnly_UnregisteredUserPromptedNotDelivered(t *testing.T) {
+	f := newDiscordRoutedFixture(t)
+	f.disableRouted()
+	f.broker.downloadsPath = filepath.Join(t.TempDir(), "downloads")
+	rt := &bodyRecordingTransport{}
+	f.session.Client = &http.Client{Transport: rt}
+
+	srv := attachmentServer(t)
+	att := &discordgo.MessageAttachment{ID: "att-1", Filename: "note.txt", URL: srv.URL + "/note.txt", Size: 16}
+	m := attachmentOnlyMessage("U-UNKNOWN", "nobody", att)
+	m.ReferencedMessage = &discordgo.Message{ID: "bot-msg", Author: &discordgo.User{ID: "BOT123", Bot: true}}
+	f.broker.handleIncomingMessage(f.session, m)
+
+	assert.Contains(t, rt.sentContents(t), msgRegisterToInteract)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.Empty(t, f.legacyCalls, "unregistered user must not reach hub")
+	assert.Empty(t, f.routedCalls)
 }

@@ -17,9 +17,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -27,12 +29,27 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
+// brokerCodeRuntimeLogsUnsupported mirrors the wire value of
+// pkg/runtimebroker.ErrCodeRuntimeLogsUnsupported, the code a runtime broker
+// sends when its runtime declines a logs request outright (e.g. the
+// substrate runtime's ErrLogsNotSupported). Kept as a literal rather than an
+// import: pkg/hub only ever talks to the broker over HTTP.
+const brokerCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
+
+// runtimeLogsUnsupportedMessage is the hub's own fixed text for a
+// runtime_logs_unsupported response — never the broker-supplied message.
+// Any broker (including one this hub does not otherwise trust — a
+// user-registered or misconfigured one) can put arbitrary text in its own
+// response body; matching the code is not a reason to repeat that text
+// verbatim under the hub's response.
+const runtimeLogsUnsupportedMessage = "agent logs are not available on this agent's runtime"
+
 // handleAgentLogs handles GET /api/v1/agents/{id}/logs
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/logs
 // It proxies the request to the agent's runtime broker to read agent.log.
 func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -77,6 +94,30 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 	logs, err := dispatcher.DispatchAgentLogs(ctx, agent, tail)
 	if err != nil {
 		slog.Error("agent log relay failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
+		// The broker declined outright (e.g. the substrate runtime's
+		// ErrLogsNotSupported) rather than failing to reach the runtime.
+		// Pass its status and code straight through instead of re-wrapping
+		// them in a generic gateway error — matching on both the status and
+		// the code keeps every other broker error, including any other 501,
+		// on the unchanged path below. The message is the hub's own fixed
+		// text, not the broker's: any broker can put arbitrary text in its
+		// response body, and this response must stay clean regardless.
+		var se *brokerStatusError
+		if errors.As(err, &se) && se.StatusCode == http.StatusNotImplemented && se.brokerErrorCode() == brokerCodeRuntimeLogsUnsupported {
+			writeError(w, http.StatusNotImplemented, brokerCodeRuntimeLogsUnsupported, runtimeLogsUnsupportedMessage, nil)
+			return
+		}
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
+		if writeBrokerRoutedUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
 			"Failed to retrieve logs from broker: "+err.Error(), nil)
 		return
@@ -89,7 +130,7 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/cloud-logs
 func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -117,6 +158,10 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
 		return
 	}
+	severity, ok := logSeverityParam(w, r.URL.Query())
+	if !ok {
+		return
+	}
 
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
@@ -125,12 +170,62 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	}
 
 	// Parse query parameters
-	query := r.URL.Query()
-	opts := LogQueryOptions{
-		HubName:   s.config.HubName,
-		AgentID:   agent.ID,
-		ProjectID: agent.ProjectID,
+	opts := agentCloudLogListOptions(s.config.HubName, agent, severity, r.URL.Query())
+
+	result, err := s.logQueryService.Query(ctx, opts)
+	if err != nil {
+		slog.Error("cloud log query failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to query cloud logs", nil)
+		return
 	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// logSeverityParam reads the optional severity query parameter of the cloud
+// log endpoints. An empty value means no severity filter. Any other value must
+// name a Cloud Logging severity (logSeverityNames, ASCII case ignored);
+// otherwise it writes 400 validation_error and returns false.
+func logSeverityParam(w http.ResponseWriter, query url.Values) (string, bool) {
+	v := query.Get("severity")
+	if v == "" {
+		return "", true
+	}
+	sev, ok := normalizeLogSeverity(v)
+	if !ok {
+		ValidationError(w, errInvalidLogSeverity.Error(), map[string]interface{}{"field": "severity"})
+		return "", false
+	}
+	return sev, true
+}
+
+// agentCloudLogQueryOptions builds the filter options shared by the
+// agent cloud-logs query and stream endpoints, so both select the same
+// set of entries for an agent.
+//
+// It deliberately does not set ProjectID: many server log entries carry
+// agent_id without a project_id label, so a project_id clause would drop
+// them. Agent IDs are UUIDs, so the agent_id clause alone is selective.
+//
+// severity is the value logSeverityParam returned: a canonical severity
+// name, or "" for no severity filter.
+func agentCloudLogQueryOptions(hubName string, agent *store.Agent, severity string, query url.Values) LogQueryOptions {
+	opts := LogQueryOptions{
+		HubName:  hubName,
+		AgentID:  agent.ID,
+		Severity: severity,
+	}
+	if v := query.Get("broker_id"); v != "" {
+		opts.BrokerID = v
+	}
+	return opts
+}
+
+// agentCloudLogListOptions builds the options for the non-streaming
+// agent cloud-logs endpoint: the shared filter plus paging and time range.
+func agentCloudLogListOptions(hubName string, agent *store.Agent, severity string, query url.Values) LogQueryOptions {
+	opts := agentCloudLogQueryOptions(hubName, agent, severity, query)
 
 	if v := query.Get("tail"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -147,30 +242,17 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 			opts.Until = t
 		}
 	}
-	if v := query.Get("severity"); v != "" {
-		opts.Severity = v
-	}
-	if v := query.Get("broker_id"); v != "" {
-		opts.BrokerID = v
-	}
-
-	result, err := s.logQueryService.Query(ctx, opts)
-	if err != nil {
-		slog.Error("cloud log query failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"Failed to query cloud logs", nil)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
+	return opts
 }
 
 // handleAgentCloudLogsStream handles GET /api/v1/agents/{id}/cloud-logs/stream
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/cloud-logs/stream
 // It returns an SSE stream of log entries using the Cloud Logging Tail API.
+// A stream opened with a user access token ends once the token stops
+// validating or loses agent.read (streamTokenStillAuthorized).
 func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -178,7 +260,10 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 
 	// Verify agent exists and caller has read access
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -198,6 +283,10 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	if !s.authorize(w, r, agentResource(agent), ActionRead) {
 		return
 	}
+	severity, ok := logSeverityParam(w, r.URL.Query())
+	if !ok {
+		return
+	}
 
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
@@ -212,17 +301,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Parse query filters
-	query := r.URL.Query()
-	opts := LogQueryOptions{
-		HubName: s.config.HubName,
-		AgentID: agent.ID,
-	}
-	if v := query.Get("severity"); v != "" {
-		opts.Severity = v
-	}
-	if v := query.Get("broker_id"); v != "" {
-		opts.BrokerID = v
-	}
+	opts := agentCloudLogQueryOptions(s.config.HubName, agent, severity, r.URL.Query())
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -244,6 +323,9 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	recheck, stopRecheck := streamTokenRecheck(ctx)
+	defer stopRecheck()
+
 	// Server-side timeout: 10 minutes
 	timeout := time.NewTimer(10 * time.Minute)
 	defer timeout.Stop()
@@ -264,6 +346,11 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+		case <-recheck:
+			if !s.streamTokenStillAuthorized(ctx, agentResource(agent), ActionRead, "agent.read") {
+				endStreamForCredential(ctx, w, flusher)
+				return
+			}
 		case <-timeout.C:
 			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()
@@ -280,7 +367,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 // entries associated with the given agent.
 func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -304,23 +391,9 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	// DEF-128b: check manage first, then read. Manage implies read and lets
-	// us skip participant scoping for users who have it — mirroring the
-	// hub-store path in handleAgentMessages (handlers_messages.go:231-239).
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
+	fullHistory, ok := s.authorizeAgentMessageLogs(w, r, agent)
+	if !ok {
 		return
-	}
-	res := agentResource(agent)
-	canManage := s.authzService.CheckAccess(ctx, identity, res, ActionManage)
-	if !canManage.Allowed {
-		decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
-		if !decision.Allowed {
-			logAuthzDenial(r, identity, res, ActionRead, decision.Reason)
-			Forbidden(w)
-			return
-		}
 	}
 
 	if s.logQueryService == nil {
@@ -337,22 +410,8 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		LogID:     logging.MessageLogID,
 	}
 
-	// DEF-128b: non-manage callers see only their own messages, matching the
-	// hub-store path's filter.ParticipantID = user.ID() constraint.
-	//
-	// Fail closed: if the caller is not-manage and we cannot resolve a user
-	// identity, deny rather than return an unscoped query. An absent identity
-	// must produce less access, not more. Any future identity kind that is
-	// not a user must be explicitly handled here — silent pass-through is
-	// an over-grant.
-	if !canManage.Allowed {
-		user := GetUserIdentityFromContext(ctx)
-		if user == nil {
-			// No user identity and not a manager — deny.
-			Forbidden(w)
-			return
-		}
-		opts.ParticipantID = user.ID()
+	if opts.ParticipantID, ok = agentMessageLogParticipant(ctx, w, fullHistory); !ok {
+		return
 	}
 
 	if v := query.Get("tail"); v != "" {
@@ -385,9 +444,13 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 // handleAgentMessageLogsStream handles GET /api/v1/agents/{id}/message-logs/stream
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/message-logs/stream
 // It returns an SSE stream of message log entries from the "scion-messages" log.
+// It applies the message-log list's rule: agent.attach gives the full
+// history, agent.read alone only the messages the caller took part in. A
+// stream opened with a user access token ends once the token stops
+// validating or loses the permission that admitted it.
 func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -395,7 +458,10 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -411,7 +477,10 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+	// The stream applies the message-log list's rule
+	// (authorizeAgentMessageLogs) for every caller.
+	fullHistory, ok := s.authorizeAgentMessageLogs(w, r, agent)
+	if !ok {
 		return
 	}
 
@@ -421,17 +490,27 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
 	opts := LogQueryOptions{
 		HubName:   s.config.HubName,
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
 		LogID:     logging.MessageLogID,
+	}
+	if opts.ParticipantID, ok = agentMessageLogParticipant(ctx, w, fullHistory); !ok {
+		return
+	}
+
+	// A token stream is re-checked on the permission that admitted it.
+	res := agentResource(agent)
+	recheckAction, recheckPermission := ActionRead, "agent.read"
+	if fullHistory {
+		recheckAction, recheckPermission = ActionAttach, "agent.attach"
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -452,6 +531,9 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	recheck, stopRecheck := streamTokenRecheck(ctx)
+	defer stopRecheck()
+
 	timeout := time.NewTimer(10 * time.Minute)
 	defer timeout.Stop()
 
@@ -470,6 +552,11 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+		case <-recheck:
+			if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) {
+				endStreamForCredential(ctx, w, flusher)
+				return
+			}
 		case <-timeout.C:
 			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()
@@ -485,7 +572,7 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 // within the given project (across all agents).
 func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -555,9 +642,11 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 
 // handleProjectMessageLogsStream handles GET /api/v1/projects/{projectId}/message-logs/stream
 // It returns an SSE stream of all message log entries within the project.
+// A stream opened with a user access token ends once the token stops
+// validating or loses project.read.
 func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -565,7 +654,10 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -621,6 +713,9 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	recheck, stopRecheck := streamTokenRecheck(ctx)
+	defer stopRecheck()
+
 	timeout := time.NewTimer(10 * time.Minute)
 	defer timeout.Stop()
 
@@ -639,6 +734,11 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+		case <-recheck:
+			if !s.streamTokenStillAuthorized(ctx, projectResource(project), ActionRead, "project.read") {
+				endStreamForCredential(ctx, w, flusher)
+				return
+			}
 		case <-timeout.C:
 			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()
@@ -647,6 +747,48 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
+}
+
+// authorizeAgentMessageLogs decides a read of an agent's message logs, for
+// the message-log list and its stream alike. agent.attach on the agent
+// gives the full history; otherwise the caller needs agent.read and sees
+// only the messages it took part in (agentMessageLogParticipant). It
+// writes 401 or 403 and returns ok false when the caller is refused.
+func (s *Server) authorizeAgentMessageLogs(w http.ResponseWriter, r *http.Request, agent *store.Agent) (fullHistory bool, ok bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false, false
+	}
+	if s.agentFullHistoryDecision(ctx, identity, agent).Allowed {
+		return true, true
+	}
+	res := agentResource(agent)
+	decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, res, ActionRead, decision.Reason)
+		Forbidden(w)
+		return false, false
+	}
+	return false, true
+}
+
+// agentMessageLogParticipant returns the participant filter of a message
+// log read: none with the full history; otherwise the caller's user ID, so
+// the caller sees only the messages it sent or received, matching the
+// hub-store message path. A caller without the full history that is not a
+// user is refused with 403 (ok false): it gets no unscoped query.
+func agentMessageLogParticipant(ctx context.Context, w http.ResponseWriter, fullHistory bool) (participantID string, ok bool) {
+	if fullHistory {
+		return "", true
+	}
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Forbidden(w)
+		return "", false
+	}
+	return user.ID(), true
 }
 
 // resolveProjectAgent resolves an agent by slug or ID within a project, returning

@@ -64,10 +64,12 @@ Then checks for any git worktree checked out to the specified branch.`,
 		}
 
 		// 2. Check for Branch Worktree if not found
-		if targetPath == "" && util.IsGitRepo() {
-			path, err := util.FindWorktreeByBranch(name)
-			if err == nil && path != "" {
-				targetPath = path
+		if targetPath == "" {
+			if repoRoot, err := util.RepoRoot(); err == nil {
+				path, err := util.FindWorktreeByBranchIn(repoRoot, name)
+				if err == nil && path != "" {
+					targetPath = path
+				}
 			}
 		}
 

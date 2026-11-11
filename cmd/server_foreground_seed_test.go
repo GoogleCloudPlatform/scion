@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
@@ -138,6 +139,52 @@ func TestSyncHubSettings_SeedsNewSections(t *testing.T) {
 	}
 	if access.Origin != "seeded" {
 		t.Errorf("access origin: want seeded, got %s", access.Origin)
+	}
+}
+
+// TestSyncHubSettings_UnseededInstance_SeedsAgentDefaultsFromEmbeds is the
+// end-to-end regression test for ptone/scion#1306: on a genuinely un-seeded
+// instance — no settings.yaml on disk, no SCION_SEED_*/SCION_SERVER_* env
+// vars, empty hub_settings table — the very first sync must still seed
+// agent_defaults.default_harness_config (and default_template) from the
+// embedded settings file via the real config.LoadBootstrapKoanf(), not leave
+// the section empty. An empty default_harness_config here is exactly what let
+// an agent-create request that omitted harnessConfig resolve to an empty
+// name and fail with a 502 instead of using the product default.
+func TestSyncHubSettings_UnseededInstance_SeedsAgentDefaultsFromEmbeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	fs := newFakeHubSettingStore()
+
+	// The real bootstrap koanf, exactly as cmd/server_foreground.go builds it
+	// at boot — no settings.yaml exists in the isolated HOME above, so this
+	// is the un-seeded-instance case.
+	k := config.LoadBootstrapKoanf()
+
+	if err := syncHubSettings(context.Background(), fs, k); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	agentDefaults, ok := fs.settings["agent_defaults"]
+	if !ok {
+		t.Fatal("expected agent_defaults section to be seeded")
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(agentDefaults.Value, &doc); err != nil {
+		t.Fatalf("agent_defaults: unmarshal error: %v", err)
+	}
+
+	hc, _ := doc["default_harness_config"].(string)
+	if hc == "" {
+		t.Error("expected agent_defaults.default_harness_config to be seeded from embedded defaults on an un-seeded instance, got empty")
+	}
+	tmpl, _ := doc["default_template"].(string)
+	if tmpl == "" {
+		t.Error("expected agent_defaults.default_template to be seeded from embedded defaults on an un-seeded instance, got empty")
 	}
 }
 
@@ -552,10 +599,13 @@ func TestSyncHubSettings_RuntimesManagedNotOverwritten(t *testing.T) {
 	}
 }
 
-func TestSyncHubSettings_EmptyMapSectionsSeeded(t *testing.T) {
+// An empty catalog (runtimes, profiles, harness_configs) in the bootstrap
+// material creates no row: the sections stay absent, which means "not
+// managed in the hub" (ptone/scion#5007). Other sections are still seeded.
+func TestSyncHubSettings_EmptyCatalogSectionsNotSeeded(t *testing.T) {
 	fs := newFakeHubSettingStore()
 
-	// No runtimes/profiles/harness_configs keys in koanf — should seed empty docs.
+	// No runtimes/profiles/harness_configs keys in koanf.
 	k := koanf.New(".")
 	_ = k.Load(confmap.Provider(map[string]interface{}{
 		"server.hub.admin_emails": []interface{}{"admin@test.com"},
@@ -569,23 +619,40 @@ func TestSyncHubSettings_EmptyMapSectionsSeeded(t *testing.T) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	// Empty map sections should be seeded as "{}".
 	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
-		setting, ok := fs.settings[sec]
-		if !ok {
-			t.Errorf("expected %s section to be seeded (empty doc)", sec)
-			continue
+		if setting, ok := fs.settings[sec]; ok {
+			t.Errorf("%s section seeded with %s, want it absent", sec, setting.Value)
 		}
-		if setting.Origin != "seeded" {
-			t.Errorf("%s origin: want seeded, got %s", sec, setting.Origin)
+	}
+	if _, ok := fs.settings["access"]; !ok {
+		t.Error("expected access section to be seeded")
+	}
+}
+
+// A seeded empty catalog row left by an earlier start is kept as is (no
+// write): it already means "not managed in the hub", and the overlay treats
+// it so (ptone/scion#5007).
+func TestSyncHubSettings_ExistingSeededEmptyCatalogRowUnchanged(t *testing.T) {
+	fs := newFakeHubSettingStore()
+	for _, sec := range []string{"runtimes", "profiles"} {
+		fs.settings[sec] = &store.HubSetting{
+			ID: sec, Section: sec, Value: json.RawMessage(`{}`),
+			Revision: 1, UpdatedBy: "seed", Origin: "seeded",
 		}
-		var doc map[string]interface{}
-		if err := json.Unmarshal(setting.Value, &doc); err != nil {
-			t.Errorf("%s: unmarshal error: %v", sec, err)
-			continue
+	}
+
+	if err := syncHubSettings(context.Background(), fs, koanf.New(".")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	for _, sec := range []string{"runtimes", "profiles"} {
+		if got := fs.settings[sec].Revision; got != 1 {
+			t.Errorf("%s revision = %d, want 1 (no write)", sec, got)
 		}
-		if len(doc) != 0 {
-			t.Errorf("%s: expected empty doc, got %v", sec, doc)
-		}
+	}
+	if _, ok := fs.settings["harness_configs"]; ok {
+		t.Error("harness_configs seeded, want it absent")
 	}
 }

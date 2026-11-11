@@ -45,9 +45,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY harnesses/ ./harnesses/
+COPY internal/ ./internal/
 COPY pkg/ ./pkg/
 COPY proto/ ./proto/
 COPY resources/ ./resources/
+COPY third_party/ ./third_party/
 # NOTE: Do NOT copy web/*.go only — the full web/ is already in place with
 # dist/client from step 1
 
@@ -56,12 +58,16 @@ COPY resources/ ./resources/
 # Keep -buildvcs=false — .git/ is in .dockerignore; without the flag the build
 # fails.
 ARG GIT_COMMIT
+ARG VERSION
 ARG BUILD_TIME
 RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     SCION_PKG="github.com/GoogleCloudPlatform/scion/pkg/version" && \
     LDFLAGS="-s -w -X ${SCION_PKG}.BuildTime=${BUILD_TIME}" && \
     if [ -n "${GIT_COMMIT}" ]; then \
         LDFLAGS="${LDFLAGS} -X ${SCION_PKG}.Commit=${GIT_COMMIT}"; \
+    fi && \
+    if [ -n "${VERSION}" ]; then \
+        LDFLAGS="${LDFLAGS} -X ${SCION_PKG}.Version=${VERSION}"; \
     fi && \
     go build -buildvcs=false -ldflags="${LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/
 

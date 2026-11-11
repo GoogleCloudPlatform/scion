@@ -38,7 +38,10 @@ steps:
   # Build and push scion-base image (uses existing core-base:<_TAG>)
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-base'
+    entrypoint: 'bash'
     args:
+      - '/workspace/image-build/scripts/buildx-record-digest.sh'
+      - '$_REGISTRY/scion-base:$_TAG'
       - 'buildx'
       - 'build'
       - '--platform'
@@ -47,6 +50,10 @@ steps:
       - 'BASE_IMAGE=$_REGISTRY/core-base:$_TAG'
       - '--build-arg'
       - 'GIT_COMMIT=$_COMMIT_SHA'
+      - '--build-arg'
+      - 'VERSION=$_VERSION'
+      - '--build-arg'
+      - 'BUILD_TIME=$_BUILD_TIME'
       - '-t'
       - '$_REGISTRY/scion-base:$_SHORT_SHA'
       - '-t'
@@ -62,7 +69,9 @@ steps:
 substitutions:
   _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
   _TAG: 'latest'
+  _VERSION: ''
+  _BUILD_TIME: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 1800s # 30 minutes - much faster since core-base is pre-built
+timeout: 3600s # 1 hour - scion-base build measured ~40m (build 14e5e1c1)

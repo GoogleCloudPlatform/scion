@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -22,9 +25,9 @@ func TestResolveMode(t *testing.T) {
 			expected: ModeHuman,
 		},
 		{
-			name:     "assistant mode from env",
+			name:     "removed assistant mode from env falls back to human",
 			envValue: "assistant",
-			expected: ModeAssistant,
+			expected: ModeHuman,
 		},
 		{
 			name:     "agent mode from env",
@@ -57,6 +60,63 @@ func TestResolveMode(t *testing.T) {
 	}
 }
 
+// resetRemovedModeWarning lets a test observe the once-per-process warning
+// for the removed assistant mode.
+func resetRemovedModeWarning(t *testing.T) {
+	t.Helper()
+	removedModeWarnOnce = &sync.Once{}
+	t.Cleanup(func() { removedModeWarnOnce = &sync.Once{} })
+}
+
+// The assistant CLI mode was removed. An old SCION_CLI_MODE=assistant must
+// not restrict any command and must print exactly one warning, however many
+// times the mode is resolved.
+func TestRemovedAssistantMode_EnvIgnoredWithOneWarning(t *testing.T) {
+	resetRemovedModeWarning(t)
+	t.Setenv("SCION_CLI_MODE", "assistant")
+
+	root := buildTestTree()
+	before := collectCommandNames(root)
+	stderr := captureStderr(t, func() {
+		for i := 0; i < 3; i++ {
+			assert.Equal(t, ModeHuman, resolveMode())
+		}
+		applyModeRestrictions(root, resolveMode())
+	})
+
+	assert.Equal(t, before, collectCommandNames(root),
+		"the removed assistant mode must not remove any commands")
+	for _, path := range []string{"hub.auth", "hub.token", "config.migrate", "cdw", "clean", "completion"} {
+		assert.Contains(t, collectCommandNames(root), path)
+	}
+	assert.Equal(t, 1, strings.Count(stderr, "has been removed"), "stderr: %q", stderr)
+	assert.Contains(t, stderr, `SCION_CLI_MODE="assistant"`)
+}
+
+// The same applies to a cli.mode: assistant value left in a settings file.
+func TestRemovedAssistantMode_SettingIgnoredWithOneWarning(t *testing.T) {
+	resetRemovedModeWarning(t)
+	t.Setenv("SCION_CLI_MODE", "")
+	_ = os.Unsetenv("SCION_CLI_MODE")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(home)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
+		[]byte("schema_version: \"1\"\ncli:\n  mode: assistant\n"), 0644))
+
+	root := buildTestTree()
+	before := collectCommandNames(root)
+	stderr := captureStderr(t, func() {
+		assert.Equal(t, ModeHuman, resolveMode())
+		applyModeRestrictions(root, resolveMode())
+	})
+
+	assert.Equal(t, before, collectCommandNames(root))
+	assert.Equal(t, 1, strings.Count(stderr, "has been removed"), "stderr: %q", stderr)
+	assert.Contains(t, stderr, `cli.mode="assistant"`)
+}
+
 // buildTestTree creates a command tree mimicking a subset of the real scion CLI
 // for testing mode filtering.
 func buildTestTree() *cobra.Command {
@@ -79,9 +139,10 @@ func buildTestTree() *cobra.Command {
 
 	// config with subcommands
 	cfg := &cobra.Command{Use: "config"}
-	for _, name := range []string{"list", "set", "get", "validate", "migrate", "dir", "cd-config", "cd-grove", "schema"} {
+	for _, name := range []string{"list", "set", "get", "validate", "migrate", "dir", "cd-config", "schema"} {
 		cfg.AddCommand(&cobra.Command{Use: name})
 	}
+	cfg.AddCommand(&cobra.Command{Use: "cd-project"})
 	root.AddCommand(cfg)
 
 	// hub with subcommands
@@ -102,12 +163,8 @@ func buildTestTree() *cobra.Command {
 	hubToken.AddCommand(&cobra.Command{Use: "list"})
 	hubToken.AddCommand(&cobra.Command{Use: "revoke"})
 	hubToken.AddCommand(&cobra.Command{Use: "delete"})
+	hubToken.AddCommand(&cobra.Command{Use: "scopes"})
 	hub.AddCommand(hubToken)
-
-	hubGrv := &cobra.Command{Use: "groves"}
-	hubGrv.AddCommand(&cobra.Command{Use: "info"})
-	hubGrv.AddCommand(&cobra.Command{Use: "delete"})
-	hub.AddCommand(hubGrv)
 
 	hubBrk := &cobra.Command{Use: "brokers"}
 	hubBrk.AddCommand(&cobra.Command{Use: "info"})
@@ -122,6 +179,8 @@ func buildTestTree() *cobra.Command {
 	hubSecret := &cobra.Command{Use: "secret"}
 	hubSecret.AddCommand(&cobra.Command{Use: "set"})
 	hubSecret.AddCommand(&cobra.Command{Use: "get"})
+	hubSecret.AddCommand(&cobra.Command{Use: "migrate"})
+	hubSecret.AddCommand(&cobra.Command{Use: "migrate-names"})
 	hub.AddCommand(hubSecret)
 
 	hubNotif := &cobra.Command{Use: "notifications"}
@@ -129,16 +188,18 @@ func buildTestTree() *cobra.Command {
 
 	root.AddCommand(hub)
 
-	// grove with subcommands
-	grove := &cobra.Command{Use: "grove"}
+	// project with subcommands; canonical name is "project", "group" is a
+	// legacy alias that must resolve to the same command.
+	project := &cobra.Command{Use: "project", Aliases: []string{"group"}}
 	for _, name := range []string{"init", "list", "prune", "reconnect"} {
-		grove.AddCommand(&cobra.Command{Use: name})
+		project.AddCommand(&cobra.Command{Use: name})
 	}
-	groveSA := &cobra.Command{Use: "service-accounts"}
-	groveSA.AddCommand(&cobra.Command{Use: "add"})
-	groveSA.AddCommand(&cobra.Command{Use: "list"})
-	grove.AddCommand(groveSA)
-	root.AddCommand(grove)
+	projectSA := &cobra.Command{Use: "service-accounts"}
+	for _, name := range []string{"add", "list", "show", "mint", "verify", "remove"} {
+		projectSA.AddCommand(&cobra.Command{Use: name})
+	}
+	project.AddCommand(projectSA)
+	root.AddCommand(project)
 
 	// server with subcommands
 	server := &cobra.Command{Use: "server"}
@@ -227,51 +288,15 @@ func TestApplyModeRestrictions_Human(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "human")
 	root := buildTestTree()
 	before := collectCommandNames(root)
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	after := collectCommandNames(root)
 	assert.Equal(t, before, after, "human mode should not remove any commands")
-}
-
-func TestApplyModeRestrictions_Assistant(t *testing.T) {
-	t.Setenv("SCION_CLI_MODE", "assistant")
-	root := buildTestTree()
-	applyModeRestrictions(root)
-	remaining := collectCommandNames(root)
-
-	// These commands should be removed
-	removed := []string{
-		"hub.auth", "hub.auth.login", "hub.auth.logout",
-		"hub.token", "hub.token.create", "hub.token.list", "hub.token.revoke", "hub.token.delete",
-		"grove.reconnect",
-		"config.migrate", "config.cd-config", "config.cd-grove",
-		"cdw",
-		"clean",
-	}
-	for _, cmd := range removed {
-		assert.NotContains(t, remaining, cmd, "assistant mode should remove %s", cmd)
-	}
-
-	// These commands should still be present
-	present := []string{
-		"create", "delete", "list", "start", "stop", "attach",
-		"config", "config.list", "config.set", "config.get", "config.validate", "config.dir", "config.schema",
-		"hub", "hub.status", "hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.groves", "hub.brokers", "hub.env", "hub.secret",
-		"grove", "grove.init", "grove.list", "grove.prune", "grove.service-accounts",
-		"server", "server.start", "server.stop",
-		"broker",
-		"templates",
-		"help", "completion",
-	}
-	for _, cmd := range present {
-		assert.Contains(t, remaining, cmd, "assistant mode should keep %s", cmd)
-	}
 }
 
 func TestApplyModeRestrictions_Agent(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	// These commands should be present in agent mode
@@ -279,11 +304,21 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"create", "delete",
 		"harness-config", "harness-config.install", "harness-config.list",
 		"help",
+		// hub and hub status stay for target-hub profiles (ptone/scion#4240); the
+		// command refuses at run time without a target profile.
+		"hub", "hub.status",
 		"list", "logs", "look",
 		"message",
 		"notifications",
 		"notifications.ack", "notifications.subscribe", "notifications.subscriptions",
 		"notifications.unsubscribe", "notifications.update",
+		// "project" itself stays allowed (mirrors the real agentAllowed map,
+		// which permits bare "project" so "project.skills" routes through
+		// it). Of its subcommands in this fake tree only the read-only
+		// project service-accounts show is agent-allowed.
+		"project",
+		// Only the read-only show subcommand of project service-accounts.
+		"project.service-accounts", "project.service-accounts.show",
 		"resume",
 		"schedule", "schedule.cancel", "schedule.create", "schedule.create-recurring",
 		"schedule.delete", "schedule.get", "schedule.history", "schedule.list",
@@ -306,8 +341,13 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 	// These should be removed
 	absent := []string{
 		"attach", "broadcast", "broker", "cdw", "clean", "completion", "config", "doctor",
-		"grove", "hub",
+		"hub.enable", "hub.disable", "hub.link", "hub.unlink", "hub.auth", "hub.token", "hub.brokers",
 		"init", "messages", "restore", "server", "sync",
+		// "project" itself remains (see expected list above), and of
+		// project service-accounts only show is agent-allowed.
+		"project.init", "project.list", "project.prune", "project.reconnect",
+		"project.service-accounts.add", "project.service-accounts.list", "project.service-accounts.mint",
+		"project.service-accounts.verify", "project.service-accounts.remove",
 	}
 	for _, cmd := range absent {
 		assert.NotContains(t, remaining, cmd, "agent mode should remove %s", cmd)
@@ -317,7 +357,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 func TestApplyModeRestrictions_AgentConfigRemoved(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	assert.NotContains(t, remaining, "config")
@@ -329,7 +369,7 @@ func TestApplyModeRestrictions_AgentConfigRemoved(t *testing.T) {
 func TestApplyModeRestrictions_AgentScheduleSubcommands(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	assert.Contains(t, remaining, "schedule")
@@ -346,11 +386,11 @@ func TestApplyModeRestrictions_AgentScheduleSubcommands(t *testing.T) {
 }
 
 func TestApplyModeRestrictions_HelpAlwaysKept(t *testing.T) {
-	for _, mode := range []string{"human", "assistant", "agent"} {
+	for _, mode := range []string{"human", "agent"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("SCION_CLI_MODE", mode)
 			root := buildTestTree()
-			applyModeRestrictions(root)
+			applyModeRestrictions(root, resolveMode())
 			remaining := collectCommandNames(root)
 			assert.Contains(t, remaining, "help")
 		})
@@ -360,13 +400,13 @@ func TestApplyModeRestrictions_HelpAlwaysKept(t *testing.T) {
 func TestApplyModeRestrictions_CompletionRemovedInAgentMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.NotContains(t, remaining, "completion")
 
-	t.Setenv("SCION_CLI_MODE", "assistant")
+	t.Setenv("SCION_CLI_MODE", "human")
 	root = buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining = collectCommandNames(root)
 	assert.Contains(t, remaining, "completion")
 }
@@ -374,7 +414,7 @@ func TestApplyModeRestrictions_CompletionRemovedInAgentMode(t *testing.T) {
 func TestApplyModeRestrictions_TemplateAlias(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	assert.Contains(t, remaining, "template")
@@ -390,31 +430,19 @@ func TestRemoveCommands_DoesNotPanicOnEmptyTree(t *testing.T) {
 	removeCommands(root, "", func(path string) bool { return true })
 }
 
-func TestAssistantDeniedList(t *testing.T) {
-	expectedDenied := []string{
-		"hub.auth", "hub.token",
-		"grove.reconnect",
-		"config.migrate", "config.cd-config", "config.cd-grove",
-		"cdw", "clean",
-	}
-	for _, path := range expectedDenied {
-		assert.True(t, assistantDenied[path], "assistantDenied should contain %s", path)
-	}
-
-	notDenied := []string{
-		"create", "list", "hub.status", "config.list", "config.set",
-		"server", "grove.init", "templates",
-	}
-	for _, path := range notDenied {
-		assert.False(t, assistantDenied[path], "assistantDenied should NOT contain %s", path)
-	}
-}
-
 func TestAgentAllowedList(t *testing.T) {
 	expectedAllowed := []string{
 		"create", "delete", "list", "start", "stop", "suspend", "look", "logs",
-		"message",
+		"message", "keys",
 		"resume", "version",
+		// Target-hub profiles and test identities (ptone/scion#4240): allowed, but
+		// they refuse at run time without a target profile.
+		"hub", "hub.status", "hub.profile", "hub.profile.add", "hub.profile.list",
+		"hub.profile.show", "hub.profile.remove", "hub.test-identity",
+		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
+		"hub.test-identity.delete", "hub.test-identity.teardown",
+		"hub.test-identity.web-code", "hub.test-identity.issue-admin",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance",
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
 		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.delete",
@@ -435,13 +463,14 @@ func TestAgentAllowedList(t *testing.T) {
 
 	notAllowed := []string{
 		"attach", "broadcast", "restore", "sync", "clean", "cdw", "init",
-		"completion", "config", "doctor", "hub", "messages",
-		"server", "broker", "grove",
-		"config.set", "config.validate", "config.migrate",
+		"completion", "config", "doctor", "messages",
+		"server", "broker",
+		"config.set", "config.unset", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.auth", "hub.token", "hub.groves", "hub.brokers",
-		"hub.env", "hub.secret", "hub.status", "hub.notifications",
+		"hub.auth", "hub.token", "hub.token.scopes", "hub.brokers",
+		"hub.env", "hub.secret", "hub.notifications", "hub.projects",
+		"hub.test-identity.delegate", "hub.users", "hub.users.invite", "hub.allow-list",
 		"messages.read",
 		"shared-dir.create", "shared-dir.remove",
 	}
@@ -450,9 +479,260 @@ func TestAgentAllowedList(t *testing.T) {
 	}
 }
 
+// TestHubSecretMigrateNamesCmd_DeniedInAgentMode pins the CLI mode for the
+// ptone/scion#2152 rename/migration command: human mode only. Agent mode
+// denies it because hub.secret is absent from agentAllowed (only the
+// target-hub profile commands of the hub subtree are allowed; an allow-list).
+func TestHubSecretMigrateNamesCmd_DeniedInAgentMode(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := buildTestTree()
+	applyModeRestrictions(root, resolveMode())
+	remaining := collectCommandNames(root)
+	assert.NotContains(t, remaining, "hub.secret.migrate-names",
+		"hub secret migrate-names must be denied in agent mode")
+
+	// Human mode (the default) keeps it.
+	t.Setenv("SCION_CLI_MODE", "human")
+	root = buildTestTree()
+	applyModeRestrictions(root, resolveMode())
+	remaining = collectCommandNames(root)
+	assert.Contains(t, remaining, "hub.secret.migrate-names")
+}
+
+// TestHubSecretMigrateNamesCmd_DeniedAgainstRealTree runs the same assertion
+// against the real command tree (rootCmd), so it also fails if the new
+// command's registration path ever changes shape (e.g. moved to a different
+// parent).
+func TestHubSecretMigrateNamesCmd_DeniedAgainstRealTree(t *testing.T) {
+	real := resolveCommandPath(rootCmd, "hub.secret.migrate-names")
+	require.NotNil(t, real, "hub secret migrate-names must exist in the real command tree")
+
+	root := &cobra.Command{Use: "scion"}
+	hubReal := resolveCommandPath(rootCmd, "hub")
+	require.NotNil(t, hubReal)
+	root.AddCommand(cloneCommandShape(hubReal))
+
+	t.Setenv("SCION_CLI_MODE", "agent")
+	applyModeRestrictions(root, resolveMode())
+	assert.Nil(t, resolveCommandPath(root, "hub.secret.migrate-names"),
+		"hub secret migrate-names must be denied in agent mode")
+}
+
 func TestResolveModeEnvOverridesSettings(t *testing.T) {
-	// Even if settings would return "assistant", env var wins
+	// Even if settings would return another mode, env var wins
 	t.Setenv("SCION_CLI_MODE", "agent")
 	mode := resolveMode()
 	require.Equal(t, ModeAgent, mode)
+}
+
+// resolveCommandPath walks a dot-separated command path (as produced by
+// removeCommands, using each command's canonical Name(), never an Aliases
+// entry) starting at root, and returns the command it points to, or nil if
+// no such command exists.
+func resolveCommandPath(root *cobra.Command, path string) *cobra.Command {
+	current := root
+	for _, seg := range strings.Split(path, ".") {
+		var next *cobra.Command
+		for _, child := range current.Commands() {
+			if child.Name() == seg {
+				next = child
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		current = next
+	}
+	return current
+}
+
+// ptone/scion#1968: agents may browse the hub skill bank read-only. The
+// allowlisted skill paths must resolve to real commands, and every mutating
+// skill verb must stay out of agent mode.
+func TestAgentAllowedSkillBrowse(t *testing.T) {
+	for _, path := range []string{"skills", "skills.list", "skills.show", "skill", "skill.list"} {
+		assert.True(t, agentAllowed[path], "agentAllowed should contain %s", path)
+		assert.NotNil(t, resolveCommandPath(rootCmd, path),
+			"agentAllowed key %q must resolve to a real command", path)
+	}
+	for _, path := range []string{
+		"skills.create", "skills.publish", "skills.delete", "skills.deprecate",
+		"skills.registries", "skills.registries.add", "skills.registries.update",
+		"skills.registries.remove", "skills.registries.pin",
+	} {
+		assert.False(t, agentAllowed[path], "agentAllowed must NOT contain mutating skill verb %s", path)
+	}
+}
+
+// ptone/scion#2257: a large-DM offload stub names `scion conversation
+// get-message <ref> <id> --body` as its fetch command, so the recipient
+// agent must be able to run it in agent mode.
+func TestAgentAllowedConversationGetMessage(t *testing.T) {
+	assert.True(t, agentAllowed["conversation.get-message"], "agentAllowed should contain conversation.get-message")
+	assert.NotNil(t, resolveCommandPath(rootCmd, "conversation.get-message"),
+		"agentAllowed key conversation.get-message must resolve to a real command")
+}
+
+// cloneCommandShape copies the names of cmd and its subcommands into a fresh
+// tree, so mode filtering can run against the real command layout without
+// mutating the shared rootCmd.
+func cloneCommandShape(cmd *cobra.Command) *cobra.Command {
+	c := &cobra.Command{Use: cmd.Name(), Run: func(*cobra.Command, []string) {}}
+	for _, child := range cmd.Commands() {
+		c.AddCommand(cloneCommandShape(child))
+	}
+	return c
+}
+
+// ptone/scion#1968: runs agent-mode filtering over a copy of the real skills
+// and skill subtrees and checks that exactly the read-only browse verbs
+// survive, so a mistyped allowlist key or a new mutating verb fails here.
+func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	for _, name := range []string{"skills", "skill"} {
+		real := resolveCommandPath(rootCmd, name)
+		require.NotNil(t, real, "real command %q must exist", name)
+		root.AddCommand(cloneCommandShape(real))
+	}
+	before := collectCommandNames(root)
+	for _, mutating := range []string{"skills.create", "skills.publish", "skills.delete", "skills.deprecate"} {
+		require.Contains(t, before, mutating, "real tree should contain %s before filtering", mutating)
+	}
+
+	applyModeRestrictions(root, resolveMode())
+
+	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.show"},
+		collectCommandNames(root),
+		"agent mode must keep exactly the read-only skill browse verbs")
+}
+
+// TestHubTokenScopesCommand_ModeRestricted pins the mode-availability
+// decision for "scion hub token scopes" (ptone/scion#2122): although it is
+// read-only, token management stays session-only, so it inherits "human
+// only" from its parent hub.token rather than getting its own allowlist
+// entry -- consistent with every other hub.token subcommand.
+func TestHubTokenScopesCommand_ModeRestricted(t *testing.T) {
+	require.NotNil(t, resolveCommandPath(rootCmd, "hub.token.scopes"),
+		"hub.token.scopes must exist in the real command tree in human mode")
+
+	t.Run("agent mode removes it: not in agentAllowed", func(t *testing.T) {
+		assert.False(t, agentAllowed["hub.token.scopes"],
+			"agentAllowed must NOT contain hub.token.scopes: it stays human-only like the rest of hub.token")
+		root := &cobra.Command{Use: "scion"}
+		real := resolveCommandPath(rootCmd, "hub")
+		require.NotNil(t, real)
+		root.AddCommand(cloneCommandShape(real))
+		t.Setenv("SCION_CLI_MODE", "agent")
+		applyModeRestrictions(root, resolveMode())
+		assert.Nil(t, resolveCommandPath(root, "hub.token.scopes"))
+	})
+}
+
+// TestAgentModeAllowsKeys covers the A.6 gap: pins, against the real command
+// tree (not just the agentAllowed map TestAgentAllowedList already checks),
+// that "keys" survives applyModeRestrictions in agent mode -- an agent
+// running inside its own container must be able to send terminal
+// keystrokes to another agent it created.
+func TestAgentModeAllowsKeys(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	real := resolveCommandPath(rootCmd, "keys")
+	require.NotNil(t, real, "real command %q must exist", "keys")
+	root.AddCommand(cloneCommandShape(real))
+
+	applyModeRestrictions(root, resolveMode())
+
+	assert.Equal(t, []string{"keys"}, collectCommandNames(root),
+		"agent mode must keep the keys command")
+}
+
+// TestSSHCommands_HumanOnly pins that ssh and ssh-config are absent in agent
+// mode: they are not in agentAllowed and are removed from the real tree.
+func TestSSHCommands_HumanOnly(t *testing.T) {
+	for _, name := range []string{"ssh", "ssh-config", "vscode"} {
+		t.Run(name, func(t *testing.T) {
+			assert.False(t, agentAllowed[name], "agentAllowed must not contain %s", name)
+			real := resolveCommandPath(rootCmd, name)
+			require.NotNil(t, real, "%s must exist in the real command tree", name)
+
+			root := &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "agent")
+			applyModeRestrictions(root, resolveMode())
+			assert.Nil(t, resolveCommandPath(root, name), "%s must be removed in agent mode", name)
+
+			root = &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "human")
+			applyModeRestrictions(root, resolveMode())
+			assert.NotNil(t, resolveCommandPath(root, name), "%s stays in human mode", name)
+		})
+	}
+}
+
+// The tunnel commands are human-only: they are not in agentAllowed, and
+// agent-mode filtering over the real tunnel subtree removes all of it.
+func TestTunnelCommandsAbsentInAgentMode(t *testing.T) {
+	real := resolveCommandPath(rootCmd, "tunnel")
+	require.NotNil(t, real, "tunnel must exist in the real command tree in human mode")
+	for _, path := range []string{"tunnel", "tunnel.status"} {
+		assert.False(t, agentAllowed[path], "agentAllowed must not contain %s", path)
+	}
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	root.AddCommand(cloneCommandShape(real))
+	applyModeRestrictions(root, resolveMode())
+	assert.Empty(t, collectCommandNames(root), "agent mode must remove every tunnel command")
+}
+
+// TestConfigUnset_HumanOnly: config unset is available in human mode only,
+// like config set; agent mode removes it with the rest of config.
+func TestConfigUnset_HumanOnly(t *testing.T) {
+	assert.False(t, agentAllowed["config.unset"], "config unset must not be allowed in agent mode")
+	assert.False(t, agentAllowed["config"], "config must not be allowed in agent mode")
+
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	cfg := &cobra.Command{Use: "config"}
+	cfg.AddCommand(&cobra.Command{Use: "unset", Run: func(*cobra.Command, []string) {}})
+	root.AddCommand(cfg)
+	applyModeRestrictions(root, resolveMode())
+	remaining := collectCommandNames(root)
+	assert.NotContains(t, remaining, "config.unset")
+	assert.NotContains(t, remaining, "config")
+
+	found := false
+	for _, c := range configCmd.Commands() {
+		if c.Name() == "unset" {
+			found = true
+		}
+	}
+	assert.True(t, found, "config unset is registered (human mode)")
+}
+
+// TestServerOpenCmd_HumanModeOnly: 'scion server open' mints a web sign-in
+// link with the server's dev token, so it exists only in human mode. It is
+// on no allow-list, and agent mode removes it from the real command tree.
+func TestServerOpenCmd_HumanModeOnly(t *testing.T) {
+	assert.False(t, agentAllowed["server.open"], "server open must not be allowed in agent mode")
+	assert.False(t, agentAllowed["server"], "the server command must not be allowed in agent mode")
+
+	real := resolveCommandPath(rootCmd, "server.open")
+	require.NotNil(t, real, "server open must exist in the real command tree")
+
+	root := &cobra.Command{Use: "scion"}
+	serverReal := resolveCommandPath(rootCmd, "server")
+	require.NotNil(t, serverReal)
+	root.AddCommand(cloneCommandShape(serverReal))
+	t.Setenv("SCION_CLI_MODE", "agent")
+	applyModeRestrictions(root, resolveMode())
+	assert.Nil(t, resolveCommandPath(root, "server.open"), "server open must be removed in agent mode")
+
+	human := &cobra.Command{Use: "scion"}
+	human.AddCommand(cloneCommandShape(serverReal))
+	t.Setenv("SCION_CLI_MODE", "human")
+	applyModeRestrictions(human, resolveMode())
+	assert.NotNil(t, resolveCommandPath(human, "server.open"), "human mode keeps server open")
 }

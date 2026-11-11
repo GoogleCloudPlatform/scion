@@ -122,6 +122,7 @@ const (
 	TriggerSuspended Trigger = "suspended"
 	TriggerStopped   Trigger = "stopped"
 	TriggerError     Trigger = "error"
+	TriggerHalted    Trigger = "halted"
 )
 
 func (t Trigger) String() string {
@@ -131,7 +132,7 @@ func (t Trigger) String() string {
 // TriggerValidator is a validator for the "trigger" field enum values. It is called by the builders before save.
 func TriggerValidator(t Trigger) error {
 	switch t {
-	case TriggerRunning, TriggerSuspended, TriggerStopped, TriggerError:
+	case TriggerRunning, TriggerSuspended, TriggerStopped, TriggerError, TriggerHalted:
 		return nil
 	default:
 		return fmt.Errorf("lifecyclehook: invalid enum value for trigger field: %q", t)

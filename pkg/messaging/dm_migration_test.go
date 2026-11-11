@@ -1642,3 +1642,67 @@ func TestF9_ReversedInput_CanonicalKey(t *testing.T) {
 	assert.Equal(t, expectedKey, ms.conversations[convID].ExternalRef,
 		"F-9 reversed: must produce byte-identical canonical key regardless of input order")
 }
+
+// ---------------------------------------------------------------------------
+// The merge's message scan must not ask the store for a total count
+// ---------------------------------------------------------------------------
+
+// countingMigrationStore records whether each ListMessages call asked the
+// store for a total count.
+type countingMigrationStore struct {
+	*mockMigrationStore
+	pages        int
+	countedPages int
+}
+
+func (c *countingMigrationStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
+	c.pages++
+	if !opts.SkipTotalCount {
+		c.countedPages++
+	}
+	return c.mockMigrationStore.ListMessages(ctx, filter, opts)
+}
+
+// TestMergeConversation_NoPerPageTotalCount checks that mergeConversation's
+// re-stamp scan does not ask the store for a total count on any page.
+// Nothing reads the count, and the store runs a COUNT of the conversation's
+// messages for it on every page.
+func TestMergeConversation_NoPerPageTotalCount(t *testing.T) {
+	ms := newMockMigrationStore()
+	ctx := context.Background()
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	oldConvID, newConvID := uuid.NewString(), uuid.NewString()
+
+	ms.users[userID] = &store.User{ID: userID, Email: "t@e.com"}
+	ms.agents[agentID] = &store.Agent{ID: agentID, Slug: "a"}
+
+	ms.addConv(&store.Conversation{ID: oldConvID, Kind: "direct", Surface: "native",
+		ExternalRef: legacyDMExternalRef(userID, agentID)},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: oldConvID, PrincipalKind: "agent", PrincipalID: agentID})
+	ms.addConv(&store.Conversation{ID: newConvID, Kind: "direct", Surface: "native",
+		ExternalRef: mustDMKey("user", userID, "agent", agentID)},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "user", PrincipalID: userID},
+		store.ConversationParticipant{ConversationID: newConvID, PrincipalKind: "agent", PrincipalID: agentID})
+
+	// 2.5 pages at defaultBatchSize, so the scan takes 3 pages.
+	n := defaultBatchSize*2 + defaultBatchSize/2
+	for i := 0; i < n; i++ {
+		ms.addMessage(&store.Message{ID: uuid.NewString(), ConversationID: oldConvID, Msg: "history"})
+	}
+
+	cs := &countingMigrationStore{mockMigrationStore: ms}
+	svc := NewDMMigrationService(cs)
+	result := &DMMigrationResult{}
+	require.NoError(t, svc.mergeConversation(ctx, oldConvID, newConvID, ms.participants[oldConvID], result))
+
+	restamped := 0
+	for _, m := range ms.messages {
+		if m.ConversationID == newConvID {
+			restamped++
+		}
+	}
+	assert.Equal(t, n, restamped, "every message must be re-stamped to the new conversation")
+	assert.Equal(t, 3, cs.pages, "the re-stamp scan should take 3 pages")
+	assert.Equal(t, 0, cs.countedPages, "no page of the re-stamp scan should request a total count")
+}

@@ -26,137 +26,12 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
-	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
 // Test helpers for cross-project messaging
 // ---------------------------------------------------------------------------
-
-// cpmSetup creates two projects (A and B) with agents, owners, and hub-level
-// operational settings that enable cross-project messaging.
-func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB string, ownerA, ownerB *store.User, agentA, agentB *store.Agent) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	// Create owners
-	ownerA = &store.User{
-		ID:          tid("cpm-owner-a"),
-		Email:       "owner-a@test.com",
-		DisplayName: "Owner A",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, ownerA))
-	ensureHubMembership(ctx, s, ownerA.ID)
-
-	ownerB = &store.User{
-		ID:          tid("cpm-owner-b"),
-		Email:       "owner-b@test.com",
-		DisplayName: "Owner B",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, ownerB))
-	ensureHubMembership(ctx, s, ownerB.ID)
-
-	// Create project A
-	projectA = tid("cpm-project-a")
-	pA := &store.Project{
-		ID:        projectA,
-		Name:      "project-a",
-		Slug:      "project-a",
-		OwnerID:   ownerA.ID,
-		CreatedBy: ownerA.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, pA))
-	srv.createProjectMembersGroup(ctx, pA)
-	msgAuthzAddProjectMember(t, s, ownerA.ID, projectA, "project-a", store.GroupMemberRoleOwner)
-	// Set inbound policy to "any" (CreateProject doesn't persist this field; default revision is 1)
-	_, err := s.UpdateProjectMessagingPolicy(ctx, projectA, store.CrossProjectInboundAny, 1)
-	require.NoError(t, err, "failed to set project A inbound policy")
-
-	// Create project B
-	projectB = tid("cpm-project-b")
-	pB := &store.Project{
-		ID:        projectB,
-		Name:      "project-b",
-		Slug:      "project-b",
-		OwnerID:   ownerB.ID,
-		CreatedBy: ownerB.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, pB))
-	srv.createProjectMembersGroup(ctx, pB)
-	msgAuthzAddProjectMember(t, s, ownerB.ID, projectB, "project-b", store.GroupMemberRoleOwner)
-	// Set inbound policy to "any" (default revision is 1)
-	_, err = s.UpdateProjectMessagingPolicy(ctx, projectB, store.CrossProjectInboundAny, 1)
-	require.NoError(t, err, "failed to set project B inbound policy")
-
-	// Create hub-mode agent in project A
-	agentA = &store.Agent{
-		ID:          tid("cpm-agent-a"),
-		Name:        "agent-alpha",
-		Slug:        "agent-alpha",
-		ProjectID:   projectA,
-		MessageMode: store.MessageModeHub,
-		Ancestry:    []string{ownerA.ID},
-		Created:     time.Now(),
-		Updated:     time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agentA))
-
-	// Create project-mode agent in project B
-	agentB = &store.Agent{
-		ID:          tid("cpm-agent-b"),
-		Name:        "agent-beta",
-		Slug:        "agent-beta",
-		ProjectID:   projectB,
-		MessageMode: store.MessageModeProject,
-		Ancestry:    []string{ownerB.ID},
-		Created:     time.Now(),
-		Updated:     time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agentB))
-
-	// Enable cross-project messaging via OperationalSettings.
-	enableCPM(t, srv, s)
-
-	return srv, s, projectA, projectB, ownerA, ownerB, agentA, agentB
-}
-
-// enableCPM sets up OperationalSettings with cross_project_messaging_enabled=true.
-func enableCPM(t *testing.T, srv *Server, s store.Store) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fileK := koanf.New(".")
-	envK := koanf.New(".")
-	ops := NewOperationalSettings(fakeStore, fileK, envK)
-	// Seed the messaging section with cross-project enabled.
-	doc := []byte(`{"conversation_envelope_switch":true,"cross_project_messaging_enabled":true}`)
-	rev, err := ops.Update(context.Background(), "messaging", doc, "test", 0, "managed")
-	require.NoError(t, err, "failed to seed messaging opsettings")
-	require.Greater(t, rev, int64(0), "expected positive revision")
-	// Verify the value is readable.
-	require.True(t, ops.CrossProjectMessagingEnabled(), "cross-project should be enabled after Update")
-	srv.SetOperationalSettings(ops)
-}
-
-func cpmAgentIdentity(agentID, projectID string, ancestry []string) AgentIdentity {
-	return &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-		Ancestry:  ancestry,
-	}}
-}
 
 // ---------------------------------------------------------------------------
 // D1: Target resolution API tests
@@ -196,6 +71,29 @@ func TestTargetResolve_InvalidTarget_PrivacyPreserving(t *testing.T) {
 
 	// Privacy-preserving: should return 404, indistinguishable from nonexistent
 	require.Equal(t, http.StatusNotFound, rr.Code, "expected 404 for nonexistent target")
+}
+
+// TestTargetResolve_TypedNilIdentity_Unauthorized covers
+// handleMessagingTargetsResolve's isNilIdentity guard: a request context
+// carrying a non-nil Identity interface value that holds a nil concrete
+// pointer (e.g. an Identity holding (*agentIdentityWrapper)(nil)) must be
+// rejected as unauthorized, the same as a plain nil interface, rather than
+// reaching the later AgentIdentity assertion that reuses this identity and
+// would otherwise dereference the nil pointer.
+func TestTargetResolve_TypedNilIdentity_Unauthorized(t *testing.T) {
+	srv, _, _, _, _, _, _, _ := cpmSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/messaging/targets/resolve?project=project-b&agent=agent-beta", nil)
+	var nilAgent *agentIdentityWrapper
+	req = req.WithContext(contextWithIdentity(req.Context(), nilAgent))
+
+	rr := httptest.NewRecorder()
+	require.NotPanics(t, func() {
+		srv.handleMessagingTargetsResolve(rr, req)
+	}, "a typed-nil context identity must not panic the handler")
+
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "a typed-nil context identity must be treated as unauthenticated")
 }
 
 func TestTargetResolve_MissingParams(t *testing.T) {
@@ -468,7 +366,7 @@ func TestCrossProjectAuth_InboundMembers_OriginNotMember(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, membersProject))
-	srv.createProjectMembersGroup(ctx, membersProject)
+	srv.seedProjectCreatorMembership(ctx, membersProject)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, membersProjectID, "members-project", store.GroupMemberRoleOwner)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, membersProjectID, store.CrossProjectInboundMembers, 1)
 	require.NoError(t, err, "failed to set inbound=members")
@@ -497,7 +395,7 @@ func TestCrossProjectAuth_InboundMembers_OriginIsMember(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, membersProject))
-	srv.createProjectMembersGroup(ctx, membersProject)
+	srv.seedProjectCreatorMembership(ctx, membersProject)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, membersProjectID, "members2-project", store.GroupMemberRoleOwner)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, membersProjectID, store.CrossProjectInboundMembers, 1)
 	require.NoError(t, err, "failed to set inbound=members")
@@ -578,38 +476,4 @@ func TestCrossProject_OneWayPolicy(t *testing.T) {
 	receiverIdent := cpmAgentIdentity(receiverAgent.ID, receiverProjectID, receiverAgent.Ancestry)
 	allowed, _, _ = srv.authorizeAgentMessage(ctx, receiverIdent, senderAgent, false)
 	require.False(t, allowed, "reply should be denied because receiver is project-mode, can't send cross-project")
-}
-
-// ---------------------------------------------------------------------------
-// derivePeerFromExternalRef tests
-// ---------------------------------------------------------------------------
-
-func TestDerivePeerFromExternalRef(t *testing.T) {
-	t.Run("agent-agent DM", func(t *testing.T) {
-		ref := "dm:agent:aaa0bb0c-cddd-eeef-ff11-122233344455:agent:ddd0ee0f-faaa-1112-2233-344455566677"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "aaa0bb0c-cddd-eeef-ff11-122233344455")
-		require.Equal(t, "agent", kind)
-		require.Equal(t, "ddd0ee0f-faaa-1112-2233-344455566677", id)
-	})
-
-	t.Run("reverse direction", func(t *testing.T) {
-		ref := "dm:agent:aaa0bb0c-cddd-eeef-ff11-122233344455:agent:ddd0ee0f-faaa-1112-2233-344455566677"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "ddd0ee0f-faaa-1112-2233-344455566677")
-		require.Equal(t, "agent", kind)
-		require.Equal(t, "aaa0bb0c-cddd-eeef-ff11-122233344455", id)
-	})
-
-	t.Run("not a participant", func(t *testing.T) {
-		ref := "dm:agent:aaa:agent:bbb"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "ccc")
-		require.Equal(t, "", kind)
-		require.Equal(t, "", id)
-	})
-
-	t.Run("not a DM ref", func(t *testing.T) {
-		ref := "thread:some-thread"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "aaa")
-		require.Equal(t, "", kind)
-		require.Equal(t, "", id)
-	})
 }

@@ -16,6 +16,7 @@ package eventbus
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -271,6 +272,35 @@ func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
 	}
 }
 
+// TestInProcessEventBus_UserTopicBufferFullReturnsError is a regression test
+// for ptone/scion#2311: a user-message publish that cannot be queued because
+// the matching subscriber's buffer is full must be reported to the caller
+// instead of silently dropped.
+func TestInProcessEventBus_UserTopicBufferFullReturnsError(t *testing.T) {
+	topic := "scion.project.g1.user.alice.messages"
+	msg := messages.NewInstruction("agent:a", "user:alice", "hi")
+	b := newSaturatedSubscriberInproc(t, "scion.project.g1.user.*.messages", topic, msg)
+
+	// The buffer is now full: the next publish must be dropped and reported.
+	if err := b.Publish(context.Background(), topic, msg); !errors.Is(err, ErrSubscriberBufferFull) {
+		t.Fatalf("expected ErrSubscriberBufferFull, got %v", err)
+	}
+}
+
+// TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget guards the
+// size-gated scope of the ptone/scion#2311 fix: every topic other than
+// user-messages keeps the historical fire-and-forget behaviour — the drop is
+// logged but Publish still returns nil.
+func TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget(t *testing.T) {
+	topic := "scion.project.g1.agent.myagent.messages"
+	msg := messages.NewInstruction("user:alice", "agent:myagent", "hi")
+	b := newSaturatedSubscriberInproc(t, "scion.project.g1.agent.*.messages", topic, msg)
+
+	if err := b.Publish(context.Background(), topic, msg); err != nil {
+		t.Fatalf("expected nil error for non-user-message topic drop (fire-and-forget unchanged), got %v", err)
+	}
+}
+
 func TestTopicHelpers(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -317,5 +347,24 @@ func TestSubjectMatchesPattern(t *testing.T) {
 				t.Errorf("subjectMatchesPattern(%q, %q) = %v, want %v", tt.pattern, tt.subject, got, tt.match)
 			}
 		})
+	}
+}
+
+func TestInProcessEventBus_SubscribeNilHandler(t *testing.T) {
+	b := newTestEventBus()
+	defer func() { _ = b.Close() }()
+
+	sub, err := b.Subscribe("test.>", nil)
+	if !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("Subscribe(nil) error = %v, want ErrNilHandler", err)
+	}
+	if sub != nil {
+		t.Fatalf("Subscribe(nil) returned a non-nil subscription")
+	}
+
+	// The rejected subscription must not have been registered: a publish to a
+	// matching topic must neither panic nor report a delivery problem.
+	if err := b.Publish(context.Background(), "test.topic", &messages.StructuredMessage{}); err != nil {
+		t.Fatalf("Publish after rejected Subscribe: %v", err)
 	}
 }

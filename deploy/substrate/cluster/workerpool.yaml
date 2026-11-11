@@ -1,0 +1,91 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Cluster prerequisite: a WorkerPool dedicated to scion actors, isolated by
+# label from any other WorkerPool on the same cluster (demos, other
+# tenants), so `worker_selector` in deploy/substrate/broker.yaml's ConfigMap
+# resolves to these workers only. See deploy/substrate/cluster/README.md.
+#
+# This is a plain manifest, like broker.yaml: every dollar-brace placeholder
+# is resolved with `envsubst` (or equivalent) before `kubectl apply`. Only
+# two of its placeholder names are actually SHARED with broker.yaml's
+# ConfigMap -- WORKER_SELECTOR_KEY and WORKER_SELECTOR_VALUE, which must
+# match so `worker_selector` resolves to these workers. SUBSTRATE_WORKER_NAMESPACE
+# is this manifest's own placeholder only; broker.yaml does not reference it.
+# Resolve both manifests with one shared set of exported values regardless,
+# so the shared two never drift apart between them.
+#
+# WorkerPool is a Substrate CRD (apiVersion ate.dev/v1alpha1), not a builtin
+# Kubernetes type -- it only exists once Substrate itself is installed on
+# the cluster (deploy/substrate/cluster/README.md, "Install order").
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${SUBSTRATE_WORKER_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: scion-substrate-integration
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: scion-agents
+  namespace: ${SUBSTRATE_WORKER_NAMESPACE}
+  labels:
+    # workerSelector on the ActorTemplate the substrate runtime builds
+    # (worker_selector in deploy/substrate/broker.yaml's ConfigMap) is
+    # matched against THIS object's own metadata.labels -- not any
+    # Kubernetes Pod label, and not the `ate.dev/worker-pool` label the
+    # Substrate WorkerPool controller separately stamps onto the generated
+    # worker Pods for its own NetworkPolicy use (see cluster/README.md,
+    # "worker_selector"). Getting this wrong doesn't fail to apply -- it
+    # fails at runtime with "no free workers", because zero WorkerPools
+    # match the selector.
+    ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
+spec:
+  replicas: ${WORKER_POOL_REPLICAS}
+  sandboxClass: gvisor
+  # The Substrate-provided gVisor worker supervisor image, resolved by your
+  # install (see cluster/README.md, "Install order"); not a scion image.
+  workerImage: ${WORKER_IMAGE}
+  template:
+    # Per-worker-POD resources. This sizes the worker's advertised
+    # scheduling capacity (workerCapacity reads the limits), not the
+    # sandboxed actor itself -- that is sized by the ActorTemplate the
+    # substrate runtime builds, from the profile's own resource settings.
+    # Requests are kept below limits so the pool can be packed onto a
+    # smaller node than its ceiling; memory requests match limits because
+    # memory isn't compressible the way CPU is.
+    resources:
+      requests:
+        cpu: "1"
+        memory: 4Gi
+      limits:
+        cpu: "2"
+        memory: 8Gi
+    # GKE taints every gVisor sandbox node `sandbox.gke.io/runtime=gvisor:NoSchedule`
+    # (see cluster/README.md, "gVisor node pool"); without this toleration
+    # the worker pods never schedule onto those nodes. The Substrate
+    # `atelet` DaemonSet needs the identical toleration patched in
+    # separately -- that lives in the Substrate install, not in this file.
+    tolerations:
+      - key: sandbox.gke.io/runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
+    # Pins workers to the node pool carrying your installed Substrate
+    # version's node label (cluster/README.md, "gVisor node pool") -- drop
+    # this if your cluster doesn't label nodes by installed version.
+    nodeSelector:
+      ${SUBSTRATE_VERSION_LABEL_KEY}: "${SUBSTRATE_VERSION_LABEL_VALUE}"

@@ -17,7 +17,9 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -27,6 +29,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -108,6 +114,7 @@ func entProjectToStore(p *ent.Project) *store.Project {
 		Updated:     p.Updated,
 		CreatedBy:   p.CreatedBy,
 		OwnerID:     p.OwnerID,
+		Fixture:     fixtureProvenanceFromColumns(p.FixtureRootID, p.FixtureIssuerID),
 	}
 	if p.GitRemote != nil {
 		sp.GitRemote = *p.GitRemote
@@ -148,8 +155,15 @@ func (s *ProjectStore) CreateProject(ctx context.Context, p *store.Project) erro
 		return err
 	}
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(p.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Project.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetName(p.Name).
 		SetSlug(p.Slug).
 		SetCreatedBy(p.CreatedBy).
@@ -246,6 +260,36 @@ func (s *ProjectStore) LockProjectForMembership(ctx context.Context, projectID s
 	return nil
 }
 
+// LockProjectAgents locks every agent row of the project FOR UPDATE, in
+// ascending agent-ID order, on PostgreSQL. On SQLite it is a plain read
+// (writes are already database-serialized). See store.ProjectStore.
+func (s *ProjectStore) LockProjectAgents(ctx context.Context, projectID string) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	_, err = lockProjectAgentIDs(ctx, s.client, uid)
+	return err
+}
+
+// lockProjectAgentIDs returns the IDs of the project's agents (soft-deleted
+// ones included) in ascending ID order. On PostgreSQL the rows are locked
+// FOR UPDATE, so the locks are taken in ID order: the order every agent
+// hard-delete path (and the project delete) uses (DeleteAgent, DeleteProject,
+// ProjectDeletionService via LockProjectAgents, PurgeDeletedAgents,
+// finalize-hard), so they cannot deadlock (40P01) on overlapping agents.
+// Shared by LockProjectAgents and CompositeStore.DeleteProject so both lock
+// the same way.
+func lockProjectAgentIDs(ctx context.Context, client *ent.Client, projectID uuid.UUID) ([]uuid.UUID, error) {
+	q := client.Agent.Query().
+		Where(agent.ProjectIDEQ(projectID)).
+		Order(ent.Asc(agent.FieldID))
+	if client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	return q.IDs(ctx)
+}
+
 // GetProjectBySlug retrieves a project by its exact (case-sensitive) slug.
 func (s *ProjectStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
 	p, err := s.client.Project.Query().Where(project.SlugEQ(slug)).Only(ctx)
@@ -315,8 +359,13 @@ func (s *ProjectStore) NextAvailableSlug(ctx context.Context, baseSlug string) (
 	}
 }
 
-// UpdateProject updates an existing project.
+// UpdateProject updates an existing project. It never writes owner_id:
+// SetProjectOwnerID is the only writer of that column (ptone/scion#2597).
+// p.OwnerID is ignored on input and refreshed from the stored row on success.
 func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) error {
+	if p == nil {
+		return fmt.Errorf("UpdateProject: nil project: %w", store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(p.ID)
 	if err != nil {
 		return err
@@ -324,8 +373,7 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 
 	update := s.client.Project.UpdateOneID(uid).
 		SetName(p.Name).
-		SetSlug(p.Slug).
-		SetOwnerID(p.OwnerID)
+		SetSlug(p.Slug)
 
 	if p.GitRemote != "" {
 		update.SetGitRemote(p.GitRemote)
@@ -378,6 +426,21 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 		return mapError(err)
 	}
 	p.Updated = updated.Updated
+	// owner_id is not written here, so report the stored value rather than
+	// leaving the caller holding a possibly stale owner.
+	p.OwnerID = updated.OwnerID
+	return nil
+}
+
+// SetProjectOwnerID updates only the owner_id column of a project.
+func (s *ProjectStore) SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	if err := s.client.Project.UpdateOneID(uid).SetOwnerID(ownerID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
 	return nil
 }
 
@@ -447,6 +510,19 @@ func (s *ProjectStore) DeleteProject(ctx context.Context, id string) error {
 
 // ListProjects returns projects matching the filter criteria.
 func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, true)
+}
+
+// ListProjectSummaries returns the projects ListProjects would return for
+// the same filter and options, without populateProjectComputed's
+// per-project queries.
+func (s *ProjectStore) ListProjectSummaries(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, false)
+}
+
+// listProjects implements ListProjects and ListProjectSummaries; computed
+// selects whether each row is enriched by populateProjectComputed.
+func (s *ProjectStore) listProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions, computed bool) (*store.ListResult[store.Project], error) {
 	query := s.client.Project.Query()
 
 	// Membership / ownership filtering mirrors the SQLite precedence:
@@ -589,8 +665,10 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	items := make([]store.Project, 0, len(rows))
 	for _, p := range rows {
 		sp := entProjectToStore(p)
-		if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
-			return nil, err
+		if computed {
+			if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
+				return nil, err
+			}
 		}
 		items = append(items, *sp)
 	}
@@ -723,11 +801,47 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	if b.GcpHostProjectID != nil {
 		sb.GCPHostProjectID = *b.GcpHostProjectID
 	}
+	sb.GCPHostSource = b.GcpHostSource
+	if b.HostIdentityObservation != nil && *b.HostIdentityObservation != "" {
+		obs := &store.HostIdentityObservation{Outcome: *b.HostIdentityObservation}
+		if b.HostIdentityObservedEmail != nil {
+			obs.Email = *b.HostIdentityObservedEmail
+		}
+		if b.HostIdentityObservedAt != nil {
+			obs.ObservedAt = *b.HostIdentityObservedAt
+		}
+		sb.HostObservation = obs
+	}
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
-	unmarshalRawJSON(b.Labels, &sb.Labels)
-	unmarshalRawJSON(b.Annotations, &sb.Annotations)
+	sb.DefaultProfile = b.DefaultProfile
+	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
+	unmarshalRawJSON(b.Health, &sb.Health)
+	sb.Labels = b.Labels
+	if sb.Labels == nil {
+		sb.Labels = make(map[string]string)
+	}
+	sb.Annotations = b.Annotations
+	if sb.Annotations == nil {
+		sb.Annotations = make(map[string]string)
+	}
+	if b.RuntimeTargetID != nil && *b.RuntimeTargetID != "" {
+		sb.RuntimeTarget = &api.RuntimeTargetDescriptor{
+			ID:          *b.RuntimeTargetID,
+			Type:        b.RuntimeTargetType,
+			DisplayName: b.RuntimeTargetDisplayName,
+		}
+	}
+	unmarshalRawJSON(b.RuntimeTargetPresentation, &sb.RuntimeTargetPresentation)
+	sb.RuntimeTargetPresentationHash = b.RuntimeTargetPresentationHash
+	sb.RuntimeTargetPresentationObservedAt = b.PresentationObservedAt
+	unmarshalRawJSON(b.ConversionPlanPresentation, &sb.ConversionPlanPresentation)
+	sb.ConversionPlanHash = b.ConversionPlanPresentationHash
+	sb.ConversionPlanObservedAt = b.ConversionPlanObservedAt
+	sb.PresentationEpoch = b.PresentationEpoch
+	sb.PresentationSeq = b.PresentationSeq
+	sb.PresentationFencedAt = b.PresentationFencedAt
 	return sb
 }
 
@@ -737,17 +851,78 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 	if err != nil {
 		return err
 	}
+	return createRuntimeBroker(ctx, s.client, uid, b)
+}
 
-	create := s.client.RuntimeBroker.Create().
+// CreateRuntimeBrokerClearingCredentials creates a new runtime broker record
+// and, in the same transaction (the caller's, when called inside
+// store.WithTx), deletes any broker secret and join token stored for its ID
+// (broker_secrets and broker_join_tokens have no FK to runtime_brokers). A
+// row created with an ID that an earlier row had then starts without that
+// row's credential.
+func (s *ProjectStore) CreateRuntimeBrokerClearingCredentials(ctx context.Context, b *store.RuntimeBroker) error {
+	uid, err := parseUUID(b.ID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return fmt.Errorf("create runtime broker: begin tx: %w", err)
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return createRuntimeBrokerClearingCredentials(ctx, s.client, uid, b)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := createRuntimeBrokerClearingCredentials(ctx, tx.Client(), uid, b); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create runtime broker: commit: %w", err)
+	}
+	return nil
+}
+
+func createRuntimeBrokerClearingCredentials(ctx context.Context, client *ent.Client, uid uuid.UUID, b *store.RuntimeBroker) error {
+	if err := createRuntimeBroker(ctx, client, uid, b); err != nil {
+		return err
+	}
+	if _, err := client.BrokerSecret.Delete().Where(brokersecret.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("create runtime broker: delete broker secret: %w", err)
+	}
+	if _, err := client.BrokerJoinToken.Delete().Where(brokerjointoken.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("create runtime broker: delete join token: %w", err)
+	}
+	return nil
+}
+
+func createRuntimeBroker(ctx context.Context, client *ent.Client, uid uuid.UUID, b *store.RuntimeBroker) error {
+
+	profiles, defaultProfile := b.Profiles, b.DefaultProfile
+	if b.IsFlat() {
+		// Profiles never persist on a flat Runtime Broker row.
+		profiles, defaultProfile = nil, ""
+	}
+	create := client.RuntimeBroker.Create().
 		SetID(uid).
 		SetName(b.Name).
 		SetSlug(b.Slug).
 		SetEndpoint(b.Endpoint).
 		SetAutoProvide(b.AutoProvide).
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
-		SetRuntimes(marshalRawJSON(b.Profiles)).
-		SetLabels(marshalRawJSON(b.Labels)).
-		SetAnnotations(marshalRawJSON(b.Annotations))
+		SetRuntimes(marshalRawJSON(profiles)).
+		SetDefaultProfile(defaultProfile).
+		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
+		SetHealth(marshalRawJSON(b.Health)).
+		SetLabels(b.Labels).
+		SetAnnotations(b.Annotations)
+	// The six presentation columns are never written at creation; only
+	// SetRuntimeBrokerPresentation writes them.
+	if b.IsFlat() {
+		create.SetRuntimeTargetID(b.RuntimeTarget.ID).
+			SetRuntimeTargetType(b.RuntimeTarget.Type).
+			SetRuntimeTargetDisplayName(b.RuntimeTarget.DisplayName)
+	}
 
 	if b.Version != "" {
 		create.SetVersion(b.Version)
@@ -778,6 +953,9 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 	}
 	if b.GCPHostProjectID != "" {
 		create.SetGcpHostProjectID(b.GCPHostProjectID)
+	}
+	if b.GCPHostSource != "" {
+		create.SetGcpHostSource(b.GCPHostSource)
 	}
 
 	created, err := create.Save(ctx)
@@ -836,6 +1014,26 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			return mapError(err)
 		}
 
+		// On a flat row (stored runtime target), profiles never persist:
+		// strip rather than reject, so a leftover written by an older binary
+		// cannot make later read-modify-writes fail. The runtime_target_*
+		// columns are never written here, and neither are the six
+		// presentation columns (runtime_target_presentation, its hash,
+		// presentation_epoch, presentation_seq, presentation_fenced_at,
+		// presentation_observed_at): only SetRuntimeBrokerPresentation
+		// writes them, so a write-back of a copy read before a presentation
+		// write cannot roll it back. Do not add them to this list. The
+		// same holds for the three conversion plan columns, written only
+		// by SetRuntimeBrokerConversionPlan.
+		profiles, defaultProfile := b.Profiles, b.DefaultProfile
+		if cur.RuntimeTargetID != nil && *cur.RuntimeTargetID != "" {
+			if len(profiles) > 0 || defaultProfile != "" {
+				slog.Warn(store.FlatRuntimeBrokerProfilesDroppedMessage,
+					"broker_id", b.ID, "profiles", len(profiles), "default_profile", defaultProfile)
+			}
+			profiles, defaultProfile = nil, ""
+		}
+
 		update := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
 			SetName(b.Name).
@@ -845,9 +1043,12 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetConnectionState(b.ConnectionState).
 			SetLastHeartbeat(b.LastHeartbeat).
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
-			SetRuntimes(marshalRawJSON(b.Profiles)).
-			SetLabels(marshalRawJSON(b.Labels)).
-			SetAnnotations(marshalRawJSON(b.Annotations)).
+			SetRuntimes(marshalRawJSON(profiles)).
+			SetDefaultProfile(defaultProfile).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
+			SetHealth(marshalRawJSON(b.Health)).
+			SetLabels(b.Labels).
+			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
 			SetAutoProvide(b.AutoProvide).
 			SetUpdated(now).
@@ -867,16 +1068,8 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		} else {
 			update.ClearConnectedAt()
 		}
-		if b.GCPHostServiceAccountEmail != "" {
-			update.SetGcpHostServiceAccountEmail(b.GCPHostServiceAccountEmail)
-		} else {
-			update.ClearGcpHostServiceAccountEmail()
-		}
-		if b.GCPHostProjectID != "" {
-			update.SetGcpHostProjectID(b.GCPHostProjectID)
-		} else {
-			update.ClearGcpHostProjectID()
-		}
+		// The GCP host pair and its source are never written here; see
+		// SetRuntimeBrokerGCPHost*.
 		affected, err := update.Save(ctx)
 		if err != nil {
 			return mapError(err)
@@ -891,14 +1084,321 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 	return store.ErrVersionConflict
 }
 
-// DeleteRuntimeBroker removes a runtime broker by ID.
+// RefreshRuntimeBrokerState applies refresh to a fresh read of the broker
+// and writes back only the heartbeat-refreshed columns, conditioned on the
+// lock_version it read. Unlike UpdateRuntimeBroker, which writes the
+// caller's whole copy, a concurrent re-registration is never overwritten:
+// its write advances lock_version, the UPDATE matches no row, and refresh
+// is re-applied to the row the re-registration stored.
+func (s *ProjectStore) RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(b *store.RuntimeBroker) bool) error {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return mapError(err)
+		}
+		b := entBrokerToStore(cur)
+		if !refresh(b) {
+			return nil
+		}
+		profiles, defaultProfile := b.Profiles, b.DefaultProfile
+		if b.IsFlat() {
+			// Profiles never persist on a flat row (see UpdateRuntimeBroker).
+			profiles, defaultProfile = nil, ""
+		}
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetCapabilities(marshalRawJSON(b.Capabilities)).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
+			SetDefaultProfile(defaultProfile).
+			SetHealth(marshalRawJSON(b.Health)).
+			SetRuntimes(marshalRawJSON(profiles)).
+			SetVersion(b.Version).
+			SetUpdated(time.Now()).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if affected == 1 {
+			return nil
+		}
+	}
+	return store.ErrVersionConflict
+}
+
+// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
+// broker, but only if it is currently empty. It is a plain conditional
+// update guarded by an empty-created_by precondition, rather than the
+// lock_version CAS loop UpdateRuntimeBroker uses: the only precondition that
+// matters here is "still unset", not "unchanged since last read", so a
+// single statement is sufficient and race-safe across concurrent
+// writers/nodes.
+//
+// "Empty" matches both an empty string and SQL NULL: created_by is an
+// Optional (not Nillable) ent field, so an unset value round-trips through
+// Go as "" but may be stored as NULL — a plain CreatedByEQ("") predicate
+// would silently match zero rows for NULL-backed columns and turn every
+// attribution into a no-op.
+func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := s.client.RuntimeBroker.Update().
+		Where(
+			runtimebroker.IDEQ(uid),
+			runtimebroker.Or(runtimebroker.CreatedByIsNil(), runtimebroker.CreatedByEQ("")),
+		).
+		SetCreatedBy(createdBy).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
+// gcpHostEmailUnset and the other predicates below match both an empty
+// string and SQL NULL: the GCP host columns are Nillable and the source
+// column predates rows written before it existed, so a plain EQ("")
+// predicate would miss NULL-backed rows.
+func gcpHostEmailUnset() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostServiceAccountEmailIsNil(), runtimebroker.GcpHostServiceAccountEmailEQ(""))
+}
+
+func gcpHostProjectUnset() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostProjectIDIsNil(), runtimebroker.GcpHostProjectIDEQ(""))
+}
+
+func gcpHostNotAdmin() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostSourceIsNil(), runtimebroker.GcpHostSourceNEQ(store.GCPHostSourceAdmin))
+}
+
+func gcpHostSourceUnset() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostSourceIsNil(), runtimebroker.GcpHostSourceEQ(""))
+}
+
+// setGCPHostPair adds the GCP host pair to an update: empty values clear.
+func setGCPHostPair(u *ent.RuntimeBrokerUpdate, email, project string) *ent.RuntimeBrokerUpdate {
+	if email != "" {
+		u.SetGcpHostServiceAccountEmail(email)
+	} else {
+		u.ClearGcpHostServiceAccountEmail()
+	}
+	if project != "" {
+		u.SetGcpHostProjectID(project)
+	} else {
+		u.ClearGcpHostProjectID()
+	}
+	return u
+}
+
+// SetRuntimeBrokerGCPHostIfUnset writes the GCP host pair, with source, in
+// one conditional UPDATE: only while the stored email and project are both
+// empty and the source is not admin. The condition is evaluated by the
+// database, so a concurrent update-API write is never overwritten.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostIfUnset(ctx context.Context, id, email, project, source string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	u := s.client.RuntimeBroker.Update().
+		Where(runtimebroker.IDEQ(uid), gcpHostEmailUnset(), gcpHostProjectUnset(), gcpHostNotAdmin()).
+		SetGcpHostSource(source).
+		SetUpdated(time.Now()).
+		AddLockVersion(1)
+	affected, err := setGCPHostPair(u, email, project).Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
+// SetRuntimeBrokerGCPHostDetected writes the GCP host pair with source
+// detected, in one conditional UPDATE, unless the stored source is admin.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostDetected(ctx context.Context, id, email, project string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	u := s.client.RuntimeBroker.Update().
+		Where(runtimebroker.IDEQ(uid), gcpHostNotAdmin()).
+		SetGcpHostSource(store.GCPHostSourceDetected).
+		SetUpdated(time.Now()).
+		AddLockVersion(1)
+	affected, err := setGCPHostPair(u, email, project).Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
+// gcpHostSettingOf returns the stored GCP host pair and source of b.
+func gcpHostSettingOf(b *ent.RuntimeBroker) store.GCPHostSetting {
+	prev := store.GCPHostSetting{Source: b.GcpHostSource}
+	if b.GcpHostServiceAccountEmail != nil {
+		prev.Email = *b.GcpHostServiceAccountEmail
+	}
+	if b.GcpHostProjectID != nil {
+		prev.Project = *b.GcpHostProjectID
+	}
+	return prev
+}
+
+// casGCPHostWrite applies apply to the row as a compare-and-set on
+// lock_version (every writer of the row advances it) and returns the GCP
+// host values it replaced. A concurrent write between the read and the
+// UPDATE makes the UPDATE match no row, and the loop retries with a fresh
+// read, so the returned values are exactly the ones overwritten.
+func (s *ProjectStore) casGCPHostWrite(ctx context.Context, id string, apply func(u *ent.RuntimeBrokerUpdate)) (store.GCPHostSetting, error) {
+	prev, _, err := s.casGCPHostWriteIf(ctx, id, nil, apply)
+	return prev, err
+}
+
+// casGCPHostWriteIf is casGCPHostWrite with an optional precondition on the
+// stored values. cond is evaluated on each read; when it returns false the
+// row is not written and the stored values are returned with applied=false.
+// Because the UPDATE is conditioned on the lock_version that was read, the
+// values cond accepted are the values the write replaces.
+func (s *ProjectStore) casGCPHostWriteIf(ctx context.Context, id string, cond func(store.GCPHostSetting) bool, apply func(u *ent.RuntimeBrokerUpdate)) (store.GCPHostSetting, bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return store.GCPHostSetting{}, false, err
+	}
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return store.GCPHostSetting{}, false, mapError(err)
+		}
+		stored := gcpHostSettingOf(cur)
+		if cond != nil && !cond(stored) {
+			return stored, false, nil
+		}
+		u := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetUpdated(time.Now()).
+			AddLockVersion(1)
+		apply(u)
+		affected, err := u.Save(ctx)
+		if err != nil {
+			return store.GCPHostSetting{}, false, mapError(err)
+		}
+		if affected == 1 {
+			return stored, true, nil
+		}
+	}
+	return store.GCPHostSetting{}, false, store.ErrVersionConflict
+}
+
+// SetRuntimeBrokerGCPHost writes the GCP host pair unconditionally with
+// source admin, as a compare-and-set on lock_version, and returns the
+// values it replaced. For test fixtures and maintenance only; request paths
+// use SetRuntimeBrokerGCPHostIfPrior or SetRuntimeBrokerGCPHostIfUnset.
+func (s *ProjectStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (store.GCPHostSetting, error) {
+	return s.casGCPHostWrite(ctx, id, func(u *ent.RuntimeBrokerUpdate) {
+		setGCPHostPair(u.SetGcpHostSource(store.GCPHostSourceAdmin), email, project)
+	})
+}
+
+// SetRuntimeBrokerGCPHostIfPrior writes the GCP host pair with source admin
+// only while the stored pair is priorEmail/priorProject (email compared
+// ignoring letter case), in the same compare-and-set as the write.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (store.GCPHostSetting, bool, error) {
+	matches := func(stored store.GCPHostSetting) bool {
+		return strings.EqualFold(stored.Email, priorEmail) && stored.Project == priorProject
+	}
+	return s.casGCPHostWriteIf(ctx, id, matches, func(u *ent.RuntimeBrokerUpdate) {
+		setGCPHostPair(u.SetGcpHostSource(store.GCPHostSourceAdmin), email, project)
+	})
+}
+
+// SetRuntimeBrokerGCPHostSource sets only the GCP host source, as a
+// compare-and-set on lock_version, and returns the values it replaced.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostSource(ctx context.Context, id, source string) (store.GCPHostSetting, error) {
+	return s.casGCPHostWrite(ctx, id, func(u *ent.RuntimeBrokerUpdate) {
+		u.SetGcpHostSource(source)
+	})
+}
+
+// RecordRuntimeBrokerHostObservation stores the latest host identity
+// observation. It writes only the host_identity_* columns.
+func (s *ProjectStore) RecordRuntimeBrokerHostObservation(ctx context.Context, id string, obs store.HostIdentityObservation) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	at := obs.ObservedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	u := s.client.RuntimeBroker.Update().
+		Where(runtimebroker.IDEQ(uid)).
+		SetHostIdentityObservation(obs.Outcome).
+		SetHostIdentityObservedAt(at)
+	if obs.Email != "" {
+		u.SetHostIdentityObservedEmail(strings.ToLower(obs.Email))
+	} else {
+		u.ClearHostIdentityObservedEmail()
+	}
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// DeleteRuntimeBroker removes a runtime broker by ID. runtime_brokers has no
+// edge to broker_settings (design.md §5.1), so the settings row, if any, is
+// deleted explicitly rather than relying on an FK cascade
+// (ptone/scion#2061 P2, AC-P2-4). Both deletes run in one transaction so a
+// failure partway through never orphans a settings row for an ID that no
+// longer has a broker (ptone/scion#2061 P2 review round 1, F10).
+//
+// The broker's HMAC secret and any unconsumed join token (broker_secrets and
+// broker_join_tokens, keyed by the broker ID with no FK) are deleted in the
+// same transaction: once the row is gone, no credential for its ID is left
+// that a later row with the same ID could inherit.
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	if err := s.client.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("delete runtime broker: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := tx.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
+	}
+	// Key off uid.String() (the canonical form), not the raw id parameter:
+	// PutBrokerSettings/GetBrokerSettings always store/read under the
+	// canonical broker ID (pkg/hub/broker_settings_handlers.go), so
+	// deleting by the raw, possibly non-canonical id here would silently
+	// miss the row for any caller that used an uppercase/braced/urn UUID
+	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
+	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	// broker_target_inventory has no FK to runtime_brokers either.
+	if _, err := tx.BrokerTargetInventory.Delete().Where(brokertargetinventory.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete target inventory: %w", err)
+	}
+	if _, err := tx.BrokerSecret.Delete().Where(brokersecret.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete broker secret: %w", err)
+	}
+	if _, err := tx.BrokerJoinToken.Delete().Where(brokerjointoken.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete join token: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete runtime broker: commit: %w", err)
 	}
 	return nil
 }
@@ -954,9 +1454,29 @@ func (s *ProjectStore) ListRuntimeBrokers(ctx context.Context, filter store.Runt
 		limit = 50
 	}
 
+	// Keyset pagination, mirroring ListProjects exactly (Order DESC on
+	// (created, id), Limit(limit+1), trim and derive NextCursor from the
+	// last row on overflow). Without this, opts.Cursor was silently
+	// ignored and NextCursor was never set: any caller that paginates
+	// through more than one page only ever sees the first `limit` newest
+	// brokers and then stops, believing the list is exhausted. Ordering
+	// stays DESC so every caller's first page is unchanged: the only
+	// caller that forwards a client cursor is the runtime-brokers list API
+	// (listOptionsFromQuery), where it previously had no effect — a
+	// client-supplied cursor is now honored there instead of being
+	// silently dropped, and its first page (no cursor) is unchanged apart
+	// from the id tiebreak on rows sharing a Created timestamp.
+	if opts.Cursor != "" {
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(runtimeBrokerBeforeCursor(cursorCreated, cursorID))
+	}
+
 	rows, err := query.
-		Order(ent.Desc(runtimebroker.FieldCreated)).
-		Limit(limit).
+		Order(ent.Desc(runtimebroker.FieldCreated), ent.Desc(runtimebroker.FieldID)).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -966,19 +1486,38 @@ func (s *ProjectStore) ListRuntimeBrokers(ctx context.Context, filter store.Runt
 	for _, b := range rows {
 		items = append(items, *entBrokerToStore(b))
 	}
-	return &store.ListResult[store.RuntimeBroker]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+
+	result := &store.ListResult[store.RuntimeBroker]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
+	}
+	return result, nil
+}
+
+// runtimeBrokerBeforeCursor returns a predicate for keyset pagination after
+// the given cursor, mirroring projectBeforeCursor/templateBeforeCursor.
+func runtimeBrokerBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.RuntimeBroker {
+	return keysetBeforeCursor(runtimebroker.FieldCreated, runtimebroker.FieldID, cursorCreated, cursorID)
 }
 
 // FindEmbeddedBroker returns the single embedded broker if exactly one exists,
 // or nil if zero or multiple embedded brokers are found. "Embedded" means the
 // broker's labels JSON contains {"scion.io/broker-role": "embedded"}.
-// Used to recover the broker ID from the DB when settings are lost.
+// Used to recover the legacy broker ID from the DB when settings are lost, so
+// only legacy rows (no stored runtime target) are candidates: a flat Runtime
+// Broker row is never recovered as the legacy identity. Only Hub-managed rows
+// (no recorded owner) are candidates.
 func (s *ProjectStore) FindEmbeddedBroker(ctx context.Context) (*store.RuntimeBroker, error) {
 	brokers, err := s.client.RuntimeBroker.Query().
-		Where(brokerLabelContains("scion.io/broker-role", "embedded")).
+		Where(
+			brokerLabelContains(store.BrokerRoleLabel, store.BrokerRoleEmbedded),
+			runtimebroker.RuntimeTargetIDIsNil(),
+			runtimebroker.Or(runtimebroker.CreatedByIsNil(), runtimebroker.CreatedByEQ("")),
+		).
 		Limit(2). // Only need to know if there's exactly one
 		All(ctx)
 	if err != nil {

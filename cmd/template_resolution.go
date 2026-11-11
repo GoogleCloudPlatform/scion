@@ -78,12 +78,22 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 		return nil, fmt.Errorf("template name is required")
 	}
 
+	// --template-scope is a plain word (no URI ambiguity, unlike the
+	// --template prefix parsed below), so reject unknown values rather than
+	// defaulting.
+	// Callers (RunAgent, create) validate it first as a usage error; this
+	// guard is marked the same way so the usage block still wins if it
+	// fires through the caller's wrapHubError.
+	if err := validateTemplateScope(templateScope); err != nil {
+		return nil, asUsageError(err)
+	}
+
 	// Parse scope prefix if present (e.g., "global:claude", "project:custom")
 	scope, name := parseTemplateScope(templateName)
 
 	// Get project ID for project-scoped lookups
 	projectID, err := GetProjectID(hubCtx)
-	if err != nil && (scope == "grove" || scope == "project") {
+	if err != nil && scope == "project" {
 		return nil, fmt.Errorf("failed to determine project ID for template resolution: %w", err)
 	}
 
@@ -91,6 +101,15 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	hubTemplate, err := findTemplateOnHub(ctx, hubCtx, name, scope, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search Hub for template: %w", err)
+	}
+
+	// With a target-hub profile only the target's templates count: no
+	// local template is read, compared or uploaded (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		if hubTemplate == nil {
+			return nil, fmt.Errorf("template %q was not found on the target hub of profile %q; with a hub profile, local templates are not uploaded: name a template that exists on the target hub", templateName, hubCtx.TargetProfile)
+		}
+		return &TemplateResolutionResult{TemplateID: hubTemplate.ID, TemplateName: hubTemplate.Name}, nil
 	}
 
 	// Step 2: Check if template exists locally
@@ -118,17 +137,33 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	return nil, formatTemplateNotFoundError(name, hubCtx.ProjectPath)
 }
 
+// validateTemplateScope rejects a --template-scope flag value that isn't one
+// of the recognized template scopes. Empty is accepted: it means "no
+// explicit scope was requested", and callers fall back to their own default.
+func validateTemplateScope(scope string) error {
+	switch scope {
+	case "", "global", "project", "user":
+		return nil
+	default:
+		return fmt.Errorf("unknown template scope %q (valid: global, project, user)", scope)
+	}
+}
+
 // parseTemplateScope extracts scope prefix from template name.
 // Examples: "global:claude" -> ("global", "claude"), "custom" -> ("", "custom")
+//
+// Only a prefix matching a known scope name is stripped; anything else before
+// a colon is left as part of the name. templateName isn't necessarily a bare
+// template name here - callers pass remote URIs and rclone connection
+// strings through this same path (e.g. "https://host/tpl",
+// ":gcs:bucket/x") with no IsRemoteURI guard beforehand, so treating an
+// unrecognized prefix as an error would reject those as an "unknown scope"
+// instead of letting them resolve as intended.
 func parseTemplateScope(templateName string) (scope, name string) {
 	if idx := strings.Index(templateName, ":"); idx != -1 {
 		prefix := templateName[:idx]
-		// Check if it's a known scope prefix
 		switch prefix {
-		case "global", "grove", "project", "user":
-			if prefix == "grove" {
-				return "project", templateName[idx+1:]
-			}
+		case "global", "project", "user":
 			return prefix, templateName[idx+1:]
 		}
 	}
@@ -146,17 +181,12 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 
 	// If explicit scope is provided, search only that scope
 	if scope != "" {
-		effectiveScope := scope
-		if effectiveScope == "grove" {
-			effectiveScope = "project"
-		}
-
 		opts := &hubclient.ListTemplatesOptions{
 			Name:   name,
-			Scope:  effectiveScope,
+			Scope:  scope,
 			Status: "active",
 		}
-		if effectiveScope == "project" && projectID != "" {
+		if scope == "project" && projectID != "" {
 			opts.ProjectID = projectID
 		}
 
@@ -253,11 +283,23 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 			TemplateName: hubTemplate.Name,
 		}, nil
 	}
+	// An upload reads through this root; see transfer.ReadCollectedFile.
+	root, err := os.OpenRoot(localTemplate.Path)
+	if err != nil {
+		// Can't read the local files, just use Hub version
+		return &TemplateResolutionResult{
+			TemplateID:   hubTemplate.ID,
+			TemplateName: hubTemplate.Name,
+		}, nil
+	}
+	defer func() { _ = root.Close() }()
 
 	localHash := computeLocalContentHash(files)
 
-	// If hashes match, no action needed
-	if localHash == hubTemplate.ContentHash {
+	// If the local files are the Hub's (paths, contents and executable
+	// bits), no action needed. Manifests are compared, not content hashes,
+	// which differ in version between Hubs (ptone/scion#5658).
+	if localMatchesHub(files, hubTemplate.Files, hubTemplate.ContentHash) {
 		return &TemplateResolutionResult{
 			TemplateID:   hubTemplate.ID,
 			TemplateName: hubTemplate.Name,
@@ -275,11 +317,11 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 
 	if uploadTemplate || autoConfirm {
 		// Auto-update Hub with local version
-		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, projectID)
+		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, root, files, projectID)
 	}
 
 	// Interactive prompt
-	return promptForTemplateHashMismatch(ctx, hubCtx, hubTemplate, localTemplate, files, localHash, projectID)
+	return promptForTemplateHashMismatch(ctx, hubCtx, hubTemplate, localTemplate, root, files, localHash, projectID)
 }
 
 // handleLocalOnlyTemplate handles the case where template exists only locally.
@@ -350,12 +392,12 @@ func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, local
 		effectiveScope = "project"
 	}
 
-	fmt.Printf("\nTemplate '%s' was not found on the Hub but exists locally at:\n", localTemplate.Name)
-	fmt.Printf("  %s\n\n", localTemplate.Path)
-	fmt.Println("The Runtime Broker cannot access local templates. Would you like to:")
-	fmt.Printf("  [U] Upload template to Hub (%s scope) and continue\n", effectiveScope)
-	fmt.Println("  [C] Cancel agent creation")
-	fmt.Println()
+	fmt.Fprintf(os.Stderr, "\nTemplate '%s' was not found on the Hub but exists locally at:\n", localTemplate.Name)
+	fmt.Fprintf(os.Stderr, "  %s\n\n", localTemplate.Path)
+	fmt.Fprintln(os.Stderr, "The Runtime Broker cannot access local templates. Would you like to:")
+	fmt.Fprintf(os.Stderr, "  [U] Upload template to Hub (%s scope) and continue\n", effectiveScope)
+	fmt.Fprintln(os.Stderr, "  [C] Cancel agent creation")
+	fmt.Fprintln(os.Stderr)
 
 	choice, err := promptChoice("Choice", "U", []string{"U", "C"})
 	if err != nil {
@@ -370,15 +412,15 @@ func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, local
 }
 
 // promptForTemplateHashMismatch prompts when local and Hub templates differ.
-func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, localHash, projectID string) (*TemplateResolutionResult, error) {
-	fmt.Printf("\nTemplate '%s' exists on Hub but local version differs:\n", localTemplate.Name)
-	fmt.Printf("  Hub hash:   %s\n", truncateHash(hubTemplate.ContentHash))
-	fmt.Printf("  Local hash: %s\n\n", truncateHash(localHash))
-	fmt.Println("Would you like to:")
-	fmt.Println("  [U] Update Hub template with local version")
-	fmt.Println("  [H] Use existing Hub template (ignore local changes)")
-	fmt.Println("  [C] Cancel agent creation")
-	fmt.Println()
+func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, root *os.Root, files []hubclient.FileInfo, localHash, projectID string) (*TemplateResolutionResult, error) {
+	fmt.Fprintf(os.Stderr, "\nTemplate '%s' exists on Hub but local version differs:\n", localTemplate.Name)
+	fmt.Fprintf(os.Stderr, "  Hub hash:   %s\n", truncateHash(hubTemplate.ContentHash))
+	fmt.Fprintf(os.Stderr, "  Local hash: %s\n\n", truncateHash(localHash))
+	fmt.Fprintln(os.Stderr, "Would you like to:")
+	fmt.Fprintln(os.Stderr, "  [U] Update Hub template with local version")
+	fmt.Fprintln(os.Stderr, "  [H] Use existing Hub template (ignore local changes)")
+	fmt.Fprintln(os.Stderr, "  [C] Cancel agent creation")
+	fmt.Fprintln(os.Stderr)
 
 	choice, err := promptChoice("Choice", "H", []string{"U", "H", "C"})
 	if err != nil {
@@ -387,7 +429,7 @@ func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubT
 
 	switch strings.ToUpper(choice) {
 	case "U":
-		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, projectID)
+		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, root, files, projectID)
 	case "H":
 		return &TemplateResolutionResult{
 			TemplateID:   hubTemplate.ID,
@@ -405,9 +447,6 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 		effectiveScope = templateScope
 	}
 	if effectiveScope == "" {
-		effectiveScope = "project"
-	}
-	if effectiveScope == "grove" {
 		effectiveScope = "project"
 	}
 
@@ -433,7 +472,9 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 }
 
 // updateHubTemplate updates an existing Hub template with local files.
-func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, projectID string) (*TemplateResolutionResult, error) {
+// files were collected from localTemplate.Path, and root is opened there;
+// uploads read through it (see uploadTemplateURLs).
+func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, root *os.Root, files []hubclient.FileInfo, projectID string) (*TemplateResolutionResult, error) {
 	fmt.Printf("Updating Hub template '%s' with local version...\n", hubTemplate.Name)
 
 	// Build file upload request
@@ -454,29 +495,9 @@ func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hub
 		return nil, fmt.Errorf("failed to get upload URLs: %w", err)
 	}
 
-	// Upload files
-	for _, urlInfo := range uploadResp.UploadURLs {
-		var fileInfo *hubclient.FileInfo
-		for i := range files {
-			if files[i].Path == urlInfo.Path {
-				fileInfo = &files[i]
-				break
-			}
-		}
-		if fileInfo == nil {
-			continue
-		}
-
-		f, err := os.Open(fileInfo.FullPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open %s: %w", fileInfo.Path, err)
-		}
-
-		err = hubCtx.Client.Templates().UploadFile(uploadCtx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
-		_ = f.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
-		}
+	// Upload files (silently: no per-file output here)
+	if err := uploadTemplateURLs(uploadCtx, hubCtx.Client.Templates(), root, files, uploadResp.UploadURLs, ""); err != nil {
+		return nil, err
 	}
 
 	// Build and finalize manifest
@@ -494,8 +515,13 @@ func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hub
 		}
 	}
 
-	updated, err := hubCtx.Client.Templates().Finalize(uploadCtx, hubTemplate.ID, manifest)
-	if err != nil {
+	updated, err := hubCtx.Client.Templates().Finalize(uploadCtx, hubTemplate.ID, manifest, hubTemplate.ContentHash, uploadResp.UploadID)
+	if hubclient.IsTemplateConflictError(err) {
+		updated, err = resyncTemplateAfterConflict(uploadCtx, hubCtx, hubTemplate.Name, hubTemplate.ID, root, files, manifest)
+		if err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, fmt.Errorf("failed to finalize template update: %w", err)
 	}
 
@@ -547,13 +573,17 @@ func detectHarnessType(tpl *config.Template) (string, error) {
 	return "", nil
 }
 
-// computeLocalContentHash computes the content hash for local files.
+// computeLocalContentHash computes the v2 content hash of local files
+// (paths, modes and contents), the hash a Hub with the hub.content_hash_v2
+// experiment on records (ptone/scion#5658). It is for display: whether
+// local files match the Hub's is decided by localMatchesHub.
 func computeLocalContentHash(files []hubclient.FileInfo) string {
 	templateFiles := make([]hubclient.TemplateFile, len(files))
 	for i, f := range files {
 		templateFiles[i] = hubclient.TemplateFile{
 			Path: f.Path,
 			Hash: f.Hash,
+			Mode: f.Mode,
 		}
 	}
 	return hubclient.ComputeContentHash(templateFiles)
@@ -570,22 +600,33 @@ func truncateHash(hash string) string {
 // promptChoice prompts the user for a choice from a list of options.
 // In non-interactive or auto-confirm mode, returns the default choice immediately.
 // If no default is available in non-interactive mode, returns an error.
+// Without auto-confirm, a stdin that is not a terminal is an error naming
+// --yes; stdin is read only on a terminal. Prompt text goes to stderr.
 func promptChoice(prompt, defaultChoice string, validChoices []string) (string, error) {
 	if autoConfirm {
 		if defaultChoice != "" {
-			fmt.Printf("%s: auto-selected %s\n", prompt, defaultChoice)
+			fmt.Fprintf(os.Stderr, "%s: auto-selected %s\n", prompt, defaultChoice)
 			return defaultChoice, nil
 		}
 		return "", fmt.Errorf("cannot prompt for %s in non-interactive mode: no default available, specify choice via flags", prompt)
+	}
+
+	// Never read an answer from stdin that is not a terminal: an idle open
+	// pipe would hang here, and a closed one is not a choice.
+	if !isInteractiveTerminal() {
+		if defaultChoice != "" {
+			return "", fmt.Errorf("cannot prompt for %s: stdin is not a terminal; re-run with --yes to choose the default (%s)", prompt, defaultChoice)
+		}
+		return "", fmt.Errorf("cannot prompt for %s: stdin is not a terminal; specify the choice via flags", prompt)
 	}
 
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		if defaultChoice != "" {
-			fmt.Printf("%s [%s]: ", prompt, strings.ToLower(defaultChoice))
+			fmt.Fprintf(os.Stderr, "%s [%s]: ", prompt, strings.ToLower(defaultChoice))
 		} else {
-			fmt.Printf("%s: ", prompt)
+			fmt.Fprintf(os.Stderr, "%s: ", prompt)
 		}
 
 		input, err := reader.ReadString('\n')
@@ -605,7 +646,7 @@ func promptChoice(prompt, defaultChoice string, validChoices []string) (string, 
 			}
 		}
 
-		fmt.Printf("Invalid choice. Please enter one of: %s\n", strings.Join(validChoices, ", "))
+		fmt.Fprintf(os.Stderr, "Invalid choice. Please enter one of: %s\n", strings.Join(validChoices, ", "))
 	}
 }
 

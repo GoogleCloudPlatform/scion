@@ -1,0 +1,222 @@
+[
+  {
+    "raw": "https://h.example/a.png",
+    "kind": "markdown",
+    "want": "https://h.example/a.png"
+  },
+  {
+    "raw": "HTTPS://IMG.Example:443/A.png",
+    "kind": "markdown",
+    "want": "https://img.example:443/A.png"
+  },
+  {
+    "raw": "https://h.example:8443/a.png?x=1#f",
+    "kind": "markdown",
+    "want": "https://h.example:8443/a.png?x=1#f"
+  },
+  {
+    "raw": "https://h.example/%E2%9C%93.png",
+    "kind": "markdown",
+    "want": "https://h.example/%E2%9C%93.png"
+  },
+  {
+    "raw": "https://h.example/a%2.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://user@h.example/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://user:pw@h.example/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://[::1]/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example:99999/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example:/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https:///a.png",
+    "kind": "markdown",
+    "want": "https://a.png"
+  },
+  {
+    "raw": "https://.h/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h_x.example/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a b.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a\"b.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a.png#x#y",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https:h.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "kind": "attribute",
+    "want": ""
+  },
+  {
+    "raw": "ftp://h.example/a.png",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a\\b.png",
+    "kind": "attribute",
+    "want": "https://h.example/a/b.png"
+  },
+  {
+    "raw": "https://h.example/a.png?q=\\x",
+    "kind": "attribute",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example\\a.png",
+    "kind": "attribute",
+    "want": "https://h.example/a.png"
+  },
+  {
+    "raw": "https:/\\/h.example/a.png",
+    "kind": "attribute",
+    "want": "https://h.example/a.png"
+  },
+  {
+    "raw": "h\nttps://h.example/a.png",
+    "kind": "attribute",
+    "want": "https://h.example/a.png"
+  },
+  {
+    "raw": "https://h.ex\tample/a.png",
+    "kind": "attribute",
+    "want": "https://h.example/a.png"
+  },
+  {
+    "raw": "https://h.example/a.png?a=1\u0026b=2",
+    "kind": "attribute",
+    "want": "https://h.example/a.png?a=1\u0026b=2"
+  },
+  {
+    "raw": "https://h.example/a.png?a=1\u0026amp;b=2",
+    "kind": "attribute",
+    "want": "https://h.example/a.png?a=1\u0026b=2"
+  },
+  {
+    "raw": "https://h.example/a.png?a=1\u0026amp=2",
+    "kind": "attribute",
+    "want": "https://h.example/a.png?a=1\u0026amp=2"
+  },
+  {
+    "raw": "https://h.example/a.png?a=1\u0026amp",
+    "kind": "attribute",
+    "want": "https://h.example/a.png?a=1\u0026"
+  },
+  {
+    "raw": "https://h.example/a.png?a=1\u0026ampx",
+    "kind": "attribute",
+    "want": "https://h.example/a.png?a=1\u0026ampx"
+  },
+  {
+    "raw": "https://h.example/a.png?\u0026copy",
+    "kind": "attribute",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a.png?\u0026copy;",
+    "kind": "attribute",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a.png?\u0026copy=1",
+    "kind": "attribute",
+    "want": "https://h.example/a.png?\u0026copy=1"
+  },
+  {
+    "raw": "https://h.example/a.png?\u0026notanentity;",
+    "kind": "attribute",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a\u0026#47;b.png",
+    "kind": "attribute",
+    "want": "https://h.example/a/b.png"
+  },
+  {
+    "raw": "https://h.example/a\u0026#47b.png",
+    "kind": "attribute",
+    "want": "https://h.example/a/b.png"
+  },
+  {
+    "raw": "https://h.example/a\u0026#9;b.png",
+    "kind": "attribute",
+    "want": "https://h.example/ab.png"
+  },
+  {
+    "raw": "https://h.example/a\u0026#0;b.png",
+    "kind": "attribute",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a\u0026#233;.png",
+    "kind": "attribute",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a\u0026#.png",
+    "kind": "attribute",
+    "want": "https://h.example/a\u0026#.png"
+  },
+  {
+    "raw": "https://h.example/a.png?a\u0026amp;b",
+    "kind": "markdown",
+    "want": "https://h.example/a.png?a\u0026b"
+  },
+  {
+    "raw": "https://h.example/a.png?a\u0026lt;b",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a.png?a\u0026#38;b",
+    "kind": "markdown",
+    "want": ""
+  },
+  {
+    "raw": "https://h.example/a.png?a\u0026b",
+    "kind": "markdown",
+    "want": "https://h.example/a.png?a\u0026b"
+  }
+]

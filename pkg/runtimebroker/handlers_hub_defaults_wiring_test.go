@@ -21,7 +21,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -48,8 +50,22 @@ func (m *hubDefaultsCapturingManager) Provision(ctx context.Context, opts api.St
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
 }
 
+func (m *hubDefaultsCapturingManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *hubDefaultsCapturingManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
+}
+
+func (m *hubDefaultsCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	m.provisionCalled = true
+	m.seenOnContext = api.HubAgentDefaultsFromContext(ctx)
+	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+}
+
 func newHubDefaultsWiringServer() (*Server, *hubDefaultsCapturingManager) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
@@ -57,7 +73,7 @@ func newHubDefaultsWiringServer() (*Server, *hubDefaultsCapturingManager) {
 	mgr := &hubDefaultsCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }
 
 // postCreateAgent drives the real HTTP handler, so the request travels the

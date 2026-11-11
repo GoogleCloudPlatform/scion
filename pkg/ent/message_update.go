@@ -379,11 +379,6 @@ func (_u *MessageUpdate) check() error {
 			return &ValidationError{Name: "recipient", err: fmt.Errorf(`ent: validator failed for field "Message.recipient": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.Msg(); ok {
-		if err := message.MsgValidator(v); err != nil {
-			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
-		}
-	}
 	if v, ok := _u.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -489,6 +484,18 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
+	}
+	if _u.mutation.SenderProjectIDCleared() {
+		_spec.ClearField(message.FieldSenderProjectID, field.TypeUUID)
+	}
+	if _u.mutation.RecipientProjectIDCleared() {
+		_spec.ClearField(message.FieldRecipientProjectID, field.TypeUUID)
+	}
+	if _u.mutation.AuthorizingUserIDCleared() {
+		_spec.ClearField(message.FieldAuthorizingUserID, field.TypeString)
+	}
+	if _u.mutation.DelegationGrantIDCleared() {
+		_spec.ClearField(message.FieldDelegationGrantID, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -873,11 +880,6 @@ func (_u *MessageUpdateOne) check() error {
 			return &ValidationError{Name: "recipient", err: fmt.Errorf(`ent: validator failed for field "Message.recipient": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.Msg(); ok {
-		if err := message.MsgValidator(v); err != nil {
-			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
-		}
-	}
 	if v, ok := _u.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -1000,6 +1002,18 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
+	}
+	if _u.mutation.SenderProjectIDCleared() {
+		_spec.ClearField(message.FieldSenderProjectID, field.TypeUUID)
+	}
+	if _u.mutation.RecipientProjectIDCleared() {
+		_spec.ClearField(message.FieldRecipientProjectID, field.TypeUUID)
+	}
+	if _u.mutation.AuthorizingUserIDCleared() {
+		_spec.ClearField(message.FieldAuthorizingUserID, field.TypeString)
+	}
+	if _u.mutation.DelegationGrantIDCleared() {
+		_spec.ClearField(message.FieldDelegationGrantID, field.TypeString)
 	}
 	_node = &Message{config: _u.config}
 	_spec.Assign = _node.assignValues

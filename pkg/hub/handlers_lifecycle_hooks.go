@@ -93,7 +93,7 @@ func (s *Server) handleAdminLifecycleHooks(w http.ResponseWriter, r *http.Reques
 		}
 		s.createLifecycleHook(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -123,7 +123,7 @@ func (s *Server) handleAdminLifecycleHookByID(w http.ResponseWriter, r *http.Req
 			s.deleteLifecycleHook(w, r, id, user)
 		}
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -140,6 +140,12 @@ func (s *Server) createLifecycleHook(w http.ResponseWriter, r *http.Request, use
 
 	if req.Name == "" {
 		BadRequest(w, "name is required")
+		return
+	}
+	// The execution identity binds a service account to the hook's
+	// actions; only an interactive session or dev credential sets it.
+	if req.ExecutionIdentity != "" &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{"executionIdentity"}) {
 		return
 	}
 
@@ -274,6 +280,14 @@ func (s *Server) updateLifecycleHook(w http.ResponseWriter, r *http.Request, id 
 				"expected": req.StateVersion,
 				"actual":   existing.StateVersion,
 			})
+		return
+	}
+
+	// The execution identity binds a service account to the hook's
+	// actions; only an interactive session or dev credential changes it,
+	// clearing it included.
+	if req.ExecutionIdentity != existing.ExecutionIdentity &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{"executionIdentity"}) {
 		return
 	}
 

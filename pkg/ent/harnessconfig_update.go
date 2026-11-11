@@ -244,6 +244,26 @@ func (_u *HarnessConfigUpdate) ClearStoragePath() *HarnessConfigUpdate {
 	return _u
 }
 
+// SetLayout sets the "layout" field.
+func (_u *HarnessConfigUpdate) SetLayout(v string) *HarnessConfigUpdate {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *HarnessConfigUpdate) SetNillableLayout(v *string) *HarnessConfigUpdate {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *HarnessConfigUpdate) ClearLayout() *HarnessConfigUpdate {
+	_u.mutation.ClearLayout()
+	return _u
+}
+
 // SetFiles sets the "files" field.
 func (_u *HarnessConfigUpdate) SetFiles(v string) *HarnessConfigUpdate {
 	_u.mutation.SetFiles(v)
@@ -309,6 +329,26 @@ func (_u *HarnessConfigUpdate) SetNillableImageStatusCheckedAt(v *time.Time) *Ha
 // ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
 func (_u *HarnessConfigUpdate) ClearImageStatusCheckedAt() *HarnessConfigUpdate {
 	_u.mutation.ClearImageStatusCheckedAt()
+	return _u
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (_u *HarnessConfigUpdate) SetBuiltImage(v string) *HarnessConfigUpdate {
+	_u.mutation.SetBuiltImage(v)
+	return _u
+}
+
+// SetNillableBuiltImage sets the "built_image" field if the given value is not nil.
+func (_u *HarnessConfigUpdate) SetNillableBuiltImage(v *string) *HarnessConfigUpdate {
+	if v != nil {
+		_u.SetBuiltImage(*v)
+	}
+	return _u
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (_u *HarnessConfigUpdate) ClearBuiltImage() *HarnessConfigUpdate {
+	_u.mutation.ClearBuiltImage()
 	return _u
 }
 
@@ -389,20 +429,6 @@ func (_u *HarnessConfigUpdate) SetNillableSourceURL(v *string) *HarnessConfigUpd
 // ClearSourceURL clears the value of the "source_url" field.
 func (_u *HarnessConfigUpdate) ClearSourceURL() *HarnessConfigUpdate {
 	_u.mutation.ClearSourceURL()
-	return _u
-}
-
-// SetVisibility sets the "visibility" field.
-func (_u *HarnessConfigUpdate) SetVisibility(v string) *HarnessConfigUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *HarnessConfigUpdate) SetNillableVisibility(v *string) *HarnessConfigUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
 	return _u
 }
 
@@ -555,6 +581,12 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(harnessconfig.FieldStoragePath, field.TypeString)
 	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(harnessconfig.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(harnessconfig.FieldLayout, field.TypeString)
+	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(harnessconfig.FieldFiles, field.TypeString, value)
 	}
@@ -572,6 +604,12 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.ImageStatusCheckedAtCleared() {
 		_spec.ClearField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.BuiltImage(); ok {
+		_spec.SetField(harnessconfig.FieldBuiltImage, field.TypeString, value)
+	}
+	if _u.mutation.BuiltImageCleared() {
+		_spec.ClearField(harnessconfig.FieldBuiltImage, field.TypeString)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
@@ -596,9 +634,6 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(harnessconfig.FieldSourceURL, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(harnessconfig.FieldUpdated, field.TypeTime, value)
@@ -839,6 +874,26 @@ func (_u *HarnessConfigUpdateOne) ClearStoragePath() *HarnessConfigUpdateOne {
 	return _u
 }
 
+// SetLayout sets the "layout" field.
+func (_u *HarnessConfigUpdateOne) SetLayout(v string) *HarnessConfigUpdateOne {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *HarnessConfigUpdateOne) SetNillableLayout(v *string) *HarnessConfigUpdateOne {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *HarnessConfigUpdateOne) ClearLayout() *HarnessConfigUpdateOne {
+	_u.mutation.ClearLayout()
+	return _u
+}
+
 // SetFiles sets the "files" field.
 func (_u *HarnessConfigUpdateOne) SetFiles(v string) *HarnessConfigUpdateOne {
 	_u.mutation.SetFiles(v)
@@ -904,6 +959,26 @@ func (_u *HarnessConfigUpdateOne) SetNillableImageStatusCheckedAt(v *time.Time) 
 // ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
 func (_u *HarnessConfigUpdateOne) ClearImageStatusCheckedAt() *HarnessConfigUpdateOne {
 	_u.mutation.ClearImageStatusCheckedAt()
+	return _u
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (_u *HarnessConfigUpdateOne) SetBuiltImage(v string) *HarnessConfigUpdateOne {
+	_u.mutation.SetBuiltImage(v)
+	return _u
+}
+
+// SetNillableBuiltImage sets the "built_image" field if the given value is not nil.
+func (_u *HarnessConfigUpdateOne) SetNillableBuiltImage(v *string) *HarnessConfigUpdateOne {
+	if v != nil {
+		_u.SetBuiltImage(*v)
+	}
+	return _u
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (_u *HarnessConfigUpdateOne) ClearBuiltImage() *HarnessConfigUpdateOne {
+	_u.mutation.ClearBuiltImage()
 	return _u
 }
 
@@ -984,20 +1059,6 @@ func (_u *HarnessConfigUpdateOne) SetNillableSourceURL(v *string) *HarnessConfig
 // ClearSourceURL clears the value of the "source_url" field.
 func (_u *HarnessConfigUpdateOne) ClearSourceURL() *HarnessConfigUpdateOne {
 	_u.mutation.ClearSourceURL()
-	return _u
-}
-
-// SetVisibility sets the "visibility" field.
-func (_u *HarnessConfigUpdateOne) SetVisibility(v string) *HarnessConfigUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *HarnessConfigUpdateOne) SetNillableVisibility(v *string) *HarnessConfigUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
 	return _u
 }
 
@@ -1180,6 +1241,12 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(harnessconfig.FieldStoragePath, field.TypeString)
 	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(harnessconfig.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(harnessconfig.FieldLayout, field.TypeString)
+	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(harnessconfig.FieldFiles, field.TypeString, value)
 	}
@@ -1197,6 +1264,12 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if _u.mutation.ImageStatusCheckedAtCleared() {
 		_spec.ClearField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.BuiltImage(); ok {
+		_spec.SetField(harnessconfig.FieldBuiltImage, field.TypeString, value)
+	}
+	if _u.mutation.BuiltImageCleared() {
+		_spec.ClearField(harnessconfig.FieldBuiltImage, field.TypeString)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
@@ -1221,9 +1294,6 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(harnessconfig.FieldSourceURL, field.TypeString)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(harnessconfig.FieldUpdated, field.TypeTime, value)

@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -12,39 +14,50 @@ import (
 type CLIMode string
 
 const (
-	ModeHuman     CLIMode = "human"
-	ModeAssistant CLIMode = "assistant"
-	ModeAgent     CLIMode = "agent"
+	ModeHuman CLIMode = "human"
+	ModeAgent CLIMode = "agent"
 )
 
-// assistantDenied lists commands removed in assistant mode (relative to human).
-// Uses dot-separated command paths: "hub.auth", "config.migrate", etc.
-var assistantDenied = map[string]bool{
-	"hub.auth":             true,
-	"hub.token":            true,
-	"grove.reconnect":      true,
-	"config.migrate":       true,
-	"config.cd-config":     true,
-	"config.cd-grove":      true,
-	"cdw":                  true,
-	"clean":                true,
-	"server.recover-authz": true,
+// removedModeAssistant is the value of a CLI mode that has been removed.
+// A SCION_CLI_MODE or cli.mode value that still names it is ignored with
+// a single warning, and the CLI runs in human mode.
+const removedModeAssistant = "assistant"
+
+// removedModeWarnOnce makes sure the removed-mode warning is printed at
+// most once per process, even though resolveMode is called many times.
+var removedModeWarnOnce = &sync.Once{}
+
+func warnRemovedMode(source string) {
+	removedModeWarnOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "Warning: %s=%q: the %q CLI mode has been removed and is ignored; running in %q mode\n",
+			source, removedModeAssistant, removedModeAssistant, ModeHuman)
+	})
 }
 
 // agentAllowed lists commands available in agent mode.
+// Uses dot-separated command paths: "notifications.ack", "schedule.list", etc.
 // Every entry — including parent commands — must be listed explicitly;
 // parents are NOT implicitly allowed when a child is listed.
+//
+// Deliberately absent: "runtime-broker.convert" in every mode (--plan,
+// --apply, --status, --rollback). It is human mode only: it acts on this
+// host's Runtime Broker identity, settings and Hub rows, which an agent in
+// a container must not change. cmd/platform_gate.go keeps it off Windows.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
+	"expose":                      true, // acts only as the calling agent (ptone/scion#4728)
+	"keys":                        true,
 	"list":                        true,
 	"logs":                        true,
 	"look":                        true,
 	"message":                     true,
+	"reincarnate":                 true,
 	"resume":                      true,
 	"start":                       true,
 	"stop":                        true,
 	"suspend":                     true,
+	"unexpose":                    true, // acts only as the calling agent (ptone/scion#4728)
 	"version":                     true,
 	"whoami":                      true,
 	"global-flags":                true,
@@ -104,23 +117,87 @@ var agentAllowed = map[string]bool{
 	"user.skills.list":            true,
 	"user.skills.add":             true,
 	"user.skills.remove":          true,
+	"skills":                      true,
+	"skills.list":                 true,
+	"skills.show":                 true, // text output also lists versions (skills.versions itself is not allowed)
+	"skill":                       true,
+	"skill.list":                  true,
 	"project":                     true,
 	"project.skills":              true,
 	"project.skills.list":         true,
 	"project.skills.add":          true,
 	"project.skills.remove":       true,
-	"set-message-mode":            true,
-	"conversation":                true,
-	"conversation.list":           true,
-	"conversation.messages":       true,
-	"conversation.get":            true,
-	"conversation.get-message":    true,
-	"conversation.create":         true,
-	"conversation.set-default":    true,
-	"conversation.participants":   true,
-	"conversation.join":           true,
-	"conversation.leave":          true,
-	"conversation.catch-up":       true,
+	// Read-only status of one service account; the mutating subcommands
+	// (add, mint, verify, remove) and list stay out (ptone, ptone/scion#4018).
+	"project.service-accounts":      true,
+	"project.service-accounts.show": true,
+	"set-message-mode":              true,
+	"conversation":                  true,
+	"conversation.list":             true,
+	"conversation.messages":         true,
+	"conversation.get":              true,
+	"conversation.get-message":      true,
+	"conversation.create":           true,
+	"conversation.set-default":      true,
+	"conversation.participants":     true,
+	"conversation.join":             true,
+	"conversation.leave":            true,
+	"conversation.catch-up":         true,
+	"artifact":                      true,
+	"artifact.publish":              true,
+	"artifact.get":                  true,
+	"artifact.versions":             true,
+	"artifact.list":                 true,
+	"artifact.view":                 true,
+	"artifact.comments":             true,
+	// artifact share, artifact grants and artifact delete are human-only
+	// and deliberately absent (ptone/scion#4529, ptone/scion#4579): agents
+	// may not share or delete artifacts, or manage their grants.
+	// Target-hub profiles and test identities (ptone/scion#4240).
+	// These run in agent mode only against a target-hub profile whose
+	// endpoint is not the agent's own hub; the run-time refusal is in
+	// checkHubProfileGate and the profile commands (hub_profile.go).
+	// Every other hub child stays removed, and hub.test-identity.delegate
+	// (the human consent step) is human only.
+	"hub":                        true,
+	"hub.status":                 true,
+	"hub.profile":                true,
+	"hub.profile.add":            true,
+	"hub.profile.list":           true,
+	"hub.profile.show":           true,
+	"hub.profile.remove":         true,
+	"hub.test-identity":          true,
+	"hub.test-identity.issue":    true,
+	"hub.test-identity.token":    true,
+	"hub.test-identity.list":     true,
+	"hub.test-identity.delete":   true,
+	"hub.test-identity.teardown": true,
+	"hub.test-identity.web-code": true,
+	// Issuer cleanup and provenance (Phase 3c, DEC-7): the same gate, so
+	// an agent runner can verify a run by absence on a target hub.
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
+	// issue-admin (X4b, DEC-7) issues through the profile's admin
+	// delegation; it needs a profile in every mode.
+	"hub.test-identity.issue-admin": true,
+
+	// Project thread groups (ptone/scion#4424, design section 4 and
+	// decision Q3): agents may list, read, create, rename and re-file
+	// threads. conversation.group.delete is deliberately absent: only
+	// users may delete a thread group, and the hub refuses an agent.
+	"conversation.group":        true,
+	"conversation.group.list":   true,
+	"conversation.group.get":    true,
+	"conversation.group.create": true,
+	"conversation.group.rename": true,
+	"conversation.group.add":    true,
+	"conversation.group.remove": true,
+
+	// Project-scoped secret reads as the calling agent (ptone/scion#5013).
+	// secret.set stays out: agents write secrets with sciontool secret set.
+	"secret":      true,
+	"secret.get":  true,
+	"secret.list": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.
@@ -128,19 +205,31 @@ var agentAllowed = map[string]bool{
 func resolveMode() CLIMode {
 	if envMode := os.Getenv("SCION_CLI_MODE"); envMode != "" {
 		switch CLIMode(envMode) {
-		case ModeHuman, ModeAssistant, ModeAgent:
+		case ModeHuman, ModeAgent:
 			return CLIMode(envMode)
+		case removedModeAssistant:
+			warnRemovedMode("SCION_CLI_MODE")
+			return ModeHuman
 		default:
 			fmt.Fprintf(os.Stderr, "Warning: unrecognized SCION_CLI_MODE=%q, defaulting to %q\n", envMode, ModeHuman)
 			return ModeHuman
 		}
 	}
 
-	settings, err := config.LoadSettings("")
+	// With a hub profile selected, read only the global settings: a
+	// profile command never reads local project settings.
+	settingsPath := ""
+	if hubProfileRequested() {
+		settingsPath = "global"
+	}
+	settings, err := config.LoadSettings(settingsPath)
 	if err == nil && settings != nil && settings.CLI != nil && settings.CLI.Mode != "" {
 		switch CLIMode(settings.CLI.Mode) {
-		case ModeHuman, ModeAssistant, ModeAgent:
+		case ModeHuman, ModeAgent:
 			return CLIMode(settings.CLI.Mode)
+		case removedModeAssistant:
+			warnRemovedMode("cli.mode")
+			return ModeHuman
 		default:
 			fmt.Fprintf(os.Stderr, "Warning: unrecognized cli.mode=%q in settings, defaulting to %q\n", settings.CLI.Mode, ModeHuman)
 			return ModeHuman
@@ -151,25 +240,11 @@ func resolveMode() CLIMode {
 }
 
 // applyModeRestrictions removes commands from the Cobra tree that are not
-// permitted in the current CLI mode.
-func applyModeRestrictions(root *cobra.Command) {
-	mode := resolveMode()
-	if mode == ModeHuman {
-		return
-	}
-
-	switch mode {
-	case ModeAssistant:
-		applyAssistantMode(root)
-	case ModeAgent:
+// permitted in mode (normally the result of resolveMode).
+func applyModeRestrictions(root *cobra.Command, mode CLIMode) {
+	if mode == ModeAgent {
 		applyAgentMode(root)
 	}
-}
-
-func applyAssistantMode(root *cobra.Command) {
-	removeCommands(root, "", func(path string) bool {
-		return assistantDenied[path]
-	})
 }
 
 func applyAgentMode(root *cobra.Command) {
@@ -199,6 +274,28 @@ func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(stri
 
 		if shouldRemove(path) {
 			parent.RemoveCommand(child)
+			parent.Long = dropCommandLines(parent.Long, parent.CommandPath()+" "+name)
 		}
 	}
+}
+
+// dropCommandLines removes the lines of a command's long help that show
+// the usage of a removed subcommand, so the help does not list a command
+// that is not available. A line matches when, after leading spaces, it is
+// usage (for example "scion artifact share") or starts with usage and a
+// space.
+func dropCommandLines(long, usage string) string {
+	if !strings.Contains(long, usage) {
+		return long
+	}
+	lines := strings.Split(long, "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		t := strings.TrimLeft(l, " \t")
+		if t == usage || strings.HasPrefix(t, usage+" ") {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
 }

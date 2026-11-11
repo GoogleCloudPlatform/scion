@@ -62,6 +62,12 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.String("state").
 			Default("pending"),
 		// result: JSON; for ops that return data (check_prompt, env-gather).
+		// On a failed row it carries the typed failure envelope
+		// (hub dispatchFailureEnvelope): brokerError
+		// ({status,code,body,retryAfter}) when the broker answered with an
+		// HTTP error status, envStillMissing (the env requirements a
+		// finalize still lacks), and/or hubErrors (hub sentinel errors such
+		// as a delete holding the row).
 		field.String("result").
 			Optional(),
 		// claimed_by: hub instanceID that reconciled this intent.
@@ -80,6 +86,31 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.Time("deadline_at").
 			Optional().
 			Nillable(),
+
+		// Initiator attribution (E.2b, path F). Set once at insert from the
+		// request that originated the cross-node op; never updated
+		// afterward. Deliberately smaller than InitiatorAttribution (no
+		// snapshot/version/revision): a broker dispatch is a transport retry
+		// of an already-authorized operation, not a re-evaluated authoring
+		// point (ruling Q4).
+		field.String("initiator_principal_kind").
+			Optional().
+			Nillable(),
+		field.String("initiator_principal_id").
+			Optional().
+			Nillable(),
+		// session | uat | agent | dev_local | legacy_unknown — see
+		// store.InitiatorCredentialKind*.
+		field.String("initiator_credential_kind").
+			Optional().
+			Nillable(),
+		field.String("initiator_credential_id").
+			Optional().
+			Nillable(),
+		// Ties this row back to the originating request's log/audit trail.
+		field.String("correlation_id").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -88,6 +119,16 @@ func (BrokerDispatch) Indexes() []ent.Index {
 	return []ent.Index{
 		// Drain query: WHERE broker_id=$X AND state='pending'.
 		index.Fields("broker_id", "state"),
+		index.Fields("correlation_id"),
+		// Delete start-block and engine classification (design
+		// ptone/scion#2483 §2.1): WHERE agent_id=$X AND op=$Y AND state IN (...).
+		index.Fields("agent_id", "op", "state"),
+		// Health summary dispatch counts (ptone/scion#3588): WHERE state=$X
+		// AND updated_at {<,>=} $Y, an equality plus a range. The reaper's
+		// stale scan uses only the state=in_progress prefix; its
+		// updated_at/deadline_at OR is filtered. The table is never pruned,
+		// so without this both are full scans.
+		index.Fields("state", "updated_at"),
 	}
 }
 

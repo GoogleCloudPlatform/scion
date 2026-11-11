@@ -1,0 +1,822 @@
+/**
+ * P3.2 (#1659): Explicit reconnect and agent-unavailable transitions.
+ *
+ * Tests disconnect detection, reconnect deduplication, error classification,
+ * SSE-driven unavailability, warm navigation guards, and buffer reset logic.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  TerminalSessionRegistry,
+  type TerminalResourceInitializer,
+  type TerminalResources,
+} from './terminal-sessions.js';
+
+const agentId = '11111111-1111-4111-8111-111111111111';
+const scope = { hubUrl: 'https://hub.example/team/', accountId: 'account-1' };
+const agent = { id: agentId, name: 'example', phase: 'running', activity: 'executing' };
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+class FakeSocket {
+  static OPEN = 1;
+  static instances: FakeSocket[] = [];
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  send = vi.fn<(data: string) => void>();
+  close = vi.fn(() => {
+    this.readyState = 3;
+  });
+  constructor(readonly url: string) {
+    FakeSocket.instances.push(this);
+  }
+  open() {
+    this.readyState = 1;
+    this.onopen?.();
+  }
+  /**
+   * A data frame is what actually confirms the stream is live, not bare
+   * onopen. Simulates tmux's redraw on attach.
+   */
+  data(payload = '') {
+    this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+  }
+}
+
+function fixture() {
+  FakeSocket.instances = [];
+  vi.stubGlobal('WebSocket', FakeSocket);
+  vi.stubGlobal(
+    'EventSource',
+    class extends EventTarget {
+      close() {}
+    }
+  );
+  const fetcher = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
+    Promise.resolve(json(agent))
+  );
+  vi.stubGlobal('fetch', fetcher);
+  const resources = {
+    write: vi.fn<(bytes: Uint8Array) => void>(),
+    size: () => ({ cols: 80, rows: 24 }),
+    dispose: vi.fn(),
+    reset: vi.fn(),
+  } satisfies TerminalResources;
+  const initialize = vi.fn<TerminalResourceInitializer>(() => Promise.resolve(resources));
+  const registry = new TerminalSessionRegistry(scope);
+  return { fetcher, resources, initialize, registry };
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('disconnect detection and state (#1659 AC1)', () => {
+  it('unexpected socket close sets disconnected with network reason', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
+    expect(session.state.connection).toBe('connected');
+    expect(session.state.disconnectReason).toBeNull();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
+    expect(session.state.error).toContain('1006');
+  });
+
+  it('clean socket close (code 1000) sets disconnectReason=detached', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1000 });
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('detached');
+    expect(session.state.error).toBeNull();
+  });
+
+  it(
+    'WebSocket error sets connect-error reason once the close-fallback timer fires ' +
+      '(classify in onclose only; onerror never releases the socket)',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const f = fixture();
+        const session = f.registry.open(agentId, f.initialize);
+        await session.connect();
+        FakeSocket.instances[0].onerror?.();
+        // onerror alone must not classify or release the socket yet.
+        expect(session.state.connection).toBe('connecting');
+        await vi.advanceTimersByTimeAsync(1000);
+
+        expect(session.state.connection).toBe('disconnected');
+        expect(session.state.disconnectReason).toBe('connect-error');
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it('retains resources and session entry after unexpected disconnect', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    expect(f.resources.dispose).not.toHaveBeenCalled();
+    expect(f.registry.list()).toHaveLength(1);
+    expect(session.state.connection).toBe('disconnected');
+  });
+
+  it('sendData returns false and never queues input when disconnected', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    expect(session.sendData('should-not-queue')).toBe(false);
+
+    // Reconnect and verify input was not replayed
+    await session.connect();
+    FakeSocket.instances[1].open();
+    expect(FakeSocket.instances[1].send).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconnect deduplication (#1659 AC2)', () => {
+  it('rapid connect calls share one attempt', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    const p1 = session.connect();
+    const p2 = session.connect();
+    const p3 = session.connect();
+
+    expect(p1).toBe(p2);
+    expect(p2).toBe(p3);
+
+    await p1;
+    // Only one reconnect socket created
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  it('generation invalidation prevents stale callback corruption', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    const oldSocket = FakeSocket.instances[0];
+    oldSocket.open();
+
+    oldSocket.readyState = 3;
+    oldSocket.onclose?.({ code: 1006 });
+
+    await session.connect();
+    const newSocket = FakeSocket.instances[1];
+    newSocket.open();
+    newSocket.data(); // confirms the new socket live; clear its own write call below
+    f.resources.write.mockClear();
+
+    // Old socket events after reconnect must not corrupt state
+    oldSocket.onmessage?.({
+      data: JSON.stringify({ type: 'data', data: btoa('stale') }),
+    });
+    oldSocket.onclose?.({ code: 1006 });
+    oldSocket.onerror?.();
+
+    expect(session.state.connection).toBe('connected');
+    expect(f.resources.write).not.toHaveBeenCalled();
+  });
+
+  it('increments generation on each reconnect attempt', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const states: number[] = [];
+    session.subscribe((s) => states.push(s.generation));
+
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    await session.connect();
+    FakeSocket.instances[1].open();
+
+    // Generation should have incremented
+    const uniqueGenerations = [...new Set(states)];
+    expect(uniqueGenerations.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('error classification (#1659 AC3)', () => {
+  it.each([
+    [401, 'auth-401', 'Authentication'],
+    [403, 'auth-403', 'permission'],
+    [404, 'not-found', 'not found'],
+    [503, 'server-error', 'denied'],
+  ] as const)(
+    'preflight %s → disconnectReason=%s with no retry loop',
+    async (status, expectedReason, errorFragment) => {
+      const f = fixture();
+      f.fetcher
+        .mockResolvedValueOnce(json(agent))
+        .mockResolvedValueOnce(json({ error: { message: 'denied' } }, status));
+      const session = f.registry.open(agentId, f.initialize);
+      await session.connect();
+
+      expect(session.state.connection).toBe('disconnected');
+      expect(session.state.disconnectReason).toBe(expectedReason);
+      expect(session.state.error?.toLowerCase()).toContain(errorFragment.toLowerCase());
+      expect(FakeSocket.instances).toHaveLength(0);
+    }
+  );
+
+  it('preflight 503 runtime_attach_unsupported (no PTY path) is terminal: message, no retry', async () => {
+    const f = fixture();
+    const noPath = {
+      error: {
+        code: 'runtime_attach_unsupported',
+        message:
+          "The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",
+        details: { reason: 'agent_pty_unavailable', path: 'none' },
+      },
+    };
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(noPath, 503));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('attach-unsupported');
+    expect(session.state.error).toContain('does not support attach');
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // Not armed: becoming frontmost does not try again.
+    const fetches = f.fetcher.mock.calls.length;
+    session.setFrontmost(false);
+    session.setFrontmost(true);
+    expect(session.reconnecting).toBe(false);
+    expect(f.fetcher.mock.calls.length).toBe(fetches);
+  });
+
+  it.each([
+    ['no-path 503 is final', true],
+    ['other 503 stays retriable', false],
+  ] as const)(
+    'connected pane drops (1006), auto-attempts, preflight answers: %s',
+    async (_name, noPathCase) => {
+      vi.useFakeTimers();
+      try {
+        const f = fixture();
+        const session = f.registry.open(agentId, f.initialize);
+        await session.connect();
+        FakeSocket.instances[0].open();
+        FakeSocket.instances[0].data();
+        session.setFrontmost(true);
+        expect(session.state.connection).toBe('connected');
+
+        const refusal = noPathCase
+          ? {
+              error: {
+                code: 'runtime_attach_unsupported',
+                message: 'No path to the terminal',
+                details: { reason: 'agent_pty_unavailable' },
+              },
+            }
+          : {
+              error: {
+                code: 'runtime_broker_unavailable',
+                message: 'Runtime broker not connected',
+              },
+            };
+        f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(refusal, 503));
+
+        FakeSocket.instances[0].readyState = 3;
+        FakeSocket.instances[0].onclose?.({ code: 1006 }); // frontmost: one immediate attempt
+        expect(session.reconnecting).toBe(true);
+        await session.connect(); // joins the in-flight automatic attempt
+        expect(FakeSocket.instances).toHaveLength(1);
+
+        if (noPathCase) {
+          expect(session.state.disconnectReason).toBe('attach-unsupported');
+          expect(session.state.error).toBe('No path to the terminal');
+          // Final: not shown as a failed reconnect, and never retried.
+          expect(session.state.reconnectFailed).toBe(false);
+          const fetches = f.fetcher.mock.calls.length;
+          session.setFrontmost(false);
+          session.setFrontmost(true);
+          await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+          session.setFrontmost(false);
+          await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+          session.setFrontmost(true);
+          expect(session.reconnecting).toBe(false);
+          expect(f.fetcher.mock.calls.length).toBe(fetches);
+          expect(FakeSocket.instances).toHaveLength(1);
+        } else {
+          expect(session.state.disconnectReason).toBe('server-error');
+          expect(session.state.reconnectFailed).toBe(true);
+          // Retriable: after the background reset, foregrounding tries again.
+          const fetches = f.fetcher.mock.calls.length;
+          session.setFrontmost(false);
+          await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+          expect(session.state.reconnectFailed).toBe(false);
+          session.setFrontmost(true);
+          expect(session.reconnecting).toBe(true);
+          await session.connect();
+          expect(f.fetcher.mock.calls.length).toBeGreaterThan(fetches);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it('preflight 503 runtime_attach_unsupported without a message uses a fixed one', async () => {
+    const f = fixture();
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(json({ error: { code: 'runtime_attach_unsupported' } }, 503));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(session.state.disconnectReason).toBe('attach-unsupported');
+    expect(session.state.error).toContain('no session that serves a terminal');
+  });
+
+  it('other preflight 503s keep the server-error handling', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(
+      json(
+        {
+          error: {
+            code: 'runtime_broker_unavailable',
+            message: 'Runtime broker not connected',
+            details: { reason: 'broker_not_connected' },
+          },
+        },
+        503
+      )
+    );
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(session.state.disconnectReason).toBe('server-error');
+    expect(session.state.error).toBe('Runtime broker not connected');
+  });
+
+  it.each([
+    [401, 'auth-401'],
+    [404, 'not-found'],
+    [500, 'server-error'],
+  ] as const)('agent metadata fetch %s → disconnectReason=%s', async (status, expectedReason) => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({}, status));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe(expectedReason);
+  });
+
+  it.each([400, 408, 418, 429])(
+    'preflight %s (unclassified 4xx) → server-error, not network',
+    async (status) => {
+      const f = fixture();
+      f.fetcher
+        .mockResolvedValueOnce(json(agent))
+        .mockResolvedValueOnce(json({ error: { message: 'http error' } }, status));
+      const session = f.registry.open(agentId, f.initialize);
+      await session.connect();
+
+      expect(session.state.connection).toBe('disconnected');
+      expect(session.state.disconnectReason).toBe('server-error');
+    }
+  );
+
+  it('offline agent → unavailable with agent-offline reason', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, activity: 'offline' }));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-offline');
+  });
+
+  it('non-running phase → unavailable with agent-phase reason', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'created' }));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-phase');
+  });
+});
+
+describe('SSE agent-stopped/deleted → unavailable (#1659 AC4)', () => {
+  it('markUnavailable(agent-stopped) sets unavailable state', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
+    expect(session.state.connection).toBe('connected');
+
+    session.markUnavailable('agent-stopped', 'Agent has stopped.');
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+    expect(session.state.error).toBe('Agent has stopped.');
+  });
+
+  it('markUnavailable(agent-deleted) sets unavailable with deleted reason', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    session.markUnavailable('agent-deleted', 'Agent was deleted.');
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-deleted');
+    expect(session.state.error).toBe('Agent was deleted.');
+    // Socket should have been closed
+    expect(FakeSocket.instances[0].close).toHaveBeenCalled();
+  });
+
+  it('markUnavailable does not affect a closed session', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+    session.close();
+
+    session.markUnavailable('agent-deleted', 'Should not apply.');
+    expect(session.state.connection).toBe('closed');
+  });
+
+  it('markUnavailable retains session entry and resources', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    session.markUnavailable('agent-stopped', 'Agent has stopped.');
+
+    expect(f.resources.dispose).not.toHaveBeenCalled();
+    expect(f.registry.list()).toHaveLength(1);
+  });
+});
+
+describe('warm navigation guard (#1659 AC5)', () => {
+  it('connect() on connected session does not trigger reconnect', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
+    expect(session.state.connection).toBe('connected');
+    const initialGeneration = session.state.generation;
+
+    // Simulating warm select by calling connect() on already-connected session
+    const result = session.connect();
+    expect(result).toEqual(Promise.resolve());
+    await result;
+
+    // No new socket, no generation change, no reset
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(session.state.generation).toBe(initialGeneration);
+    expect(f.resources.reset).not.toHaveBeenCalled();
+  });
+
+  it('connect() while connecting shares existing attempt', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+    const duplicate = session.connect();
+    expect(duplicate).toBe(attempt);
+    await attempt;
+  });
+});
+
+describe('buffer reset on reconnect (#1659 AC6)', () => {
+  it('successful reconnect resets buffer', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+    expect(f.resources.reset).not.toHaveBeenCalled();
+
+    await session.connect();
+    FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data();
+    expect(f.resources.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it('failed reconnect does not reset buffer', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json({}, 403));
+    await session.connect();
+
+    expect(f.resources.reset).not.toHaveBeenCalled();
+    expect(f.resources.dispose).not.toHaveBeenCalled();
+  });
+
+  it('failed reconnect followed by successful reconnect resets buffer once', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    // First reconnect fails
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json({}, 403));
+    await session.connect();
+    expect(f.resources.reset).not.toHaveBeenCalled();
+
+    // Second reconnect succeeds
+    f.fetcher.mockResolvedValue(json(agent));
+    await session.connect();
+    FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data();
+    expect(f.resources.reset).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reconnecting getter (#1659)', () => {
+  it('reconnecting is true during pending connect, false after', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+
+    // registry.open() auto-calls connect(), so reconnecting starts true
+    expect(session.reconnecting).toBe(true);
+    const attempt = session.connect(); // shares the existing attempt
+    expect(session.reconnecting).toBe(true);
+    await attempt;
+    // pending cleared after attempt completes
+    expect(session.reconnecting).toBe(false);
+  });
+
+  it('reconnecting reflects ongoing attempt even after socket opens', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    const attempt = session.connect();
+    expect(session.reconnecting).toBe(true);
+    await attempt;
+    expect(session.reconnecting).toBe(false);
+  });
+});
+
+describe('generation guard after extractApiError (#1659 P3.2)', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  /** Create a Response whose .json() is delayed until the deferred resolves. */
+  function slowErrorResponse(status: number, gate: { promise: Promise<unknown> }): Response {
+    return {
+      ok: false,
+      status,
+      statusText: `Error ${status}`,
+      json: () => gate.promise,
+    } as unknown as Response;
+  }
+
+  it('does not overwrite closed state with disconnected after delayed extractApiError (agent metadata path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    // First fetch (agent metadata) returns a slow error response
+    f.fetcher.mockResolvedValueOnce(slowErrorResponse(500, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    // Wait until fetch is called
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(1));
+
+    // Close the session while extractApiError is waiting on json()
+    session.close();
+    expect(session.state.connection).toBe('closed');
+
+    // Now resolve the slow body — the late continuation should be suppressed
+    bodyGate.resolve({ error: { message: 'server error' } });
+    await attempt;
+
+    // State must remain 'closed', not overwritten to 'disconnected'
+    expect(session.state.connection).toBe('closed');
+  });
+
+  it('does not overwrite unavailable state with disconnected after delayed extractApiError (agent metadata path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    f.fetcher.mockResolvedValueOnce(slowErrorResponse(500, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(1));
+
+    // markUnavailable while extractApiError is waiting
+    session.markUnavailable('agent-stopped', 'Agent has stopped.');
+    expect(session.state.connection).toBe('unavailable');
+
+    bodyGate.resolve({ error: { message: 'server error' } });
+    await attempt;
+
+    // State must remain 'unavailable', not overwritten to 'disconnected'
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+  });
+
+  it('does not overwrite closed state with disconnected after delayed extractApiError (preflight path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    // First fetch (agent metadata) succeeds, second fetch (preflight) returns slow error
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(slowErrorResponse(503, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    // Wait until both fetches are called
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(2));
+
+    // Close while extractApiError parses the preflight body
+    session.close();
+    expect(session.state.connection).toBe('closed');
+
+    bodyGate.resolve({ error: { message: 'broker unavailable' } });
+    await attempt;
+
+    expect(session.state.connection).toBe('closed');
+  });
+
+  it('does not overwrite unavailable state with disconnected after delayed extractApiError (preflight path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(slowErrorResponse(503, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(2));
+
+    session.markUnavailable('agent-deleted', 'Agent was deleted.');
+    expect(session.state.connection).toBe('unavailable');
+
+    bodyGate.resolve({ error: { message: 'broker unavailable' } });
+    await attempt;
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-deleted');
+  });
+});
+
+describe('disconnect reason cleared on reconnect (#1659)', () => {
+  it('connect() clears previous disconnect reason', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+    expect(session.state.disconnectReason).toBe('network');
+
+    const attempt = session.connect();
+    // After connect() is called, the reason should be cleared
+    expect(session.state.disconnectReason).toBeNull();
+    await attempt;
+  });
+});
+
+describe('subscribers see reconnecting=false once an attempt settles without a socket', () => {
+  const noPath = {
+    error: {
+      code: 'runtime_attach_unsupported',
+      message: 'No path to the terminal',
+      details: { reason: 'agent_pty_unavailable' },
+    },
+  };
+
+  it.each([
+    ['attach unsupported', json(agent), json(noPath, 503), 'attach-unsupported'],
+    ['denied (403)', json(agent), json({ error: { message: 'denied' } }, 403), 'auth-403'],
+    ['unauthenticated (401)', json(agent), json({ error: { message: 'login' } }, 401), 'auth-401'],
+    ['preflight 5xx', json(agent), json({ error: { message: 'down' } }, 503), 'server-error'],
+  ] as const)(
+    'initial load, %s: the last notification has reconnecting=false',
+    async (_name, agentResponse, preflightResponse, reason) => {
+      const f = fixture();
+      f.fetcher.mockResolvedValueOnce(agentResponse).mockResolvedValueOnce(preflightResponse);
+      const session = f.registry.open(agentId, f.initialize, { deferConnect: true });
+      const seen: boolean[] = [];
+      session.subscribe(() => seen.push(session.reconnecting));
+      await session.connect();
+      await Promise.resolve();
+
+      expect(session.state.disconnectReason).toBe(reason);
+      expect(seen).toContain(true); // the attempt was reported while it ran
+      expect(seen[seen.length - 1]).toBe(false); // and its end was reported too
+      expect(FakeSocket.instances).toHaveLength(0);
+    }
+  );
+
+  it('initial load, agent unavailable: the last notification has reconnecting=false', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'stopped' }));
+    const session = f.registry.open(agentId, f.initialize, { deferConnect: true });
+    const seen: boolean[] = [];
+    session.subscribe(() => seen.push(session.reconnecting));
+    await session.connect();
+    await Promise.resolve();
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(seen[seen.length - 1]).toBe(false);
+  });
+
+  it('initial load, a thrown error: the last notification has reconnecting=false', async () => {
+    const f = fixture();
+    f.fetcher.mockRejectedValueOnce(new Error('network down'));
+    const session = f.registry.open(agentId, f.initialize, { deferConnect: true });
+    const seen: boolean[] = [];
+    session.subscribe(() => seen.push(session.reconnecting));
+    await session.connect().catch(() => undefined);
+    await Promise.resolve();
+
+    expect(seen[seen.length - 1]).toBe(false);
+  });
+
+  it('after a 4503 wait, a no-path answer: the last notification has reconnecting=false', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const session = f.registry.open(agentId, f.initialize);
+      await session.connect();
+      FakeSocket.instances[0].open();
+      FakeSocket.instances[0].data();
+      session.setFrontmost(true);
+      const seen: boolean[] = [];
+      session.subscribe(() => seen.push(session.reconnecting));
+      f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(noPath, 503));
+
+      FakeSocket.instances[0].readyState = 3;
+      FakeSocket.instances[0].onclose?.({ code: 4503 });
+      expect(seen[seen.length - 1]).toBe(true); // the wait is reported
+      await vi.advanceTimersByTimeAsync(5_001);
+
+      expect(session.state.disconnectReason).toBe('attach-unsupported');
+      expect(seen[seen.length - 1]).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

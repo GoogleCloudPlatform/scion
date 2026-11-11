@@ -268,24 +268,6 @@ func TestFormatNewDelivery_PlainReturnsRawText(t *testing.T) {
 	}
 }
 
-func TestFormatNewDelivery_RawReturnsRawText(t *testing.T) {
-	intent := IntentRequest
-	msg := &Message{
-		ID:        "msg-008",
-		From:      PrincipalRef("user:alice"),
-		Kind:      KindText,
-		Intent:    &intent,
-		Body:      "keystroke content",
-		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
-	}
-
-	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{Raw: true}, false, false)
-
-	if result != "keystroke content" {
-		t.Errorf("raw delivery = %q, want %q", result, "keystroke content")
-	}
-}
-
 func TestFormatNewDelivery_Delimiters(t *testing.T) {
 	intent := IntentRequest
 	msg := &Message{

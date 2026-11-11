@@ -24,72 +24,11 @@ package hub
 import (
 	"encoding/json"
 	"net/http"
-	"sort"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// additiveEnvelope is a minimal struct for decoding the rendered envelope.
-type additiveEnvelope struct {
-	Type string   `json:"type"`
-	To   []string `json:"to,omitempty"`
-	From string   `json:"from"`
-	Msg  string   `json:"msg"`
-}
-
-// parseAdditiveEnvelope extracts and decodes the JSON envelope from DeliveryText.
-func parseAdditiveEnvelope(t *testing.T, deliveryText string) additiveEnvelope {
-	t.Helper()
-	jsonStr := extractDEF169JSON(t, deliveryText) // reuse the existing helper
-	var env additiveEnvelope
-	if err := json.Unmarshal([]byte(jsonStr), &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope JSON: %v\nJSON: %s", err, jsonStr)
-	}
-	return env
-}
-
-// collectEnvelopes extracts agent slug -> envelope from dispatched messages.
-func collectEnvelopes(t *testing.T, dispatched []brokerDispatchedMsg) map[string]additiveEnvelope {
-	t.Helper()
-	envelopes := make(map[string]additiveEnvelope)
-	for _, d := range dispatched {
-		if d.structured == nil {
-			t.Errorf("dispatch to %q has nil structured message", d.agentSlug)
-			continue
-		}
-		if d.structured.DeliveryText == "" {
-			t.Fatalf("dispatch to %q has empty DeliveryText — writeDenyEnabled() path not reached", d.agentSlug)
-		}
-		envelopes[d.agentSlug] = parseAdditiveEnvelope(t, d.structured.DeliveryText)
-	}
-	return envelopes
-}
-
-// sortedTo returns a sorted copy of the "to" array.
-func sortedTo(to []string) []string {
-	c := make([]string, len(to))
-	copy(c, to)
-	sort.Strings(c)
-	return c
-}
-
-// assertToEqual checks that two "to" arrays contain the same elements.
-func assertToEqual(t *testing.T, label string, got, want []string) {
-	t.Helper()
-	gs := sortedTo(got)
-	ws := sortedTo(want)
-	if len(gs) != len(ws) {
-		t.Errorf("%s: to length = %d, want %d; got %v, want %v", label, len(gs), len(ws), gs, ws)
-		return
-	}
-	for i := range ws {
-		if gs[i] != ws[i] {
-			t.Errorf("%s: to[%d] = %q, want %q", label, i, gs[i], ws[i])
-		}
-	}
-}
 
 // Case 1: Default + mention
 // Topic has default agent-a. Message mentions agent-b.

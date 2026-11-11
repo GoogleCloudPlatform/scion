@@ -1742,3 +1742,110 @@ func TestScriptTokenStillAuthenticatesRequests(t *testing.T) {
 			"from argv but must still be sent in the Authorization header via "+
 			"-K <configfile>")
 }
+
+// ---------------------------------------------------------------------------
+// Step 6: IAP OAuth client ID output (ptone/scion#1301)
+//
+// IAP auto-generates the OAuth client, so deploy.sh never holds its ID; step 6
+// reads it back from the project's IAP settings with
+// di_print_iap_oauth_client_id (the same `gcloud iap settings get
+// --resource-type=iap_web` lookup hybrid-tier.sh uses). These tests pin that
+// the ID is printed, that only the clientId field is requested, and that a
+// failed, empty or noisy lookup never fails the deploy or masquerades as an ID.
+// ---------------------------------------------------------------------------
+
+// iapSettingsGetArgv is the exact gcloud argv di_print_iap_oauth_client_id
+// must use for project "test-project".
+const iapSettingsGetArgv = "iap settings get --project=test-project " +
+	"--resource-type=iap_web --format=value(accessSettings.oauthSettings.clientId)"
+
+// iapSettingsStub builds a gcloud() mock that records argv and answers only
+// `gcloud iap settings get ...` with the given stdout, stderr and exit code.
+func iapSettingsStub(argvLog, stdout, stderr string, exitCode int) string {
+	return fmt.Sprintf(`gcloud() {
+  printf '%%s\n' "$*" >> %q
+  case "$*" in
+    "iap settings get "*)
+      printf '%%s' %s
+      printf '%%s' %s >&2
+      return %d ;;
+    *)
+      echo "test stub: unexpected gcloud invocation: gcloud $*" >&2
+      return 1 ;;
+  esac
+}`, argvLog, shellQuote(stdout), shellQuote(stderr), exitCode)
+}
+
+func TestScriptStep6PrintsIAPOAuthClientID(t *testing.T) {
+	argvLog := gcloudArgvLog(t)
+	clientID := "123456789-abc123def456.apps.googleusercontent.com"
+	stub := iapSettingsStub(argvLog, clientID+"\n", "", 0)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t, stub,
+		"di_print_iap_oauth_client_id", "test-project")
+	require.Equal(t, 0, exitCode, "stderr: %s", stderr)
+	assert.Contains(t, stdout, "IAP OAuth client ID: "+clientID,
+		"step 6 must print the client ID, clearly labelled")
+
+	argv := readGcloudArgvLog(t, argvLog)
+	assert.Equal(t, iapSettingsGetArgv+"\n", argv,
+		"the lookup must be the supported project-level iap_web settings read, "+
+			"projecting ONLY the clientId field, and nothing else may be called")
+}
+
+func TestScriptStep6ClientIDLookupFailureIsNotFatal(t *testing.T) {
+	argvLog := gcloudArgvLog(t)
+	stub := iapSettingsStub(argvLog, "",
+		"ERROR: (gcloud.iap.settings.get) PERMISSION_DENIED: test stub\nsecond line\n", 1)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t, stub,
+		"di_print_iap_oauth_client_id", "test-project")
+	require.Equal(t, 0, exitCode,
+		"a failed client ID lookup must not fail a deploy that already passed "+
+			"step 4; stderr: %s", stderr)
+	assert.Contains(t, stdout, "IAP OAuth client ID: (could not be determined automatically)")
+	assert.Contains(t, stdout, "gcloud: ERROR: (gcloud.iap.settings.get) PERMISSION_DENIED: test stub",
+		"the fallback must show the first line of gcloud's error")
+	assert.NotContains(t, stdout, "second line",
+		"only the first line of gcloud's error is shown")
+	assert.Contains(t, stdout, "Security > Identity-Aware Proxy",
+		"the fallback must name the console path")
+	assert.Contains(t, stdout, "gcloud iap settings get --project=test-project --resource-type=iap_web",
+		"the fallback must name the supported lookup command")
+	assert.NotContains(t, stdout, "oauth-clients",
+		"the fallback must not point at the shut-down alpha OAuth clients command")
+}
+
+func TestScriptStep6EmptyClientIDFallsBack(t *testing.T) {
+	// IAP settings with no oauthSettings: gcloud succeeds and prints nothing.
+	argvLog := gcloudArgvLog(t)
+	stub := iapSettingsStub(argvLog, "\n", "", 0)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t, stub,
+		"di_print_iap_oauth_client_id", "test-project")
+	require.Equal(t, 0, exitCode, "stderr: %s", stderr)
+	assert.Contains(t, stdout, "IAP OAuth client ID: (could not be determined automatically)")
+	assert.NotContains(t, stdout, "gcloud: ",
+		"no gcloud error line when gcloud wrote nothing to stderr")
+}
+
+func TestScriptStep6IgnoresNonClientIDOutput(t *testing.T) {
+	argvLog := gcloudArgvLog(t)
+	stub := iapSettingsStub(argvLog, "WARNING: something leaked into stdout\n", "", 0)
+
+	stdout, stderr, exitCode := runBashFuncWithSetup(t, stub,
+		"di_print_iap_oauth_client_id", "test-project")
+	require.Equal(t, 0, exitCode, "stderr: %s", stderr)
+	assert.NotContains(t, stdout, "IAP OAuth client ID: WARNING",
+		"output that is not an OAuth client ID must never be presented as one")
+	assert.Contains(t, stdout, "(could not be determined automatically)")
+}
+
+func TestScriptStep6CallsClientIDLookup(t *testing.T) {
+	script := readDeployScript(t)
+	step6 := strings.Index(script, `echo "==> Step 6:`)
+	step7 := strings.Index(script, `echo "==> Step 7:`)
+	require.True(t, step6 >= 0 && step7 > step6, "could not locate steps 6 and 7 in deploy.sh")
+	assert.Contains(t, script[step6:step7], `di_print_iap_oauth_client_id "$DI_PROJECT"`,
+		"di_main step 6 must print the IAP OAuth client ID")
+}

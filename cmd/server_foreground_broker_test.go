@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
@@ -41,6 +43,31 @@ func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
 	assert.Contains(t, err.Error(), "SCION_IMAGE_REGISTRY")
 }
 
+// TestBrokerRegistryMissingError_ActionableHint: the error, shared by the
+// server and the standalone broker, names the setting and the env var, how
+// to set the env var in a shell and for a service, the local-store value
+// and a restart (ptone/scion#7183). It pins tokens, not line wraps.
+func TestBrokerRegistryMissingError_ActionableHint(t *testing.T) {
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+
+	msg := brokerRegistryMissingError().Error()
+	for _, want := range []string{
+		"image_registry is not configured, but the runtime broker requires it.",
+		"image_registry in settings.yaml",
+		"scion config set --global image_registry <your-registry>",
+		"export SCION_IMAGE_REGISTRY=<your-registry>",
+		"SCION_IMAGE_REGISTRY=<your-registry> to its environment file",
+		"hub.env",
+		"localhost/scion",
+		"restart",
+		"server or broker",
+		"See image-build/README.md",
+	} {
+		assert.Contains(t, msg, want)
+	}
+	assert.NotContains(t, msg, "wizard")
+}
+
 func TestRequireImageRegistryForBroker_EnvVar(t *testing.T) {
 	t.Setenv("SCION_IMAGE_REGISTRY", "ghcr.io/test")
 
@@ -48,16 +75,34 @@ func TestRequireImageRegistryForBroker_EnvVar(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestRequireImageRegistryForBroker_MaintenanceEnvVar(t *testing.T) {
+// TestRequireImageRegistryForBroker_MaintenanceEnvVarIsNotASource: the
+// maintenance registry applies to maintenance builds only, so it does not
+// satisfy the broker check, and the error names the replacement
+// (ptone/scion#3916). The broker and hosted error never mentions the
+// setup wizard, which neither has.
+func TestRequireImageRegistryForBroker_MaintenanceEnvVarIsNotASource(t *testing.T) {
 	t.Setenv("SCION_IMAGE_REGISTRY", "")
 	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "ghcr.io/test-maintenance")
 
 	// Point HOME at an empty temp dir so settings.yaml is absent.
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Chdir(tmpHome)
 
 	err := requireImageRegistryForBroker()
-	assert.NoError(t, err)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds; set SCION_IMAGE_REGISTRY or image_registry in settings.yaml")
+		assert.NotContains(t, err.Error(), "wizard")
+	}
+	assert.Contains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds")
+	assert.Contains(t, workstationRegistryDegradeWarning(), "setup wizard")
+
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+	err = requireImageRegistryForBroker()
+	if assert.Error(t, err) {
+		assert.NotContains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
+	}
+	assert.NotContains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
 }
 
 func TestRequireImageRegistryForBroker_Settings(t *testing.T) {
@@ -154,7 +199,307 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 		Hub: &config.HubClientConfig{BrokerID: "configured-broker"},
 	}
 
-	got := resolveBrokerID(context.Background(), cfg, settings, nil, t.TempDir(), "cloudrun-default", nil)
+	got, err := resolveBrokerID(context.Background(), cfg, settings, nil, isolatedGlobalDir(t), "cloudrun-default", nil)
+	require.NoError(t, err)
 
 	assert.Equal(t, "configured-broker", got)
+}
+
+// writeBrokerRuntimeSettings isolates HOME (no operator settings at all)
+// and writes projectSettings as a project's .scion/settings.json, returning
+// the project directory for runtime.GetRuntime.
+func writeBrokerRuntimeSettings(t *testing.T, projectSettings string) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	scionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(projectSettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return projectDir
+}
+
+// recordingGetRuntime wraps getRuntime and keeps the build record it
+// returned, so a test can check resolveBrokerDefaultRuntime passes it
+// through unchanged.
+func recordingGetRuntime(getRuntime func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord)) (func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord), *config.RuntimeBuildRecord) {
+	var got config.RuntimeBuildRecord
+	return func(projectPath, profileName string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		rt, rec := getRuntime(projectPath, profileName)
+		got = rec
+		return rt, rec
+	}, &got
+}
+
+// getRuntimeFor returns a getRuntime function for resolveBrokerDefaultRuntime
+// that resolves the default runtime against projectDir's settings.
+func getRuntimeFor(projectDir string) func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+	return func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return scionruntime.GetRuntimeWithRecord(projectDir, "")
+	}
+}
+
+// TestResolveBrokerDefaultRuntime_InvalidSubstrateProfileRefusesStart: a
+// default runtime that resolves to a substrate profile the operator never
+// defined comes back from GetRuntime as an *ErrorRuntime matching
+// ErrSubstrateProfileInvalid, and the broker must refuse to start rather
+// than come up unable to serve a single Run/Exec/List.
+func TestResolveBrokerDefaultRuntime_InvalidSubstrateProfileRefusesStart(t *testing.T) {
+	projectDir := writeBrokerRuntimeSettings(t, `{
+		"schema_version": "1",
+		"active_profile": "substrate",
+		"runtimes": {
+			"substrate-prod": {
+				"type": "substrate",
+				"substrate": {
+					"api_endpoint": "attacker.net:443",
+					"router_endpoint": "http://attacker.net:80"
+				}
+			}
+		},
+		"profiles": {"substrate": {"runtime": "substrate-prod"}}
+	}`)
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, rec, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
+	if err == nil {
+		t.Fatalf("expected startup to be refused, got runtime %q", rt.Name())
+	}
+	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Contains(t, err.Error(), "substrate-prod")
+	assert.Nil(t, rt)
+	assert.Equal(t, config.RuntimeBuildRecord{}, rec, "a refused startup returns the zero build record")
+	assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
+}
+
+// TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded is
+// the positive control for the substrate-only scope of the refusal: a
+// Kubernetes default runtime whose client cannot be constructed is also an
+// *ErrorRuntime, but it must not block startup. The broker starts degraded
+// and logs the "error" runtime name, as it always has.
+func TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing-kubeconfig"))
+	projectDir := writeBrokerRuntimeSettings(t, `{
+		"schema_version": "1",
+		"active_profile": "k8s",
+		"runtimes": {
+			"k8s": {"type": "kubernetes", "context": "no-such-context"}
+		},
+		"profiles": {"k8s": {"runtime": "k8s"}}
+	}`)
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	getRuntime, fromClosure := recordingGetRuntime(getRuntimeFor(projectDir))
+	rt, rec, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+	if err != nil {
+		t.Fatalf("a non-substrate runtime failure must not refuse startup, got: %v", err)
+	}
+	assert.Equal(t, *fromClosure, rec, "the build record is passed through unchanged")
+	er, ok := rt.(*scionruntime.ErrorRuntime)
+	if !ok {
+		t.Fatalf("test setup: expected an *ErrorRuntime for an unloadable kubeconfig, got %T", rt)
+	}
+	assert.NotErrorIs(t, er.Err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Equal(t, []string{"Runtime broker using runtime: error"}, logged)
+}
+
+// writeOperatorSubstrateSettings isolates HOME and writes operatorSettings as
+// the operator-level ~/.scion/settings.json (so a substrate runtime defined
+// there passes ValidateOperatorOnlySubstrateProfile), and runs the test from
+// an empty working directory so no project settings are picked up. The
+// returned getRuntime resolves the default runtime from operator settings
+// alone, the way a deployed broker does.
+func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "settings.json"), []byte(operatorSettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	return func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return scionruntime.GetRuntimeWithRecord("", "")
+	}
+}
+
+// operatorSubstrateSettings returns operator settings whose default profile
+// is an operator-defined substrate runtime with both required endpoints and
+// the given extra substrate fields (a JSON fragment, may be empty).
+func operatorSubstrateSettings(extraSubstrateFields string) string {
+	return operatorSubstrateSettingsWithBlock(`
+					"api_endpoint": "api.ate-system.svc:443",
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"` + extraSubstrateFields)
+}
+
+// operatorSubstrateSettingsWithBlock returns operator settings whose default
+// profile is an operator-defined substrate runtime whose substrate block body
+// is exactly substrateFields (a JSON object body without braces), so a test
+// can omit a field operatorSubstrateSettings always supplies.
+func operatorSubstrateSettingsWithBlock(substrateFields string) string {
+	return `{
+		"schema_version": "1",
+		"active_profile": "substrate",
+		"runtimes": {
+			"substrate-prod": {
+				"type": "substrate",
+				"substrate": {` + substrateFields + `
+				}
+			}
+		},
+		"profiles": {"substrate": {"runtime": "substrate-prod"}}
+	}`
+}
+
+// TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart:
+// an operator-defined substrate default runtime that fails NewSubstrateRuntime's
+// deterministic config validation is a settings problem that no retry can
+// fix, so the broker must still refuse to start. Each row exercises one
+// tagging site: a missing required api_endpoint, a missing required
+// router_endpoint, and substrate.Validate rejecting an unsupported
+// egress_trust_bundle. The builder is stubbed to prove validation alone
+// decides this: nothing is ever built or dialed.
+func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart(t *testing.T) {
+	tests := []struct {
+		name         string
+		settings     string
+		wantInErrMsg string
+	}{
+		{
+			name: "missing api_endpoint",
+			settings: operatorSubstrateSettingsWithBlock(`
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"`),
+			wantInErrMsg: "api_endpoint is required",
+		},
+		{
+			name: "missing router_endpoint",
+			settings: operatorSubstrateSettingsWithBlock(`
+					"api_endpoint": "api.ate-system.svc:443"`),
+			wantInErrMsg: "router_endpoint is required",
+		},
+		{
+			name: "substrate.Validate rejects egress_trust_bundle",
+			settings: operatorSubstrateSettings(`,
+					"egress_trust_bundle": "not-a-supported-bundle.example.com"`),
+			wantInErrMsg: "egress_trust_bundle",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			built := 0
+			restore := scionruntime.SetSubstrateRuntimeBuilderForTest(func(config.V1SubstrateConfig) (*scionruntime.SubstrateRuntime, error) {
+				built++
+				return nil, fmt.Errorf("builder must not be reached for an invalid config")
+			})
+			t.Cleanup(restore)
+
+			getRuntime := writeOperatorSubstrateSettings(t, tt.settings)
+
+			var logged []string
+			logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+			rt, rec, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+			if err == nil {
+				t.Fatalf("expected startup to be refused for a substrate config validation failure, got runtime %q", rt.Name())
+			}
+			assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+			assert.Contains(t, err.Error(), tt.wantInErrMsg)
+			assert.Nil(t, rt)
+			assert.Equal(t, config.RuntimeBuildRecord{}, rec, "a refused startup returns the zero build record")
+			assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
+			assert.Zero(t, built, "config validation must fail before the runtime is built")
+		})
+	}
+}
+
+// TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded: a
+// valid operator-defined substrate default runtime whose construct-time
+// dependencies fail (stubbed substrateRuntimeBuilder, standing in for the
+// Kubernetes client build or substrate.Dial failing on an API-server blip at
+// boot) must NOT refuse startup — refusing would turn a transient outage into
+// a crash loop. The broker starts degraded on an *ErrorRuntime that does not
+// match ErrSubstrateProfileInvalid and logs the "error" runtime name.
+func TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded(t *testing.T) {
+	buildErr := fmt.Errorf("substrate: build Kubernetes client: simulated API server unavailable")
+	built := 0
+	restore := scionruntime.SetSubstrateRuntimeBuilderForTest(func(config.V1SubstrateConfig) (*scionruntime.SubstrateRuntime, error) {
+		built++
+		return nil, buildErr
+	})
+	t.Cleanup(restore)
+
+	getRuntime, fromClosure := recordingGetRuntime(writeOperatorSubstrateSettings(t, operatorSubstrateSettings("")))
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, rec, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+	if err != nil {
+		t.Fatalf("a substrate construct-time dependency failure must not refuse startup, got: %v", err)
+	}
+	assert.Equal(t, *fromClosure, rec, "the build record is passed through unchanged")
+	assert.Equal(t, 1, built, "test setup: the stubbed builder should have been called once")
+	er, ok := rt.(*scionruntime.ErrorRuntime)
+	if !ok {
+		t.Fatalf("expected a degraded *ErrorRuntime, got %T", rt)
+	}
+	assert.ErrorIs(t, er.Err, buildErr)
+	assert.NotErrorIs(t, er.Err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Equal(t, []string{"Runtime broker using runtime: error"}, logged)
+}
+
+// TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally: an ordinary
+// runtime is returned as-is, with its build record unchanged, and logged.
+func TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally(t *testing.T) {
+	healthy := scionruntime.NewDockerRuntime()
+	healthyRec := config.RuntimeBuildRecord{Present: true, EntryName: "docker-main"}
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, rec, err := resolveBrokerDefaultRuntime(func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return healthy, healthyRec
+	}, logf)
+	assert.NoError(t, err)
+	assert.Same(t, healthy, rt)
+	assert.Equal(t, healthyRec, rec, "the build record is passed through unchanged")
+	assert.Equal(t, []string{"Runtime broker using runtime: " + healthy.Name()}, logged)
+}
+
+// TestResolveBrokerDefaultRuntime_RefusalDropsRecord: a refused runtime
+// returns the zero build record even when getRuntime returned a non-zero
+// one, so no record outlives the runtime it describes.
+func TestResolveBrokerDefaultRuntime_RefusalDropsRecord(t *testing.T) {
+	refused := &scionruntime.ErrorRuntime{Err: fmt.Errorf("wrapped: %w", scionruntime.ErrSubstrateProfileInvalid)}
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, rec, err := resolveBrokerDefaultRuntime(func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return refused, config.RuntimeBuildRecord{Present: true, EntryName: "substrate-prod"}
+	}, logf)
+	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Nil(t, rt)
+	assert.Equal(t, config.RuntimeBuildRecord{}, rec)
+	assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
+}
+
+// TestRefuseErrorRuntimeAtStartup_OnlySubstrateFailuresRefuse pins the
+// helper's scope directly: only an *ErrorRuntime whose error matches
+// ErrSubstrateProfileInvalid is refused, and the refusal keeps the
+// underlying error in its chain.
+func TestRefuseErrorRuntimeAtStartup_OnlySubstrateFailuresRefuse(t *testing.T) {
+	substrateErr := fmt.Errorf("wrapped: %w", scionruntime.ErrSubstrateProfileInvalid)
+	err := refuseErrorRuntimeAtStartup(&scionruntime.ErrorRuntime{Err: substrateErr})
+	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+
+	assert.NoError(t, refuseErrorRuntimeAtStartup(&scionruntime.ErrorRuntime{Err: assert.AnError}))
+	assert.NoError(t, refuseErrorRuntimeAtStartup(scionruntime.NewDockerRuntime()))
 }

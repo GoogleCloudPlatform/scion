@@ -302,10 +302,16 @@ func TestRS3_ProjectDeleteStaleOwnerIDDenied(t *testing.T) {
 	}))
 	ensureHubMembership(ctx, s, staleOwnerID)
 
-	// Simulate stale OwnerID by updating the project record.
-	project, _ := s.GetProject(ctx, projectID)
-	project.OwnerID = staleOwnerID
-	_ = s.UpdateProject(ctx, project)
+	// Simulate a stale OwnerID with the dedicated owner writer. The general
+	// UpdateProject no longer writes OwnerID (ptone/scion#2597), so it cannot
+	// be used for this setup. Assert the precondition so the test cannot go
+	// vacuous if the setup stops taking effect.
+	require.NoError(t, s.SetProjectOwnerID(ctx, projectID, staleOwnerID))
+	project, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	require.Equal(t, staleOwnerID, project.OwnerID, "precondition: project.OwnerID names the stale user")
+	require.Empty(t, projectBindingsFor(t, s, projectID, staleOwnerID),
+		"precondition: the stale owner holds no project role bindings")
 
 	req := ProjectDeleteRequest{
 		ProjectID: projectID,
@@ -377,6 +383,40 @@ func TestRS3_ProjectDeleteScopedUATDenied(t *testing.T) {
 
 	_, decision := srv.deletionService.Delete(ctx, req)
 	require.NotNil(t, decision, "scoped UAT should be denied for project deletion")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, ErrCodeCredentialInsufficient, decision.DenialCode)
+	assert.Equal(t, 403, decision.HTTPStatus)
+	// Project delete is session-only with the IRREVERSIBLE_CASCADE reason.
+	assert.Equal(t, sessionOnlyDenialDetails(authzop.ReasonIrreversibleCascade), decision.Details)
+}
+
+// TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied: an unrecognized
+// credential kind — as credentialContextForIdentity's fail-closed default
+// produces for an unclassified identity — is denied by the same
+// session-only ceiling as a scoped UAT above, not silently admitted because
+// it isn't one of the specifically-named non-session kinds.
+// ProjectDeletionService.Delete enforces this credential ceiling directly,
+// independent of requireSessionCredential and
+// (*UserAccessTokenService).enforceSessionCredential.
+func TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-unrec-deny")
+	ownerID := tid("rs3-unrec-deny-user")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+
+	ctx = setTestIdentity(ctx, req.Actor)
+	ctx = setTestCredentialContext(ctx, CredentialContext{Kind: CredentialKind("bogus")})
+
+	_, decision := srv.deletionService.Delete(ctx, req)
+	require.NotNil(t, decision, "an unrecognized credential kind should be denied for project deletion")
 	assert.False(t, decision.Allowed)
 	assert.Equal(t, ErrCodeCredentialInsufficient, decision.DenialCode)
 	assert.Equal(t, 403, decision.HTTPStatus)
@@ -767,8 +807,17 @@ func findDeleteProjectCallSites(t *testing.T) []callSite {
 	dirs := []string{"pkg/hub/", "pkg/store/entadapter/"}
 	for _, dir := range dirs {
 		fullDir := filepath.Join(repoRoot(t), dir)
-		entries, err := os.ReadDir(fullDir)
+		// pkgmove:scan-covers guardScanSubdirs
+		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub and its guardScanSubdirs entries; pkg/store/entadapter is read alone).
+		read := os.ReadDir
+		if dir == "pkg/hub/" {
+			read = readGuardScanDirs
+		}
+		entries, err := read(fullDir)
 		if err != nil {
+			if dir == "pkg/hub/" {
+				t.Fatalf("reading %s: %v", fullDir, err)
+			}
 			continue
 		}
 		for _, entry := range entries {
@@ -819,6 +868,7 @@ func findCallSitesInFile(t *testing.T, filePath, relPath, symbol string) []callS
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	// Walk up from the test file to find the repository root.
+	// scan-coverage:exempt locates the module root; enumerates no files.
 	dir, err := os.Getwd()
 	require.NoError(t, err)
 	for {
@@ -836,38 +886,6 @@ func repoRoot(t *testing.T) string {
 // ---------------------------------------------------------------------------
 // Test Helpers
 // ---------------------------------------------------------------------------
-
-func createRS3Project(t *testing.T, s store.Store, projectID, ownerID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: ownerID, Email: ownerID + "@test.com",
-		DisplayName: "Owner", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, ownerID)
-
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:        projectID,
-		Name:      "RS3 Test Project " + projectID,
-		Slug:      fmt.Sprintf("rs3-test-%s", projectID[:8]),
-		CreatedBy: ownerID,
-	}))
-
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: ownerRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      ownerID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create owner binding: %v", err)
-	}
-}
 
 func createRS3UserWithRole(t *testing.T, s store.Store, userID, email, projectID, roleName string) {
 	t.Helper()
@@ -1386,10 +1404,12 @@ func TestRS3_ProjectDeleteCascadeUATsSchedulesCredentials(t *testing.T) {
 		ExpiresAt:    time.Now().Add(24 * time.Hour),
 	}))
 
-	// Delete the project.
+	// Delete the project. The agent is live, so the delete is forced
+	// (ptone/scion#4811).
 	req := ProjectDeleteRequest{
 		ProjectID: projectID,
 		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+		Force:     true,
 	}
 	ctx = setTestIdentity(ctx, req.Actor)
 
@@ -1645,17 +1665,6 @@ func (d *rs3EffectSpy) DispatchAgentDelete(_ context.Context, _ *store.Agent, _,
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// newTestAuthzService creates an AuthzService from the given store for use in
-// failure injection tests where we can't use the full server.
-func newTestAuthzService(s store.Store) *AuthzService {
-	return NewAuthzService(s, slog.Default())
-}
-
-// setTestIdentity sets the identity in context for the test.
-func setTestIdentity(ctx context.Context, user UserIdentity) context.Context {
-	return contextWithIdentity(ctx, user)
-}
 
 // setTestCredentialContext sets the credential context for the test.
 func setTestCredentialContext(ctx context.Context, cred CredentialContext) context.Context {

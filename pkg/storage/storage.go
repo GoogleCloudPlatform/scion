@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -75,7 +76,9 @@ type Credentials struct {
 type Object struct {
 	// Name is the object name/path.
 	Name string `json:"name"`
-	// Size is the object size in bytes.
+	// Size is the object size in bytes. On objects returned by Download it
+	// is the number of bytes the reader yields, or -1 when that is unknown
+	// (for example, GCS decompressing a gzip-encoded object on read).
 	Size int64 `json:"size"`
 	// ContentType is the MIME content type.
 	ContentType string `json:"contentType,omitempty"`
@@ -87,6 +90,27 @@ type Object struct {
 	Updated time.Time `json:"updated,omitempty"`
 	// Metadata is custom metadata attached to the object.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// Generation identifies this version of the object's content, for
+	// providers that version objects (GCS); 0 when the provider does not.
+	Generation int64 `json:"generation,omitempty"`
+}
+
+// ErrPreconditionFailed is returned by DeleteIfGeneration when the object
+// no longer has the given generation.
+var ErrPreconditionFailed = errors.New("object generation does not match")
+
+// GenerationDeleter is implemented by providers that can delete an object
+// only while it still has a given generation (GCS), so a delete that
+// reaches the provider late does not remove content written since.
+// Callers that must not lose content written after a delete was issued use
+// it for such providers; an unconditional Delete is only safe on providers
+// whose delete is synchronous (it never applies after the call returns),
+// such as local storage, which does not implement this interface.
+type GenerationDeleter interface {
+	// DeleteIfGeneration deletes the object at objectPath if its
+	// generation is generation. It returns ErrNotFound when there is no
+	// object and ErrPreconditionFailed when its generation differs.
+	DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error
 }
 
 // SignedURLOptions configures signed URL generation.
@@ -99,6 +123,14 @@ type SignedURLOptions struct {
 	ContentType string
 	// ContentMD5 is the expected MD5 hash (for PUT).
 	ContentMD5 string
+	// ResponseContentType, when set on a GET URL, overrides the
+	// Content-Type the object store answers with. Providers that cannot
+	// override response headers ignore it.
+	ResponseContentType string
+	// ResponseContentDisposition, when set on a GET URL, overrides the
+	// Content-Disposition the object store answers with. Providers that
+	// cannot override response headers ignore it.
+	ResponseContentDisposition string
 }
 
 // SignedURL contains a signed URL for object access.
@@ -186,6 +218,13 @@ type UploadOptions struct {
 	CacheControl string
 	// Metadata is custom metadata to attach to the object.
 	Metadata map[string]string
+	// Idempotent says that writing these bytes again is harmless (a
+	// content-addressed object always gets the same bytes) and that the
+	// caller retries a failed write itself, with its own bound on attempts
+	// and time: the provider makes one request per call at any size (GCS
+	// turns off its client's retrying and sends the object in a single
+	// non-resumable request) and returns its error.
+	Idempotent bool
 }
 
 // New creates a new storage client based on the configuration.
@@ -200,8 +239,8 @@ func New(ctx context.Context, cfg Config) (Storage, error) {
 	}
 }
 
-// ResourceKind identifies a storable, file-based resource type. The grove→project
-// resource-storage refactor (§7.3) is collapsing the parallel template and
+// ResourceKind identifies a storable, file-based resource type. The
+// resource-storage layout collapses the parallel template and
 // harness-config storage code onto a single kind-keyed implementation; this is
 // the first shared seam — the storage-path layout.
 type ResourceKind string
@@ -227,6 +266,20 @@ func resourcePrefix(kind ResourceKind) string {
 	}
 }
 
+// DirPrefix returns the DeletePrefix/List prefix that matches exactly the
+// objects under the directory-like storage path dir: dir with one trailing
+// "/". Object stores such as GCS match prefixes as plain strings, so passing
+// "a/foo" would also match the sibling "a/foo-bar/...". An empty (or
+// all-slash) dir yields "", which DeletePrefix rejects with ErrInvalidPath,
+// rather than "/", which would match every object in the bucket.
+func DirPrefix(dir string) string {
+	dir = strings.TrimRight(dir, "/")
+	if dir == "" {
+		return ""
+	}
+	return dir + "/"
+}
+
 // ResourceStoragePath returns the storage path for a file-based resource of the
 // given kind, organized by scope. This is the single source of truth for the
 // scope layout shared by all resource kinds; the per-kind helpers below delegate
@@ -237,22 +290,50 @@ func ResourceStoragePath(hubID string, kind ResourceKind, scope, scopeID, slug s
 	switch scope {
 	case "global":
 		scopePath = prefix + "/global/" + slug
-	case "grove", "project":
+	case "project":
 		scopePath = prefix + "/groves/" + scopeID + "/" + slug
 	case "user":
 		scopePath = prefix + "/users/" + scopeID + "/" + slug
 	default:
 		scopePath = prefix + "/" + slug
 	}
+	return hubNamespaced(hubID, scopePath)
+}
+
+// hubNamespaced prefixes path with hubID's namespace ("hubs/<hubID>/"); an
+// empty hubID leaves path un-namespaced (the legacy layout).
+func hubNamespaced(hubID, path string) string {
 	if hubID != "" {
-		return "hubs/" + hubID + "/" + scopePath
+		return "hubs/" + hubID + "/" + path
 	}
-	return scopePath
+	return path
+}
+
+// ResourceRootPaths returns the storage directories below which
+// ResourceStoragePath places every resource of kind for hubID: the bare kind
+// directory (the legacy un-namespaced layout) and, for a non-empty hubID, the
+// hub-namespaced one. Nothing else (workspaces, other kinds) lies below them.
+func ResourceRootPaths(hubID string, kind ResourceKind) []string {
+	roots := []string{resourcePrefix(kind)}
+	if hubID != "" {
+		roots = append(roots, hubNamespaced(hubID, resourcePrefix(kind)))
+	}
+	return roots
 }
 
 // ResourceStorageURI returns the full bucket URI for a file-based resource.
 func ResourceStorageURI(hubID, bucket string, kind ResourceKind, scope, scopeID, slug string) string {
-	return "gs://" + bucket + "/" + ResourceStoragePath(hubID, kind, scope, scopeID, slug) + "/"
+	return StorageURIForPath(bucket, ResourceStoragePath(hubID, kind, scope, scopeID, slug))
+}
+
+// StorageURIForPath returns the full bucket URI for an already-computed
+// storage path, e.g. one made request-unique with a suffix the per-kind
+// path helpers above don't know about. Callers that can express their path
+// as (hubID, kind, scope, scopeID, slug) should use ResourceStorageURI (or
+// one of its per-kind wrappers) instead, so the URI format stays defined in
+// this one place either way.
+func StorageURIForPath(bucket, path string) string {
+	return "gs://" + bucket + "/" + strings.TrimRight(path, "/") + "/"
 }
 
 // TemplateStoragePath returns the storage path for a template.
@@ -289,28 +370,13 @@ func HarnessConfigStorageURI(hubID, bucket, scope, scopeID, slug string) string 
 }
 
 // WorkspaceStoragePath returns the storage path for an agent's workspace.
-// Workspaces are stored under /workspaces/{groveId}/{agentId}/.
-func WorkspaceStoragePath(hubID, groveID, agentID string) string {
-	path := "workspaces/" + groveID + "/" + agentID
-	if hubID != "" {
-		return "hubs/" + hubID + "/" + path
-	}
-	return path
-}
-
-// ProjectWorkspaceStoragePath returns the storage path for a hub-managed project's shared workspace.
-// Hub-managed projects share a single workspace across agents (no per-agent worktrees),
-// so the path is grove-level rather than agent-level.
-func ProjectWorkspaceStoragePath(hubID, groveID string) string {
-	path := "workspaces/" + groveID + "/grove-workspace"
-	if hubID != "" {
-		return "hubs/" + hubID + "/" + path
-	}
-	return path
+// Workspaces are stored under /workspaces/{projectId}/{agentId}/.
+func WorkspaceStoragePath(hubID, projectID, agentID string) string {
+	return hubNamespaced(hubID, "workspaces/"+projectID+"/"+agentID)
 }
 
 // WorkspaceStorageURI returns the full storage URI for an agent's workspace.
-func WorkspaceStorageURI(hubID, bucket, groveID, agentID string) string {
-	path := WorkspaceStoragePath(hubID, groveID, agentID)
+func WorkspaceStorageURI(hubID, bucket, projectID, agentID string) string {
+	path := WorkspaceStoragePath(hubID, projectID, agentID)
 	return "gs://" + bucket + "/" + path + "/"
 }

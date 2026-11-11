@@ -385,7 +385,6 @@ export async function pollPreviewJobUntilDone(
   const { initialIntervalMs = 2000, maxIntervalMs = 10000, onProgress, signal } = options;
   let interval = initialIntervalMs;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const job = await pollPreviewJob(jobId, { signal: signalInit(signal) });
 
@@ -422,6 +421,7 @@ export async function pollPreviewJobUntilDone(
       if (signal) {
         onAbort = () => {
           clearTimeout(timer);
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the AbortSignal reason unchanged, as signal.throwIfAborted() does, so callers can still match it.
           reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
         };
         signal.addEventListener('abort', onAbort, { once: true });

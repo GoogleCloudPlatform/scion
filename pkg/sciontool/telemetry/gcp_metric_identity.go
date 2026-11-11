@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
@@ -18,9 +19,46 @@ const (
 	gcpResourceIDLabel = "scion_metric_resource_id"
 	gcpScopeIDLabel    = "scion_metric_scope_id"
 	gcpPointIDLabel    = "scion_metric_point_id"
-	gcpAgentLabel      = "scion_agent_id"
-	gcpProjectLabel    = "scion_project_id"
+	gcpAgentLabel      = telemetrycontract.AgentLabel
+	gcpProjectLabel    = telemetrycontract.ProjectLabel
+	gcpAgentSlugLabel  = telemetrycontract.AgentSlugLabel
 )
+
+// identityLabelKeys are the exporter-reserved canonical identity labels
+// (design D3/D7): a producer may never set these itself. They are stamped
+// only from the receiver's authoritative resource identity.
+var identityLabelKeys = []string{gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLabel}
+
+// rejectReservedIdentityPointLabel enforces, at admission, that a producer
+// never sets one of the exporter-reserved canonical identity labels itself
+// (design D3/D7). The GCP path already rejects these per point through
+// validateDescriptor/validateCloudIdentity; this is the same rule for the
+// generic OTLP path, which used to defer the check to export time
+// (stampIdentityLabels), too late to fail only the offending request rather
+// than poisoning the whole batch on a retry loop.
+//
+// Compares cloudLabelKey(kv.Key), not kv.Key directly:
+// the GCP path normalizes dots and dashes to underscores before comparing,
+// so a producer label spelled scion.agent.id or scion-agent-id is rejected
+// there too. Some generic-OTLP backends (for example a Prometheus/Mimir
+// translation layer) apply the same dot-to-underscore mapping, so without
+// this a producer using the dotted spelling could still collide with the
+// stamped scion_agent_id after translation. Matching the GCP path's
+// normalization here closes that gap for the same spoofing concern.
+func rejectReservedIdentityPointLabel(attrs []*commonpb.KeyValue) error {
+	for _, kv := range attrs {
+		if kv == nil {
+			continue
+		}
+		normalized := cloudLabelKey(kv.Key)
+		for _, reserved := range identityLabelKeys {
+			if normalized == reserved {
+				return fmt.Errorf("reserved canonical identity metric label")
+			}
+		}
+	}
+	return nil
+}
 
 var cloudResourceFields = map[string]bool{
 	"service.name": true, "service.namespace": true, "service.instance.id": true,
@@ -29,10 +67,24 @@ var cloudResourceFields = map[string]bool{
 	"gcp.project_id": true,
 }
 var cloudScopeFields = map[string]bool{"component": true, "scope.kind": true, "scope.variant": true}
+
+// cloudPointFields is the general point-label allowlist shared by every
+// reserved counter and hook metric except scion.usage.tokens: token_type
+// is a closed enum meaningful only on that one metric, so it is not a member
+// of this set. cloudPointFieldsFor routes scion.usage.tokens to
+// cloudUsageTokenFields instead.
 var cloudPointFields = map[string]bool{
 	"agent_id": true, "project_id": true, "harness": true, "model": true,
 	"tool_name": true, "status": true, "operation": true, "sensor": true,
 	"phase": true, "run": true,
+}
+
+// cloudUsageTokenFields is the point-label allowlist for scion.usage.tokens
+// only (design §3.2): harness and model as usual, plus the closed
+// token_type enum. checkTokenTypeField enforces the enum's membership; being
+// listed here only admits the label, it does not validate its value.
+var cloudUsageTokenFields = map[string]bool{
+	"harness": true, "model": true, telemetrycontract.TokenTypeLabel: true,
 }
 
 const pipelineMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -49,7 +101,45 @@ func cloudPointFieldsFor(scopeName, metricName string) map[string]bool {
 			return cloudExportErrorFields
 		}
 	}
+	if metricName == telemetrycontract.MetricUsageTokens {
+		return cloudUsageTokenFields
+	}
 	return cloudPointFields
+}
+
+// checkTokenTypeField enforces the closed token_type enum (design §3.2:
+// "Any other value is an admission error") on the GCP path, wherever the
+// label is allowed at all (only scion.usage.tokens, via
+// cloudPointFieldsFor/cloudUsageTokenFields above). It is a no-op for every
+// other point label. checkUsageTokenTypeField below is its generic-OTLP
+// counterpart.
+func checkTokenTypeField(kv *commonpb.KeyValue) error {
+	if kv == nil || kv.Key != telemetrycontract.TokenTypeLabel {
+		return nil
+	}
+	value, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue)
+	if !ok || !telemetrycontract.ValidTokenType(value.StringValue) {
+		return fmt.Errorf("invalid token_type")
+	}
+	return nil
+}
+
+// checkUsageTokenTypeField enforces the same closed token_type enum (design
+// §3.2: "Any other value is an admission error") on the generic OTLP
+// admission path: the generic path has no per-metric label allowlist to
+// route token_type's validation through the way cloudPointFieldsFor does
+// for GCP, so this checks it directly, scoped to scion.usage.tokens the
+// same way.
+func checkUsageTokenTypeField(metricName string, attrs []*commonpb.KeyValue) error {
+	if metricName != telemetrycontract.MetricUsageTokens {
+		return nil
+	}
+	for _, kv := range attrs {
+		if err := checkTokenTypeField(kv); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func checkCloudSelfMetricFields(scopeName, metricName string, attrs []*commonpb.KeyValue) error {
@@ -173,6 +263,7 @@ func gcpIdentityMetrics(input []*metricpb.ResourceMetrics) ([]*metricpb.Resource
 		resourceID := identityDigest(rkey)
 		agentID := metricAttrString(source.GetResource().GetAttributes(), "scion.agent.id")
 		projectID := metricAttrString(source.GetResource().GetAttributes(), "scion.project.id")
+		agentSlug := metricAttrString(source.GetResource().GetAttributes(), "scion.agent.slug")
 		if rm.Resource != nil {
 			rm.Resource.Attributes = allowedMetricAttrs(rm.Resource.Attributes, cloudResourceFields)
 		}
@@ -198,22 +289,29 @@ func gcpIdentityMetrics(input []*metricpb.ResourceMetrics) ([]*metricpb.Resource
 				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(metric.Name, "gen_ai.tokens.") {
 					return nil, fmt.Errorf("unsupported normalized hook token name")
 				}
+				// scion.hook.tokens.* is retired (design §3.5): rejected here
+				// too, the same way the streams admission path rejects it in
+				// metric_streams.go, so the Cloud adapter can't be reached
+				// with a retired name via a path that bypasses s.add.
+				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(metric.Name, "scion.hook.tokens.") {
+					return nil, fmt.Errorf("retired hook token name")
+				}
 				if _, _, _, err := metricKind(metric); err != nil {
 					return nil, err
 				}
 				allowed := cloudPointFieldsFor(sm.GetScope().GetName(), metric.Name)
 				for _, point := range metric.GetSum().GetDataPoints() {
-					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID); err != nil {
+					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID, agentSlug); err != nil {
 						return nil, err
 					}
 				}
 				for _, point := range metric.GetGauge().GetDataPoints() {
-					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID); err != nil {
+					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID, agentSlug); err != nil {
 						return nil, err
 					}
 				}
 				for _, point := range metric.GetHistogram().GetDataPoints() {
-					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID); err != nil {
+					if err := addGCPIdentityLabels(&point.Attributes, allowed, sm.GetScope().GetName(), metric.Name, resourceID, scopeID, agentID, projectID, agentSlug); err != nil {
 						return nil, err
 					}
 				}
@@ -224,7 +322,7 @@ func gcpIdentityMetrics(input []*metricpb.ResourceMetrics) ([]*metricpb.Resource
 	return output, nil
 }
 
-func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, scopeName, metricName, resourceID, scopeID, agentID, projectID string) error {
+func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, scopeName, metricName, resourceID, scopeID, agentID, projectID, agentSlug string) error {
 	if err := checkCloudMetricFields(*attrs, allowed, "point"); err != nil {
 		return err
 	}
@@ -232,7 +330,7 @@ func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, 
 		return err
 	}
 	for _, kv := range *attrs {
-		for _, reserved := range []string{gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel, "service_name", "service_namespace", "service_instance_id"} {
+		for _, reserved := range []string{gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLabel, "service_name", "service_namespace", "service_instance_id"} {
 			if cloudLabelKey(kv.Key) == reserved {
 				return fmt.Errorf("reserved Cloud Monitoring metric label")
 			}
@@ -248,13 +346,25 @@ func addGCPIdentityLabels(attrs *[]*commonpb.KeyValue, allowed map[string]bool, 
 		metricStringLabel(gcpScopeIDLabel, scopeID),
 		metricStringLabel(gcpPointIDLabel, identityDigest(key)),
 	)
+	appendCanonicalIdentity(attrs, agentID, projectID, agentSlug)
+	return nil
+}
+
+// appendCanonicalIdentity appends the canonical scion_agent_id,
+// scion_project_id and scion_agent_slug labels (whichever are non-empty)
+// from authoritative resource identity. Shared by the GCP and generic OTLP
+// identity-stamping paths (design §3.4) so both exporters produce the same
+// labels.
+func appendCanonicalIdentity(attrs *[]*commonpb.KeyValue, agentID, projectID, agentSlug string) {
 	if agentID != "" {
 		*attrs = append(*attrs, metricStringLabel(gcpAgentLabel, agentID))
 	}
 	if projectID != "" {
 		*attrs = append(*attrs, metricStringLabel(gcpProjectLabel, projectID))
 	}
-	return nil
+	if agentSlug != "" {
+		*attrs = append(*attrs, metricStringLabel(gcpAgentSlugLabel, agentSlug))
+	}
 }
 
 func metricStringLabel(key, value string) *commonpb.KeyValue {

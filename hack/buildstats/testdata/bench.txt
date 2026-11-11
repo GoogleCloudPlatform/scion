@@ -1,0 +1,28 @@
+commit: go1.26.1
+goos: linux
+goarch: amd64
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:fe:init                       1      495681 ns/op      0.57 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:fe:loadsys                    1      668960 ns/op      0.77 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:fe:parse                      1    12317403 ns/op     14.16 %    811 lines    65842 lines/s
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:fe:pgo-load-profile           1      152086 ns/op      0.17 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:fe:devirtualize-and-inline    1     2055433 ns/op      2.36 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:fe:escapes                    1      826000 ns/op      0.95 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:fe:subtotal                   1    16515563 ns/op     18.98 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:be:compilefuncs               1    66573598 ns/op     76.52 %     68 funcs     1021 funcs/s
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:be:dumpobj                    1     3915003 ns/op      4.50 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:be:subtotal                   1    70488601 ns/op     81.02 %
+BenchmarkCompile:github.com/GoogleCloudPlatform/scion/pkg/projectkeys:total                         1    87004164 ns/op    100.00 %
+commit: go1.26.1
+goos: linux
+goarch: amd64
+BenchmarkCompile:main:fe:init                       1      459001 ns/op      1.91 %
+BenchmarkCompile:main:fe:loadsys                    1      666587 ns/op      2.78 %
+BenchmarkCompile:main:fe:parse                      1     8008533 ns/op     33.37 %    86 lines    10739 lines/s
+BenchmarkCompile:main:fe:pgo-load-profile           1       20380 ns/op      0.08 %
+BenchmarkCompile:main:fe:devirtualize-and-inline    1     2349899 ns/op      9.79 %
+BenchmarkCompile:main:fe:escapes                    1      246671 ns/op      1.03 %
+BenchmarkCompile:main:fe:subtotal                   1    11751071 ns/op     48.96 %
+BenchmarkCompile:main:be:compilefuncs               1    10929135 ns/op     45.54 %    60 funcs     5490 funcs/s
+BenchmarkCompile:main:be:dumpobj                    1     1319410 ns/op      5.50 %
+BenchmarkCompile:main:be:subtotal                   1    12248545 ns/op     51.04 %
+BenchmarkCompile:main:total                         1    23999616 ns/op    100.00 %

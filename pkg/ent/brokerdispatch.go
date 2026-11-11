@@ -45,8 +45,18 @@ type BrokerDispatch struct {
 	// UpdatedAt holds the value of the "updated_at" field.
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	// DeadlineAt holds the value of the "deadline_at" field.
-	DeadlineAt   *time.Time `json:"deadline_at,omitempty"`
-	selectValues sql.SelectValues
+	DeadlineAt *time.Time `json:"deadline_at,omitempty"`
+	// InitiatorPrincipalKind holds the value of the "initiator_principal_kind" field.
+	InitiatorPrincipalKind *string `json:"initiator_principal_kind,omitempty"`
+	// InitiatorPrincipalID holds the value of the "initiator_principal_id" field.
+	InitiatorPrincipalID *string `json:"initiator_principal_id,omitempty"`
+	// InitiatorCredentialKind holds the value of the "initiator_credential_kind" field.
+	InitiatorCredentialKind *string `json:"initiator_credential_kind,omitempty"`
+	// InitiatorCredentialID holds the value of the "initiator_credential_id" field.
+	InitiatorCredentialID *string `json:"initiator_credential_id,omitempty"`
+	// CorrelationID holds the value of the "correlation_id" field.
+	CorrelationID *string `json:"correlation_id,omitempty"`
+	selectValues  sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -58,7 +68,7 @@ func (*BrokerDispatch) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case brokerdispatch.FieldAttempts:
 			values[i] = new(sql.NullInt64)
-		case brokerdispatch.FieldAgentSlug, brokerdispatch.FieldOp, brokerdispatch.FieldArgs, brokerdispatch.FieldState, brokerdispatch.FieldResult, brokerdispatch.FieldClaimedBy, brokerdispatch.FieldError:
+		case brokerdispatch.FieldAgentSlug, brokerdispatch.FieldOp, brokerdispatch.FieldArgs, brokerdispatch.FieldState, brokerdispatch.FieldResult, brokerdispatch.FieldClaimedBy, brokerdispatch.FieldError, brokerdispatch.FieldInitiatorPrincipalKind, brokerdispatch.FieldInitiatorPrincipalID, brokerdispatch.FieldInitiatorCredentialKind, brokerdispatch.FieldInitiatorCredentialID, brokerdispatch.FieldCorrelationID:
 			values[i] = new(sql.NullString)
 		case brokerdispatch.FieldCreatedAt, brokerdispatch.FieldUpdatedAt, brokerdispatch.FieldDeadlineAt:
 			values[i] = new(sql.NullTime)
@@ -172,6 +182,41 @@ func (_m *BrokerDispatch) assignValues(columns []string, values []any) error {
 				_m.DeadlineAt = new(time.Time)
 				*_m.DeadlineAt = value.Time
 			}
+		case brokerdispatch.FieldInitiatorPrincipalKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_principal_kind", values[i])
+			} else if value.Valid {
+				_m.InitiatorPrincipalKind = new(string)
+				*_m.InitiatorPrincipalKind = value.String
+			}
+		case brokerdispatch.FieldInitiatorPrincipalID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_principal_id", values[i])
+			} else if value.Valid {
+				_m.InitiatorPrincipalID = new(string)
+				*_m.InitiatorPrincipalID = value.String
+			}
+		case brokerdispatch.FieldInitiatorCredentialKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_credential_kind", values[i])
+			} else if value.Valid {
+				_m.InitiatorCredentialKind = new(string)
+				*_m.InitiatorCredentialKind = value.String
+			}
+		case brokerdispatch.FieldInitiatorCredentialID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_credential_id", values[i])
+			} else if value.Valid {
+				_m.InitiatorCredentialID = new(string)
+				*_m.InitiatorCredentialID = value.String
+			}
+		case brokerdispatch.FieldCorrelationID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field correlation_id", values[i])
+			} else if value.Valid {
+				_m.CorrelationID = new(string)
+				*_m.CorrelationID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -254,6 +299,31 @@ func (_m *BrokerDispatch) String() string {
 	if v := _m.DeadlineAt; v != nil {
 		builder.WriteString("deadline_at=")
 		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorPrincipalKind; v != nil {
+		builder.WriteString("initiator_principal_kind=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorPrincipalID; v != nil {
+		builder.WriteString("initiator_principal_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorCredentialKind; v != nil {
+		builder.WriteString("initiator_credential_kind=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorCredentialID; v != nil {
+		builder.WriteString("initiator_credential_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.CorrelationID; v != nil {
+		builder.WriteString("correlation_id=")
+		builder.WriteString(*v)
 	}
 	builder.WriteByte(')')
 	return builder.String()

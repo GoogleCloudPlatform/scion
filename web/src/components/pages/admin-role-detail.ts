@@ -34,13 +34,16 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import { setDocumentTitle } from '../../client/page-title.js';
-import { getPrincipalIcon, formatDateTime } from '../shared/role-binding-utils.js';
+import { getPrincipalIcon } from '../shared/role-binding-utils.js';
+import '../shared/detail-header.js';
 import '../shared/principal-picker.js';
 import '../shared/project-picker.js';
 import type { AssignmentFormValues } from '../shared/role-binding-assignment-form.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import '../shared/role-binding-assignment-form.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -86,6 +89,9 @@ interface RoleBinding {
 
 @customElement('scion-page-admin-role-detail')
 export class ScionPageAdminRoleDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   // Core state
   @state() private roleId = '';
   @state() private roleData: RoleDefinition | null = null;
@@ -132,55 +138,13 @@ export class ScionPageAdminRoleDetail extends LitElement {
       display: block;
     }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-
-    .header-info {
-      flex: 1;
-    }
-
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.25rem 0;
-    }
-
+    /* A long description with no spaces breaks instead of spilling past the
+       shared header's title column. */
     .header-description {
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
       margin: 0;
-    }
-
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
-    }
-
-    .badges {
-      display: flex;
-      gap: 0.5rem;
-      margin-bottom: 0.5rem;
+      overflow-wrap: anywhere;
     }
 
     .type-badge {
@@ -484,10 +448,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
       .hide-mobile {
         display: none;
       }
-
-      .header {
-        flex-direction: column;
-      }
     }
   `;
 
@@ -588,27 +548,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
       .split('_')
       .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
       .join(' ');
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) return rtf.format(-diffSeconds, 'second');
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -823,20 +762,11 @@ export class ScionPageAdminRoleDetail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    // The detail view puts the back link in the shared header; the loading,
+    // error and not-found states have no header, so it stands alone there.
+    const inHeader = !this.loading && !this.error && !!this.roleData;
     return html`
-      ${this.renderFeedback()}
-      <a
-        class="back-link"
-        href="/admin/roles"
-        @click=${(e: Event) => {
-          e.preventDefault();
-          navigateTo('/admin/roles');
-        }}
-      >
-        <sl-icon name="arrow-left"></sl-icon>
-        Roles
-      </a>
-
+      ${this.renderFeedback()} ${inHeader ? nothing : this.renderBackLink()}
       ${this.loading
         ? this.renderLoading()
         : this.error === 'not_found'
@@ -847,6 +777,12 @@ export class ScionPageAdminRoleDetail extends LitElement {
       ${this.renderEditDialog()} ${this.renderDeleteDialog()} ${this.renderDuplicateDialog()}
       ${this.renderDeleteBindingDialog()}
     `;
+  }
+
+  private renderBackLink(slot?: 'back') {
+    return html`<scion-back-link slot=${slot ?? nothing} href="/admin/roles"
+      >Roles</scion-back-link
+    >`;
   }
 
   private renderFeedback() {
@@ -919,24 +855,20 @@ export class ScionPageAdminRoleDetail extends LitElement {
     if (!role) return nothing;
 
     return html`
-      <div class="header">
-        <div class="header-info">
-          <div class="badges">
-            <span class="type-badge ${role.system ? 'system' : 'custom'}">
-              ${role.system ? 'System' : 'Custom'}
-            </span>
-            <span class="scope-badge">${role.scopeType}</span>
-          </div>
-          <h1>${role.name}</h1>
-          ${role.description
-            ? html`<p class="header-description">${role.description}</p>`
-            : nothing}
-          <div class="metadata-row">
-            Updated ${this.formatRelativeTime(role.updatedAt)} · Created
-            ${this.formatRelativeTime(role.createdAt)}
-          </div>
+      <scion-detail-header heading=${role.name}>
+        ${this.renderBackLink('back')}
+        <sl-icon slot="icon" name="shield-lock"></sl-icon>
+        <span class="type-badge ${role.system ? 'system' : 'custom'}">
+          ${role.system ? 'System' : 'Custom'}
+        </span>
+        <span class="scope-badge">${role.scopeType}</span>
+        ${role.description
+          ? html`<p slot="meta" class="header-description">${role.description}</p>`
+          : nothing}
+        <div slot="meta" class="metadata-row">
+          Updated ${formatRelative(role.updatedAt)} · Created ${formatRelative(role.createdAt)}
         </div>
-        <div class="header-actions">
+        <div slot="actions" class="header-actions">
           <sl-button variant="default" size="small" @click=${() => this.openDuplicateDialog()}>
             <sl-icon slot="prefix" name="copy"></sl-icon>
             Duplicate
@@ -969,7 +901,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
                 </sl-button>
               `}
         </div>
-      </div>
+      </scion-detail-header>
 
       <sl-tab-group @sl-tab-show=${(e: CustomEvent) => this.handleTabChange(e)}>
         <sl-tab slot="nav" panel="permissions" ?active=${this.activeTab === 'permissions'}>
@@ -1144,7 +1076,9 @@ export class ScionPageAdminRoleDetail extends LitElement {
         </td>
         <td><span class="scope-badge">${scopeLabel}</span></td>
         <td class="hide-mobile">${createdByLabel}</td>
-        <td class="hide-mobile">${formatDateTime(binding.createdAt)}</td>
+        <td class="hide-mobile">
+          ${formatInstantWithZone(binding.createdAt) || binding.createdAt}
+        </td>
         <td>
           <sl-icon-button
             name="trash"

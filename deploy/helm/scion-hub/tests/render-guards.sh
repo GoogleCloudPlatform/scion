@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=130   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path).
+EXPECTED_TOTAL=286   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -29,7 +29,7 @@ HELM="${HELM:-helm}"
 # BASE render would return an error string instead of manifests and every check below would
 # accuse the chart of a fault it does not have. The chart will not default it - a generated
 # secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
-BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+BASE=(--set image.repository=r --set agents.imageRegistry=example.invalid/agents --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
 
 # A COMPLETE WEB CLIENT CREDENTIAL, for the rows that need auth.mode=oauth to
 # render at all. Not folded into BASE, because several rows below exist
@@ -37,7 +37,9 @@ BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=http
 # would make those rows unwriteable, and worse, would make them look written.
 # It replaces --set auth.acknowledgeOAuthUnlanded=true, which is what these rows
 # carried while the credentials had no channel.
-OAUTH_WEB=(--set auth.oauth.web.google.clientId=rg-web-google-id --set auth.oauth.web.google.clientSecret=rg-web-google-secret)
+# The empty audience undoes BASE's: the chart refuses an audience under oauth,
+# where it would be silently discarded.
+OAUTH_WEB=(--set auth.proxy.iap.audience= --set auth.oauth.web.google.clientId=rg-web-google-id --set auth.oauth.web.google.clientSecret=rg-web-google-secret)
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -384,7 +386,7 @@ echo "== THE READINESS PATH IS /readyz, AND NOTHING ELSE =="
 # R6 (gd-p3-rev's sweep, made gd-em's own at 14:20Z). "/readyz" appeared ZERO
 # times across all six committed test scripts while two probes in deployment.yaml
 # depend on it. It is a hard constraint on this project -- the path is /readyz,
-# NOT /api/v1/readyz and NOT /healthz -- and until these two rows it was protected
+# NOT /api/v1/readyz and NOT the legacy health-z path -- and until the rows below it was protected
 # by nothing at all. A constraint that lives only in a brief is not a constraint.
 #
 # TWO ASSERTIONS, POSITIVE AND EXHAUSTIVE, BECAUSE EITHER ALONE IS WEAK. The
@@ -392,24 +394,82 @@ echo "== THE READINESS PATH IS /readyz, AND NOTHING ELSE =="
 # a correct one is deleted. The no-other-path row alone passes VACUOUSLY if the
 # probes stop rendering altogether -- zero paths is zero wrong paths. Together
 # they pin "exactly two, and both of them /readyz".
+# STRUCTURAL, NOT BY VALUE SHAPE. Only a `path:` that is a direct child of an
+# `httpGet:` mapping is a probe (or lifecycle-hook) path, so that is the only
+# `path:` this section reads. Volume `items` entries (the settings Secret
+# projects `path: settings.yaml`) and hostPath volumes are skipped because they
+# are not under httpGet, whatever their value looks like. Both quote styles are
+# unwrapped, and a relative value is read with a leading slash added, because
+# Kubernetes does not require one on an httpGet path and the kubelet adds it
+# when it builds the URL. Flow-style `httpGet: {path: ...}` is not parsed; the
+# chart renders block style, and the self-test row below pins what is parsed.
+_httpget_paths() {
+  awk '
+    function ind(s) { match(s, /^ */); return RLENGTH }
+    /^[[:space:]]*$/ { next }
+    inblk && ind($0) <= hind { inblk = 0 }
+    inblk && $0 ~ /^[[:space:]]*(- )?path:/ {
+      v = $0
+      sub(/^[[:space:]]*(- )?path:[[:space:]]*/, "", v)
+      sub(/[[:space:]]+#.*$/, "", v); sub(/[[:space:]]+$/, "", v)
+      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+      if (substr(v, 1, 1) != "/") v = "/" v
+      print v
+    }
+    /^[[:space:]]*(- )?httpGet:[[:space:]]*$/ { inblk = 1; hind = ind($0) }
+  '
+}
+# THE EXTRACTOR'S OWN CHECK. A synthetic manifest with one probe path in each
+# form the extractor must read, and two non-probe `path:` lines it must skip.
+executed=$((executed + 1))
+_synthetic='      livenessProbe:
+        httpGet:
+          path: "/dq"
+          port: http
+      startupProbe:
+        httpGet:
+          path: \047/sq\047
+      readinessProbe:
+        httpGet:
+          path: relative
+          httpHeaders:
+            - name: X
+              value: y
+      volumes:
+        - name: s
+          secret:
+            items:
+              - key: settings.yaml
+                path: settings.yaml
+        - name: h
+          hostPath:
+            path: /var/data'
+_synthetic="$(printf '%b' "$_synthetic")"
+_synthgot="$(printf '%s\n' "$_synthetic" | _httpget_paths | tr '\n' ' ')"
+if [ "$_synthgot" = "/dq /sq /relative " ]; then
+  echo "ok    the httpGet path extractor reads double-quoted, single-quoted and relative paths and skips volume paths"
+else
+  echo "FAIL  the httpGet path extractor read [${_synthgot}] from the synthetic manifest; expected [/dq /sq /relative ]"
+  failed=$((failed + 1))
+fi
 executed=$((executed + 1))
 _probeout="$("$HELM" template t "$CHART" "${BASE[@]}" -s templates/deployment.yaml 2>&1)"
-_nready=$(printf '%s\n' "$_probeout" | grep -c 'path: /readyz')
+_nready=$(printf '%s\n' "$_probeout" | _httpget_paths | grep -cx '/readyz' || true)
 if [ "$_nready" -eq 2 ]; then
   echo "ok    both probes point at /readyz (exactly 2)"
 else
-  echo "FAIL  expected exactly 2 'path: /readyz' in the Deployment, got ${_nready}"
+  echo "FAIL  expected exactly 2 httpGet paths of /readyz in the Deployment, got ${_nready}"
   failed=$((failed + 1))
 fi
 # Whole chart, not just the Deployment: an httpGet path introduced in any other
 # template is in scope for this constraint too.
 executed=$((executed + 1))
-_nother=$(render | grep 'path:' | grep -cv 'path: /readyz')
+_nother=$(render | _httpget_paths | grep -cvx '/readyz' || true)
 if [ "$_nother" -eq 0 ]; then
   echo "ok    no probe path other than /readyz renders anywhere in the chart"
 else
   echo "FAIL  ${_nother} probe path(s) other than /readyz render:"
-  render | grep 'path:' | grep -v 'path: /readyz' | sed 's/^/        /'
+  render | _httpget_paths | grep -vx '/readyz' | sed 's/^/        /'
   failed=$((failed + 1))
 fi
 
@@ -600,34 +660,19 @@ accept "threshold 30, product 300s" --set probes.startup.failureThreshold=30 --s
 reject "sub-60 threshold is the HELPER's refusal, not a shadow of the old bound" \
        "the startup budget is too short" --skip-schema-validation --set probes.startup.failureThreshold=30
 
-echo "== the HA-unlanded gate: THREE ROUTES, TRANSCRIBED FROM THE HUB =="
-# scion-hub.assertHAUnlanded refuses the shapes this chart can render but cannot
-# start. The routes are not this chart's invention: they are isHADeployment
-# (cmd/server_foreground.go:927), and the hub's own tripwire test asserts the
-# same three at cmd/server_ha_preflight_test.go:248-256 on ab0d227. THE ROUTES
-# ARE TRANSCRIBED, SO THEY CAN DRIFT, which is what these rows are for.
+echo "== HA routes under auth.mode proxy: the chart renders what the preflight reads =="
+# The routes are isHADeployment's (cmd/server_foreground.go), carried in
+# scion-hub.haRoutes; the hub's own tripwire test (cmd/server_ha_preflight_test.go)
+# asserts the same three. Under auth.mode proxy the preflight then checks the
+# IAP audience's shape and the transport block, and the chart refuses an HA
+# render that would fail it. Under oauth those gates are not reached.
 #
-# EACH NEGATIVE ASSERTS *WHICH* ROUTE FIRED, NOT MERELY THAT SOMETHING DID. The
-# three routes overlap in the value space - postgres implies gcs by schema rule,
-# and gcs plus proxy is route 3 - so a row that only checked for a refusal would
-# stay green with two of the three routes deleted. Row r2 uses auth.mode oauth
-# for exactly that reason: it is the only way to reach the postgres route with
-# the gcs-plus-proxy route switched off. My first matrix did not do this and
-# three of its rows were confounded by pre-existing schema allOf rules doing the
-# refusing instead of this guard.
-# POSTGRES NOW COSTS FOUR MORE VALUES, AND THAT IS THE CLOUD SQL PHASE, NOT A
-# WORKAROUND. --set database.driver=postgres on its own is a hard refusal since
-# the proxy landed: the chart reaches Postgres only through the Cloud SQL Auth
-# Proxy, so a postgres driver with cloudsql.enabled false renders a DSN pointing
-# at a loopback port nothing binds. Every row below that wants to reach an HA
-# route THROUGH postgres has to get past that refusal first, or it measures the
-# Cloud SQL guard while claiming to measure the HA guard - a green row about the
-# wrong subject.
+# EACH NEGATIVE ASSERTS WHICH ROUTE FIRED. The routes overlap - postgres implies
+# gcs by schema rule, and gcs plus proxy is route 3 - so each row names its own.
 #
-# MEASURED, and this is why the list is here rather than inline: with these four
-# omitted, r2 and its positive twin both fail with "database.driver is postgres
-# but cloudsql.enabled is false" instead of the HA refusal, and the gate-name arm
-# below reports 0/7 because the message it reads is the Cloud SQL one.
+# POSTGRES NEEDS THE CLOUD SQL VALUES. --set database.driver=postgres on its own
+# is refused because the chart reaches Postgres only through the Cloud SQL Auth
+# Proxy; without these the rows below would measure that refusal instead.
 CLOUDSQL_SET=(
   --set cloudsql.enabled=true
   --set cloudsql.instanceConnectionName=my-project:us-central1:db-1
@@ -635,373 +680,103 @@ CLOUDSQL_SET=(
   --set database.name=scion
   --set serviceAccount.gcpServiceAccount=hub@my-project.iam.gserviceaccount.com
 )
+# The transport block the proxy preflight requires. Probe strings, not credentials.
+TRANSPORT=(
+  --set auth.transport.mode=iap
+  --set auth.transport.oidcAudience=probe-rg-oauth-client.apps.googleusercontent.com
+  --set auth.transport.platformAuthSa=probe-rg@probe-project.iam.gserviceaccount.com
+)
+GCS=(--set storage.provider=gcs --set storage.bucket=b)
+PG=(--set database.driver=postgres "${GCS[@]}" "${CLOUDSQL_SET[@]}")
 
-reject "r1: hub.extraEnv sets K_SERVICE" "hub.extraEnv sets K_SERVICE" \
+reject "r1: hub.extraEnv sets K_SERVICE, proxy, no transport" "hub.extraEnv sets K_SERVICE" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc'
-reject "r2: postgres driver, route 3 held off with oauth" "database.driver is postgres" \
-  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
-  "${CLOUDSQL_SET[@]}" \
-  --set auth.mode=oauth "${OAUTH_WEB[@]}"
-reject "r3: gcs storage with proxy auth" "storage.provider is gcs and auth.mode is proxy" \
-  --set storage.provider=gcs --set storage.bucket=b
+reject "r2: postgres driver, proxy, no transport" "database.driver is postgres" \
+  "${PG[@]}"
+reject "r3: gcs storage with proxy auth, no transport" "storage.provider is gcs and auth.mode is proxy" \
+  "${GCS[@]}"
+reject "an HA proxy refusal names the transport mode it needs" "must be iap - set auth.transport.mode: iap" \
+  "${GCS[@]}"
+# The preflight reads oidc_audience as TrimRight(TrimSpace(x), "/"), so a value
+# of only slashes is empty to it. The render-time check must strip them too.
+reject "HA, oidcAudience of only slashes" "oidc_audience is empty once surrounding whitespace and trailing slashes are removed" \
+  "${GCS[@]}" --set auth.transport.mode=iap --set-string 'auth.transport.oidcAudience=//' \
+  --set auth.transport.platformAuthSa=probe-rg@probe-project.iam.gserviceaccount.com
 
-# POSITIVE TWINS, ONE PER ROUTE. The flag is the escape hatch for rendering the
-# settings.yaml without installing, so each refusal must be clearable - a guard
-# with no way past it is a removed feature, not a warning.
-accept "r1 + acknowledgeHAUnlanded" \
-  --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc' --set acknowledgeHAUnlanded=true
-accept "r2 + acknowledgeHAUnlanded" \
-  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
-  "${CLOUDSQL_SET[@]}" \
-  --set auth.mode=oauth "${OAUTH_WEB[@]}" --set acknowledgeHAUnlanded=true
-accept "r3 + acknowledgeHAUnlanded" \
-  --set storage.provider=gcs --set storage.bucket=b --set acknowledgeHAUnlanded=true
+# POSITIVE TWINS, ONE PER ROUTE: each refusal clears once the values the
+# preflight reads are supplied, and by nothing else.
+accept "r1 + transport" \
+  --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc' "${TRANSPORT[@]}"
+accept "r2 + transport" "${PG[@]}" "${TRANSPORT[@]}"
+accept "r3 + transport" "${GCS[@]}" "${TRANSPORT[@]}"
+# Under oauth the IAP gates sit inside `if cfg.Auth.Mode == "proxy"`, so an HA
+# oauth shape needs none of them.
+accept "postgres + gcs under oauth, no IAP or transport values" \
+  "${PG[@]}" --set auth.mode=oauth "${OAUTH_WEB[@]}"
+reject "cloudrun_invoker transport on an HA proxy shape" "must be iap" \
+  "${GCS[@]}" --set auth.transport.mode=cloudrun_invoker \
+  --set auth.transport.platformAuthSa=probe-rg@probe-project.iam.gserviceaccount.com
 
-# THE OVER-TRIGGER DIRECTION, WHICH IS THE HALF A REFUSAL SUITE USUALLY OMITS.
-# Demanding an acknowledgement from a deployment that is not HA is a defect of
-# the same size as failing to demand one from a deployment that is: it teaches
-# operators to set the flag reflexively, and then the flag protects nobody.
-# K_SERVICE with an empty value is the near-miss that matters - the hub reads
-# os.Getenv != "" (:928), so an empty value is not a route, and a guard written
-# on the name alone would refuse it.
+# THE OVER-TRIGGER DIRECTION. A deployment that is not HA must not be asked for
+# transport. K_SERVICE with an empty value is not a route: the hub reads
+# os.Getenv != "", so a guard written on the name alone would refuse it.
 accept "K_SERVICE present but with an explicit empty value" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value='
 accept "an unrelated extraEnv name"       --set 'hub.extraEnv[0].name=NOT_K_SERVICE' --set 'hub.extraEnv[0].value=svc'
 accept "sqlite + local storage + oauth"   --set auth.mode=oauth "${OAUTH_WEB[@]}"
 accept "the chart defaults, no route"
 
-# THE GATE LIST IS PART OF THE CONTRACT, SO IT IS ASSERTED RATHER THAN TRUSTED.
-# gke-deploy-lead's Critical 1 requires the refusal to name every unlandable
-# gate in hub order. The number was reported as five for most of a day because a
-# prober stopped at the first gate it could not construct and its extent was
-# read as the preflight's extent; then it was reported as eight, because that
-# prober supplied a WELL-FORMED IAP audience and never reached the format gate.
-# So the list is no longer written here. It is read out of hack/ha-gates.txt,
-# which cmd/helm_chart_ha_contract_test.go derives by driving the real
-# validateHostedHAPreflight over the chart's own golden settings.yaml. If the
-# hub gains or loses a gate, this assertion changes with it and no one edits a
-# constant. THE DENOMINATOR IS STILL ASSERTED, not the presence of at least one:
-# a message naming three of the gates would satisfy any per-substring loop that
-# has no total.
-#
-# CONTROLS RUN AGAINST THIS DERIVATION on 2026-08-17, all four red:
-#
-#   seed a KEY the refusal cannot name  -> FAIL 8/9, names it as unnamed
-#   delete hack/ha-gates.txt            -> META-FAILURE, exit 2
-#   seed an unrecognised PROSE gate     -> META-FAILURE, exit 2
-#   point the awk header at nothing     -> META-FAILURE "holds 0 entries"
-#
-# The last is the apparatus control: an extraction that quietly returns nothing
-# is the failure mode that makes _ha_seen equal _ha_total on an empty list.
-# 🛑 COMPLETENESS ALONE WAS THE HOLE, AND IT STAYED OPEN BECAUSE IT PASSED.
-# Until now this block asserted only that the refusal names EVERY derived gate.
-# A refusal naming every derived gate AND SEVERAL THE HUB NO LONGER HAS scored
-# a clean pass, because nothing here had an upper bound. That is not
-# hypothetical: 1b3c9418 deleted the server.auth.mode=proxy gate and moved the
-# seven IAP gates behind `if cfg.Auth.Mode == "proxy"`, and this assertion
-# stayed green over a refusal that still named all of them under oauth. A
-# one-sided parity check reports "8/8 named" in exactly the voice it would use
-# if it were right.
-#
-# So there are now TWO assertions per arm and TWO arms:
-#   completeness  every derived gate appears in the refusal          (was here)
-#   exclusivity   the refusal's enumeration names NO key the walk did not (new)
-# and the arms are the proxy shape and the oauth shape, which since 1b3c9418
-# are different lists. A single-arm guard cannot see a per-mode error at all.
-#
-# THE PRE-REGISTERED EXTENTS ARE WRITTEN HERE, ABOVE THE RUN, AND NOT READ OFF
-# THE OUTPUT AFTERWARDS: proxy >= 3 gates, oauth == 1 gate, proxy > oauth.
-# gd-spec-rev's sharpening of gd-em's rule is the reason they are stated rather
-# than inspected - "a positive arm you read after the fact is just another
-# number on the screen". The oauth arm carries the absolute count per ruling
-# (p1) because its one gate is the session secret — Cloud SQL landed in P2 and
-# server.database.url is no longer a gate; if that number moves, a phase
-# boundary moved and a human is supposed to be interrupted. The proxy arm keeps
-# a floor rather than a pin because pinning it is the hand-maintained constant
-# this whole block exists to delete.
-_ha_gates="$CHART/hack/ha-gates.txt"
-if [ ! -s "$_ha_gates" ]; then
-  echo "HARNESS ERROR: $_ha_gates is missing or empty, so there is no derived gate list to check the refusal against. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract. NOTHING WAS MEASURED."
-  echo "ASSERTIONS_EXECUTED=${executed}"
-  exit 2
-fi
+echo "== auth.proxy.iap.audience =="
+# Required on every proxy render: initHubServer and initWebServer both refuse
+# iap with no audience. Its SHAPE is checked only on HA shapes, as the hub
+# checks it only in validateHostedHAPreflight. Two layers per case, because
+# config.extra and --skip-schema-validation reach the template without the schema.
+reject "proxy with no audience, schema layer"   "auth.proxy.iap.audience" \
+  --set auth.proxy.iap.audience=
+reject "proxy with no audience, template layer" "no IAP audience is set" \
+  --skip-schema-validation --set auth.proxy.iap.audience=
+reject "whitespace-only audience, template layer" "no IAP audience is set" \
+  --skip-schema-validation --set 'auth.proxy.iap.audience=  '
+accept "HA, backendServices audience" \
+  "${GCS[@]}" "${TRANSPORT[@]}" --set auth.proxy.iap.audience=/projects/123456789012/global/backendServices/5555555555555555555
+accept "HA, audience with a trailing slash (the hub trims it)" \
+  "${GCS[@]}" "${TRANSPORT[@]}" --set auth.proxy.iap.audience=/projects/123456789012/global/backendServices/5555555555555555555/
+reject "HA, malformed audience, schema layer" "auth.proxy.iap.audience" \
+  "${GCS[@]}" "${TRANSPORT[@]}" --set auth.proxy.iap.audience=my-iap-audience
+reject "HA, malformed audience, template layer" "isSupportedIAPAudience" \
+  --skip-schema-validation "${GCS[@]}" "${TRANSPORT[@]}" --set auth.proxy.iap.audience=my-iap-audience
+reject "HA, audience with an empty segment, template layer" "isSupportedIAPAudience" \
+  --skip-schema-validation "${GCS[@]}" "${TRANSPORT[@]}" --set auth.proxy.iap.audience=/projects//global/backendServices/1
+accept "non-HA, malformed audience (the hub checks the shape only on HA)" \
+  --set auth.proxy.iap.audience=my-iap-audience
+reject "audience set under auth.mode oauth" "but auth.mode is" \
+  --set auth.mode=oauth "${OAUTH_WEB[@]}" --set auth.proxy.iap.audience=/projects/123456789012/global/backendServices/5555555555555555555
+reject "config.extra overwrites the audience the chart writes" "config.extra overwrites" \
+  --set config.extra.server.auth.proxy.iap.audience=/projects/123456789012/global/backendServices/6666666666666666666
 
-# Reads one arm's CANON block out of the artifact into globals. Globals rather
-# than a return value on purpose: every failure in here is a meta-failure, and
-# `exit 2` inside a $( ) subshell would set a status nobody reads instead of
-# stopping the run.
-_ha_read_canon() {
-  local _hdr="$1" _line _canon
-  _canon="$(awk -v hdr="$_hdr" '
-    index($0, hdr) == 1 { f = 1; next }
-    f && $0 == "CANON BEGIN" { c = 1; next }
-    c && $0 == "CANON END"   { exit }
-    c { print }' "$_ha_gates")"
-  # KEY lines name a settings key; PROSE lines are gates that name none, and
-  # each one needs a deliberate decision here rather than a silent drop.
-  _ha_want=""
-  _ha_keys=""
-  while IFS= read -r _line; do
-    [ -n "$_line" ] || continue
-    case "$_line" in
-      "KEY   "*)
-        _ha_want="$_ha_want${_line#KEY   }"$'\n'
-        _ha_keys="$_ha_keys${_line#KEY   }"$'\n' ;;
-      "PROSE "*)
-        case "$_line" in
-          *"durable session/signing secret"*) _ha_want="$_ha_want"'durable session/signing secret'$'\n' ;;
-          *"supported IAP audience"*)         : ;;  # reached only by the malformed-audience arms
-          *)
-            echo "HARNESS ERROR: the derived gate list carries a prose gate this script does not recognise: ${_line#PROSE }"
-            echo "               Add it to the case above, or decide in writing that the chart's refusal need not name it. NOTHING WAS MEASURED."
-            echo "ASSERTIONS_EXECUTED=${executed}"
-            exit 2 ;;
-        esac ;;
-    esac
-  done <<EOF
-$_canon
-EOF
-  _ha_total="$(printf '%s' "$_ha_want" | grep -cE .)"
-}
+echo "== auth.proxy.provider =="
+reject "jwt provider, schema layer"   "auth.proxy.provider" --set auth.proxy.provider=jwt
+reject "jwt provider, template layer" "config.existingSecret" --skip-schema-validation --set auth.proxy.provider=jwt
+reject "header provider, template layer" "initWebServer" --skip-schema-validation --set auth.proxy.provider=header
 
-# Cuts the gate enumeration out of the refusal and leaves the harvested keys in
-# the global _ha_named. LOCATED BY CONTENT, and the anchors are two fixed
-# phrases the message itself carries. Scoping matters: the refusal also says
-# "The chart already satisfies server.hub.hub_id", and a key harvest over the
-# whole message would read that as a gate and then report an intruder that is
-# really a correct sentence.
-#
-# 🔴 [HISTORY 2026-08-17] A GLOBAL, NOT A RETURN VALUE, AND I LEARNED THAT THE
-# EXPENSIVE WAY TWENTY LINES AFTER WRITING THE COMMENT THAT SAYS SO. This
-# started out printing to stdout and being read with `_named="$(...)"`, with an
-# `exit 2` on the vacuous path - and `exit 2` inside a command substitution
-# exits the SUBSHELL. The meta-failure text became the function's return value,
-# the run carried on with the error message as its corpus, and the arm reported
-# a differ fault instead of the extractor fault that had actually occurred. I
-# had documented this exact hazard on _ha_read_canon immediately above and then
-# reintroduced it here, which is worth leaving on the record: THE COMMENT DID
-# NOT PROTECT THE NEXT FUNCTION. The apparatus control caught it, on its first
-# run, by breaking the anchor and reading the message rather than the exit code.
-_ha_enumerated_keys() {
-  local _msg="$1" _enum
-  _enum="$(printf '%s' "$_msg" | tr '\n' ' ' | sed -n 's/.*measured in hub order by walking the real preflight: \(.*\)\. The chart already satisfies.*/\1/p')"
-  if [ -z "$_enum" ]; then
-    # 🛑 THE EXTRACTOR SHAPE GUARD. If the refusal is reworded and these anchors
-    # stop matching, the harvest returns the empty set - which is a SUBSET of
-    # every canon list and would make the exclusivity assertion pass on every
-    # arm forever. An extractor that cannot extract takes the strict branch.
-    echo "HARNESS ERROR: could not cut the gate enumeration out of the HA refusal. The anchors 'measured in hub order by walking the real preflight: ' and '. The chart already satisfies' no longer both appear in it, so the exclusivity check has nothing to check and would pass vacuously. Re-anchor it against the current message in _helpers.tpl. NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-  _ha_named="$(printf '%s' "$_enum" | grep -oE 'server\.[a-z0-9_]+(\.[a-z0-9_]+)*' | sort -u)"
-}
-
-# label / canon header / render args, with the extents pre-registered above.
-_ha_arm() {
-  local _label="$1" _hdr="$2" _min="$3" _max="$4"; shift 4
-  local _out _seen=0 _missing="" _w _re _named _extra
-  local _rwant _rclause _rgot _rmiss _rxtra _rctl_before _rctl_after
-
-  _out="$(render "$@" 2>&1)"
-  _ha_read_canon "$_hdr"
-
-  # THE PROBE'S OWN CORPUS, ASSERTED. An awk header that matched nothing would
-  # leave _ha_want empty, and an empty want list makes _seen equal _total on
-  # zero gates and prints ok. That is the exact failure this block is here to
-  # catch, reproduced one level up, so it is a meta-failure and not a pass.
-  if [ "$_ha_total" -lt "$_min" ] || { [ "$_max" -gt 0 ] && [ "$_ha_total" -ne "$_max" ]; }; then
-    echo "HARNESS ERROR: the ${_label} arm's derived gate list holds ${_ha_total} entries; this run was registered in advance for at least ${_min}$([ "$_max" -gt 0 ] && echo " and exactly ${_max}"). Either hack/ha-gates.txt moved and the pre-registered extent above must be re-decided by a human, or the awk header '${_hdr}' no longer matches a block in it. NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-
-  # --- completeness: every derived gate is named -----------------------------
-  executed=$((executed + 1))
-  while IFS= read -r _w; do
-    [ -n "$_w" ] || continue
-    # A bare substring test would count server.auth.transport as present
-    # because server.auth.transport.mode is - a prefix passing for its own
-    # extension. Match the key followed by something that cannot continue it.
-    _re="$(printf '%s' "$_w" | sed 's/[.[\*^$]/\\&/g')"
-    if printf '%s' "$_out" | grep -qE "${_re}([^.[:alnum:]_]|\$)"; then
-      _seen=$((_seen + 1))
-    else
-      _missing="$_missing $_w"
-    fi
-  done <<EOF
-$_ha_want
-EOF
-  if [ "$_seen" -eq "$_ha_total" ]; then
-    echo "ok    ${_label}: the HA refusal names all ${_ha_total} unlandable gates the hub refuses on"
-  else
-    echo "FAIL  ${_label}: the HA refusal names ${_seen}/${_ha_total} unlandable gates; unnamed:${_missing}"
-    echo "        got: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-300)"
-    failed=$((failed + 1))
-  fi
-
-  # --- exclusivity: no gate the walk did not derive --------------------------
-  executed=$((executed + 1))
-  if ! printf '%s' "$_ha_keys" | grep -qE .; then
-    # PROSE-ONLY ARM. After Cloud SQL landed, the oauth arm has only the session
-    # secret — a PROSE gate — and no KEY entries. A key harvest over a refusal
-    # that names no keys returns the empty set, and the empty set is a subset of
-    # every canon, so the exclusivity differ would pass vacuously. But the
-    # COMPLETENESS check above already verified the refusal's content against the
-    # walk, and a PROSE-only arm cannot name a settings key the walk did not
-    # derive, so the exclusivity assertion is satisfied by construction. Report
-    # it and move on rather than sending the key harvester into a corpus it
-    # cannot read.
-    echo "ok    ${_label}: the HA refusal's enumeration has no KEY gates on this arm (PROSE-only); exclusivity is satisfied by construction"
-  else
-    _ha_enumerated_keys "$_out"; _named="$_ha_named"
-    # THE HARVEST'S OWN EXTENT, ASSERTED AGAINST AN INDEPENDENTLY-DERIVED FLOOR
-    # AND NEVER AGAINST ZERO. Every arm's canon has at least one KEY, so the
-    # refusal must name at least one. If the key regex stops matching - a rename
-    # from server.* to hub.* would do it - the harvest is empty, the empty set is
-    # a subset of every canon, and the exclusivity assertion below passes forever
-    # on every arm. That is the same vacuity the extractor shape guard catches one
-    # level up, and it needs catching at both levels because the anchors can match
-    # while the harvest inside them does not.
-    if [ "$(printf '%s\n' "$_named" | grep -cE .)" -lt 1 ]; then
-      echo "HARNESS ERROR: the ${_label} arm's refusal enumeration was located but no settings key could be harvested out of it. The exclusivity check would compare the empty set against the canon and pass. NOTHING WAS MEASURED."
-      echo "ASSERTIONS_EXECUTED=${executed}"
-      exit 2
-    fi
-    _extra="$(printf '%s\n' "$_named" | grep -E . | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | tr '\n' ' ')"
-    # THE POSITIVE CONTROL, IN THE SAME COMMAND, WITH ITS EXPECTED VALUE WRITTEN
-    # DOWN BEFORE THE RUN: seeding one key the walk cannot have derived must move
-    # the differ's answer by EXACTLY ONE. A comm that silently produced nothing -
-    # unsorted input is enough to do that - would report "no intruders" in the
-    # same words as a clean arm.
-    #
-    # 🔴 [HISTORY 2026-08-17] THE EXPECTED VALUE WAS FIRST WRITTEN AS THE ABSOLUTE
-    # `1`, WHICH IS ONLY CORRECT WHILE THE SUBJECT IS CLEAN. I found that by
-    # planting a real intruder in the oauth branch to check this arm goes red:
-    # it did go red, on the CONTROL, reporting "the differ is not reading one of
-    # its two inputs" about a differ that was working perfectly and had just found
-    # the thing I planted. A CONTROL WHOSE EXPECTED VALUE DEPENDS ON THE SUBJECT
-    # BEING CLEAN REPORTS AN APPARATUS FAULT EVERY TIME THE APPARATUS SUCCEEDS -
-    # and it fails in the direction of exit 2, "nothing was measured", which is
-    # the one outcome that tells a reader to disregard the finding. The delta is
-    # the right expectation because it holds either way.
-    _ctl_before="$(printf '%s\n' "$_extra" | tr ' ' '\n' | grep -cE .)"
-    _ctl_after="$(printf '%s\nserver.zzz.control.probe\n' "$_named" | grep -E . | sort -u | comm -23 - <(printf '%s\n' "$_ha_keys" | grep -E . | sort -u) | grep -cE .)"
-    if [ "$_ctl_after" -ne "$((_ctl_before + 1))" ]; then
-      echo "HARNESS ERROR: the ${_label} exclusivity differ answered ${_ctl_before} on the real corpus and ${_ctl_after} on the same corpus seeded with one key the walk cannot have derived (server.zzz.control.probe). Seeding one intruder must move it by exactly one; it moved by $((_ctl_after - _ctl_before)). The differ is not reading one of its two inputs. NOTHING WAS MEASURED."
-      echo "ASSERTIONS_EXECUTED=${executed}"
-      exit 2
-    fi
-    if [ -z "${_extra// /}" ]; then
-      echo "ok    ${_label}: the HA refusal's enumeration names no gate outside the ${_ha_total} the walk derived"
-    else
-      echo "FAIL  ${_label}: the HA refusal names gates the hub does not have on this arm:${_extra}"
-      echo "        this is the 1b3c9418 shape - a refusal that is right about the outcome and wrong about the reason, which sends the operator to configure things that were never going to be checked."
-      failed=$((failed + 1))
-    fi
-  fi
-
-  # --- the removal condition names exactly the phases the walk attributes ----
-  #
-  # WHY THIS EXISTS, AND IT IS NOT THE SAME CHECK AS THE TWO ABOVE. Those read
-  # the GATE LIST. This reads the sentence that tells the operator when the flag
-  # goes away, which is a different claim about a different set, and it was
-  # wrong on BOTH arms while the gate list was right on both.
-  #
-  #   oauth: the gate list says "the ingress/IAP phase lands nothing this
-  #          release is waiting on" and the removal sentence, forty words later
-  #          in the same string, said the flag waits on the ingress/IAP values.
-  #          A single message contradicting itself.
-  #   proxy: the gate list attributes a gate to the session-secret phase and the
-  #          removal sentence named only Cloud SQL and ingress/IAP, so the flag
-  #          would have been declared removable with a gate still standing.
-  #
-  # THE EXPECTED SET IS DERIVED FROM THE WALK, NOT READ OUT OF THE PROSE. If it
-  # were harvested from the gate list it would agree with the gate list by
-  # construction and could never disagree with it, which is the whole question.
-  #
-  # THE CLAUSE IS CUT POSITIVELY. Both arms MENTION the ingress/IAP phase - the
-  # oauth one to say it does not apply - so a token scan over the whole sentence
-  # would score oauth as naming it. Only the text between "when" and "landed" is
-  # the list of phases being waited on.
-  executed=$((executed + 1))
-  _rwant=""
-  printf '%s\n' "$_ha_keys" | grep -qx 'server\.database\.url'  && _rwant="${_rwant}Cloud SQL phase|"
-  printf '%s\n' "$_ha_want" | grep -q  'durable session'        && _rwant="${_rwant}session-secret phase|"
-  printf '%s\n' "$_ha_keys" | grep -qE '^server\.auth\.'        && _rwant="${_rwant}ingress/IAP phase|"
-  _rwant="$(printf '%s' "$_rwant" | tr '|' '\n' | grep -E . | sort -u)"
-  _rclause="$(printf '%s' "$_out" | tr '\n' ' ' | sed -n 's/.*stops being needed for auth\.mode [a-z]* when \(.*\) ha[sv]e\?\( both\| all\)\? landed.*/\1/p')"
-  # THE EXTRACTION'S OWN SHAPE, ASSERTED. An anchor that stops matching yields
-  # an empty clause, the empty set names no wrong phase, and the comparison
-  # below reports agreement in the same words it would use for a correct
-  # sentence.
-  # NOTE: the sed pattern accepts "has landed" (single phase), "have both
-  # landed" (two phases), and "have all landed" (three or more). After Cloud
-  # SQL lands, the oauth arm waits on one phase and uses the singular.
-  if [ -z "$_rclause" ] || [ -z "$_rwant" ]; then
-    echo "HARNESS ERROR: the ${_label} arm's removal-condition clause cut to '${_rclause}' and its walk-derived phase set to '$(printf '%s' "$_rwant" | tr '\n' ' ')'. Either the refusal no longer says 'stops being needed for auth.mode X when ... have both/all landed', or the walk yielded no phase to attribute. An empty set agrees with every sentence. NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-  _rgot="$(printf '%s' "$_rclause" | grep -oE 'Cloud SQL phase|session-secret phase|ingress/IAP phase' | sort -u)"
-  _rmiss="$(printf '%s\n' "$_rgot" | grep -E . | comm -13 - <(printf '%s\n' "$_rwant") | tr '\n' ' ')"
-  _rxtra="$(printf '%s\n' "$_rgot" | grep -E . | comm -23 - <(printf '%s\n' "$_rwant") | tr '\n' ' ')"
-  # THE POSITIVE CONTROL, DELTA-EXPECTED FOR THE REASON RECORDED ABOVE.
-  #
-  # 🔴 [HISTORY 2026-08-17] THE COUNT IS TAKEN IN LINES, AND THE FIRST VERSION
-  # TOOK IT IN SPACE-SEPARATED TOKENS - `tr ' ' '\n'`, copied from the exclusivity
-  # control forty lines up, where the items are settings KEYS and contain no
-  # spaces. Phase names do: "ingress/IAP phase" tokenises to two. So on a CLEAN
-  # subject the extras set is empty, 0 tokens, delta 1, and the control passed;
-  # on a DIRTY subject it counted 2 where the truth was 1, the delta came out 0,
-  # and the arm exited 2 "NOTHING WAS MEASURED" instead of exiting 1 with the
-  # defect named. MEASURED: reverting the oauth removal sentence to the old
-  # shared wording produced exactly that, and the arm that was supposed to catch
-  # it reported an apparatus fault about itself instead.
-  #
-  # This is the SAME defect I recorded above and thought I had designed out. The
-  # expected value was already a delta; what stayed coupled to the subject was
-  # the COUNTING METHOD, which is only correct while the set it counts is empty.
-  # A CONTROL CAN BE SUBJECT-COUPLED THROUGH ITS TOKENISER AND NOT THROUGH ITS
-  # EXPECTATION, and a clean tree cannot tell the difference.
-  _rctl_before="$(printf '%s\n' "$_rgot" | grep -E . | comm -23 - <(printf '%s\n' "$_rwant") | grep -cE .)"
-  _rctl_after="$(printf '%s\nzzz control phase\n' "$_rgot" | grep -E . | sort -u | comm -23 - <(printf '%s\n' "$_rwant") | grep -cE .)"
-  if [ "$_rctl_after" -ne "$((_rctl_before + 1))" ]; then
-    echo "HARNESS ERROR: the ${_label} removal-condition differ answered ${_rctl_before} on the real clause and ${_rctl_after} with one phase planted that the walk cannot attribute. Planting one must move it by exactly one; it moved by $((_rctl_after - _rctl_before)). NOTHING WAS MEASURED."
-    echo "ASSERTIONS_EXECUTED=${executed}"
-    exit 2
-  fi
-  if [ -z "${_rmiss// /}" ] && [ -z "${_rxtra// /}" ]; then
-    echo "ok    ${_label}: the removal condition waits on exactly the phases the walk attributes gates to ($(printf '%s' "$_rwant" | tr '\n' ',' | sed 's/,$//'))"
-  else
-    echo "FAIL  ${_label}: the removal condition and the walk disagree about which phases this flag waits on. Waits on a phase with no gate on this arm:${_rxtra:- none}. Has a gate but is not waited on:${_rmiss:- none}."
-    echo "        an operator reading this is told the flag clears at the wrong time - too early leaves a gate standing, too late holds the flag through a phase that cannot affect it."
-    failed=$((failed + 1))
-  fi
-}
-
-_ha_arm "proxy" "===== settings.yaml [audience well-formed" 3 0 \
-  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
-  "${CLOUDSQL_SET[@]}"
-_ha_proxy_total="$_ha_total"
-
-_ha_arm "oauth" "===== settings-oauth.yaml [audience well-formed" 1 1 \
-  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
-  "${CLOUDSQL_SET[@]}" \
-  --set auth.mode=oauth "${OAUTH_WEB[@]}"
-_ha_oauth_total="$_ha_total"
-
-# --- the differential itself -------------------------------------------------
-# Two arms that agree prove nothing about a per-mode error; they are also what a
-# chart with one hard-coded list produces. This asserts the arms DISAGREE, which
-# is the whole content of 1b3c9418 as it reaches this chart.
-executed=$((executed + 1))
-if [ "$_ha_proxy_total" -gt "$_ha_oauth_total" ]; then
-  echo "ok    the proxy arm walks more gates than the oauth arm (${_ha_proxy_total} > ${_ha_oauth_total}), so the two refusals are not one list rendered twice"
-else
-  echo "FAIL  the proxy and oauth arms derived ${_ha_proxy_total} and ${_ha_oauth_total} gates. Since 1b3c9418 the hub's IAP gates run only under auth.mode=proxy, so proxy must be the longer list. Equal counts mean the two arms are reading the same canon block and the per-mode branch in scion-hub.assertHAUnlanded is untested."
-  failed=$((failed + 1))
-fi
+echo "== auth.transport =="
+reject "oidcAudience with no transport mode" "set while auth.transport.mode is" \
+  --set auth.transport.oidcAudience=probe-rg-oauth-client.apps.googleusercontent.com
+reject "platformAuthSa with mode none" "set while auth.transport.mode is" \
+  --set auth.transport.mode=none --set auth.transport.platformAuthSa=probe-rg@probe-project.iam.gserviceaccount.com
+reject "unknown transport mode, schema layer" "auth.transport.mode" --set auth.transport.mode=bogus
+reject "unknown transport mode, template layer" "must be one of" --skip-schema-validation --set auth.transport.mode=bogus
+reject "iap transport with no oidcAudience" "requires auth.transport.oidcAudience" \
+  --set auth.transport.mode=iap --set auth.transport.platformAuthSa=probe-rg@probe-project.iam.gserviceaccount.com
+reject "cloudrun_invoker with no platformAuthSa" "requires auth.transport.platformAuthSa" \
+  --set auth.transport.mode=cloudrun_invoker
+accept "cloudrun_invoker with platformAuthSa, non-HA" \
+  --set auth.transport.mode=cloudrun_invoker --set auth.transport.platformAuthSa=probe-rg@probe-project.iam.gserviceaccount.com
+accept "transport mode none, nothing else" --set auth.transport.mode=none
+reject "config.extra camelCase transport key" "That spelling binds nothing" \
+  --set config.extra.server.auth.transport.oidcAudience=probe-rg-oauth-client.apps.googleusercontent.com
+reject "config.extra camelCase platformAuthSA" "That spelling binds nothing" \
+  --set config.extra.server.auth.transport.platformAuthSA=probe-rg@probe-project.iam.gserviceaccount.com
 
 echo "== oauth mode requires a complete web client credential =="
 # THIS SECTION REPLACES auth.acknowledgeOAuthUnlanded, and the replacement is not
@@ -1021,34 +796,34 @@ echo "== oauth mode requires a complete web client credential =="
 # demands clientId. A schema that listed both halves whatever was missing would
 # satisfy a looser pair of substrings while telling the operator nothing.
 reject "oauth, no credentials, schema layer"  "clientId" \
-  --set auth.mode=oauth
+  --set auth.mode=oauth --set auth.proxy.iap.audience=
 reject "oauth, clientId only, schema layer"   "clientSecret" \
-  --set auth.mode=oauth --set auth.oauth.web.google.clientId=rg-id
+  --set auth.mode=oauth --set auth.proxy.iap.audience= --set auth.oauth.web.google.clientId=rg-id
 reject "oauth, clientSecret only, schema layer" "clientId" \
-  --set auth.mode=oauth --set auth.oauth.web.google.clientSecret=rg-sec
+  --set auth.mode=oauth --set auth.proxy.iap.audience= --set auth.oauth.web.google.clientSecret=rg-sec
 
 reject "oauth, no credentials, template layer" "no complete OAuth web client credential is present" \
-  --skip-schema-validation --set auth.mode=oauth
+  --skip-schema-validation --set auth.mode=oauth --set auth.proxy.iap.audience=
 reject "oauth, clientId only, template layer"  "google (has client_id, missing client_secret)" \
-  --skip-schema-validation --set auth.mode=oauth --set auth.oauth.web.google.clientId=rg-id
+  --skip-schema-validation --set auth.mode=oauth --set auth.proxy.iap.audience= --set auth.oauth.web.google.clientId=rg-id
 reject "oauth, clientSecret only, template layer" "google (has client_secret, missing client_id)" \
-  --skip-schema-validation --set auth.mode=oauth --set auth.oauth.web.google.clientSecret=rg-sec
+  --skip-schema-validation --set auth.mode=oauth --set auth.proxy.iap.audience= --set auth.oauth.web.google.clientSecret=rg-sec
 
 # CLI CREDENTIALS DO NOT SUBSTITUTE FOR WEB ONES, and this row is the reason the
 # guard walks the web subtree specifically instead of asking "is server.oauth
-# non-empty". The hub keys its login check by client type (pkg/hub/oauth.go:194),
-# so a complete cli credential renders, validates, looks like configuration in
+# non-empty". The hub keys its login check by client type
+# (OAuthService.IsProviderConfiguredForClient, pkg/hub/oauth.go), so a complete cli credential renders, validates, looks like configuration in
 # the Secret, and satisfies no browser login. A guard written on presence rather
 # than on client type passes this input.
 reject "complete cli credential does not satisfy oauth mode" "no complete OAuth web client credential is present" \
-  --set auth.mode=oauth \
+  --set auth.mode=oauth --set auth.proxy.iap.audience= \
   --set config.extra.server.oauth.cli.google.client_id=rg-cli-id \
   --set config.extra.server.oauth.cli.google.client_secret=rg-cli-secret
 
 # THE SPELLING GUARD, WHICH IS THE ONE THAT CAUGHT ME. settings.yaml binds
-# client_id/client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go:635);
+# client_id/client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go);
 # clientId/clientSecret is the SCION_SERVER_* environment mapper's spelling
-# (pkg/config/hub_config.go:334). Measured both directions in
+# (OAuthProviderConfig, pkg/config/hub_config.go). Measured both directions in
 # harness/zz_p3_oauth_settings_probe_test.go: snake_case binds, camelCase leaves
 # the field empty with no error from yaml.v3. I wrote the positive case in
 # camelCase and expected it to pass.
@@ -1068,20 +843,20 @@ reject "camelCase via config.extra, proxy mode" "server.oauth.web.github.clientI
   --set config.extra.server.oauth.web.github.clientId=rg-camel
 
 accept "oauth with a complete google web credential" --set auth.mode=oauth "${OAUTH_WEB[@]}"
-accept "oauth with a complete github web credential" --set auth.mode=oauth \
+accept "oauth with a complete github web credential" --set auth.mode=oauth --set auth.proxy.iap.audience= \
   --set auth.oauth.web.github.clientId=rg-gh-id --set auth.oauth.web.github.clientSecret=rg-gh-secret
 # config.extra IS A FIRST-CLASS WAY TO MEET THE REQUIREMENT, not a bypass of it.
 # The guard reads the rendered document, so an operator who supplies
 # server.oauth.web themselves has supplied it, and a guard that insisted on
 # auth.oauth.web specifically would refuse a correct deployment.
-accept "credentials supplied through config.extra in snake_case" --set auth.mode=oauth \
+accept "credentials supplied through config.extra in snake_case" --set auth.mode=oauth --set auth.proxy.iap.audience= \
   --set config.extra.server.oauth.web.google.client_id=rg-extra-id \
   --set config.extra.server.oauth.web.google.client_secret=rg-extra-secret
 # WITH AN EXTERNAL SETTINGS SECRET THE CHART RENDERS NO SETTINGS DOCUMENT, so
 # there is nothing to inspect and nothing to refuse. Asserting this keeps the
 # guard from growing into a claim about a file the chart cannot see.
 accept "oauth with no credentials but an external settings Secret" \
-  --set auth.mode=oauth --set config.existingSecret=operator-owned
+  --set auth.mode=oauth --set auth.proxy.iap.audience= --set agents.imageRegistry= --set config.existingSecret=operator-owned
 
 # THE POSITIVE TWIN OF THE SPELLING GUARD: the chart's own render must land on
 # the side of the guard it enforces. A chart that refused camelCase from
@@ -1106,6 +881,664 @@ else
   failed=$((failed + 1))
 fi
 unset _oa
+
+echo "== agents.imageRegistry is required for the in-process broker =="
+# The chart always renders --enable-runtime-broker, and the hub then refuses to
+# start without a registry (requireImageRegistryForBroker,
+# cmd/server_foreground.go). The hub's sources, each accepted here: the
+# SCION_IMAGE_REGISTRY environment variable, and image_registry resolved for
+# the active profile (profile level, else top level).
+# SCION_MAINTENANCE_IMAGE_REGISTRY applies only to maintenance builds
+# (ptone/scion#3916) and is refused as the only source, naming the
+# replacement. Not checked under config.existingSecret. BASE carries a
+# registry, so each row clears it first.
+reject "no registry anywhere" "agents.imageRegistry is required" --set agents.imageRegistry=
+reject "registry only on a profile that is not active" "agents.imageRegistry is required" \
+  --set agents.imageRegistry= --set config.extra.profiles.other.image_registry=example.invalid/agents
+reject "SCION_IMAGE_REGISTRY with an empty value" "to an empty value" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+accept "agents.imageRegistry set"
+accept "top-level image_registry through config.extra" \
+  --set agents.imageRegistry= --set config.extra.image_registry=example.invalid/agents
+accept "active-profile image_registry through config.extra" \
+  --set agents.imageRegistry= --set config.extra.profiles.default.image_registry=example.invalid/agents
+accept "SCION_IMAGE_REGISTRY through hub.extraEnv" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/agents'
+reject "SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv valueFrom as the only source" "now applies only to maintenance image builds" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
+accept "SCION_MAINTENANCE_IMAGE_REGISTRY alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/maintenance'
+accept "no registry under config.existingSecret" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned
+
+echo "== hub.extraEnv entries the koanf env layer applies over settings.yaml =="
+# LoadVersionedSettings loads SCION_* variables over settings.yaml, so
+# SCION_ACTIVE_PROFILE changes what the registry check above read from the
+# file. The chart refuses it rather than modelling env precedence
+# (assertExtraEnv).
+#
+# An empty SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY is not a
+# registry source and is refused as a likely mistake.
+reject "empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+reject "empty SCION_MAINTENANCE_IMAGE_REGISTRY" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+reject "SCION_IMAGE_REGISTRY with neither value nor valueFrom" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY'
+reject "empty SCION_IMAGE_REGISTRY under config.existingSecret" "to an empty value" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+accept "non-empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/other'
+reject "non-empty literal SCION_MAINTENANCE_IMAGE_REGISTRY as the only source" "Set agents.imageRegistry, image_registry through config.extra, or SCION_IMAGE_REGISTRY" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].value=example.invalid/agents'
+accept "SCION_IMAGE_REGISTRY valueFrom alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
+# SCION_ACTIVE_PROFILE overrides active_profile. The first row was a false
+# refusal (the hub would resolve profiles.other), the second a false accept
+# (the hub would resolve no registry); both are now one refusal.
+reject "SCION_ACTIVE_PROFILE naming a profile that has a registry" "may not set SCION_ACTIVE_PROFILE" \
+  --set agents.imageRegistry= --set config.extra.profiles.other.image_registry=example.invalid/agents \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' --set 'hub.extraEnv[0].value=other'
+reject "SCION_ACTIVE_PROFILE moving off the profile that has a registry" "may not set SCION_ACTIVE_PROFILE" \
+  --set agents.imageRegistry= --set config.extra.profiles.default.image_registry=example.invalid/agents \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' --set 'hub.extraEnv[0].value=other'
+reject "SCION_ACTIVE_PROFILE through valueFrom" "active_profile through config.extra" \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=profile' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=name'
+accept "a name that only begins with SCION_ACTIVE_PROFILE" \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE_NOTE' --set 'hub.extraEnv[0].value=x'
+
+echo "== SCION_SERVER_SECRETS_* through hub.extraEnv =="
+# SCION_SERVER_SECRETS_BACKEND binds after settings.yaml and can select gcpsm
+# with no project, which the hub only logs; secrets.backend refuses that shape.
+reject "SCION_SERVER_SECRETS_BACKEND" "SCION_SERVER_SECRETS_* are refused" \
+  --set 'hub.extraEnv[0].name=SCION_SERVER_SECRETS_BACKEND' --set 'hub.extraEnv[0].value=gcpsm'
+reject "scion_server_hub_conduit_internal_listen, lower case" "Use conduit.internalTls" \
+  --set 'hub.extraEnv[0].name=scion_server_hub_conduit_internal_listen' --set 'hub.extraEnv[0].value=0.0.0.0:9443'
+
+echo "== hub.adminEmails =="
+# One address per entry. The hub comma-splits a one-element list only, so a
+# comma would mean two admins or one invalid address depending on the list.
+reject "adminEmails entry with a comma, schema layer" "hub.adminEmails.0" \
+  --set 'hub.adminEmails[0]=a@example.invalid\,b@example.invalid'
+reject "adminEmails with config.existingSecret" "inline settings values (hub.adminEmails)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned \
+  --set 'hub.adminEmails[0]=a@example.invalid'
+executed=$((executed + 1))
+_ae="$(render --set 'hub.adminEmails={a@example.invalid,b@example.invalid}' --show-only templates/secret-settings.yaml)"
+_ad="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_ae" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_ad" | grep -q '^kind: Secret$'; then
+  echo "FAIL  server.hub.admin_emails shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_ae" | grep -A2 -E '^ +admin_emails:$' | grep -qE '^ +- a@example.invalid$' \
+  && printf '%s\n' "$_ae" | grep -A2 -E '^ +admin_emails:$' | grep -qE '^ +- b@example.invalid$' \
+  && ! printf '%s\n' "$_ad" | grep -q 'admin_emails'; then
+  echo "ok    hub.adminEmails renders server.hub.admin_emails as a list; empty renders no admin_emails"
+else
+  echo "FAIL  server.hub.admin_emails shape: the list did not render, or an empty list rendered the key"
+  failed=$((failed + 1))
+fi
+unset _ae _ad
+
+echo "== conduit.internalTls =="
+# The relay hop between hub nodes. Opt-in; when on it needs its Secret and a
+# free port, and a non-loopback relay listener without TLS is refused on every
+# path, config.extra included.
+# The hub image is set by digest here, so these rows do not depend on the
+# minimum hub release for relay TLS; the version gate has its own rows below.
+RT_ON=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000)
+reject "internalTls enabled without existingSecret" "requires conduit.internalTls.existingSecret" \
+  --set conduit.internalTls.enabled=true
+reject "internalTls existingSecret while disabled" "set while the relay hop is off (conduit.internalTls.enabled is false" \
+  --set conduit.internalTls.enabled=false --set conduit.internalTls.existingSecret=rg-relay-cert
+reject "internalTls auto at two replicas without a Secret" "turns on TLS for the relay hop between hub nodes above one replica" \
+  --set replicaCount=2
+accept "internalTls auto at two replicas with a Secret" --set replicaCount=2 --set conduit.internalTls.existingSecret=rg-relay-cert --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+accept "internalTls disabled at two replicas" --set replicaCount=2 --set conduit.internalTls.enabled=false
+accept "internalTls existingSecret under auto at one replica (set ahead of a scale-up)" \
+  --set conduit.internalTls.existingSecret=rg-relay-cert
+reject "internalTls port on hub.webPort" "is also hub.webPort" "${RT_ON[@]}" --set conduit.internalTls.port=8080
+reject "internalTls port on the in-process broker" "is also the hub's in-process runtime broker" "${RT_ON[@]}" --set conduit.internalTls.port=9800
+reject "internalTls serverName not a DNS name" "must be a DNS name" "${RT_ON[@]}" --set conduit.internalTls.serverName=Bad_Name
+reject "plaintext non-loopback internal_listen through config.extra" "which is not a loopback address" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443"}}}}'
+reject "internalTls with config.extra conduit listener" "also sets server.hub.conduit.internal_listen" "${RT_ON[@]}" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9555"}}}}'
+reject "internalTls with config.existingSecret" "inline settings values (conduit.internalTls.enabled" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${RT_ON[@]}"
+reject "cert without key on a non-loopback listener through config.extra" "internal_tls_cert_file and internal_tls_key_file are not both set" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt"}}}}'
+reject "cert without key on a loopback listener through config.extra" "must be set together" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt"}}}}'
+# Loopback means host:port with a port of 1-65535 and a valid 127.x.y.z,
+# [::1], as the hub reads it (a loopback IP literal: [::1] or a valid
+# 127.x.y.z, never a name such as localhost); anything else needs TLS.
+reject "internal_listen loopback IP without a port" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1"}}}}'
+reject "internal_listen localhost without a port" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"localhost"}}}}'
+reject "internal_listen localhost:port without TLS (a name is never loopback)" "which is not a loopback address" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"localhost:9443"}}}}'
+reject "internal_listen 127.x with an out-of-range octet" "which is not a loopback address" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.300.0.1:9443"}}}}'
+reject "internal_listen with leading whitespace" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":" 127.0.0.1:9443"}}}}'
+reject "internal_listen with trailing whitespace" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443 "}}}}'
+# A whitespace-only listen is refused as whitespace, with TLS files or without.
+reject "internal_listen of spaces only" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"   "}}}}'
+reject "internal_listen of a tab only" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"\t"}}}}'
+reject "internal_listen of spaces only, with TLS files" "with leading or trailing whitespace" --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"   ","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+reject "internal_listen of a tab only, with TLS files" "with leading or trailing whitespace" --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"\t","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+reject "internal_listen port 65536" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:65536"}}}}'
+reject "internal_listen port 0" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:0"}}}}'
+reject "internal_listen without a port, with TLS files" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+# The TLS files and the server name are checked as the hub reads them.
+reject "internal_tls_server_name with a slash through config.extra" "it must be a host name" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_server_name":"relay/internal"}}}}'
+reject "internal_tls_server_name with trailing whitespace through config.extra" "it must be a host name" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_server_name":"relay.internal "}}}}'
+reject "a blank internal_tls_cert_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"  "}}}}'
+reject "a padded internal_tls_key_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":" /x/tls.key"}}}}'
+reject "a padded internal_tls_ca_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_ca_file":"/x/ca.crt "}}}}'
+accept "loopback internal_listen through config.extra" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443"}}}}'
+accept "internalTls enabled" "${RT_ON[@]}"
+executed=$((executed + 1))
+_rt_on="$(render "${RT_ON[@]}" --set conduit.internalTls.caSecret=rg-relay-ca)"
+_rt_off="$(render)"
+_rt_fail=""
+for _want in \
+  '          internal_listen: 0.0.0.0:9443' \
+  '          internal_tls_cert_file: /etc/scion/relay-tls/tls.crt' \
+  '          internal_tls_key_file: /etc/scion/relay-tls/tls.key' \
+  '          internal_tls_ca_file: /etc/scion/relay-tls-ca/ca.crt' \
+  '          internal_tls_server_name: t-scion-hub-relay.default.svc' \
+  '                  fieldPath: status.podIP' \
+  '              containerPort: 9443' \
+  '              mountPath: "/etc/scion/relay-tls"' \
+  '              mountPath: "/etc/scion/relay-tls-ca"' \
+  '            secretName: rg-relay-cert' \
+  '            secretName: rg-relay-ca'; do
+  printf '%s\n' "$_rt_on" | grep -qxF -- "$_want" || _rt_fail="${_rt_fail} [missing: ${_want# *}]"
+done
+# Whole-directory mounts (a subPath mount never sees a rotated Secret), no
+# relay port on the Service, and nothing at all when disabled.
+printf '%s\n' "$_rt_on" | grep -A2 -E 'mountPath: "/etc/scion/relay-tls' | grep -q 'subPath' && _rt_fail="${_rt_fail} [relay mount uses subPath]"
+printf '%s\n' "$_rt_on" | sed -n '/^kind: Service$/,/^---$/p' | grep -q '9443' && _rt_fail="${_rt_fail} [relay port on the Service]"
+printf '%s\n' "$_rt_off" | grep -qE 'internal_listen|relay-tls|status.podIP' && _rt_fail="${_rt_fail} [disabled render carries relay wiring]"
+if [ -z "$_rt_fail" ] && printf '%s\n' "$_rt_on" | grep -q '^kind: Deployment$'; then
+  echo "ok    conduit.internalTls renders server.hub.conduit TLS keys, whole-directory Secret mounts, POD_IP and a pod-only port; disabled renders none of it"
+else
+  echo "FAIL  conduit.internalTls shape:${_rt_fail:- no Deployment rendered}"
+  failed=$((failed + 1))
+fi
+unset _rt_on _rt_off _rt_fail _want
+# The relay wiring trusts no forwarded headers: with the relay on, the rendered
+# settings carry no server.relay block and no trusted_proxies under
+# server.hub.conduit. A relay-level trusted_proxies default stays empty.
+executed=$((executed + 1))
+_rt_settings="$(render "${RT_ON[@]}" --show-only templates/secret-settings.yaml)"
+_rt_conduit="$(printf '%s\n' "$_rt_settings" | sed -n '/^        conduit:$/,/^        [a-z_]*:/p')"
+if ! printf '%s\n' "$_rt_conduit" | grep -q 'internal_listen:'; then
+  echo "FAIL  relay trusted_proxies pin: no server.hub.conduit block rendered, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_rt_conduit" | grep -q 'trusted_proxies' || printf '%s\n' "$_rt_settings" | grep -qE '^      relay:$'; then
+  echo "FAIL  relay trusted_proxies pin: the relay wiring rendered a trusted_proxies entry or a server.relay block"
+  failed=$((failed + 1))
+else
+  echo "ok    the relay wiring renders no relay-level trusted_proxies and no server.relay block"
+fi
+unset _rt_settings _rt_conduit RT_ON
+
+echo "== conduit.internalTls minimum hub image =="
+# The relay wiring is refused for a hub image older than the first release that
+# honours the internal_tls_* settings (scion-hub.relayTlsMinHub). The floor is
+# read from the chart, so these rows follow it when it changes.
+_rt_min="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^version: "\(.*\)"$/\1/p')"
+_rt_min_n="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^nightly: "\(.*\)"$/\1/p')"
+_rt_vlines="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | grep -c '^version: "')"
+# The major version, without a leading v (the floor is written v0.3.0-preview.5).
+_rt_mv="${_rt_min#v}"
+_rt_major="${_rt_mv%%.*}"
+RT_TAG=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert)
+# The chart ships a version floor, and semver tags are compared with it. An
+# empty version floor (every semver tag refused, the message naming only the
+# nightly) is still handled by the template, and one row below covers it by
+# rendering a copy of the chart with the floor emptied; an empty floor in the
+# chart itself fails this block closed. A tag that passes the check: the
+# version floor.
+_rt_ok_tag="$_rt_min"; _rt_semver_refusal="is older than ${_rt_min}"
+if [ "$_rt_vlines" -ne 1 ] || [ -z "$_rt_min_n" ] || [ -z "$_rt_min" ] || ! [[ "$_rt_major" =~ ^[0-9]+$ ]]; then
+  executed=$((executed + 37)); failed=$((failed + 37))
+  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version lines $_rt_vlines, version '$_rt_min', nightly '$_rt_min_n'); none of its 37 rows ran"
+else
+  reject "relay wiring with an older semver tag" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=0.0.1
+  accept "relay wiring with the minimum semver tag" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}"
+  accept "relay wiring with a newer semver tag" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0"
+  # The shipped floor, v0.3.0-preview.5 and nightly-20261029, by literal tag:
+  # these rows change only when the floor does.
+  reject "floor: v0.3.0-preview.4 is refused, naming the nightly and the release floor" \
+    "Use nightly-20261029 or later or a release at or after v0.3.0-preview.5," "${RT_TAG[@]}" --set-string image.tag=v0.3.0-preview.4
+  accept "floor: v0.3.0-preview.5" "${RT_TAG[@]}" --set-string image.tag=v0.3.0-preview.5
+  # Numeric pre-release identifiers compare as numbers (10 > 5), not as text.
+  accept "floor: v0.3.0-preview.10" "${RT_TAG[@]}" --set-string image.tag=v0.3.0-preview.10
+  accept "floor: v0.3.0" "${RT_TAG[@]}" --set-string image.tag=v0.3.0
+  accept "floor: v0.3.1-preview.1" "${RT_TAG[@]}" --set-string image.tag=v0.3.1-preview.1
+  reject "floor: v0.2.99 is refused" "is older than v0.3.0-preview.5" "${RT_TAG[@]}" --set-string image.tag=v0.2.99
+  reject "floor: nightly-20261028 is refused" "is older than nightly-20261029" "${RT_TAG[@]}" --set-string image.tag=nightly-20261028
+  accept "floor: nightly-20261029" "${RT_TAG[@]}" --set-string image.tag=nightly-20261029
+  reject "floor: the default tag (appVersion) refusal offers a release at or after v0.3.0-preview.5" \
+    "set image.tag to nightly-20261029 or later or a release at or after v0.3.0-preview.5," "${RT_TAG[@]}"
+  # An empty version floor, in a copy of the chart. All three empty-floor
+  # branches of the template are covered: a version tag at any height, the
+  # default tag (appVersion) and a malformed version tag are each refused with a
+  # nightly-only message, and no refusal names a version floor.
+  _rt_ph="$(mktemp -d)"
+  _rt_ph_ok=0
+  # An empty _rt_ph (mktemp failed) must not copy to /c; the rows then FAIL.
+  if [ -n "$_rt_ph" ] && cp -r "$CHART" "$_rt_ph/c" \
+    && sed '/define "scion-hub.relayTlsMinHub"/,/end/s/^version: ".*"$/version: ""/' "$_rt_ph/c/templates/_helpers.tpl" > "$_rt_ph/c/templates/_helpers.tpl.new" \
+    && mv "$_rt_ph/c/templates/_helpers.tpl.new" "$_rt_ph/c/templates/_helpers.tpl"; then
+    _rt_ph_ok=1
+  fi
+  # rt_empty_floor NAME EXPECTED_SUBSTRING [helm args...]: one row. The render
+  # must fail with EXPECTED_SUBSTRING, name the nightly and name no version floor.
+  rt_empty_floor() {
+    local name="$1" want="$2" out=""; shift 2
+    executed=$((executed + 1))
+    if [ "$_rt_ph_ok" -ne 1 ]; then
+      echo "FAIL  relay image gate: ${name}: the chart copy with an empty floor could not be made"; failed=$((failed + 1))
+    elif out="$("$HELM" template t "$_rt_ph/c" "${BASE[@]}" "${RT_TAG[@]}" "$@" 2>&1)"; then
+      echo "FAIL  relay image gate: ${name}: the render was accepted"; failed=$((failed + 1))
+    elif printf '%s\n' "$out" | grep -qF "$want" && printf '%s\n' "$out" | grep -qF "nightly-${_rt_min_n} or later" \
+      && ! printf '%s\n' "$out" | grep -qE 'a release at or after|is older than|Use a valid version tag'; then
+      echo "ok    ${name}"
+    else
+      echo "FAIL  relay image gate: ${name}: wrong refusal: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+    fi
+  }
+  rt_empty_floor "an empty version floor refuses v100.0.0, naming the nightly and no version floor" \
+    "no versioned hub release serves the relay hop" --set-string image.tag=v100.0.0
+  rt_empty_floor "an empty version floor refuses the default tag (appVersion), naming the nightly and no version floor" \
+    "image.tag is not set, so the tag is the chart's appVersion"
+  rt_empty_floor "an empty version floor refuses a malformed version tag, naming the nightly and no version floor" \
+    "is not a valid semantic version, and no versioned hub release serves the relay hop" --set-string image.tag=1.2.0-01
+  unset -f rt_empty_floor
+  [ -n "$_rt_ph" ] && [ -d "$_rt_ph" ] && rm -rf "$_rt_ph"
+  unset _rt_ph _rt_ph_ok
+  # The semver refusal names the version floor.
+  executed=$((executed + 1))
+  _rt_sv="$(render "${RT_TAG[@]}" --set-string image.tag=0.0.1)"
+  if printf '%s\n' "$_rt_sv" | grep -qF "$_rt_min"; then
+    echo "ok    the semver refusal names the version floor ${_rt_min}"
+  else
+    echo "FAIL  relay image gate: the semver refusal does not name the version floor: $(printf '%s' "$_rt_sv" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+  fi
+  unset _rt_sv
+  # The malformed-version refusal advises a valid version tag (a version floor
+  # exists).
+  executed=$((executed + 1))
+  _rt_mf="$(render "${RT_TAG[@]}" --set-string image.tag=1.2.0-01)"
+  if ! printf '%s\n' "$_rt_mf" | grep -qF 'is not a valid semantic version'; then
+    echo "FAIL  relay image gate: no malformed-version refusal for 1.2.0-01"; failed=$((failed + 1))
+  elif printf '%s\n' "$_rt_mf" | grep -qF 'Use a valid version tag'; then
+    echo "ok    the malformed-version refusal advises a valid version tag (a version floor exists)"
+  else
+    echo "FAIL  relay image gate: the malformed-version remedy is wrong: $(printf '%s' "$_rt_mf" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+  fi
+  unset _rt_mf
+  # On the config.extra path (wiring off), the off-remedy is to remove that
+  # listener, not to turn off conduit.internalTls.
+  executed=$((executed + 1))
+  _rt_xr="$(render --set-string image.tag=0.1.0 --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}')"
+  if printf '%s\n' "$_rt_xr" | grep -qF 'remove the config.extra internal_listen' && ! printf '%s\n' "$_rt_xr" | grep -qF 'conduit.internalTls.enabled: false'; then
+    echo "ok    the config.extra path names removing that internal_listen as the off-remedy"
+  else
+    echo "FAIL  relay image gate: the config.extra path's remedy is wrong: $(printf '%s' "$_rt_xr" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+  fi
+  unset _rt_xr
+  reject "relay wiring with an older nightly tag" "is older than nightly-${_rt_min_n}" "${RT_TAG[@]}" --set-string image.tag=nightly-20000101
+  accept "relay wiring with the minimum nightly tag" "${RT_TAG[@]}" --set-string "image.tag=nightly-${_rt_min_n}"
+  accept "relay off with an older tag (no gate)" --set-string image.tag=0.0.1
+  # With image.tag unset the tag is the chart's appVersion, which stays below
+  # the floor (versioned images are not published per release); the refusal must
+  # tell the operator to set image.tag or image.digest.
+  reject "relay wiring on the default tag (appVersion) names image.tag and image.digest" "image.tag is not set, so the tag is the chart's appVersion" "${RT_TAG[@]}"
+  # Build metadata does not change precedence (an earlier pre-release sorting
+  # below the floor is the v0.3.0-preview.4 row above); a tag that starts like
+  # a version but is not one gets the chart's own refusal.
+  reject "relay wiring with an older tag carrying build metadata" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=0.0.1+build
+  accept "relay wiring with the minimum tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}+build.1"
+  reject "relay wiring with a malformed version tag" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=1.2.0-01
+  reject "relay wiring with an overflowing version number" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=99999999999999999999.0.0
+  # Rows that do not lean on appVersion being below the floor.
+  _rt_core="${_rt_min%%[-+]*}"
+  _rt_patch="${_rt_core##*.}"
+  accept "relay wiring with a newer pre-release (patch+1, -preview.10)" "${RT_TAG[@]}" --set-string "image.tag=${_rt_core%.*}.$((_rt_patch + 1))-preview.10"
+  accept "relay wiring with a newer tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0+meta.1"
+  accept "config.extra loopback relay listener on an older tag (loopback is not gated)" --set-string image.tag=0.0.1 \
+    --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+  unset _rt_core _rt_patch
+  # A non-loopback relay listener from config.extra, with the wiring off, is held
+  # to the same floor: an older hub would serve it in plaintext.
+  reject "config.extra non-loopback relay listener on an older tag" "$_rt_semver_refusal" --set-string image.tag=0.1.0 \
+    --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+  executed=$((executed + 1))
+  _rt_xd="$(render --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}' --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_xd" | grep -qxF '    scion.io/relay-tls-image-check: unverified'; then
+    echo "ok    a config.extra non-loopback relay listener on a digest renders with the unverified annotation"
+  else
+    echo "FAIL  relay image gate: config.extra listener on a digest did not render the unverified annotation"; failed=$((failed + 1))
+  fi
+  executed=$((executed + 1))
+  _rt_dg="$(render "${RT_TAG[@]}" --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_dg" | grep -qxF '    scion.io/relay-tls-image-check: unverified'; then
+    echo "ok    the relay wiring on an image digest renders with the unverified annotation"
+  else
+    echo "FAIL  relay image gate: the relay wiring on a digest did not render the unverified annotation"; failed=$((failed + 1))
+  fi
+  unset _rt_xd _rt_dg
+  executed=$((executed + 1))
+  _rt_latest="$(render "${RT_TAG[@]}" --set-string image.tag=latest --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_latest" | grep -qxF '    scion.io/relay-tls-image-check: unverified'; then
+    echo "ok    an unparseable tag (latest) is allowed and the Deployment is annotated unverified"
+  else
+    echo "FAIL  relay image gate: tag latest did not render with the unverified annotation"; failed=$((failed + 1))
+  fi
+  executed=$((executed + 1))
+  _rt_ok="$(render "${RT_TAG[@]}" --set-string "image.tag=${_rt_ok_tag}" --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_ok" | grep -q '^kind: Deployment$' && ! printf '%s\n' "$_rt_ok" | grep -q 'relay-tls-image-check'; then
+    echo "ok    a checked tag renders no unverified annotation"
+  else
+    echo "FAIL  relay image gate: a checked tag rendered the unverified annotation, or no Deployment"; failed=$((failed + 1))
+  fi
+  # NOTES.txt is rendered through a copy whose NOTES is renamed to a manifest and
+  # shown with --debug, as chart-integrity.sh E11 does (helm template does not
+  # print NOTES, and exits non-zero on the prose). Both renders must carry the
+  # unconditional SCHEMA_VERSION anchor, so an empty probe cannot pass.
+  executed=$((executed + 1))
+  _rt_tmp="$(mktemp -d)"
+  _rt_warn='RELAY TLS: THE HUB IMAGE VERSION COULD NOT BE CHECKED'
+  _rt_notes() { "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "${RT_TAG[@]}" "$@" --show-only templates/zz-notes-probe.txt 2>/dev/null \
+    | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'; }
+  # If the copy cannot be made (including an empty _rt_tmp when mktemp fails),
+  # the probes stay empty and every NOTES row below FAILs on the missing anchor.
+  _rt_n_latest="" _rt_n_ok="" _rt_n_extra="" _rt_n_extra_digest=""
+  if [ -n "$_rt_tmp" ] && cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
+    _rt_n_latest="$(_rt_notes --set-string image.tag=latest)"
+    _rt_n_ok="$(_rt_notes --set-string "image.tag=${_rt_ok_tag}")"
+    # The config.extra path (wiring off), on a tag and on a digest: rendered
+    # without RT_TAG.
+    _rt_notes_extra() {
+      "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "$@" \
+        --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}' \
+        --show-only templates/zz-notes-probe.txt 2>/dev/null | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'
+    }
+    _rt_n_extra="$(_rt_notes_extra --set-string image.tag=latest)"
+    _rt_n_extra_digest="$(_rt_notes_extra --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000)"
+  fi
+  if printf '%s\n' "$_rt_n_latest" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_n_ok" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' \
+    && printf '%s\n' "$_rt_n_latest" | grep -qF "$_rt_warn" && ! printf '%s\n' "$_rt_n_ok" | grep -qF "$_rt_warn"; then
+    echo "ok    NOTES.txt warns when the hub image version could not be checked, and not when it was"
+  else
+    echo "FAIL  relay image gate: the NOTES warning is missing for tag latest, present for a checked tag, or the NOTES probe rendered nothing"; failed=$((failed + 1))
+  fi
+  # On the config.extra path the NOTES warning names removing that listener (or
+  # binding it to loopback), not turning off conduit.internalTls: for tag latest
+  # and for an image.digest.
+  for _rt_case in "tag latest:$_rt_n_extra" "image.digest:$_rt_n_extra_digest"; do
+    _rt_label="${_rt_case%%:*}"; _rt_out="${_rt_case#*:}"
+    executed=$((executed + 1))
+    if printf '%s\n' "$_rt_out" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_out" | grep -qF "$_rt_warn" \
+      && printf '%s\n' "$_rt_out" | grep -qF 'remove the config.extra internal_listen (or bind it to loopback)' \
+      && ! printf '%s\n' "$_rt_out" | grep -qF 'conduit.internalTls.enabled: false'; then
+      echo "ok    NOTES.txt on the config.extra path ($_rt_label) names removing that listener, not conduit.internalTls.enabled: false"
+    else
+      echo "FAIL  relay image gate: the NOTES remedy on the config.extra path ($_rt_label) is wrong, or the probe rendered nothing"; failed=$((failed + 1))
+    fi
+  done
+  [ -n "$_rt_tmp" ] && [ -d "$_rt_tmp" ] && rm -rf "$_rt_tmp"
+  unset -f _rt_notes _rt_notes_extra; unset _rt_n_latest _rt_n_ok _rt_n_extra _rt_n_extra_digest _rt_warn _rt_case _rt_label _rt_out
+fi
+unset _rt_min _rt_min_n _rt_mv _rt_major _rt_latest _rt_ok _rt_tmp RT_TAG _rt_vlines _rt_ok_tag _rt_semver_refusal
+
+echo "== secrets.backend =="
+# local renders nothing; gcpsm renders server.secrets and needs a project. The
+# hub only WARNS when gcpsm has no project (NewGCPBackend's error is logged by
+# cmd/server_foreground.go and the hub runs with no secret backend), so the
+# chart refuses it. gcpsm values under local reach nothing and are refused too.
+reject "gcpsm with no projectId" "requires secrets.gcpsm.projectId" --set secrets.backend=gcpsm
+reject "projectId under backend local" "set while secrets.backend is local" \
+  --set secrets.gcpsm.projectId=rg-project
+reject "replicationLocations under backend local" "set while secrets.backend is local" \
+  --set 'secrets.gcpsm.replicationLocations={us-central1}'
+reject "unknown backend, schema layer" "secrets.backend" --set secrets.backend=vault
+reject "gcpsm alongside config.existingSecret" "secrets.backend" \
+  --set config.existingSecret=rg-settings --set auth.proxy.iap.audience= \
+  --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project
+accept "gcpsm with projectId" --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project
+# The rendered shape: snake_case keys V1SecretsConfig binds, under server.secrets,
+# and absent entirely under the default backend.
+executed=$((executed + 1))
+_sb="$(render --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project \
+  --set 'secrets.gcpsm.replicationLocations={us-central1,us-east1}' --show-only templates/secret-settings.yaml)"
+_sd="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_sb" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_sd" | grep -q '^kind: Secret$'; then
+  echo "FAIL  server.secrets shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_sb" | grep -qE '^      secrets:$' \
+  && printf '%s\n' "$_sb" | grep -qE '^        backend: gcpsm$' \
+  && printf '%s\n' "$_sb" | grep -qE '^        gcp_project_id: rg-project$' \
+  && printf '%s\n' "$_sb" | grep -A2 -E '^        gcp_replication_locations:$' | grep -qE '^        - us-east1$' \
+  && ! printf '%s\n' "$_sd" | grep -qE '^      secrets:$'; then
+  echo "ok    gcpsm renders server.secrets.{backend,gcp_project_id,gcp_replication_locations}; local renders no server.secrets"
+else
+  echo "FAIL  server.secrets shape: gcpsm did not render the snake_case keys, or local rendered a secrets block"
+  failed=$((failed + 1))
+fi
+unset _sb _sd
+
+echo "== workspaceStorage.nfs =="
+# One value drives both server.project_storage and the hub pod's NFS mount,
+# because with backend nfs the hub's /readyz fails unless
+# <mount_root>/<shares[0].id> is a mounted volume in the hub container. These
+# rows pin the guards in scion-hub.nfsWorkspace and the shape the two consumers
+# render. NFS is the minimum that enables it; placeholders only (RFC 5737 IP).
+NFS=(--set workspaceStorage.nfs.enabled=true --set-string workspaceStorage.nfs.server=192.0.2.10
+  --set-string workspaceStorage.nfs.export=/rg_share --set-string workspaceStorage.nfs.shareId=rg-share
+  --set-string workspaceStorage.nfs.pvName=rg-pv)
+reject "enabled without server" "requires workspaceStorage.nfs.server" "${NFS[@]}" --set-string workspaceStorage.nfs.server=
+reject "enabled without export" "requires workspaceStorage.nfs.export" "${NFS[@]}" --set-string workspaceStorage.nfs.export=
+reject "enabled without shareId" "requires workspaceStorage.nfs.shareId" "${NFS[@]}" --set-string workspaceStorage.nfs.shareId=
+accept "enabled without pvName (agent pods mount the share inline)" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=
+reject "pvName that is not an object name" "workspaceStorage.nfs.pvName is" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=Bad_Name
+reject "enabled with config.extra.server.workspace_storage" "config.extra also sets server.workspace_storage" \
+  "${NFS[@]}" --set-string config.extra.server.workspace_storage.backend=local
+reject "enabled with config.extra.server.project_storage" "config.extra also sets server.project_storage" \
+  "${NFS[@]}" --set-string config.extra.server.project_storage.backend=local
+reject "enabled with config.extra.server.shared_dir_storage" "config.extra also sets server.shared_dir_storage" \
+  "${NFS[@]}" --set-string config.extra.server.shared_dir_storage.backend=local
+reject "enabled with config.existingSecret" "inline settings values (workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${NFS[@]}"
+reject "share field set while disabled" "workspaceStorage.nfs.server set while workspaceStorage.nfs.enabled is false" \
+  --set-string workspaceStorage.nfs.server=192.0.2.10
+reject "shareId with a slash" "workspaceStorage.nfs.shareId is" "${NFS[@]}" --set-string workspaceStorage.nfs.shareId=a/b
+reject "relative mountRoot" "workspaceStorage.nfs.mountRoot is" "${NFS[@]}" --set-string workspaceStorage.nfs.mountRoot=mnt/nfs
+reject "subpathRoot escaping with .." "workspaceStorage.nfs.subpathRoot is" "${NFS[@]}" --set-string workspaceStorage.nfs.subpathRoot=../escape
+reject "relative export" "workspaceStorage.nfs.export is" "${NFS[@]}" --set-string workspaceStorage.nfs.export=rg_share
+accept "the minimal enabled set" "${NFS[@]}"
+
+# THE POSITIVE SHAPE, and the one assertion the runtime owner asked for: the hub
+# container's mountPath must equal the RENDERED mount_root + "/" + shares[0].id,
+# both read back out of the manifest - not compared against the values that were
+# set, which would pass for a template that hardcoded the same literal twice.
+# Non-default mountRoot and shareId so a default leaking into either side shows.
+# uid/gid are not values: they must render as the non-default securityContext.
+executed=$((executed + 1))
+_nf="$(render "${NFS[@]}" --set-string workspaceStorage.nfs.mountRoot=/srv/rg-root \
+  --set-string workspaceStorage.nfs.shareId=rg-other --set-string workspaceStorage.nfs.subpathRoot=team/projects \
+  --set hub.securityContext.runAsUser=2001 --set hub.securityContext.runAsGroup=2002)"
+_nf_root="$(printf '%s\n' "$_nf" | sed -n 's/^          mount_root: //p')"
+_nf_id="$(printf '%s\n' "$_nf" | sed -n 's/^            id: //p')"
+_nf_mount="$(printf '%s\n' "$_nf" | grep -A1 -E '^            - name: workspace-nfs$' | sed -n 's/^              mountPath: "\(.*\)"$/\1/p')"
+_nf_vol="$(printf '%s\n' "$_nf" | grep -A4 -E '^        - name: workspace-nfs$')"
+if ! printf '%s\n' "$_nf" | grep -qE '^kind: Deployment$'; then
+  echo "FAIL  NFS shape: the render produced no Deployment, so nothing was inspected"
+  printf '        got: %s\n' "$(printf '%s' "$_nf" | tr '\n' ' ' | cut -c1-200)"
+  failed=$((failed + 1))
+elif [ -n "$_nf_root" ] && [ -n "$_nf_id" ] && [ "$_nf_mount" = "${_nf_root}/${_nf_id}" ] \
+  && [ "$_nf_mount" = "/srv/rg-root/rg-other" ] \
+  && printf '%s\n' "$_nf" | grep -qE '^      project_storage:$' \
+  && ! printf '%s\n' "$_nf" | grep -qE '^      workspace_storage:$' \
+  && printf '%s\n' "$_nf" | grep -qE '^        backend: nfs$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          subpath_root: team/projects$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          uid: 2001$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          gid: 2002$' \
+  && printf '%s\n' "$_nf" | grep -qE '^            pv_name: rg-pv$' \
+  && printf '%s\n' "$_nf" | grep -qE '^            server: 192\.0\.2\.10$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          - export: /rg_share$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^          nfs:$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^            server: "192\.0\.2\.10"$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^            path: "/rg_share"$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^            readOnly: false$'; then
+  echo "ok    NFS renders server.project_storage and an inline nfs volume mounted at mount_root/shares[0].id (${_nf_mount})"
+else
+  echo "FAIL  NFS shape: mountPath=${_nf_mount:-<none>} mount_root=${_nf_root:-<none>} shares[0].id=${_nf_id:-<none>}, or a settings or volume field is missing"
+  failed=$((failed + 1))
+fi
+unset _nf _nf_root _nf_id _nf_mount _nf_vol
+# Without pvName the settings carry no pv_name (agent pods mount the share
+# inline) and the hub pod still mounts the export at mount_root/shares[0].id.
+executed=$((executed + 1))
+_ni="$(render "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=)"
+_ni_mount="$(printf '%s\n' "$_ni" | grep -A1 -E '^            - name: workspace-nfs$' | sed -n 's/^              mountPath: "\(.*\)"$/\1/p')"
+if ! printf '%s\n' "$_ni" | grep -qE '^kind: Deployment$'; then
+  echo "FAIL  NFS without pvName: the render produced no Deployment, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_ni" | grep -qE '^      project_storage:$' \
+  && ! printf '%s\n' "$_ni" | grep -qE 'pv_name' \
+  && printf '%s\n' "$_ni" | grep -qE '^            server: 192\.0\.2\.10$' \
+  && printf '%s\n' "$_ni" | grep -qE '^          - export: /rg_share$' \
+  && [ "$_ni_mount" = "/mnt/scion-nfs/rg-share" ]; then
+  echo "ok    NFS without pvName renders shares[0] with no pv_name and keeps the hub mount (${_ni_mount})"
+else
+  echo "FAIL  NFS without pvName: mountPath=${_ni_mount:-<none>}, or pv_name rendered, or a settings field is missing"
+  failed=$((failed + 1))
+fi
+unset _ni _ni_mount
+# Disabled (the default) renders neither half.
+executed=$((executed + 1))
+_nd="$(render)"
+if ! printf '%s\n' "$_nd" | grep -qE '^kind: Deployment$'; then
+  echo "FAIL  NFS disabled: the render produced no Deployment, so nothing was inspected"
+  failed=$((failed + 1))
+elif ! printf '%s\n' "$_nd" | grep -qE 'project_storage:|workspace_storage:|workspace-nfs|^ +nfs:$'; then
+  echo "ok    NFS disabled renders no storage block and no NFS volume or mount"
+else
+  echo "FAIL  NFS disabled still rendered a storage block or an NFS volume"
+  failed=$((failed + 1))
+fi
+unset _nd
+
+echo "== runtime.gke =="
+# runtimes.kubernetes.gke was hardcoded true; runtime.gke keeps that default and
+# makes false reachable. The chart writes the key, so config.extra stays refused.
+reject "config.extra overriding runtimes.kubernetes.gke" "config.extra overwrites runtimes.kubernetes.gke" \
+  --set config.extra.runtimes.kubernetes.gke=false
+reject "gke false with config.existingSecret" "inline settings values (runtime.gke)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned --set runtime.gke=false
+reject "gke string \"false\" with config.existingSecret, schema skipped" "inline settings values (runtime.gke)" \
+  --skip-schema-validation --set agents.imageRegistry= --set auth.proxy.iap.audience= \
+  --set config.existingSecret=operator-owned --set-string runtime.gke=false
+reject "gke not a boolean, schema layer" "runtime.gke" --set-string runtime.gke=false
+reject "gke not a boolean, template layer" "runtime.gke is \"false\"; it must be a boolean" \
+  --skip-schema-validation --set-string runtime.gke=false
+executed=$((executed + 1))
+_gf="$(render --set runtime.gke=false --show-only templates/secret-settings.yaml)"
+_gt="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_gf" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_gt" | grep -q '^kind: Secret$'; then
+  echo "FAIL  runtime.gke shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_gf" | grep -A1 -E '^      kubernetes:$' | grep -qE '^        gke: false$' \
+  && printf '%s\n' "$_gt" | grep -A1 -E '^      kubernetes:$' | grep -qE '^        gke: true$'; then
+  echo "ok    runtime.gke=false renders runtimes.kubernetes.gke: false; the default renders true"
+else
+  echo "FAIL  runtime.gke shape: false did not render gke: false, or the default did not render gke: true"
+  failed=$((failed + 1))
+fi
+unset _gf _gt
+
+echo "== Deployment selector labels are a contract =="
+# CONTRACT, NOT STYLE. A Terraform-owned NEG Service selects the hub's pods by
+# exactly these two labels, app.kubernetes.io/name and app.kubernetes.io/instance,
+# with values derived from the chart name (or nameOverride) and the release
+# name. Change the set or the derivation and that Service selects nothing:
+# the load balancer's backends drain, nothing in this chart goes red, and
+# Kubernetes reports the Deployment healthy. spec.selector is also immutable on
+# an existing Deployment, so a change here cannot be rolled out in place.
+# If you must change these labels, change the Terraform selector in the same
+# release and plan for a Deployment replacement.
+#
+# Each row pins spec.selector.matchLabels to EXACTLY the two keys (no more, no
+# fewer) and checks the pod template carries both with the same values.
+# _matchlabels <release> <helm args...> prints "key=value" lines from the
+# Deployment's spec.selector.matchLabels, sorted.
+_matchlabels() {
+  local rel="$1"; shift
+  "$HELM" template "$rel" "$CHART" "${BASE[@]}" "$@" --show-only templates/deployment.yaml 2>&1 \
+    | awk '/^  selector:$/ {s=1; next}
+           s==1 && /^    matchLabels:$/ {s=2; next}
+           s==2 && /^      [^ ]/ {sub(/^      /, ""); sub(/: /, "="); gsub(/"/, ""); print; next}
+           s==2 {exit}' | sort
+}
+_podlabels() {
+  local rel="$1"; shift
+  "$HELM" template "$rel" "$CHART" "${BASE[@]}" "$@" --show-only templates/deployment.yaml 2>&1 \
+    | awk '/^  template:$/ {s=1; next}
+           s==1 && /^      labels:$/ {s=2; next}
+           s==2 && /^        [^ ]/ {sub(/^        /, ""); sub(/: /, "="); gsub(/"/, ""); print; next}
+           s==2 {exit}' | sort
+}
+_selector_row() { # _selector_row <label> <release> <expected name> <helm args...>
+  local label="$1" rel="$2" name="$3"; shift 3
+  executed=$((executed + 1))
+  local want got pod
+  want="$(printf 'app.kubernetes.io/instance=%s\napp.kubernetes.io/name=%s\n' "$rel" "$name")"
+  got="$(_matchlabels "$rel" "$@")"
+  pod="$(_podlabels "$rel" "$@")"
+  if [ "$got" != "$want" ]; then
+    echo "FAIL  selector contract, ${label}: matchLabels is not exactly name=${name}, instance=${rel}"
+    echo "        got: $(printf '%s' "$got" | tr '\n' ' ')"
+    failed=$((failed + 1))
+  elif ! printf '%s\n' "$pod" | grep -qxF "app.kubernetes.io/name=${name}" \
+    || ! printf '%s\n' "$pod" | grep -qxF "app.kubernetes.io/instance=${rel}"; then
+    echo "FAIL  selector contract, ${label}: the pod template does not carry the selector labels"
+    echo "        got: $(printf '%s' "$pod" | tr '\n' ' ')"
+    failed=$((failed + 1))
+  else
+    echo "ok    selector contract, ${label}: matchLabels is exactly name=${name}, instance=${rel}"
+  fi
+}
+_selector_row "chart name, release t" t scion-hub
+_selector_row "chart name, another release" scion-prod scion-hub
+_selector_row "nameOverride" scion-prod hub-override --set nameOverride=hub-override
+_selector_row "fullnameOverride does not reach the selector" t scion-hub --set fullnameOverride=something-else
+unset -f _matchlabels _podlabels _selector_row
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm

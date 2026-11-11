@@ -1,0 +1,173 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package store
+
+import (
+	"context"
+	"slices"
+	"time"
+)
+
+// DeletionPredicate is the condition UpdateAgentDeletion evaluates against
+// the current row inside its transaction (design ptone/scion#2483 §2.1).
+// Every set term must hold (they are ANDed); an unset term is ignored.
+type DeletionPredicate struct {
+	// Claim, when set, requires deletion_claim == *Claim (the caller still
+	// holds its claim).
+	Claim *int64
+	// States, when non-empty, requires deletion_state to be one of these
+	// values. "" matches a row with no delete marker (including NULL).
+	States []string
+	// Codes, when non-empty, requires deletion_code to be one of these
+	// values. "" matches a row with no stored code.
+	Codes []string
+	// DeletedAtNull requires deleted_at IS NULL.
+	DeletedAtNull bool
+	// DeletedAtNotNull requires deleted_at IS NOT NULL (a soft-deleted
+	// row). Setting it together with DeletedAtNull matches nothing.
+	DeletedAtNotNull bool
+	// LeaseExpiredBefore, when set, requires deletion_lease_at to be set and
+	// strictly before *LeaseExpiredBefore.
+	LeaseExpiredBefore *time.Time
+}
+
+// Matches reports whether a satisfies p. It is the reference semantics every
+// UpdateAgentDeletion implementation applies to the row it read inside its
+// transaction.
+func (p DeletionPredicate) Matches(a *Agent) bool {
+	if a == nil {
+		return false
+	}
+	if p.Claim != nil && a.DeletionClaim != *p.Claim {
+		return false
+	}
+	if len(p.States) > 0 {
+		ok := false
+		for _, s := range p.States {
+			if a.DeletionState == s {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if len(p.Codes) > 0 && !slices.Contains(p.Codes, a.DeletionCode) {
+		return false
+	}
+	if p.DeletedAtNull && !a.DeletedAt.IsZero() {
+		return false
+	}
+	if p.DeletedAtNotNull && a.DeletedAt.IsZero() {
+		return false
+	}
+	if p.LeaseExpiredBefore != nil {
+		if a.DeletionLeaseAt == nil || !a.DeletionLeaseAt.Before(*p.LeaseExpiredBefore) {
+			return false
+		}
+	}
+	return true
+}
+
+// DeletionFields is the set of changes UpdateAgentDeletion applies when its
+// predicate holds. A nil pointer leaves the column unchanged; a pointer to
+// the zero value writes it ("" for strings). Time columns use a separate
+// Clear flag because nil means "unchanged".
+//
+// Besides the deletion_* columns, a delete may also move the agent's phase
+// and activity (the claim writes stopping for an active agent; a failed
+// delete restores the prior state), so Phase and Activity are writable here
+// too. Derive lets a caller compute the change from the locked current row
+// (for example "capture prior only on a fresh claim"); it runs inside the
+// transaction after the predicate has matched, and may modify the fields
+// before they are written.
+type DeletionFields struct {
+	State *string
+	// Claim sets deletion_claim; BumpClaim increments it (claim+1) and wins
+	// over Claim when both are set. Any write that takes a new claim must
+	// bump the claim epoch (use BumpClaim), never reuse or lower it: the
+	// reincarnate worker pins its failed-marker clear to the claim admitted
+	// at request time and relies on a marker at that claim never appearing
+	// later.
+	Claim     *int64
+	BumpClaim bool
+
+	LeaseAt        *time.Time
+	ClearLeaseAt   bool
+	StartedAt      *time.Time
+	ClearStartedAt bool
+	FailedAt       *time.Time
+	ClearFailedAt  bool
+
+	Code    *string
+	Error   *string
+	Prior   *string
+	Request *string
+
+	Phase    *string
+	Activity *string
+
+	// DeletedAt soft-deletes the row (the engine's soft finish). There is no
+	// clear: restore goes through UpdateAgent.
+	DeletedAt *time.Time
+
+	// KeepUpdated leaves the row's updated timestamp alone. The engine's
+	// lease renewal sets it: a renewal is bookkeeping, not a change to the
+	// agent, so it must not make the row look recently modified (list
+	// ordering, notification staleness checks). state_version is still
+	// bumped, so stale whole-row writers still conflict.
+	KeepUpdated bool
+
+	// SoftFinishRunID and SoftFinishPreviousRunIDs, when set, write the
+	// agent's run_id and previous_run_ids (an empty list clears them).
+	// Only the delete engine's soft finish sets them, after it deleted the
+	// run the broker reported holding rather than the recorded one
+	// (ptone/scion#5016), so that the soft-deleted row names the runs
+	// whose files the broker may still retain. Only FinalizeAgentDeletion
+	// in soft mode applies them; UpdateAgentDeletion and a hard finalize
+	// refuse a set that carries them, also when Derive sets them
+	// (ErrInvalidInput). Every other run ID write goes through
+	// SetAgentRunID and its compare-and-swap relatives. The names are
+	// unique in the module so the hub's closed-set test of run writers
+	// can find every use (pkg/hub/agent_run_writers_test.go).
+	SoftFinishRunID          *string
+	SoftFinishPreviousRunIDs *[]string
+
+	// Derive, when set, is called with the current row (as read inside the
+	// transaction) after the predicate matched, before the write.
+	Derive func(current *Agent, f *DeletionFields)
+}
+
+// SetsSoftFinishRunIDs reports whether f writes the agent's run_id or
+// previous_run_ids (see DeletionFields.SoftFinishRunID).
+func (f DeletionFields) SetsSoftFinishRunIDs() bool {
+	return f.SoftFinishRunID != nil || f.SoftFinishPreviousRunIDs != nil
+}
+
+// DeletionFinalizeMode selects FinalizeAgentDeletion's terminal write.
+type DeletionFinalizeMode string
+
+const (
+	// DeletionFinalizeSoft keeps the row, marked deleted (deleted_at set).
+	DeletionFinalizeSoft DeletionFinalizeMode = "soft"
+	// DeletionFinalizeHard removes the row and its dependent records.
+	DeletionFinalizeHard DeletionFinalizeMode = "hard"
+)
+
+// DeletionFinalizeHook runs inside FinalizeAgentDeletion's transaction just
+// before commit. tx is a transaction-scoped Store: writes through it commit
+// or roll back with the finalize. A non-nil error rolls the finalize back.
+type DeletionFinalizeHook func(ctx context.Context, tx Store, a *Agent, mode DeletionFinalizeMode) error

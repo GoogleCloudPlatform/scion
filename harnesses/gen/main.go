@@ -15,12 +15,21 @@
 // Command gen copies the canonical harnesses/scion_harness.py into each
 // harnesses/<name>/scion_harness.py, prepending a GENERATED header.
 //
-// Usage:
+// Usage (from the repository root):
 //
 //	go run ./harnesses/gen
+//
+// or, via the //go:generate directive in harnesses/embed.go:
+//
+//	go generate ./harnesses/
+//
+// The -dir flag names the harnesses directory and defaults to "harnesses"
+// (relative to the repository root). The go:generate directive passes
+// "-dir ." because go generate runs commands in the package directory.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +38,10 @@ import (
 const header = "# GENERATED FILE — DO NOT EDIT. Source: harnesses/scion_harness.py\n"
 
 func main() {
-	harnessesDir := filepath.Join("harnesses")
+	dir := flag.String("dir", "harnesses", "path to the harnesses directory")
+	flag.Parse()
+
+	harnessesDir := filepath.Clean(*dir)
 	canonical := filepath.Join(harnessesDir, "scion_harness.py")
 
 	src, err := os.ReadFile(canonical)

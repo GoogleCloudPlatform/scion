@@ -16,18 +16,19 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -82,12 +83,21 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	// unless forwarded. appendDaemonBoolFlag omits them when unset.
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
+	// --test-mode (string value): forwarded verbatim when given, so the
+	// child resolves the same level and runs the same gate.
+	// validateTestModeFlagsEarly already refused the removed flags,
+	// super-admin without a complete test-admin policy, and --production
+	// with a level (which the re-exec would otherwise turn into --hosted)
+	// in this parent.
+	if cmd.Flags().Changed(testModeFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testModeFlag, testModeValue))
+	}
+	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
 	// hubHost holds a default here; forwarding it unconditionally would make the
-	// child treat --host as changed and clobber a config-file host (and skip the
-	// workstation loopback default for the runtime broker). Unset → the child
-	// derives its own default (127.0.0.1 in workstation mode).
+	// child treat --host as changed and clobber a config-file host. Unset → the
+	// child derives its own default (127.0.0.1 in workstation mode).
 	if cmd.Flags().Changed("host") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--host=%s", hubHost))
 	}
@@ -112,6 +122,7 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if cmd.Flags().Changed("storage-dir") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--storage-dir=%s", storageDir))
 	}
+	daemonArgs = appendConduitDaemonArgs(cmd, daemonArgs)
 	// String/int flags registered only on serverStartCmd: forward when explicitly
 	// set so they survive the re-exec into the --foreground child rather than
 	// falling back to defaults (e.g. --session-secret would otherwise be
@@ -133,6 +144,15 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if cmd.Flags().Changed("base-url") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--base-url=%s", webBaseURL))
 	}
+	// --keyring-file is a path, not key material: the foreground child
+	// reads the file itself (loadServerKeyring), so forwarding the path
+	// exposes nothing in the process list or server-args.json.
+	if cmd.Flags().Changed("keyring-file") {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--keyring-file=%s", serverKeyringFile))
+	}
+	if cmd.Flags().Changed("keyring-file-allow-world-readable") {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--keyring-file-allow-world-readable=%t", serverKeyringAllowWorldReadable))
+	}
 	if cmd.Flags().Changed("admin-emails") {
 		// Forwarded as a single comma-joined value rather than repeated flags:
 		// the daemon argv is persisted to server-args.json for restart, and the
@@ -146,9 +166,35 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	return daemonArgs
 }
 
+// resolveDaemonServerMode validates server.mode, sets hostedMode from it
+// unless --hosted or --production was given, and checks the flags that
+// depend on the mode. The daemon parent runs it so that a refused setting is
+// reported directly instead of as a generic start failure from the child.
+func resolveDaemonServerMode(cmd *cobra.Command) error {
+	// Check if hosted mode is set in config (settings.yaml server.mode).
+	// LoadServerMode() normalizes the legacy "production" value to "hosted".
+	if err := config.ValidateServerMode(config.LoadServerMode()); err != nil {
+		return err
+	}
+	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
+		if config.LoadServerMode() == "hosted" {
+			hostedMode = true
+		}
+	}
+	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return err
+	}
+	return validateTestModeFlagsEarly(cmd)
+}
+
 // runServerStartOrDaemon handles the server start command. By default it launches
 // the server as a background daemon. When --foreground is set, it runs directly.
 func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
+	// Resolve a relative --config against the launch directory, for this
+	// process's own reads and for the daemon child's args alike.
+	if err := absolutizeServerConfigPath(); err != nil {
+		return err
+	}
 	if serverStartForeground {
 		return runServerStart(cmd, args)
 	}
@@ -175,12 +221,8 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("port conflict: ports %v are occupied", phantomPorts)
 	}
 
-	// Check if hosted mode is set in config (settings.yaml server.mode).
-	// LoadServerMode() normalizes the legacy "production" value to "hosted".
-	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
-		if config.LoadServerMode() == "hosted" {
-			hostedMode = true
-		}
+	if err := resolveDaemonServerMode(cmd); err != nil {
+		return err
 	}
 
 	// Apply workstation defaults when not in hosted mode.
@@ -195,6 +237,17 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
 	}
 
+	// The convert host lock check (convert-apply design section 4.7), run
+	// here too so a refusal is reported directly instead of as a failed
+	// daemon start. The foreground server process takes the lock itself.
+	if enableRuntimeBroker {
+		lock, err := acquireConvertStartLock(globalDir)
+		if err != nil {
+			return err
+		}
+		lock.Release()
+	}
+
 	// Find the scion executable
 	executable, err := os.Executable()
 	if err != nil {
@@ -205,10 +258,12 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	// `server start` so they survive the re-exec (see buildDaemonStartArgs).
 	daemonArgs := buildDaemonStartArgs(cmd)
 
-	// Capture onboarding state BEFORE starting the daemon — the child process
-	// calls InitGlobal() on startup which creates settings.yaml, so checking
-	// afterwards would always see the file as present.
-	needsOnboarding := !hostedMode && config.GetSettingsPath(globalDir) == ""
+	// Capture whether the settings file exists BEFORE starting the daemon —
+	// the child process calls InitGlobal() on startup which creates
+	// settings.yaml, so checking afterwards would always see the file as
+	// present. It is only the fallback onboarding signal, used when the hub's
+	// onboarding status cannot be read (see quickstartWebPath).
+	settingsMissingBeforeStart := !hostedMode && config.GetSettingsPath(globalDir) == ""
 
 	// Start daemon
 	mode := "workstation"
@@ -225,8 +280,11 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save daemon args: %v\n", err)
 	}
 
-	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the started components answer /healthz, so a command run
+	// right after start (e.g. 'scion hub link') can reach the server.
+	if err := waitForDaemonServerReady(globalDir, daemonArgs); err != nil {
+		return err
+	}
 	running, pid, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
 	if !running {
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
@@ -237,9 +295,15 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	fmt.Printf("PID file: %s\n", daemon.GetPIDPathComponent(serverDaemonComponent, globalDir))
 	fmt.Println()
 
-	// Print quickstart info for workstation mode
+	// Print quickstart info for workstation mode. The server settings name
+	// the dev token file the child uses; if they cannot be loaded, the
+	// quickstart falls back to the default file, as the child does.
 	if !hostedMode {
-		printWorkstationQuickstart(needsOnboarding, globalDir, hubHost, webPort, enableWeb, enableDevAuth)
+		serverCfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(daemonArgs))
+		if err != nil {
+			serverCfg = nil
+		}
+		printWorkstationQuickstart(settingsMissingBeforeStart, globalDir, serverCfg, hubHost, webPort, enableWeb, enableDevAuth, enableHub, enableRuntimeBroker)
 	}
 
 	fmt.Println("Use 'scion server stop' to stop the daemon.")
@@ -307,29 +371,84 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
 
+	// StopComponent waits for the process to exit and only then removes
+	// the PID file.
 	if err := daemon.StopComponent(serverDaemonComponent, globalDir); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Verify it stopped
-	time.Sleep(500 * time.Millisecond)
-	running, _, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
-	if running {
-		return fmt.Errorf("daemon may still be running. Check with 'scion server status'")
+		return serverStopError(err)
 	}
 
 	fmt.Println("Server daemon stopped.")
 	return nil
 }
 
+// serverForceStopGrace is how long 'server stop --force' waits for the
+// server to exit after the interrupt before killing processes on its ports.
+// A variable so tests can shorten it.
+var serverForceStopGrace = 5 * time.Second
+
+// serverForceExitWait is how long 'server stop --force' waits, after killing
+// processes on the server ports, for the recorded server process to be gone.
+// A killed process still answers liveness checks until it has been reaped.
+var serverForceExitWait = 2 * time.Second
+
+// serverProcessIdentity reports whether pid is a scion server daemon: its
+// command line must be this scion binary (by base name) running
+// "server start --foreground". It errors when the command line cannot be
+// read. A variable so tests can substitute the check.
+var serverProcessIdentity = func(pid int) (bool, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	return daemon.IsProcessCommand(pid, executable, serverDaemonArgsPrefix...)
+}
+
+// serverDaemonArgsPrefix is the leading argv of the server daemon started by
+// 'server start' (see buildDaemonStartArgs), used to recognise it.
+var serverDaemonArgsPrefix = []string{"server", "start", "--foreground"}
+
+// serverStopError turns a daemon stop failure into a user-facing error,
+// pointing at the forced stop when the server did not exit in time.
+func serverStopError(err error) error {
+	if errors.Is(err, daemon.ErrStopTimeout) {
+		return fmt.Errorf("server stop timed out: %w\n\nUse 'scion server stop --force' to force it to stop", err)
+	}
+	return fmt.Errorf("failed to stop daemon: %w", err)
+}
+
+// forcedStopStillRunningError reports a server process that survived
+// 'server stop --force'. The manual kill hint is given only for a valid PID:
+// "kill -9 0" would signal the caller's whole process group.
+func forcedStopStillRunningError(pid int, err error) error {
+	if pid <= 0 {
+		return fmt.Errorf("server process is still running after the forced stop: %w", err)
+	}
+	return fmt.Errorf("server process (PID %d) is still running after the forced stop: %w\n\nKill it manually, for example: kill -9 %d", pid, err, pid)
+}
+
+// forcedStopUnconfirmedError reports a recorded process that survived
+// 'server stop --force' but was not confirmed as the server. It gives no kill
+// hint, since the PID may have been reused by another process.
+func forcedStopUnconfirmedError(pid int, err error) error {
+	if pid <= 0 {
+		return forcedStopStillRunningError(pid, err)
+	}
+	return fmt.Errorf("process (PID %d) from the server PID file is still running after the forced stop, but it could not be confirmed as the scion server: %w\n\nCheck what PID %d is before stopping it manually", pid, err, pid)
+}
+
 func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts []int) error {
 	killed := false
+	// confirmed records that the identity check passed for pid. Only then is
+	// the manual kill hint given for a process that is still running.
+	confirmed := false
 
 	// If PID file exists and process is running, stop it normally first.
 	if pidRunning {
 		fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
-		if err := daemon.StopComponent(serverDaemonComponent, globalDir); err == nil {
-			time.Sleep(500 * time.Millisecond)
+		// Give the server a short grace period to exit on its own; if it
+		// does not, fall through to killing whatever holds the ports.
+		err := daemon.StopComponentWithTimeout(serverDaemonComponent, globalDir, serverForceStopGrace)
+		if err == nil || errors.Is(err, daemon.ErrStopTimeout) {
 			killed = true
 		}
 	}
@@ -354,8 +473,41 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 		}
 	}
 
-	// Clean up stale PID file
-	_ = daemon.RemovePIDComponent(serverDaemonComponent, globalDir)
+	// A hung server that holds no port survives the port kill. Kill the
+	// recorded process directly, but only once it is confirmed to still be
+	// the server, so a reused PID is never killed.
+	if pidRunning && pid > 0 {
+		if running, curPID, _ := daemon.StatusComponent(serverDaemonComponent, globalDir); running && curPID == pid {
+			ok, err := serverProcessIdentity(pid)
+			switch {
+			case err != nil:
+				fmt.Fprintf(os.Stderr, "Warning: PID %d could not be confirmed as the scion server (%v); not killing it\n", pid, err)
+			case !ok:
+				fmt.Fprintf(os.Stderr, "Warning: PID %d could not be confirmed as the scion server (its command line does not match); not killing it\n", pid)
+			default:
+				confirmed = true
+				if process, err := os.FindProcess(pid); err == nil && process.Kill() == nil {
+					fmt.Printf("Killed server process %d\n", pid)
+					killed = true
+				}
+			}
+		}
+	}
+
+	// Clean up the PID file, but only once its process has exited. A process
+	// killed above can still answer liveness checks until it is reaped, so
+	// wait briefly; WaitForExitComponent removes the PID file once the
+	// process is gone and keeps it if the process is still running.
+	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, serverForceExitWait); err != nil {
+		stillPID, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
+		if readErr != nil || stillPID <= 0 {
+			stillPID = pid
+		}
+		if confirmed && stillPID == pid {
+			return forcedStopStillRunningError(stillPID, err)
+		}
+		return forcedStopUnconfirmedError(stillPID, err)
+	}
 
 	if killed {
 		fmt.Println("Server stopped (forced).")
@@ -378,13 +530,10 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 
 	// Stop the daemon
 	fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
+	// StopComponent waits for the old process to exit, so the new server is
+	// never started while the old one is still running.
 	if err := daemon.StopComponent(serverDaemonComponent, globalDir); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Wait for the process to exit
-	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, 10*time.Second); err != nil {
-		return fmt.Errorf("failed to stop server: %w", err)
+		return serverStopError(err)
 	}
 	fmt.Println("Server daemon stopped.")
 
@@ -435,8 +584,10 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the restarted components answer /healthz.
+	if err := waitForDaemonServerReady(globalDir, daemonArgs); err != nil {
+		return err
+	}
 	running, pid, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
 	if !running {
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
@@ -444,9 +595,168 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Server restarted (PID: %d)\n", pid)
 	fmt.Printf("Log file: %s\n", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
+	if restartedWorkstation(daemonArgs, config.LoadServerMode()) {
+		// A restarted workstation server may not accept the browser's
+		// old session; the web UI signs in only from a sign-in link.
+		fmt.Println("To sign in to the web UI, run: scion server open")
+	}
 	fmt.Println()
 
 	return nil
+}
+
+// restartedWorkstation reports whether a server restarted with daemonArgs
+// runs in workstation mode: neither its args nor the settings' server mode
+// (settingsMode, as config.LoadServerMode returns it) select hosted mode.
+func restartedWorkstation(daemonArgs []string, settingsMode string) bool {
+	for _, a := range daemonArgs {
+		switch a {
+		case "--hosted", "--hosted=true", "--production", "--production=true":
+			return false
+		}
+	}
+	return settingsMode != "hosted"
+}
+
+// Composite /healthz status values (see pkg/hub HealthStatus* constants;
+// mirrored here rather than imported to keep this CLI-side probe decoupled
+// from the Hub's response types).
+//
+//   - healthy:   everything is fine.
+//   - degraded:  the process is up and serving, but a non-critical check is
+//     non-healthy (e.g. colocated_broker). "Process is up" consumers treat
+//     this as up and name the non-healthy checks.
+//   - unhealthy: a critical check (database, workspace_storage) failed; treated as not up.
+const (
+	probeStatusHealthy   = "healthy"
+	probeStatusDegraded  = "degraded"
+	probeStatusUnhealthy = "unhealthy"
+)
+
+// probeStatusIsUp reports whether a composite /healthz status means the
+// process is up and serving: healthy or degraded (ptone/scion#1094).
+func probeStatusIsUp(status string) bool {
+	return status == probeStatusHealthy || status == probeStatusDegraded
+}
+
+// healthProbeComponent is the nested per-component health object in the
+// composite (combined-mode) /healthz body.
+type healthProbeComponent struct {
+	Status string            `json:"status"`
+	Checks map[string]string `json:"checks"`
+}
+
+// healthProbeResponse covers both shapes /healthz can return, so a single
+// probe/parse works whether the Hub answers directly (standalone, port 9810:
+// pkg/hub.HealthResponse, checks at the top level) or the web server answers
+// on its behalf (combined workstation mode, the default: port 8080,
+// pkg/hub.CompositeHealthResponse — the top-level checks are always empty,
+// and the Hub's own status/checks are nested under "hub", the broker's under
+// "broker". See WebServer.handleHealthz in pkg/hub/web.go). Declared locally
+// (rather than importing pkg/hub) to keep this CLI-side probe decoupled from
+// the Hub's response type.
+type healthProbeResponse struct {
+	Status string            `json:"status"`
+	Checks map[string]string `json:"checks"`
+	// Hub is set only on the composite (combined-mode) response; nil on a
+	// standalone Hub's direct response, which has no "hub" key at all.
+	Hub *healthProbeComponent `json:"hub,omitempty"`
+	// Broker is set only on the composite response when a co-located broker
+	// health provider is registered.
+	Broker *healthProbeComponent `json:"broker,omitempty"`
+}
+
+// nonHealthyChecks lists what kept a health response from being "healthy",
+// as sorted "key: value" strings: non-healthy hub checks from either the
+// top level (standalone Hub) or the nested "hub" object (combined mode),
+// plus, when a nested broker reports non-healthy, its problem checks as
+// "broker.<key>: <value>" (falling back to "broker: <status>" if no check
+// qualifies). Returns nil for a healthy or empty response.
+func nonHealthyChecks(health healthProbeResponse) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(checks map[string]string) {
+		for k, v := range checks {
+			if v == probeStatusHealthy {
+				continue
+			}
+			entry := k + ": " + v
+			if !seen[entry] {
+				seen[entry] = true
+				out = append(out, entry)
+			}
+		}
+	}
+	add(health.Checks)
+	if health.Hub != nil {
+		add(health.Hub.Checks)
+	}
+	if b := health.Broker; b != nil && b.Status != "" && b.Status != probeStatusHealthy {
+		problems := brokerProblemChecks(b.Checks)
+		if len(problems) == 0 {
+			out = append(out, "broker: "+b.Status)
+		}
+		for _, p := range problems {
+			out = append(out, "broker."+p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// brokerProblemChecks returns a broker's problem checks as sorted
+// "key: value" strings, using the rule the broker itself degrades on
+// (pkg/runtimebroker/handlers.go): a value other than "available" or
+// "healthy" is a problem. Broker check values are not "healthy"-valued
+// (e.g. docker: "available"), so nonHealthyChecks' hub rule does not apply.
+func brokerProblemChecks(checks map[string]string) []string {
+	var out []string
+	for k, v := range checks {
+		if v != "available" && v != probeStatusHealthy {
+			out = append(out, k+": "+v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// brokerProblemReason renders a non-healthy broker's own /healthz answer for
+// its status line: its problem checks, or "status: <status>" when none
+// qualifies. "" when healthy.
+func brokerProblemReason(health healthProbeComponent) string {
+	if health.Status == "" || health.Status == probeStatusHealthy {
+		return ""
+	}
+	if problems := brokerProblemChecks(health.Checks); len(problems) > 0 {
+		return strings.Join(problems, "; ")
+	}
+	return "status: " + health.Status
+}
+
+// healthProblemReason renders nonHealthyChecks as a single human-readable
+// reason, e.g. "colocated_broker: unhealthy: registration failed". Returns ""
+// when the response is healthy. A non-healthy response that names no check
+// falls back to its bare status so the caller still has something to print.
+func healthProblemReason(health healthProbeResponse) string {
+	if health.Status == probeStatusHealthy || health.Status == "" {
+		return ""
+	}
+	if checks := nonHealthyChecks(health); len(checks) > 0 {
+		return strings.Join(checks, "; ")
+	}
+	return "status: " + health.Status
+}
+
+// healthProblemHint returns the recovery hint for a reason produced by
+// healthProblemReason. A co-located broker registration failure
+// (ptone/scion#2154) is terminal for the process lifetime, so it gets the
+// specific "fix the config and restart" advice; anything else just points
+// at the server log.
+func healthProblemHint(reason string) string {
+	if strings.Contains(reason, "colocated_broker: ") {
+		return "see server log; restart after fixing the broker config"
+	}
+	return "see server log"
 }
 
 type serverStatusInfo struct {
@@ -454,9 +764,169 @@ type serverStatusInfo struct {
 	DaemonPID     int    `json:"daemonPid,omitempty"`
 	LogFile       string `json:"logFile,omitempty"`
 	PIDFile       string `json:"pidFile,omitempty"`
-	HubRunning    bool   `json:"hubRunning,omitempty"`
-	BrokerRunning bool   `json:"brokerRunning,omitempty"`
-	WebRunning    bool   `json:"webRunning,omitempty"`
+	// HubRunning/WebRunning are true when the component answered /healthz
+	// with a status that means "up": healthy or degraded. An unhealthy
+	// response (critical check failed, e.g. database) leaves them false.
+	HubRunning    bool `json:"hubRunning,omitempty"`
+	BrokerRunning bool `json:"brokerRunning,omitempty"`
+	WebRunning    bool `json:"webRunning,omitempty"`
+	// HubStatus/WebStatus carry the component's /healthz status string when
+	// it answered but was not healthy ("degraded" or "unhealthy"); empty
+	// when healthy or not detected. In combined mode WebStatus is the
+	// composite status and HubStatus the nested hub's own.
+	HubStatus    string `json:"hubStatus,omitempty"`
+	WebStatus    string `json:"webStatus,omitempty"`
+	BrokerStatus string `json:"brokerStatus,omitempty"`
+	// HubHealthReason names the hub's own non-healthy checks (see
+	// healthProblemReason, e.g. "colocated_broker: unhealthy: registration
+	// failed"): from the nested "hub" object in combined mode (port 8080),
+	// or from the top level on a standalone Hub (port 9810). Broker-only
+	// problems are not included; see BrokerHealthReason and
+	// WebHealthReason. Empty when the Hub is healthy or not detected.
+	HubHealthReason string `json:"hubHealthReason,omitempty"`
+	// WebHealthReason is set only when the 8080 (combined web+hub) probe
+	// itself reported a non-healthy status — i.e. the process actually
+	// serving the Web Frontend is the degraded one. In combined mode this is
+	// the composite (hub and broker) reason. Kept separate from
+	// HubHealthReason so a standalone Hub-only deployment (port 9810, no
+	// web server running at all) does not get an incorrect "Web Frontend:
+	// degraded" line just because the Hub is degraded.
+	WebHealthReason string `json:"webHealthReason,omitempty"`
+	// BrokerHealthReason names a degraded broker's problem checks from its
+	// own /healthz (see brokerProblemReason); BrokerStatus holds its
+	// non-healthy status. Both empty when the broker is healthy or not
+	// detected.
+	BrokerHealthReason string `json:"brokerHealthReason,omitempty"`
+}
+
+// probeServerStatus probes the web, hub, and broker health endpoints at the
+// given base URLs (no trailing slash, e.g. "http://127.0.0.1:8080") and
+// returns the resulting component-status fields of serverStatusInfo. Split
+// out from runServerStatus, and parameterized on the base URLs rather than
+// hardcoding the default ports, so tests can point it at httptest.Server
+// instances instead of real listeners on 127.0.0.1.
+//
+// Parses JSON responses to verify composite health rather than relying
+// solely on HTTP 200 (the web server returns 200 even when degraded).
+func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseURL string) serverStatusInfo {
+	var status serverStatusInfo
+
+	// webPortHasHub tracks whether the combined web port returned the scion
+	// combined composite body (any status) — i.e. health.Hub != nil, which
+	// CompositeHealthResponse always populates when a Hub provider is
+	// registered (see WebServer.handleHealthz in pkg/hub/web.go) — as
+	// opposed to status.HubRunning, which is only set on an "up" status
+	// (healthy or degraded). Combined mode (--enable-web) never starts the
+	// standalone Hub listener (port 9810), so once the web port has answered
+	// with that composite body, a follow-up probe to the standalone hub port
+	// is redundant, whatever status it reported. This must not key off "any
+	// parseable 200 JSON body": an unrelated service on 8080 (a common dev
+	// port) can answer 200 with an unrelated JSON object, and health.Hub ==
+	// nil then, so the standalone hub still gets probed.
+	var webPortHasHub bool
+
+	// Check web/hub on the combined web port. In combined mode this is the
+	// only listener (see healthProbeResponse for the nested-hub JSON shape
+	// it returns).
+	if resp, err := client.Get(webBaseURL + "/healthz"); err == nil {
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && readErr == nil {
+			var health healthProbeResponse
+			if json.Unmarshal(body, &health) == nil {
+				webPortHasHub = health.Hub != nil
+				switch {
+				case health.Status == probeStatusHealthy:
+					status.WebRunning = true
+					status.HubRunning = true
+				case webPortHasHub:
+					// A scion composite body (it carries a nested "hub"):
+					// degraded is up, unhealthy is not, and either way the
+					// non-healthy checks are named instead of a bare "not
+					// detected". Requiring webPortHasHub keeps an unrelated
+					// service on 8080 answering {"status":"degraded"} from
+					// being reported as the scion web server. A web+broker
+					// server without a hub (no nested "hub") that is
+					// degraded therefore stays "not detected" here, as
+					// before this change; only bodies with a nested hub are
+					// treated as the scion composite.
+					// The Web fields carry the composite (web server's own
+					// answer, which folds in hub and broker). The Hub fields
+					// come from the nested hub only, so a broker-only
+					// degradation is not pinned on the Hub line; it shows on
+					// the Web line here and on the Runtime Broker line from
+					// the broker's own probe below.
+					status.WebRunning = probeStatusIsUp(health.Status)
+					status.WebStatus = health.Status
+					status.WebHealthReason = healthProblemReason(health)
+					hub := healthProbeResponse{Status: health.Hub.Status, Checks: health.Hub.Checks}
+					status.HubRunning = probeStatusIsUp(hub.Status)
+					if hub.Status != probeStatusHealthy {
+						status.HubStatus = hub.Status
+						status.HubHealthReason = healthProblemReason(hub)
+					}
+				}
+			}
+		}
+	}
+
+	// Check standalone hub port if not already found on the web port. This
+	// probe intentionally leaves WebHealthReason/WebStatus unset: a
+	// standalone Hub (no web server) must not print "Web Frontend: degraded"
+	// just because the Hub itself is degraded.
+	if !status.HubRunning && !webPortHasHub {
+		if resp, err := client.Get(hubBaseURL + "/healthz"); err == nil {
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && readErr == nil {
+				var health healthProbeResponse
+				if json.Unmarshal(body, &health) == nil {
+					switch health.Status {
+					case probeStatusHealthy:
+						status.HubRunning = true
+					case probeStatusDegraded, probeStatusUnhealthy:
+						status.HubRunning = health.Status == probeStatusDegraded
+						status.HubStatus = health.Status
+						if status.HubHealthReason == "" {
+							status.HubHealthReason = healthProblemReason(health)
+						}
+					default:
+						// Not a scion hub status (e.g. {"status":"ok"} from
+						// some other service on this port, or no status at
+						// all): report the Hub as not detected rather than
+						// echoing an unrecognised status.
+					}
+				}
+			}
+		}
+	}
+
+	// Check the broker on brokerBaseURL (the server's broker port).
+	if resp, err := client.Get(brokerBaseURL + "/healthz"); err == nil {
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && readErr == nil {
+			var health healthProbeComponent
+			if json.Unmarshal(body, &health) == nil {
+				// Same rule as the standalone 9810 probe: degraded is up
+				// (and names its problem checks), unhealthy is not, and a
+				// status that is not a scion status means not detected.
+				switch health.Status {
+				case probeStatusHealthy:
+					status.BrokerRunning = true
+				case probeStatusDegraded, probeStatusUnhealthy:
+					status.BrokerRunning = health.Status == probeStatusDegraded
+					status.BrokerStatus = health.Status
+					status.BrokerHealthReason = brokerProblemReason(health)
+				default:
+					// Not a scion broker status (e.g. {"status":"ok"} from
+					// some other service on this port, or no status).
+				}
+			}
+		}
+	}
+
+	return status
 }
 
 func runServerStatus(cmd *cobra.Command, args []string) error {
@@ -476,55 +946,20 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 		status.PIDFile = daemon.GetPIDPathComponent(serverDaemonComponent, globalDir)
 	}
 
-	// Probe health endpoints to check component status.
-	// Parse JSON responses to verify composite health rather than relying
-	// solely on HTTP 200 (the web server returns 200 even when degraded).
 	client := &http.Client{Timeout: 2 * time.Second}
-
-	// Check web/hub on default web port (8080)
-	if resp, err := client.Get("http://127.0.0.1:8080/healthz"); err == nil {
-		body, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && readErr == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
-				status.WebRunning = true
-				status.HubRunning = true
-			}
-		}
-	}
-
-	// Check standalone hub on default hub port (9810) if not found on web port
-	if !status.HubRunning {
-		if resp, err := client.Get("http://127.0.0.1:9810/healthz"); err == nil {
-			body, readErr := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && readErr == nil {
-				var health struct {
-					Status string `json:"status"`
-				}
-				if json.Unmarshal(body, &health) == nil {
-					status.HubRunning = true
-				}
-			}
-		}
-	}
-
-	// Check broker on default broker port (9800)
-	if resp, err := client.Get("http://127.0.0.1:9800/healthz"); err == nil {
-		body, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && readErr == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(body, &health) == nil {
-				status.BrokerRunning = true
-			}
-		}
-	}
+	// Probe the ports the server was started with (its saved start args and
+	// config), not the defaults.
+	webBase, hubBase, brokerBase := serverStatusBaseURLs(globalDir, running)
+	probed := probeServerStatus(client, webBase, hubBase, brokerBase)
+	status.HubRunning = probed.HubRunning
+	status.BrokerRunning = probed.BrokerRunning
+	status.WebRunning = probed.WebRunning
+	status.HubStatus = probed.HubStatus
+	status.WebStatus = probed.WebStatus
+	status.BrokerStatus = probed.BrokerStatus
+	status.BrokerHealthReason = probed.BrokerHealthReason
+	status.HubHealthReason = probed.HubHealthReason
+	status.WebHealthReason = probed.WebHealthReason
 
 	if serverStatusJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -543,110 +978,298 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	fmt.Println("Components:")
-	if status.HubRunning {
-		fmt.Println("  Hub API:         running")
-	} else {
-		fmt.Println("  Hub API:         not detected")
-	}
-	if status.BrokerRunning {
-		fmt.Println("  Runtime Broker:  running")
-	} else {
-		fmt.Println("  Runtime Broker:  not detected")
-	}
-	if status.WebRunning {
-		fmt.Println("  Web Frontend:    running")
-	} else {
-		fmt.Println("  Web Frontend:    not detected")
+	for _, line := range formatServerStatusComponents(status) {
+		fmt.Println(line)
 	}
 
 	return nil
 }
+
+// serverStatusBaseURLs returns the base URLs (no trailing slash) 'server
+// status' probes: the web port, the standalone hub port and the runtime
+// broker port of the server, with their hosts, resolved by
+// serverListenersFromArgs as the start wait does. While the daemon runs they
+// come from its saved start args and the config those args name. Otherwise
+// the saved args are ignored: they outlive 'server stop' (restart reads
+// them) and a foreground server saves none, so the ports come from the
+// config and the defaults, as a foreground server's do.
+func serverStatusBaseURLs(globalDir string, daemonRunning bool) (webBase, hubBase, brokerBase string) {
+	var saved []string
+	if daemonRunning {
+		if args, err := daemon.LoadArgs(serverDaemonComponent, globalDir); err == nil {
+			saved = args
+		}
+	}
+	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(saved))
+	if err != nil {
+		cfg = nil
+	}
+	// The registry check only decides whether the broker runs, not where it
+	// listens; status probes every component.
+	noRegistryCheck := func() error { return nil }
+	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
+	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
+	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
+}
+
+// formatServerStatusComponents renders the "Components:" lines of
+// `scion server status` from an already-populated serverStatusInfo. Split
+// out from runServerStatus so the formatting — in particular, naming the
+// non-healthy checks (e.g. colocated_broker, ptone/scion#2154) instead of a
+// bare "not detected" — can be unit tested without spinning up HTTP servers.
+func formatServerStatusComponents(status serverStatusInfo) []string {
+	var lines []string
+
+	lines = append(lines, "  Hub API:         "+formatComponentState(status.HubRunning, status.HubStatus, status.HubHealthReason))
+
+	lines = append(lines, "  Runtime Broker:  "+formatComponentState(status.BrokerRunning, status.BrokerStatus, status.BrokerHealthReason))
+
+	// WebStatus/WebHealthReason (not the Hub fields): a standalone Hub-only
+	// deployment with no web server at all must not print "Web Frontend:
+	// degraded" just because the Hub is degraded.
+	lines = append(lines, "  Web Frontend:    "+formatComponentState(status.WebRunning, status.WebStatus, status.WebHealthReason))
+
+	return lines
+}
+
+// formatComponentState renders one component's state for
+// formatServerStatusComponents:
+//   - running (healthy):            "running"
+//   - running, degraded:            "running, degraded (<checks>) — <hint>"
+//   - answered but not up (unhealthy): "unhealthy (<checks>) — <hint>"
+//   - no answer:                    "not detected"
+func formatComponentState(running bool, healthStatus, reason string) string {
+	switch {
+	case running && reason == "":
+		return "running"
+	case running:
+		return fmt.Sprintf("running, degraded (%s) — %s", reason, healthProblemHint(reason))
+	case healthStatus != "" || reason != "":
+		label := healthStatus
+		if label == "" || label == probeStatusDegraded {
+			// Not up but no usable status string; never claim "degraded"
+			// (which means up) for a component that is not running.
+			label = probeStatusUnhealthy
+		}
+		if reason == "" {
+			return label
+		}
+		return fmt.Sprintf("%s (%s) — %s", label, reason, healthProblemHint(reason))
+	default:
+		return "not detected"
+	}
+}
+
+// serverReadyPollInterval is how often waitForServerReady polls /healthz.
+// A variable so tests can shorten it.
+var serverReadyPollInterval = 250 * time.Millisecond
 
 // waitForServerReady polls the server's /healthz endpoint until it returns 200
 // with a "healthy" composite status, or the timeout expires.
 // The web server's /healthz always returns HTTP 200 but reports a composite
 // status that reflects hub and broker readiness. On first start the hub
 // database may still be migrating when the HTTP listener begins accepting
-// connections, so we parse the JSON body to confirm all components are ready.
-func waitForServerReady(host string, port int, timeout time.Duration) bool {
+// connections, and the co-located broker registers just after the listener
+// starts (colocated_broker is transiently non-healthy), so we parse the JSON
+// body and keep polling for "healthy" until the deadline.
+//
+// If the deadline passes and the last observed status was "degraded", the
+// process is up and serving with a non-critical problem, so this still
+// reports ready (ptone/scion#1094); the caller checks lastHealth.Status and
+// warns, naming the checks via healthProblemReason. "unhealthy" (a critical
+// check such as the database failed) or no answer at all is not ready.
+//
+// It also returns the last health response it observed (zero value if the
+// endpoint was never reachable), so a caller can name the specific checks
+// that kept the composite status from going healthy — e.g. colocated_broker
+// (ptone/scion#2154) — instead of printing a bare "not ready".
+func waitForServerReady(host string, port int, timeout time.Duration) (ready bool, lastHealth healthProbeResponse) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	url := fmt.Sprintf("http://%s:%d/healthz", host, port)
 	deadline := time.Now().Add(timeout)
 
+	// lastAnswered tracks whether the most recent poll got a parsed answer,
+	// so a server that answered degraded and then died before the deadline
+	// is not reported ready on a stale response. lastHealth is still
+	// returned for naming the checks.
+	lastAnswered := false
 	for time.Now().Before(deadline) {
+		lastAnswered = false
 		if resp, err := client.Get(url); err == nil {
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK && readErr == nil {
-				var health struct {
-					Status string `json:"status"`
-				}
-				if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
-					return true
+				var health healthProbeResponse
+				if json.Unmarshal(body, &health) == nil {
+					lastHealth = health
+					lastAnswered = true
+					if health.Status == probeStatusHealthy {
+						return true, lastHealth
+					}
 				}
 			}
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(serverReadyPollInterval)
 	}
-	return false
+	return lastAnswered && lastHealth.Status == probeStatusDegraded, lastHealth
+}
+
+// quickstartReadyMessage chooses what printWorkstationQuickstart prints after
+// waitForServerReady, and whether to open the browser:
+//   - ready, healthy:            no message, open.
+//   - ready, degraded:           a warning naming the checks, open (it is up).
+//   - not ready, stale degraded: the server stopped answering after a
+//     degraded answer; say so, with the last checks, no open.
+//   - not ready, with a reason:  the status and checks (e.g. unhealthy), no open.
+//   - not ready, no answer:      "not yet ready", no open.
+func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg string, openBrowser bool) {
+	reason := healthProblemReason(lastHealth)
+	switch {
+	case ready && reason != "":
+		// Degraded: e.g. a co-located broker that failed to register
+		// (ptone/scion#2154), which does not retry: fix config and restart.
+		return fmt.Sprintf("  Warning: server is up but degraded: %s — %s", reason, healthProblemHint(reason)), true
+	case ready:
+		return "", true
+	case reason != "" && probeStatusIsUp(lastHealth.Status):
+		// Not ready, yet the last answer was an "up" status: the server
+		// answered (degraded) and then stopped answering before the
+		// deadline (waitForServerReady requires the last poll to answer).
+		// Do not claim it is up.
+		return fmt.Sprintf("  (server stopped answering /healthz; last status %s: %s — see server log)", lastHealth.Status, reason), false
+	case reason != "":
+		// Unhealthy (a critical check failed) is not up; say what it is.
+		return fmt.Sprintf("  (server is %s: %s — %s)", lastHealth.Status, reason, healthProblemHint(reason)), false
+	default:
+		return "  (server not yet ready — open the URL manually once it starts)", false
+	}
 }
 
 // printWorkstationQuickstart prints the first-run quickstart information
 // including the developer token and web UI URL after a workstation-mode daemon starts.
-// When the machine hasn't been onboarded yet, it prints and opens the /onboarding URL.
-func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host string, wPort int, webEnabled, devAuth bool) {
+//
+// Once the server is ready it asks the hub whether onboarding is complete
+// (GET /api/v1/system/status). If it is not, it prints the /onboarding URL
+// and, under the browser rule (browserAutoOpenAllowed), opens it. If the hub
+// cannot be asked, it falls back to settingsMissingBeforeStart: whether the
+// global settings file was absent before the daemon started (see
+// quickstartWebPath). When the co-located broker was skipped for lack of an
+// image registry, it prints the fix next to the URL.
+//
+// serverCfg is the server configuration the daemon child loads; its dev
+// token settings decide which token file the quickstart shows. A nil
+// serverCfg means the default settings.
+func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, serverCfg *config.GlobalConfig, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
+	if serverCfg == nil {
+		serverCfg = &config.GlobalConfig{}
+	}
+	tokenFile := devTokenFilePath(serverCfg.Auth.TokenFile, globalDir)
+
 	if webEnabled {
 		displayHost := host
 		if displayHost == "0.0.0.0" || displayHost == "" {
 			displayHost = "127.0.0.1"
 		}
 
-		// Auto-configure hub.endpoint so that `scion hub` commands work
-		// immediately after workstation-mode start.
-		hubEndpoint := fmt.Sprintf("http://%s:%d", displayHost, wPort)
-		if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
-			if vs.GetHubEndpoint() == "" {
-				if err := config.UpdateVersionedSetting(globalDir, "hub.endpoint", hubEndpoint); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure hub endpoint: %v\n", err)
+		// Register the local hub in the hub list, so that `scion hub`
+		// commands work immediately after workstation-mode start (see
+		// registerLocalHub for when it becomes the current hub). No
+		// hub.endpoint is written: the server advertises its loopback
+		// endpoint without one.
+		registerLocalHub(os.Stdout, os.Stderr, fmt.Sprintf("http://%s:%d", displayHost, wPort))
+
+		// Wait for the server before asking the hub for its onboarding
+		// status. The Hub API is mounted on the web port in workstation mode.
+		baseURL := fmt.Sprintf("http://%s:%d", displayHost, wPort)
+		// serverUp is false when the server never answered or is unhealthy;
+		// then the hub is not asked and nothing is opened.
+		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
+		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
+		// The token is sent only to the local server (the status and
+		// sign-in link endpoints), never printed: the settings token if
+		// one is set, else the token file's contents. The transport rule
+		// applies first: the token is read and sent only over a loopback
+		// (or TLS) connection. For another bind host it is not read, the
+		// status is not asked and the settings-file signal below is used.
+		tokenAllowed := quickstartStatusAllowed(baseURL)
+		serverToken := ""
+		if serverUp && tokenAllowed && (hubEnabled || devAuth) {
+			serverToken = readServerDevToken(serverCfg, globalDir)
+		}
+		if serverUp && hubEnabled && tokenAllowed {
+			status, statusErr = quickstartOnboardingStatus(baseURL, serverToken)
+		}
+		if statusErr != nil {
+			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
+		}
+
+		webPath := quickstartWebPath(status, statusErr, settingsMissingBeforeStart)
+		url := baseURL + webPath
+		fmt.Printf("Web UI:  %s\n", url)
+		if msg != "" {
+			fmt.Println(msg)
+		}
+		// With dev auth the web UI signs a browser in only from a
+		// single-use sign-in link: open that instead of the bare URL. The
+		// link is requested with the server's token, so the transport rule
+		// applies: only over a loopback (or TLS) connection.
+		openURL := url
+		if devAuth && serverUp && !tokenAllowed {
+			fmt.Printf("Sign-in links are requested only over a loopback or TLS connection, so no sign-in link was requested.\n"+
+				"Bind the server to 127.0.0.1 (or 0.0.0.0) and run scion server open; from another machine, use an SSH forward to http://127.0.0.1:%d.\n", wPort)
+		}
+		if devAuth && serverUp && tokenAllowed {
+			if link, err := quickstartDevSignIn(baseURL, serverToken, webPath); err == nil {
+				openURL = link.URL
+				// The link is printed only to a terminal, so a redirected
+				// stdout or a log never records the code.
+				if quickstartStdoutIsTerminal() {
+					fmt.Printf("Sign in: %s\n", link.URL)
+					fmt.Printf("         (%s; run 'scion server open' for a new one)\n", link.expiresInText())
 				} else {
-					fmt.Printf("Configured hub endpoint: %s (run 'scion hub status' to verify)\n", hubEndpoint)
+					fmt.Println("To sign in to the web UI, run: scion server open")
 				}
+			} else {
+				slog.Debug("Dev sign-in link unavailable", "error", err)
+				fmt.Println("To sign in to the web UI, run: scion server open")
 			}
 		}
-
-		// Point to /onboarding when the machine hadn't been set up before daemon start.
-		// This state is captured before the daemon launches (which auto-creates settings.yaml).
-		path := ""
-		if needsOnboarding {
-			path = "/onboarding"
+		// The server runs in the global directory, so check the registry
+		// there: a registry set only in the current project does not keep
+		// its broker on.
+		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, daemonRegistryCheck(globalDir)) {
+			fmt.Println(brokerSkippedNotice)
 		}
-
-		url := fmt.Sprintf("http://%s:%d%s", displayHost, wPort, path)
-		fmt.Printf("Web UI:  %s\n", url)
 
 		// Auto-open the browser in interactive terminals once the server is ready.
-		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
-			if waitForServerReady(displayHost, wPort, 20*time.Second) {
-				_ = util.OpenBrowser(url)
-			} else {
-				fmt.Println("  (server not yet ready — open the URL manually once it starts)")
-			}
+		if serverUp && quickstartBrowserAllowed() {
+			_ = quickstartOpenBrowser(openURL)
 		}
 	}
 
 	if devAuth {
-		// Read the dev token from the token file (written by the daemon child process)
-		tokenFile := filepath.Join(globalDir, "dev-token")
-		if data, err := os.ReadFile(tokenFile); err == nil {
-			token := strings.TrimSpace(string(data))
-			if token != "" {
-				fmt.Println()
-				fmt.Println("Developer token (for CLI authentication):")
-				fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
-			}
+		// Show where the server keeps its dev token: the configured token
+		// file (which the server creates if it does not exist yet), or a
+		// plain note when the token is set in the settings. Never the value.
+		fmt.Println()
+		fmt.Println("Developer token (for CLI authentication):")
+		hint := devTokenExportHint(tokenFile)
+		if serverCfg.Auth.Token != "" {
+			hint = devTokenStartupHint(serverCfg, globalDir)
 		}
+		fmt.Printf("  %s\n", hint)
 	}
 	fmt.Println()
+}
+
+// readDevTokenFile returns the dev token stored in the file at path, or ""
+// if there is none.
+func readDevTokenFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // collectServerPorts returns the list of TCP ports the server would bind based

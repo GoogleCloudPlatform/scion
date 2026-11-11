@@ -27,22 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// hubDefaultsDispatchAgent returns a minimal agent record for the dispatch
-// tests below. AppliedConfig must be non-nil: buildCreateRequest only builds
-// req.Config when the agent has one.
-func hubDefaultsDispatchAgent() *store.Agent {
-	return &store.Agent{
-		ID:              tid("agent-1"),
-		Name:            "test-agent",
-		Slug:            "test-agent",
-		OwnerID:         tid("user-1"),
-		RuntimeBrokerID: tid("host-1"),
-		AppliedConfig:   &store.AgentAppliedConfig{},
-	}
-}
 
 func hubDefaultsDispatcher(t *testing.T, srv *Server) *HTTPAgentDispatcher {
 	t.Helper()
@@ -142,7 +127,7 @@ func TestDispatch_HubAgentDefaults_OnWire(t *testing.T) {
 			t.Fatal("fixture no longer yields a non-nil InlineConfig, so the A5-leak assertion " +
 				"below would evaluate nothing; restore it rather than deleting this check")
 		}
-		if req.InlineConfig.MaxTurns != 0 || req.InlineConfig.MaxModelCalls != 0 ||
+		if req.InlineConfig.MaxTurns != nil || req.InlineConfig.MaxModelCalls != nil ||
 			req.InlineConfig.MaxDuration != "" || req.InlineConfig.Resources != nil {
 			t.Errorf("hub defaults leaked into InlineConfig (alternative A5): %+v", req.InlineConfig)
 		}
@@ -257,9 +242,18 @@ func TestDispatch_HubAgentDefaults_ProviderInstalledByServer(t *testing.T) {
 // requestId is dropped before comparison: it is a fresh uuid.NewString() per
 // call and is the only non-deterministic member. Everything else, including the
 // two derived UUIDs, is stable across runs.
+//
+// Golden updated: buildCreateRequest always writes the
+// SCION_METADATA_MODE_SOURCE=hub marker into resolvedEnv/envClassifications.
+// This fixed input has no GCP identity configured, so SCION_METADATA_MODE
+// itself is absent and the broker applies its runtime default ("block" on
+// every runtime except Kubernetes, "passthrough" on Kubernetes). This is an
+// intended change to the payload, not an incidental one.
 func TestDispatch_FileMode_RequestJSONUnchanged(t *testing.T) {
-	const preChangeGolden = `{"config":{},"id":"8de2cea5-95b0-5ee2-a75a-c4d168aff6a7",` +
-		`"name":"test-agent","projectId":"","slug":"test-agent",` +
+	const preChangeGolden = `{"config":{},"envClassifications":{` +
+		`"SCION_METADATA_MODE_SOURCE":"plain"},"id":"8de2cea5-95b0-5ee2-a75a-c4d168aff6a7",` +
+		`"name":"test-agent","projectId":"","resolvedEnv":{` +
+		`"SCION_METADATA_MODE_SOURCE":"hub"},"slug":"test-agent",` +
 		`"userId":"b88f5d8f-14e6-5a0a-8f6c-6b720a0f672c"}`
 
 	ctx := context.Background()
@@ -309,6 +303,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 			Limits:   api.ResourceList{CPU: "2", Memory: "4Gi"},
 			Disk:     "10Gi",
 		},
+		AutoExposePorts: func() *bool { b := true; return &b }(),
 	}
 
 	blob, err := json.Marshal(&RemoteAgentConfig{HubAgentDefaults: sent})
@@ -333,7 +328,9 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 		got.HubAgentDefaults.MaxModelCalls != want.MaxModelCalls ||
 		got.HubAgentDefaults.MaxDuration != want.MaxDuration ||
 		got.HubAgentDefaults.Resources == nil ||
-		*got.HubAgentDefaults.Resources != *want.Resources {
+		*got.HubAgentDefaults.Resources != *want.Resources ||
+		got.HubAgentDefaults.AutoExposePorts == nil ||
+		!*got.HubAgentDefaults.AutoExposePorts {
 		t.Errorf("wire round-trip mismatch:\n sent %+v\n got  %+v (resources %+v)",
 			want, got.HubAgentDefaults, got.HubAgentDefaults.Resources)
 	}
@@ -344,7 +341,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 // still marshal the key and would make the broker-side rung "fire" with zero
 // values, which is how file-mode parity would silently break.
 func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
-	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}); got != nil {
+	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, nil); got != nil {
 		t.Errorf("want nil for empty section, got %+v", got)
 	}
 	// The two hub-resolved fields alone must not put the field on the wire:
@@ -352,13 +349,94 @@ func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
 	d := opsettings.AgentDefaultsSettings{}
 	d.DefaultTemplate = "team-default"
 	d.DefaultHarnessConfig = "claude-vertex"
-	if got := remoteHubAgentDefaults(d); got != nil {
+	if got := remoteHubAgentDefaults(d, nil, nil, nil); got != nil {
 		t.Errorf("template/harness-config defaults must not travel here, got %+v", got)
 	}
 	// A single limit is enough to send.
 	d = opsettings.AgentDefaultsSettings{}
 	d.DefaultMaxTurns = 50
-	if got := remoteHubAgentDefaults(d); got == nil || got.MaxTurns != 50 {
+	if got := remoteHubAgentDefaults(d, nil, nil, nil); got == nil || got.MaxTurns != 50 {
 		t.Errorf("want MaxTurns 50 on the wire, got %+v", got)
+	}
+	// The hub auto-expose default alone is enough to send, false included.
+	off := false
+	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off, nil, nil)
+	if got == nil || got.AutoExposePorts == nil || *got.AutoExposePorts {
+		t.Errorf("want autoExposePorts=false on the wire, got %+v", got)
+	}
+	off = true
+	if *got.AutoExposePorts {
+		t.Error("the wire value must be a copy, not the provider's pointer")
+	}
+}
+
+// TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart: hub
+// agent_defaults.resources and limits ride the start and restart wires as
+// well as create, because the broker applies them per start and no longer
+// persists them into the agent config (ptone/scion#4561, ptone/scion#623).
+// A changed hub value reaches the next start and restart.
+func TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart(t *testing.T) {
+	ctx := context.Background()
+	d, client, ag := autoExposeDispatchFixture(t)
+	defaults := opsettings.AgentDefaultsSettings{
+		DefaultMaxTurns:      50,
+		DefaultMaxModelCalls: 500,
+		DefaultMaxDuration:   "2h",
+		DefaultResources:     &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}},
+	}
+	d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings { return defaults })
+
+	check := func(label string, hd *RemoteHubAgentDefaults, wantCPU string, wantTurns, wantCalls int, wantDuration string) {
+		t.Helper()
+		if hd == nil || hd.Resources == nil || hd.Resources.Limits.CPU != wantCPU {
+			t.Fatalf("%s: hub defaults = %+v, want resources limits.cpu %q", label, hd, wantCPU)
+		}
+		if hd.MaxTurns != wantTurns || hd.MaxModelCalls != wantCalls || hd.MaxDuration != wantDuration {
+			t.Errorf("%s: limits = (%d, %d, %q), want (%d, %d, %q)", label,
+				hd.MaxTurns, hd.MaxModelCalls, hd.MaxDuration, wantTurns, wantCalls, wantDuration)
+		}
+	}
+
+	if err := d.DispatchAgentStart(ctx, ag, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart: %v", err)
+	}
+	check("start", client.lastStartExtras.HubAgentDefaults, "3", 50, 500, "2h")
+	// The limits ride only the low-precedence hubAgentDefaults field, never
+	// the top-of-chain inline config (rejected alternative A5).
+	if ic := client.lastInlineConfig; ic != nil && (ic.MaxTurns != nil || ic.MaxModelCalls != nil || ic.MaxDuration != "") {
+		t.Errorf("start inline config carries hub limits: %+v", ic)
+	}
+	if err := d.DispatchAgentRestart(ctx, ag); err != nil {
+		t.Fatalf("DispatchAgentRestart: %v", err)
+	}
+	check("restart", client.lastRestartExtras.HubAgentDefaults, "3", 50, 500, "2h")
+
+	defaults.DefaultResources = &api.ResourceSpec{Limits: api.ResourceList{CPU: "5"}}
+	defaults.DefaultMaxTurns = 60
+	defaults.DefaultMaxModelCalls = 600
+	defaults.DefaultMaxDuration = "3h"
+	if err := d.DispatchAgentStart(ctx, ag, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart: %v", err)
+	}
+	check("start after change", client.lastStartExtras.HubAgentDefaults, "5", 60, 600, "3h")
+	if err := d.DispatchAgentRestart(ctx, ag); err != nil {
+		t.Fatalf("DispatchAgentRestart: %v", err)
+	}
+	check("restart after change", client.lastRestartExtras.HubAgentDefaults, "5", 60, 600, "3h")
+
+	// The broker decodes the same names.
+	blob, err := json.Marshal(client.lastRestartExtras.HubAgentDefaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got api.HubAgentDefaults
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Resources == nil || got.Resources.Limits.CPU != "5" {
+		t.Errorf("broker side does not see the resources in %s", blob)
+	}
+	if got.MaxTurns != 60 || got.MaxModelCalls != 600 || got.MaxDuration != "3h" {
+		t.Errorf("broker side does not see the limits in %s", blob)
 	}
 }

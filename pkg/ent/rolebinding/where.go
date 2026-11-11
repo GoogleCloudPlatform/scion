@@ -96,6 +96,16 @@ func MembershipKind(v string) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldEQ(FieldMembershipKind, v))
 }
 
+// SourceRuleID applies equality check predicate on the "source_rule_id" field. It's identical to SourceRuleIDEQ.
+func SourceRuleID(v uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldSourceRuleID, v))
+}
+
+// IssuanceID applies equality check predicate on the "issuance_id" field. It's identical to IssuanceIDEQ.
+func IssuanceID(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldIssuanceID, v))
+}
+
 // RoleDefinitionIDEQ applies the EQ predicate on the "role_definition_id" field.
 func RoleDefinitionIDEQ(v uuid.UUID) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldEQ(FieldRoleDefinitionID, v))
@@ -584,6 +594,131 @@ func MembershipKindEqualFold(v string) predicate.RoleBinding {
 // MembershipKindContainsFold applies the ContainsFold predicate on the "membership_kind" field.
 func MembershipKindContainsFold(v string) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldContainsFold(FieldMembershipKind, v))
+}
+
+// SourceRuleIDEQ applies the EQ predicate on the "source_rule_id" field.
+func SourceRuleIDEQ(v uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldSourceRuleID, v))
+}
+
+// SourceRuleIDNEQ applies the NEQ predicate on the "source_rule_id" field.
+func SourceRuleIDNEQ(v uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNEQ(FieldSourceRuleID, v))
+}
+
+// SourceRuleIDIn applies the In predicate on the "source_rule_id" field.
+func SourceRuleIDIn(vs ...uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIn(FieldSourceRuleID, vs...))
+}
+
+// SourceRuleIDNotIn applies the NotIn predicate on the "source_rule_id" field.
+func SourceRuleIDNotIn(vs ...uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotIn(FieldSourceRuleID, vs...))
+}
+
+// SourceRuleIDGT applies the GT predicate on the "source_rule_id" field.
+func SourceRuleIDGT(v uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGT(FieldSourceRuleID, v))
+}
+
+// SourceRuleIDGTE applies the GTE predicate on the "source_rule_id" field.
+func SourceRuleIDGTE(v uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGTE(FieldSourceRuleID, v))
+}
+
+// SourceRuleIDLT applies the LT predicate on the "source_rule_id" field.
+func SourceRuleIDLT(v uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLT(FieldSourceRuleID, v))
+}
+
+// SourceRuleIDLTE applies the LTE predicate on the "source_rule_id" field.
+func SourceRuleIDLTE(v uuid.UUID) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLTE(FieldSourceRuleID, v))
+}
+
+// SourceRuleIDIsNil applies the IsNil predicate on the "source_rule_id" field.
+func SourceRuleIDIsNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIsNull(FieldSourceRuleID))
+}
+
+// SourceRuleIDNotNil applies the NotNil predicate on the "source_rule_id" field.
+func SourceRuleIDNotNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotNull(FieldSourceRuleID))
+}
+
+// IssuanceIDEQ applies the EQ predicate on the "issuance_id" field.
+func IssuanceIDEQ(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDNEQ applies the NEQ predicate on the "issuance_id" field.
+func IssuanceIDNEQ(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDIn applies the In predicate on the "issuance_id" field.
+func IssuanceIDIn(vs ...string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDNotIn applies the NotIn predicate on the "issuance_id" field.
+func IssuanceIDNotIn(vs ...string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDGT applies the GT predicate on the "issuance_id" field.
+func IssuanceIDGT(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGT(FieldIssuanceID, v))
+}
+
+// IssuanceIDGTE applies the GTE predicate on the "issuance_id" field.
+func IssuanceIDGTE(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDLT applies the LT predicate on the "issuance_id" field.
+func IssuanceIDLT(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLT(FieldIssuanceID, v))
+}
+
+// IssuanceIDLTE applies the LTE predicate on the "issuance_id" field.
+func IssuanceIDLTE(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDContains applies the Contains predicate on the "issuance_id" field.
+func IssuanceIDContains(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldContains(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasPrefix applies the HasPrefix predicate on the "issuance_id" field.
+func IssuanceIDHasPrefix(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldHasPrefix(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasSuffix applies the HasSuffix predicate on the "issuance_id" field.
+func IssuanceIDHasSuffix(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldHasSuffix(FieldIssuanceID, v))
+}
+
+// IssuanceIDIsNil applies the IsNil predicate on the "issuance_id" field.
+func IssuanceIDIsNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIsNull(FieldIssuanceID))
+}
+
+// IssuanceIDNotNil applies the NotNil predicate on the "issuance_id" field.
+func IssuanceIDNotNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotNull(FieldIssuanceID))
+}
+
+// IssuanceIDEqualFold applies the EqualFold predicate on the "issuance_id" field.
+func IssuanceIDEqualFold(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEqualFold(FieldIssuanceID, v))
+}
+
+// IssuanceIDContainsFold applies the ContainsFold predicate on the "issuance_id" field.
+func IssuanceIDContainsFold(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldContainsFold(FieldIssuanceID, v))
 }
 
 // HasRoleDefinition applies the HasEdge predicate on the "role_definition" edge.

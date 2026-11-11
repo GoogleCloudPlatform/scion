@@ -37,7 +37,10 @@ func TestEventTargetsAgent_MatchByID(t *testing.T) {
 	}
 }
 
-func TestEventTargetsAgent_MatchByName(t *testing.T) {
+// TestEventTargetsAgent_NameAloneDoesNotMatch verifies eventTargetsAgent keys
+// on ID and Slug only: a payload value matching an agent's mutable display
+// Name (but not its ID or Slug) does not select that agent.
+func TestEventTargetsAgent_NameAloneDoesNotMatch(t *testing.T) {
 	agent := &store.Agent{
 		ID:   "agent-123",
 		Name: "my-agent",
@@ -46,8 +49,8 @@ func TestEventTargetsAgent_MatchByName(t *testing.T) {
 	payload, _ := json.Marshal(map[string]string{"agentName": "my-agent"})
 	evt := store.ScheduledEvent{Payload: string(payload)}
 
-	if !eventTargetsAgent(evt, agent) {
-		t.Error("expected eventTargetsAgent to match by agent name")
+	if eventTargetsAgent(evt, agent) {
+		t.Error("expected eventTargetsAgent to NOT match on agent.Name alone")
 	}
 }
 

@@ -17,12 +17,12 @@ harness authors following the same pattern.
 # 1. Build the container image
 docker build -t scion-amp examples/amp/
 
-# 2. Install the harness-config (grove-level or global)
+# 2. Install the harness-config (project-level or global)
 cp -r examples/amp .scion/harness-configs/amp
 # OR install globally:
 # cp -r examples/amp ~/.scion/harness-configs/amp
 
-# 3. Copy the template into your grove's .scion directory
+# 3. Copy the template into your project's .scion directory
 cp -r examples/amp/templates/amp .scion/templates/amp
 
 # 4. Start an agent

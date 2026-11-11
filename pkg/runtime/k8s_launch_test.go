@@ -190,22 +190,9 @@ func TestBuildPod_DefaultResources_WhenNoneSpecified(t *testing.T) {
 		t.Errorf("expected memory request '512Mi', got %q", memReq.String())
 	}
 
-	// Should have default CPU limit
-	cpuLim, ok := res.Limits[corev1.ResourceCPU]
-	if !ok {
-		t.Fatal("expected default CPU limit to be set")
-	}
-	if cpuLim.String() != "2" {
-		t.Errorf("expected CPU limit '2', got %q", cpuLim.String())
-	}
-
-	// Should have default memory limit
-	memLim, ok := res.Limits[corev1.ResourceMemory]
-	if !ok {
-		t.Fatal("expected default memory limit to be set")
-	}
-	if memLim.String() != "4Gi" {
-		t.Errorf("expected memory limit '4Gi', got %q", memLim.String())
+	// Only requests are defaulted: no CPU, memory or ephemeral-storage limit.
+	if len(res.Limits) != 0 {
+		t.Errorf("expected no default limits, got %v", res.Limits)
 	}
 
 	// Should have default ephemeral storage

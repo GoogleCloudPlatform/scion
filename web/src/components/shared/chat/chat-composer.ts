@@ -24,20 +24,44 @@
  * - Sends via `chat-send` custom event: {text, plain, interrupt, mentions}
  * - @-mention autocomplete integration (Phase 4)
  * - The composer knows nothing about the network
- * - Send on Enter (Shift+Enter for newline)
- * - Right-click send button for "Send with interruption"
+ * - Send on Enter (Shift+Enter for newline); on touch-primary devices Enter
+ *   inserts a newline instead, since there is no Shift+Enter combo
+ * - Right-click send button for "Send with interruption" and, when
+ *   `scheduleSendEnabled` is set, "Schedule send…" (`chat-schedule` event)
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
+import { live } from 'lit/directives/live.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
 import type { SlashCommandDetail } from './slash-autocomplete.js';
+import { blurElement, focusElement } from '../focus-moved.js';
 import './mention-autocomplete.js';
 import './slash-autocomplete.js';
 import { showToast } from '../../../utils/toast.js';
+import { LongPressController } from './long-press.js';
+import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
+import './chat-action-sheet.js';
+import type { ScheduleConfirmDetail } from './chat-schedule-dialog.js';
+import './chat-schedule-dialog.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
+import { saveDraftForConversation } from './chat-wake.js';
+import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
+import './artifact-picker.js';
+import { findDefaultAgent } from './default-agent.js';
+
+/** The touch presentation of the send button's right-click menu. */
+const SEND_SHEET_INTERRUPT: ActionSheetItem = {
+  id: 'send-interrupt',
+  label: 'Send with interruption',
+  icon: 'lightning-charge',
+};
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -90,12 +114,41 @@ export interface ChatSendDetail {
   mentions: string[];
   /** W7: Attachment IDs to include with the message. */
   attachmentIds: string[];
+  /**
+   * Artifact references picked in the composer (scion://artifact/<id>),
+   * sent in the message metadata (ptone/scion#3224).
+   */
+  artifactRefs?: string[];
   /** Phase-3: Reply-to message ID. */
   replyToId?: string;
-  /** Reply-to sender (e.g. "agent:slug") for routing replies to agents. */
-  replyToSender?: string;
   /** Reply-to content for RE_msg_starting metadata. */
   replyToContent?: string;
+}
+
+/**
+ * Event detail for the chat-schedule custom event: send `text` at `fireAt`
+ * (a UTC ISO instant) instead of now.
+ */
+export interface ChatScheduleDetail {
+  text: string;
+  fireAt: string;
+  replyToId?: string;
+  onSuccess: () => void;
+  /** Restore composer state when scheduling fails. */
+  onError?: (errorMsg: string) => void;
+}
+
+/** Composer draft state saved before an optimistic clear. */
+interface ComposerSnapshot {
+  /** The conversation the state was taken in. */
+  conversationKey: string;
+  text: string;
+  runeCount: number;
+  acceptedMentions: Set<string>;
+  mentionRanges: MentionRange[];
+  pendingFiles: UploadedAttachment[];
+  pendingArtifacts: PendingArtifact[];
+  replyTo: { messageId: string; senderName: string; content: string } | null;
 }
 
 /** Event detail for the chat-edit custom event (Phase 3). */
@@ -111,6 +164,35 @@ export interface MemberInfo {
   email: string;
   avatarUrl?: string;
   kind: 'user' | 'agent';
+  /** Agent slug, when the roster carries it. */
+  slug?: string;
+}
+
+/**
+ * A span of `this.text` occupied by an accepted mention token, `@slug `
+ * (including the trailing space inserted on accept). `start`/`end` are
+ * indices into `this.text`, kept in sync as the surrounding text changes.
+ */
+interface MentionRange {
+  start: number;
+  end: number;
+  slug: string;
+}
+
+/**
+ * Whether the primary input mechanism does not support hover — i.e. touch is
+ * the primary way of interacting with this device. Mice and trackpads
+ * support hover; fingers do not. This is more accurate than `ontouchstart`
+ * presence checks, which also flag laptops with touchscreens where a mouse
+ * or trackpad is still the primary input.
+ */
+let _isPrimaryInputTouchCached: boolean | undefined;
+function isPrimaryInputTouch(): boolean {
+  if (_isPrimaryInputTouchCached === undefined) {
+    _isPrimaryInputTouchCached =
+      typeof window !== 'undefined' && window.matchMedia('(hover: none)').matches;
+  }
+  return _isPrimaryInputTouchCached;
 }
 
 /**
@@ -165,12 +247,15 @@ export class ScionChatComposer extends LitElement {
   @property()
   projectId = '';
 
+  /** The signed-in user's id; the artifact picker shows their artifacts as "You". */
+  @property()
+  currentUserId = '';
+
   // ---- Phase-3 properties ----
 
   /** Reply-to context: shows a reply preview bar above the input. */
   @property({ type: Object })
-  replyTo: { messageId: string; senderName: string; content: string; sender?: string } | null =
-    null;
+  replyTo: { messageId: string; senderName: string; content: string } | null = null;
 
   /** Edit mode: populates the textarea with existing content. */
   @property({ type: Object })
@@ -182,11 +267,38 @@ export class ScionChatComposer extends LitElement {
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
 
+  /**
+   * Whether the send menu offers "Schedule send…". The parent sets it when
+   * the scheduled-send experiment is on and the conversation supports it.
+   */
+  @property({ type: Boolean })
+  scheduleSendEnabled = false;
+
+  /** Whether the Schedule send dialog is open. */
+  @state() private showScheduleDialog = false;
+
+  /** Whether the send menu is open as an action sheet (a long-press on Send). */
+  @state() private showSendSheet = false;
+
+  /** "Send with interruption" was chosen from the sheet; sent once it has closed. */
+  private sendInterruptOnSheetClose = false;
+
+  /** "Schedule send…" was chosen from the sheet; its dialog opens once the sheet has closed. */
+  private scheduleOnSheetClose = false;
+
+  private readonly sendLongPress = new LongPressController(this);
+
   /** W7: Pending file uploads before send. */
   @state() private pendingFiles: UploadedAttachment[] = [];
 
   /** W7: Upload in progress. */
   @state() private uploading = false;
+
+  /** Artifacts picked with "Attach artifact", sent as references. */
+  @state() private pendingArtifacts: PendingArtifact[] = [];
+
+  /** Whether the "Attach artifact" picker is open. */
+  @state() private artifactPickerOpen = false;
 
   /** Files the last upload refused, shown until dismissed or superseded. */
   @state() private uploadFailures: UploadFailure[] = [];
@@ -201,13 +313,39 @@ export class ScionChatComposer extends LitElement {
   /** Set of accepted mention slugs. Filtered to those still present on send. */
   private acceptedMentions = new Set<string>();
 
+  /**
+   * Ranges of `this.text` occupied by an *accepted* (resolved) mention —
+   * `@slug ` including its trailing space, as inserted on accept. Backspace/
+   * Delete at the edges of one of these ranges removes the whole token in a
+   * single keystroke (#1912). Edits that land inside a range invalidate it —
+   * it is no longer a clean resolved mention, so it reverts to plain text
+   * that deletes one character at a time like any other typed text.
+   */
+  private mentionRanges: MentionRange[] = [];
+
+  /** Reset per-message mention bookkeeping (ranges + accepted set). */
+  private resetMentionTracking(): void {
+    this.mentionRanges = [];
+    this.acceptedMentions.clear();
+  }
+
   /** Phase-3 + Phase-4: Handle editMessage and conversationKey changes. */
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('editMessage') && this.editMessage) {
       this.text = this.editMessage.content;
       this.runeCount = countRunes(this.editMessage.content);
+      // Edited content is historical plain text, not a just-accepted
+      // mention — it must not be atomically deletable.
+      this.resetMentionTracking();
       this.focusTextarea();
+    }
+    // A new reply target (including switching from one message to another)
+    // must move focus into the textarea, caret at the end of the draft, so
+    // the user can start typing the reply immediately. Clearing `replyTo`
+    // (cancel/send) must not re-steal focus, hence the truthy check.
+    if (changedProperties.has('replyTo') && this.replyTo) {
+      this.focusTextareaCaretEnd();
     }
     if (changedProperties.has('conversationKey')) {
       // Save the draft for the OLD conversation immediately before switching.
@@ -218,6 +356,15 @@ export class ScionChatComposer extends LitElement {
       // Reset text so stale content from the old conversation is not carried over.
       this.text = '';
       this.runeCount = 0;
+      // Uploads and picked artifacts belong to the conversation they were
+      // made in: a topic upload carries the topic's project, which a DM
+      // refuses at send. Drafts keep only text, so they are dropped rather
+      // than carried over.
+      this.pendingFiles = [];
+      this.uploadFailures = [];
+      this.pendingArtifacts = [];
+      this.uploading = false;
+      this.resetMentionTracking();
       this.restoreDraft();
     }
   }
@@ -225,17 +372,47 @@ export class ScionChatComposer extends LitElement {
   /** Debounce timer for saving drafts to localStorage. */
   private _draftTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * The draft text this composer last read from or wrote to storage for its
+   * conversation ('' for none). A flush only writes when `text` differs from
+   * it, so an entry written elsewhere (e.g. text handed over from the quick
+   * message dialog) is not overwritten or removed by a composer that never
+   * changed its draft.
+   */
+  private _persistedText = '';
+
   static override styles = css`
     :host {
       display: block;
     }
 
+    /* The rows are spaced by the context rows' own gap and bottom padding
+       and by the footer's top margin, not a gap here, so that context rows
+       which have shrunk away (see the end of the styles) leave no gap. */
     .composer {
       display: flex;
       flex-direction: column;
-      gap: 0.375rem;
-      padding: 0.75rem 1rem;
+      /* The vertical padding halves in a tight keyboard frame (see the
+         tight-frame rules below). */
+      --composer-pad-block: calc(0.75rem - 0.375rem * var(--scion-chat-tight, 0));
+      padding: var(--composer-pad-block) 1rem;
+      /* Clear the home indicator (the page uses viewport-fit=cover). While
+         the on-screen keyboard is open the composer sits on the keyboard,
+         not the screen edge, so the inset is dropped: --scion-kb-open is 1
+         then (set on the root by client/viewport.ts) and 0 otherwise. */
+      padding-bottom: max(
+        var(--composer-pad-block),
+        calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
+      );
       border-top: 1px solid var(--scion-border, #e2e8f0);
+      /* Clear a landscape phone's notch and rounded corners (the page uses
+         viewport-fit=cover) on whichever sides this column meets the screen
+         edge. Each inset is a transparent border, so the row's background still
+         paints to the screen edge and only its content moves in. The chat page
+         sets --chat-inset-left and --chat-inset-right for the edges the
+         conversation touches; both are 0 everywhere else. */
+      border-left: var(--chat-inset-left, 0px) solid transparent;
+      border-right: var(--chat-inset-right, 0px) solid transparent;
       background: var(--scion-surface, #ffffff);
     }
 
@@ -273,6 +450,123 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
+    /* On a phone or tablet the field grows with the draft only so far, then
+       scrolls inside itself. Uncapped, a long draft outgrows a frame the open
+       keyboard has shrunk: the caret ends up below the frame, and iOS pans
+       the page to reveal it, which pushes the header off the top and leaves
+       an empty band above the keyboard.
+       The cap is --composer-field-room, which the thread works out and
+       writes on this element (see composer-room.ts for how: it is a
+       continuous, growing function of the frame height, whatever chrome is
+       showing). Before the thread has measured, or without one, a simple
+       curve of the frame applies instead.
+       The floor is exactly one line: the line plus the field's 0.5em top
+       and bottom padding. Shoelace's line height is 1.4, which gives the
+       2.4em fallback for engines without the lh unit; the lh rule is in
+       @supports, since a var() in it would otherwise win the cascade and
+       drop the cap where lh is unknown.
+       The overflow also overrides Shoelace's own overflow-y: hidden for
+       resize="auto". */
+    @media (max-width: 768px), (pointer: coarse) {
+      sl-textarea::part(textarea) {
+        --composer-field-cap: var(
+          --composer-field-room,
+          calc(var(--scion-app-height, 100dvh) * 0.15 + 2.65rem)
+        );
+        max-height: max(2.4em, var(--composer-field-cap));
+        overflow-y: auto;
+      }
+
+      @supports (height: 1lh) {
+        sl-textarea::part(textarea) {
+          max-height: max(calc(1lh + 1em), var(--composer-field-cap));
+        }
+      }
+    }
+
+    /* In a tight keyboard frame inside the chat shell (it publishes
+       --scion-chat-tight, --scion-chat-tight-position and
+       --scion-chat-tight-visibility from the state client/viewport.ts sets;
+       nothing else does), the composer gives the draft and the thread as
+       much room as it can: the destination chip and the footer row (the
+       character counter) leave the flow, and the padding tightens. They are
+       taken out of flow and hidden (visibility: hidden also takes them out
+       of the tab order and the accessibility tree) rather than removed, so
+       their height stays measurable: tightSavings() reports what they free,
+       and the field's cap adds it back, so crossing the tight threshold
+       never moves the field. All of it is back as soon as the keyboard
+       closes. Each fallback is the element's own value (the footer row's
+       are in its own rule below). */
+    :host > sl-dropdown {
+      position: var(--scion-chat-tight-position, static);
+      visibility: var(--scion-chat-tight-visibility, visible);
+    }
+
+    :host > .destination-chip {
+      position: var(--scion-chat-tight-position, relative);
+      visibility: var(--scion-chat-tight-visibility, visible);
+    }
+
+    /* Stop iOS/Android focus-zoom: the composer's inner native textarea
+       computes at 16px or more on a coarse (touch) pointer, even though
+       the Shoelace font-size custom property (set app-wide in critical
+       CSS) only reaches ::part(base), not the inner textarea itself. */
+    @media (pointer: coarse) {
+      sl-textarea::part(textarea) {
+        font-size: max(16px, var(--chat-fs-lg));
+      }
+    }
+
+    @media (max-width: 768px) {
+      /* The attach button is a 44px square, the same size as Send at the
+         other end of the row, so both entry points have full touch targets
+         with the field between them. The icon stays at its size, centred. */
+      .attach-btn::part(base) {
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        padding: 0;
+        justify-content: center;
+      }
+
+      /* Icon-only on mobile: a square accent button, freeing the width the
+         text label used for the textarea. The label stays in the DOM
+         (visually hidden, not removed) so the accessible name is still
+         "Send" / "Save Edit" without a separate aria-label. */
+      .send-btn::part(base) {
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        padding: 0;
+        justify-content: center;
+      }
+
+      .send-btn::part(prefix) {
+        margin-inline-end: 0;
+      }
+
+      /* The label slot wrapper keeps its own padding even though the
+         slotted content (the clip-rect-hidden span) collapses to 1x1 —
+         without this, the icon sits visibly off-centre in the square
+         button instead of in the middle of it. */
+      .send-btn::part(label) {
+        padding: 0;
+      }
+
+      .send-btn sl-icon {
+        font-size: 20px;
+      }
+
+      .send-btn .send-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+    }
+
     .send-container {
       position: relative;
       flex-shrink: 0;
@@ -280,6 +574,16 @@ export class ScionChatComposer extends LitElement {
 
     .send-btn {
       flex-shrink: 0;
+    }
+
+    /* Long-press on Send opens its menu; keep iOS's callout and text
+       selection from claiming the press. */
+    @media (hover: none) {
+      .send-btn {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
     }
 
     .send-context-overlay {
@@ -317,8 +621,33 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
     }
 
-    .footer-row {
+    .send-context-item.disabled {
+      cursor: default;
+      opacity: 0.5;
+    }
+
+    .send-context-item.disabled:hover {
+      background: none;
+    }
+
+    .composer-context {
       display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+    }
+
+    .composer-context-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 0.375rem;
+      padding-bottom: 0.375rem;
+    }
+
+    .footer-row {
+      margin-top: 0.375rem;
+      display: flex;
+      position: var(--scion-chat-tight-position, static);
+      visibility: var(--scion-chat-tight-visibility, visible);
       align-items: center;
       justify-content: space-between;
       gap: 0.5rem;
@@ -367,7 +696,9 @@ export class ScionChatComposer extends LitElement {
       border-radius: 0.5rem 0.5rem 0 0;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-bottom: none;
-      margin: 0 1rem;
+      /* Keep the tab over the composer's content, which moves in by the
+         chat page's side insets (see .composer). */
+      margin: 0 calc(1rem + var(--chat-inset-right, 0px)) 0 calc(1rem + var(--chat-inset-left, 0px));
       margin-bottom: -1px;
       position: relative;
       z-index: 1;
@@ -407,7 +738,61 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-primary-50, #eff6ff);
     }
 
+    /* In a narrow composer the chip keeps to one line: a long agent name is
+       cut with an ellipsis (the full name is in its title) rather than
+       wrapping the tab into a block over the messages. */
+    @media (max-width: 768px) {
+      :host > sl-dropdown {
+        max-width: 100%;
+      }
+
+      .destination-chip {
+        min-width: 0;
+        white-space: nowrap;
+      }
+
+      .destination-chip > * {
+        flex: none;
+      }
+
+      .destination-chip > .agent-name {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+
     /* W7: File upload styles */
+    .pending-artifacts {
+      display: flex;
+      gap: 0.375rem;
+      flex-wrap: wrap;
+    }
+    .pending-artifact {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.125rem 0.25rem 0.125rem 0.5rem;
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      background: var(--sl-color-primary-50, #eff6ff);
+      border-radius: 0.5rem;
+      font-size: var(--chat-fs-sm);
+      max-width: 100%;
+    }
+    .pending-artifact .artifact-name {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pending-artifact .artifact-version {
+      color: var(--scion-text-muted, #64748b);
+      flex: none;
+    }
+    .pending-artifact .remove-artifact {
+      font-size: 0.75rem;
+    }
     .attach-btn {
       flex-shrink: 0;
     }
@@ -501,29 +886,50 @@ export class ScionChatComposer extends LitElement {
     }
 
     /* ---- Phase-3: Reply preview bar ---- */
+    /* While the keyboard is open inside the chat shell (it publishes
+       --scion-chat-kb-open) the bar is one line with less padding. Keying
+       this to the keyboard rather than to a frame size keeps the bar the
+       same height whatever the frame, so the field's cap stays monotonic. */
     .reply-bar {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.375rem 0.75rem;
-      background: var(--scion-surface-50, #f8fafc);
+      padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
+      background: var(--scion-bg, #f8fafc);
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
       border-radius: 0 0.25rem 0.25rem 0;
       font-size: var(--chat-fs-base);
-      color: var(--scion-neutral-600, #475569);
+      color: var(--scion-text-secondary, #475569);
     }
 
+    /* The sender and a one-line excerpt: on two lines normally, side by
+       side while the keyboard is open, where the excerpt's basis drops from
+       the full width (which wraps it under the sender) to 0. */
     .reply-bar .reply-info {
       flex: 1;
       overflow: hidden;
+      display: flex;
+      flex-wrap: wrap;
+      column-gap: 0.375rem;
     }
 
+    /* While the keyboard is open the sender takes at most half the bar and
+       is cut with an ellipsis, so a long name never wraps the bar back to
+       two lines. Its colour is primary-600 in the light theme and
+       primary-300 in the dark one, for AA contrast on the bar in both. */
     .reply-bar .reply-sender {
       font-weight: 600;
-      color: var(--scion-primary-600, #2563eb);
+      color: var(--scion-primary-hover, #2563eb);
+      max-width: calc(100% - 50% * var(--scion-chat-kb-open, 0));
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .reply-bar .reply-content {
+      flex: 1 1 calc(100% * (1 - var(--scion-chat-kb-open, 0)));
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -541,7 +947,7 @@ export class ScionChatComposer extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.375rem 0.75rem;
+      padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
       background: var(--scion-warning-50, #fffbeb);
       border-left: 3px solid var(--scion-warning-400, #fbbf24);
       border-radius: 0 0.25rem 0.25rem 0;
@@ -583,6 +989,111 @@ export class ScionChatComposer extends LitElement {
       font-weight: 600;
       color: var(--scion-primary, #3b82f6);
     }
+
+    /* (These rules come last so they override the base rules above.)
+       On a phone or tablet the column can never push the field out of the
+       frame: when there is not room for everything, the composer shrinks,
+       and inside it the rows above the input row (a reply or edit bar,
+       attachments, upload failures) give way together, clipped from the
+       top, while the input row keeps its height. Their wrapper has no
+       padding or border, so it can give way entirely. */
+    @media (max-width: 768px), (pointer: coarse) {
+      :host {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .composer-wrapper {
+        display: flex;
+        flex-direction: column;
+        flex: 0 1 auto;
+        min-height: 0;
+      }
+
+      .composer {
+        flex: 0 1 auto;
+        min-height: 0;
+      }
+
+      /* Clipped from the top when it has to give way: nothing in it
+         paints or takes taps outside it. The composer's top padding moves
+         inside it while it shows, so a cancel target can use that space
+         (see below) without reaching past the clip. */
+      .composer-context {
+        flex: 0 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .composer:has(> .composer-context) {
+        padding-top: 0;
+      }
+
+      .composer-context-rows {
+        flex: none;
+        padding-top: 0.75rem;
+      }
+
+      .input-row {
+        flex-shrink: 0;
+      }
+
+      /* Attachments are one row that scrolls sideways, whatever the frame,
+         so the row's height never changes as the frame does. */
+      .pending-files {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+      }
+
+      .pending-file {
+        flex: none;
+      }
+
+      /* A reply or edit bar's cancel button is a 44px square target with
+         the icon at its usual size. The bar (always the first row) is at
+         least 44px less the space above it in the wrapper (the composer's
+         0.75rem top padding, which stays whole here even in a tight frame)
+         and below it (the rows' 0.375rem gap), and the button reaches into
+         both with negative margins: the whole target is inside the
+         wrapper's clip, over nothing else interactive. padding-top
+         re-centres the icon on the bar. */
+      .reply-bar,
+      .edit-bar {
+        min-height: calc(44px - 1.125rem);
+        box-sizing: border-box;
+      }
+
+      .reply-bar sl-icon-button,
+      .edit-bar sl-icon-button {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        width: 44px;
+        height: 44px;
+        margin: -0.75rem -0.75rem -0.375rem 0;
+        padding-top: 0.375rem;
+      }
+    }
+
+    /* Touch targets: an attachment's remove button is 44px square on a
+       coarse pointer, inside its chip. */
+    @media (pointer: coarse) {
+      .pending-file {
+        min-height: 44px;
+        box-sizing: border-box;
+      }
+
+      .pending-file .remove-btn {
+        min-width: 44px;
+        min-height: 44px;
+        margin: -0.25rem -0.5rem -0.25rem 0;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -598,10 +1109,12 @@ export class ScionChatComposer extends LitElement {
 
   /** Restore a draft from localStorage for the current conversationKey. */
   private restoreDraft(): void {
+    this._persistedText = '';
     if (!this.conversationKey) return;
     try {
-      const key = `scion-chat-draft-${this.conversationKey}`;
+      const key = chatDraftStorageKey(this.conversationKey);
       const saved = localStorage.getItem(key);
+      this._persistedText = saved ?? '';
       if (saved !== null) {
         this.text = saved;
         this.runeCount = countRunes(this.text);
@@ -617,12 +1130,13 @@ export class ScionChatComposer extends LitElement {
     if (this._draftTimer !== null) clearTimeout(this._draftTimer);
     this._draftTimer = setTimeout(() => {
       try {
-        const key = `scion-chat-draft-${this.conversationKey}`;
+        const key = chatDraftStorageKey(this.conversationKey);
         if (this.text) {
           localStorage.setItem(key, this.text);
         } else {
           localStorage.removeItem(key);
         }
+        this._persistedText = this.text;
       } catch {
         // localStorage may throw in private browsing mode — silently ignore.
       }
@@ -638,7 +1152,8 @@ export class ScionChatComposer extends LitElement {
     }
     if (!this.conversationKey) return;
     try {
-      localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
+      localStorage.removeItem(chatDraftStorageKey(this.conversationKey));
+      this._persistedText = '';
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -647,6 +1162,11 @@ export class ScionChatComposer extends LitElement {
   /**
    * Immediately persist the current draft text under the given key.
    * Cancels any pending debounced save so it is not double-written. (#1152)
+   *
+   * Writes only when `text` differs from what this composer last persisted
+   * (see `_persistedText`): an unchanged composer leaves the stored entry
+   * alone, while a composer whose text was cleared (sent, edit saved or
+   * cancelled) still removes it.
    */
   private flushDraft(key: string): void {
     if (this._draftTimer !== null) {
@@ -655,12 +1175,14 @@ export class ScionChatComposer extends LitElement {
     }
     if (!key) return;
     try {
-      const storageKey = `scion-chat-draft-${key}`;
+      if (this.text === this._persistedText) return;
+      const storageKey = chatDraftStorageKey(key);
       if (this.text) {
         localStorage.setItem(storageKey, this.text);
       } else {
         localStorage.removeItem(storageKey);
       }
+      this._persistedText = this.text;
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -669,7 +1191,10 @@ export class ScionChatComposer extends LitElement {
   override render() {
     const isOverLimit = this.runeCount > MAX_MESSAGE_LENGTH;
     const isNearLimit = this.runeCount > MAX_MESSAGE_LENGTH * 0.9;
-    const hasContent = this.text.trim().length > 0 || this.pendingFiles.length > 0;
+    const hasContent =
+      this.text.trim().length > 0 ||
+      this.pendingFiles.length > 0 ||
+      this.pendingArtifacts.length > 0;
     const inEditMode = !!this.editMessage;
     const canSend = hasContent && !isOverLimit && !this.disabled && !this.uploading;
 
@@ -695,21 +1220,19 @@ export class ScionChatComposer extends LitElement {
           ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
           : nothing}
         <div class="composer">
-          ${this.replyTo ? this.renderReplyBar() : nothing}
-          ${this.editMessage ? this.renderEditBar() : nothing}
-          ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
-          ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
-          ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
+          ${this.renderContextRows()}
           <div class="input-row">
             ${this.conversationMode && !inEditMode
               ? html`
-                  <sl-icon-button
-                    class="attach-btn"
-                    name="paperclip"
-                    label="Attach file"
-                    @click=${this.handleAttachClick}
-                    ?disabled=${this.disabled || this.uploading}
-                  ></sl-icon-button>
+                  ${isFeatureEnabled(ARTIFACTS_FLAG)
+                    ? this.renderAttachMenu()
+                    : html`<sl-icon-button
+                        class="attach-btn"
+                        name="paperclip"
+                        label="Attach file"
+                        @click=${this.handleAttachClick}
+                        ?disabled=${this.disabled || this.uploading}
+                      ></sl-icon-button>`}
                   <input
                     type="file"
                     multiple
@@ -720,11 +1243,12 @@ export class ScionChatComposer extends LitElement {
               : nothing}
             <div class="textarea-wrapper">
               <sl-textarea
+                enterkeyhint="enter"
                 placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
                 size="small"
                 rows="1"
                 resize=${this.nativeTextareaSizing ? 'none' : 'auto'}
-                .value=${this.text}
+                .value=${live(this.text)}
                 @sl-input=${this.handleInput}
                 @keydown=${this.handleKeydown}
                 @paste=${this.handlePaste}
@@ -746,10 +1270,11 @@ export class ScionChatComposer extends LitElement {
                 variant=${sendVariant}
                 ?disabled=${!canSend}
                 @click=${this.handleSend}
+                @pointerdown=${this.handleSendPointerDown}
                 @contextmenu=${this.handleSendContextMenu}
               >
                 <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
-                ${sendLabel}
+                <span class="send-label">${sendLabel}</span>
               </sl-button>
               ${this.showSendContextMenu && !inEditMode
                 ? html`
@@ -759,9 +1284,24 @@ export class ScionChatComposer extends LitElement {
                         <sl-icon name="lightning-charge"></sl-icon>
                         Send with interruption
                       </div>
+                      ${this.scheduleSendEnabled ? this.renderScheduleMenuItem() : nothing}
                     </div>
                   `
                 : nothing}
+              ${this.scheduleSendEnabled
+                ? html`<scion-chat-schedule-dialog
+                    .open=${this.showScheduleDialog}
+                    @schedule-confirm=${this.handleScheduleConfirm}
+                    @schedule-cancel=${this.handleScheduleCancel}
+                  ></scion-chat-schedule-dialog>`
+                : nothing}
+              <scion-action-sheet
+                heading="Send options"
+                .items=${this.sendSheetItems()}
+                .open=${this.showSendSheet && !inEditMode}
+                @action-sheet-select=${this.handleSendSheetSelect}
+                @action-sheet-close=${this.handleSendSheetClose}
+              ></scion-action-sheet>
             </div>
           </div>
           <div class="footer-row">
@@ -773,6 +1313,39 @@ export class ScionChatComposer extends LitElement {
                 `
               : nothing}
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * The rows above the input row: a reply or edit bar, attachments, upload
+   * failures and progress. They sit in one wrapper so that on a phone or
+   * tablet they can give way together (see the end of the styles): the
+   * wrapper has no padding or border of its own, so it can shrink to
+   * nothing, clipping from the top.
+   */
+  private renderContextRows(): TemplateResult | typeof nothing {
+    const inEditMode = !!this.editMessage;
+    if (
+      !this.replyTo &&
+      !inEditMode &&
+      this.pendingFiles.length === 0 &&
+      this.pendingArtifacts.length === 0 &&
+      this.uploadFailures.length === 0 &&
+      !this.uploading
+    ) {
+      return nothing;
+    }
+    return html`
+      <div class="composer-context">
+        <div class="composer-context-rows">
+          ${this.replyTo ? this.renderReplyBar() : nothing}
+          ${inEditMode ? this.renderEditBar() : nothing}
+          ${this.pendingArtifacts.length > 0 ? this.renderPendingArtifacts() : nothing}
+          ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
+          ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
+          ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
         </div>
       </div>
     `;
@@ -821,6 +1394,7 @@ export class ScionChatComposer extends LitElement {
     // to the parent (see cancelReply).
     this.text = '';
     this.runeCount = 0;
+    this.resetMentionTracking();
     this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
     this.focusTextarea();
   }
@@ -831,7 +1405,7 @@ export class ScionChatComposer extends LitElement {
       return html`
         <div class="destination-chip dm">
           <span class="arrow">&rarr;</span>
-          <span class="agent-name">@${this.peerName}</span>
+          <span class="agent-name" title=${'@' + this.peerName}>@${this.peerName}</span>
         </div>
       `;
     }
@@ -841,12 +1415,13 @@ export class ScionChatComposer extends LitElement {
     const hasAgents = agentMembers.length > 0;
 
     if (this.defaultAgent) {
+      const defaultName = this.defaultAgentMember()?.name || this.defaultAgent;
       return html`
         <sl-dropdown>
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
             <span style="font-size: var(--chat-fs-base)">🤖</span>
-            <span class="agent-name">${this.defaultAgent}</span>
+            <span class="agent-name" title=${defaultName}>${defaultName}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
               ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
@@ -872,8 +1447,19 @@ export class ScionChatComposer extends LitElement {
     `;
   }
 
+  /**
+   * The agent member the thread default names. The stored value may be an
+   * agent ID (a promoted DM stores the UUID), a slug, or a display name, so
+   * all three are matched, ID first.
+   */
+  private defaultAgentMember(): MemberInfo | undefined {
+    const agents = this.members.filter((m) => m.kind === 'agent');
+    return findDefaultAgent(this.defaultAgent, agents, (m) => m.name);
+  }
+
   /** Render the dropdown menu for selecting a default agent. */
   private renderAgentMenu(agentMembers: MemberInfo[]) {
+    const current = this.defaultAgentMember();
     return html`
       <sl-menu @sl-select=${this.handleAgentMenuSelect}>
         <sl-menu-label style="padding: 0 var(--sl-spacing-medium);"
@@ -881,7 +1467,7 @@ export class ScionChatComposer extends LitElement {
         >
         ${agentMembers.map(
           (m) => html`
-            <sl-menu-item value=${m.name} ?checked=${this.defaultAgent === m.name}>
+            <sl-menu-item value=${m.name} ?checked=${current === m}>
               <span slot="prefix" style="font-size: 1.1em;">🤖</span>
               ${m.name}
             </sl-menu-item>
@@ -904,6 +1490,9 @@ export class ScionChatComposer extends LitElement {
     const newDefault = value === '__clear__' ? '' : value;
 
     if (newDefault === this.defaultAgent) return;
+    // Picking the agent that is already the default (stored by ID or slug)
+    // is not a change.
+    if (newDefault && newDefault === this.defaultAgentMember()?.name) return;
 
     this.dispatchEvent(
       new CustomEvent('default-agent-change', {
@@ -916,7 +1505,11 @@ export class ScionChatComposer extends LitElement {
 
   private handleInput(e: Event): void {
     const target = e.target as HTMLInputElement;
-    this.text = target.value;
+    const oldText = this.text;
+    const newText = target.value;
+    const caretAfterEdit = this.getTextareaElement()?.selectionStart ?? newText.length;
+    this.reconcileMentionRangesForEdit(oldText, newText, caretAfterEdit);
+    this.text = newText;
     this.runeCount = countRunes(this.text);
 
     // Persist draft with debounce.
@@ -928,17 +1521,23 @@ export class ScionChatComposer extends LitElement {
     }
 
     // Feed the autocomplete components.
+    this.notifyMentionAutocompleteOfTextChange();
+    this.notifySlashAutocompleteOfTextChange();
+  }
+
+  /** Tell the mention-autocomplete component about the current text/cursor. */
+  private notifyMentionAutocompleteOfTextChange(): void {
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
       | import('./mention-autocomplete.js').ScionMentionAutocomplete
       | null;
-    if (autocomplete) {
-      const textarea = this.getTextareaElement();
-      if (textarea) {
-        autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
-      }
+    const textarea = this.getTextareaElement();
+    if (autocomplete && textarea) {
+      autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
     }
+  }
 
-    // Feed slash command autocomplete.
+  /** Tell the slash-autocomplete component about the current text/cursor. */
+  private notifySlashAutocompleteOfTextChange(): void {
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
       | import('./slash-autocomplete.js').ScionSlashAutocomplete
       | null;
@@ -948,7 +1547,76 @@ export class ScionChatComposer extends LitElement {
     }
   }
 
+  /**
+   * Keep `mentionRanges` in sync with an arbitrary text edit (typing,
+   * pasting, selecting-and-replacing, or a native backspace/delete that we
+   * did not intercept as an atomic mention delete).
+   *
+   * Ranges entirely before or after the edited region are unaffected or
+   * shifted by the length delta. A range that overlaps the edited region is
+   * no longer a clean `@slug ` token — it has been hand-edited — so it is
+   * dropped from `mentionRanges` (it loses atomic delete). Its slug is
+   * *not* removed from `acceptedMentions` here: only an atomic delete
+   * (`deleteMentionRange`) does that. The send-time
+   * `trimmed.includes('@slug')` filter in `doSend` already de-routes text
+   * that no longer reads `@slug` for any other reason (R1 in #1912 round 2).
+   */
+  private reconcileMentionRangesForEdit(
+    oldText: string,
+    newText: string,
+    caretAfterEdit: number
+  ): void {
+    if (this.mentionRanges.length === 0 || oldText === newText) return;
+
+    const maxPrefix = Math.min(oldText.length, newText.length);
+    let prefixLen = 0;
+    while (prefixLen < maxPrefix && oldText[prefixLen] === newText[prefixLen]) prefixLen++;
+
+    const delta = newText.length - oldText.length;
+
+    // A plain greedy common-prefix/suffix diff can misplace the edit when an
+    // inserted or trailing character happens to match the adjacent range's
+    // boundary character (e.g. typing "@" right before an accepted "@slug "
+    // mention: the prefix match greedily swallows that shared "@", putting
+    // the edit *inside* the range instead of outside it). Anchor the diff to
+    // where the caret actually ended up: the edit cannot start later than
+    // that, less any inserted length, so it never creeps past the real edit
+    // point into an adjacent range.
+    const caretCap = Math.max(0, caretAfterEdit - Math.max(delta, 0));
+    prefixLen = Math.min(prefixLen, caretCap);
+
+    const maxSuffix = maxPrefix - prefixLen;
+    let suffixLen = 0;
+    while (
+      suffixLen < maxSuffix &&
+      oldText[oldText.length - 1 - suffixLen] === newText[newText.length - 1 - suffixLen]
+    ) {
+      suffixLen++;
+    }
+
+    const editStart = prefixLen;
+    const editOldEnd = oldText.length - suffixLen;
+
+    const survivors: MentionRange[] = [];
+    for (const range of this.mentionRanges) {
+      if (range.end <= editStart) {
+        survivors.push(range);
+      } else if (range.start >= editOldEnd) {
+        survivors.push({ ...range, start: range.start + delta, end: range.end + delta });
+      }
+      // else: the edit landed inside this range — drop it from tracking.
+    }
+    this.mentionRanges = survivors;
+  }
+
   private handleKeydown(e: KeyboardEvent): void {
+    // Backspace/Delete right at the edge of an accepted mention removes the
+    // whole token atomically, ahead of the slash/mention autocomplete's own
+    // key handling (neither of which claims these keys).
+    if ((e.key === 'Backspace' || e.key === 'Delete') && this.tryAtomicMentionDelete(e)) {
+      return;
+    }
+
     // Let slash command autocomplete handle keys first.
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
       | import('./slash-autocomplete.js').ScionSlashAutocomplete
@@ -965,10 +1633,83 @@ export class ScionChatComposer extends LitElement {
       return; // consumed by autocomplete
     }
 
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    // On touch devices there is no Shift+Enter combo to insert a newline, so
+    // Enter is left to its default textarea behavior there instead of sending.
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isPrimaryInputTouch()) {
       e.preventDefault();
       this.handleSend();
     }
+  }
+
+  /**
+   * If the caret sits at the edge of an accepted-mention range with no
+   * active selection, delete the whole range in one keystroke: Backspace at
+   * the range's end, Delete at its start. Returns true if it handled the
+   * key (and called preventDefault), so the caller should not fall through
+   * to default text-editing behavior.
+   */
+  private tryAtomicMentionDelete(e: KeyboardEvent): boolean {
+    if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey || e.isComposing) return false;
+    if (this.mentionRanges.length === 0) return false;
+
+    const textarea = this.getTextareaElement();
+    if (!textarea) return false;
+
+    const selStart = textarea.selectionStart ?? this.text.length;
+    const selEnd = textarea.selectionEnd ?? this.text.length;
+    if (selStart !== selEnd) return false; // a real selection deletes normally
+
+    const isBackspace = e.key === 'Backspace';
+    const range = this.mentionRanges.find((r) =>
+      isBackspace ? r.end === selStart : r.start === selStart
+    );
+    if (!range) return false;
+
+    e.preventDefault();
+    this.deleteMentionRange(range);
+    return true;
+  }
+
+  /** Remove an accepted-mention range from `this.text` in one shot. */
+  private deleteMentionRange(range: MentionRange): void {
+    const before = this.text.slice(0, range.start);
+    const after = this.text.slice(range.end);
+    this.text = before + after;
+    this.runeCount = countRunes(this.text);
+
+    const delta = range.start - range.end; // negative: text got shorter
+    this.mentionRanges = this.mentionRanges
+      .filter((r) => r !== range)
+      .map((r) =>
+        r.start >= range.end ? { ...r, start: r.start + delta, end: r.end + delta } : r
+      );
+
+    // Drop the slug from send-time routing unless the text still literally
+    // reads `@slug` elsewhere (e.g. a second mention of the same agent, or a
+    // hand-edited remnant that lost its tracked range but kept the text).
+    // This mirrors the send-time `trimmed.includes('@slug')` filter exactly,
+    // so an atomic delete never de-routes an agent the send-time check would
+    // still route (and vice versa).
+    if (!this.text.includes('@' + range.slug)) {
+      this.acceptedMentions.delete(range.slug);
+    }
+
+    this.saveDraft();
+
+    const cursorPos = range.start;
+    void this.updateComplete.then(() => {
+      const ta = this.getTextareaElement();
+      if (ta) {
+        ta.setSelectionRange(cursorPos, cursorPos);
+      }
+      // An atomic delete bypasses the native input event both autocomplete
+      // components normally listen to. Tell them directly so their own
+      // bookkeeping (e.g. a dismissed-trigger position) doesn't go stale
+      // relative to the new text, and each stays closed rather than
+      // reopening on stale state (#1912).
+      this.notifyMentionAutocompleteOfTextChange();
+      this.notifySlashAutocompleteOfTextChange();
+    });
   }
 
   private handleSlashCommand(e: CustomEvent<SlashCommandDetail>): void {
@@ -989,6 +1730,7 @@ export class ScionChatComposer extends LitElement {
     // Clear the text input after dispatching.
     this.text = '';
     this.runeCount = 0;
+    this.resetMentionTracking();
     this.clearDraft();
     this.focusTextarea();
   }
@@ -1007,19 +1749,122 @@ export class ScionChatComposer extends LitElement {
     this.text = before + insertion + after;
     this.runeCount = countRunes(this.text);
 
-    // Track the accepted mention.
+    // Shift any existing mention ranges that sit after the replaced region
+    // (there's an accepted mention later in the text and this one was
+    // inserted before it). The replaced region itself — the `@partial` query
+    // just typed — cannot already contain a range: an accepted mention's
+    // trailing space would have blocked the trigger from being found there.
+    const delta = insertion.length - (cursorPos - triggerStart);
+    this.mentionRanges = this.mentionRanges.map((r) =>
+      r.start >= cursorPos ? { ...r, start: r.start + delta, end: r.end + delta } : r
+    );
+
+    // Track the newly accepted mention, including its trailing space, so
+    // Backspace/Delete at its edges can remove it atomically (#1912).
+    this.mentionRanges.push({ start: triggerStart, end: triggerStart + insertion.length, slug });
     this.acceptedMentions.add(slug);
 
-    // Restore cursor position after the inserted text.
+    // Restore cursor position after the inserted text. The value itself is
+    // already driven by `this.text` via the `live()`-bound textarea — no
+    // need (and no longer safe) to also poke the native element's `.value`
+    // directly here; doing so bypassed both Lit's and sl-textarea's own
+    // dirty-checking and is what made later keystrokes stop visibly
+    // updating the input until an unrelated re-render forced a resync
+    // (#1912, and the reason #1689 removed the old liveMentionOverride).
     const newCursorPos = triggerStart + insertion.length;
     void this.updateComplete.then(() => {
       const ta = this.getTextareaElement();
       if (ta) {
-        ta.value = this.text;
         ta.setSelectionRange(newCursorPos, newCursorPos);
-        ta.focus();
+        focusElement(ta);
       }
     });
+  }
+
+  /**
+   * The paperclip as a menu while artifacts are enabled: Upload file, or
+   * Attach artifact (opens the picker). The picker itself is rendered here
+   * too, so it shares the composer's lifetime.
+   */
+  private renderAttachMenu() {
+    const full = this.pendingArtifacts.length >= MAX_MESSAGE_ARTIFACTS;
+    return html`
+      <sl-dropdown class="attach-menu" placement="top-start" hoist>
+        <sl-icon-button
+          slot="trigger"
+          class="attach-btn"
+          name="paperclip"
+          label="Attach"
+          ?disabled=${this.disabled || this.uploading}
+        ></sl-icon-button>
+        <sl-menu
+          @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+            this.handleAttachMenuSelect(e)}
+        >
+          <sl-menu-item value="file">
+            <sl-icon slot="prefix" name="upload"></sl-icon>
+            Upload file
+          </sl-menu-item>
+          <sl-menu-item value="artifact" ?disabled=${full}>
+            <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
+            Attach artifact…
+          </sl-menu-item>
+        </sl-menu>
+      </sl-dropdown>
+      <scion-artifact-picker
+        .open=${this.artifactPickerOpen}
+        .projectId=${this.projectId}
+        .currentUserId=${this.currentUserId}
+        .remaining=${MAX_MESSAGE_ARTIFACTS - this.pendingArtifacts.length}
+        .attachedIds=${this.pendingArtifacts.map((a) => a.id)}
+        @artifact-picker-select=${(e: CustomEvent<ArtifactPickerSelectDetail>) =>
+          this.handleArtifactsPicked(e)}
+        @artifact-picker-close=${() => {
+          this.artifactPickerOpen = false;
+        }}
+      ></scion-artifact-picker>
+    `;
+  }
+
+  private handleAttachMenuSelect(e: CustomEvent<{ item: { value: string } }>): void {
+    if (e.detail.item.value === 'artifact') {
+      this.artifactPickerOpen = true;
+    } else {
+      this.handleAttachClick();
+    }
+  }
+
+  private handleArtifactsPicked(e: CustomEvent<ArtifactPickerSelectDetail>): void {
+    const have = new Set(this.pendingArtifacts.map((a) => a.id));
+    const added = e.detail.artifacts.filter((a) => !have.has(a.id));
+    this.pendingArtifacts = [...this.pendingArtifacts, ...added].slice(0, MAX_MESSAGE_ARTIFACTS);
+  }
+
+  private removePendingArtifact(id: string): void {
+    this.pendingArtifacts = this.pendingArtifacts.filter((a) => a.id !== id);
+  }
+
+  /** Render the picked artifacts as removable chips, next to file attachments. */
+  private renderPendingArtifacts() {
+    return html`
+      <div class="pending-artifacts">
+        ${this.pendingArtifacts.map(
+          (a) => html`
+            <div class="pending-artifact" title=${a.ref}>
+              <sl-icon name="file-earmark-richtext"></sl-icon>
+              <span class="artifact-name">${a.title}</span>
+              <span class="artifact-version">· v${a.version}</span>
+              <sl-icon-button
+                class="remove-artifact"
+                name="x-lg"
+                label="Remove ${a.title}"
+                @click=${() => this.removePendingArtifact(a.id)}
+              ></sl-icon-button>
+            </div>
+          `
+        )}
+      </div>
+    `;
   }
 
   /** Render the pending uploaded files as previews/chips. */
@@ -1116,10 +1961,22 @@ export class ScionChatComposer extends LitElement {
       return;
     }
 
+    // The composer is reused across conversations. An upload that settles
+    // after a switch belongs to the conversation it was made in, so its
+    // result is dropped rather than attached to the one now open.
+    const uploadKey = this.conversationKey;
+    const switchedAway = (): boolean => this.conversationKey !== uploadKey;
+
     this.uploading = true;
     try {
       const formData = new FormData();
-      formData.append('project_id', this.projectId);
+      // A DM belongs to no project, and the hub accepts only project-less
+      // uploads there. The composer can still hold a projectId in a DM (an
+      // agent DM carries the agent's project, a DM opened from a project
+      // scope carries that project), so the field is left out for a DM.
+      if (!this.isDirectMessage()) {
+        formData.append('project_id', this.projectId);
+      }
       for (const file of files) {
         formData.append('files', file);
       }
@@ -1139,6 +1996,7 @@ export class ScionChatComposer extends LitElement {
         error?: { message?: string };
         message?: string;
       };
+      if (switchedAway()) return;
 
       // The server reports per file: some may be stored while others are
       // refused. Anything it did take is attached, and the refusals are named
@@ -1159,6 +2017,7 @@ export class ScionChatComposer extends LitElement {
         );
       }
     } catch (err) {
+      if (switchedAway()) return;
       this.dispatchEvent(
         new CustomEvent('composer-error', {
           detail: { message: err instanceof Error ? err.message : 'Upload failed' },
@@ -1167,8 +2026,18 @@ export class ScionChatComposer extends LitElement {
         })
       );
     } finally {
-      this.uploading = false;
+      // After a switch the indicator belongs to the new conversation, which
+      // the switch already reset; an upload started there may be running.
+      if (!switchedAway()) this.uploading = false;
     }
+  }
+
+  /**
+   * Whether the open conversation is a DM: the parent says so, or the key
+   * is a DM key. Either is enough, so a DM is never treated as a topic.
+   */
+  private isDirectMessage(): boolean {
+    return this.conversationMode === 'dm' || this.conversationKey.startsWith('dm:');
   }
 
   /** Handle paste events — extract images from clipboard and upload. */
@@ -1250,10 +2119,8 @@ export class ScionChatComposer extends LitElement {
 
   /** Send the current message with the given interrupt flag. */
   private doSend(interrupt: boolean): void {
+    if (!this.hasSendableContent()) return;
     const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
-      return;
 
     // Phase-3: If in edit mode, dispatch chat-edit instead of chat-send.
     if (this.editMessage) {
@@ -1269,8 +2136,9 @@ export class ScionChatComposer extends LitElement {
       );
       this.text = '';
       this.runeCount = 0;
+      this.resetMentionTracking();
       this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
-      this.focusTextarea();
+      this.settleFocusAfterSend();
       return;
     }
 
@@ -1279,13 +2147,10 @@ export class ScionChatComposer extends LitElement {
 
     // W7: Collect attachment IDs from pending uploads.
     const attachmentIds = this.pendingFiles.map((f) => f.id);
+    const artifactRefs = this.pendingArtifacts.map((a) => a.ref);
 
     // Save state for error recovery before clearing.
-    const savedText = this.text;
-    const savedRuneCount = this.runeCount;
-    const savedMentions = new Set(this.acceptedMentions);
-    const savedPendingFiles = [...this.pendingFiles];
-    const savedReplyTo = this.replyTo;
+    const saved = this.snapshotComposer();
 
     // Phase-3: Build detail with optional replyToId.
     const detail: ChatSendDetail = {
@@ -1294,26 +2159,17 @@ export class ScionChatComposer extends LitElement {
       interrupt,
       mentions,
       attachmentIds,
+      ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
       onSuccess: () => {
         // Input already cleared — nothing to do.
       },
       onError: () => {
         // Restore composer state so the user can retry.
-        this.text = savedText;
-        this.runeCount = savedRuneCount;
-        this.acceptedMentions = savedMentions;
-        this.pendingFiles = savedPendingFiles;
-        if (savedReplyTo) {
-          this.replyTo = savedReplyTo;
-        }
-        this.focusTextarea();
+        this.restoreComposer(saved);
       },
     };
     if (this.replyTo) {
       detail.replyToId = this.replyTo.messageId;
-      if (this.replyTo.sender) {
-        detail.replyToSender = this.replyTo.sender;
-      }
       if (this.replyTo.content) {
         detail.replyToContent = this.replyTo.content;
       }
@@ -1327,10 +2183,11 @@ export class ScionChatComposer extends LitElement {
     // parent's state prematurely, making it unrecoverable on send failure.
     this.text = '';
     this.runeCount = 0;
-    this.acceptedMentions.clear();
+    this.resetMentionTracking();
     this.pendingFiles = [];
+    this.pendingArtifacts = [];
     this.clearDraft();
-    this.focusTextarea();
+    this.settleFocusAfterSend();
 
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {
@@ -1341,27 +2198,234 @@ export class ScionChatComposer extends LitElement {
     );
   }
 
+  /**
+   * The draft state a send or schedule clears optimistically, so a failure
+   * can put it back (restoreComposer).
+   */
+  private snapshotComposer(): ComposerSnapshot {
+    return {
+      conversationKey: this.conversationKey,
+      text: this.text,
+      runeCount: this.runeCount,
+      acceptedMentions: new Set(this.acceptedMentions),
+      mentionRanges: [...this.mentionRanges],
+      pendingFiles: [...this.pendingFiles],
+      pendingArtifacts: [...this.pendingArtifacts],
+      replyTo: this.replyTo,
+    };
+  }
+
+  /**
+   * Restore a snapshot after a failed send or schedule. A failure that
+   * lands after a conversation switch must not put the old conversation's
+   * state into the one now open: its text becomes that conversation's draft
+   * (unless it already has one), and its uploads and artifacts, which belong
+   * to it, are not restored.
+   */
+  private restoreComposer(saved: ComposerSnapshot): void {
+    if (saved.conversationKey !== this.conversationKey) {
+      saveDraftForConversation(saved.conversationKey, saved.text);
+      return;
+    }
+    this.text = saved.text;
+    this.runeCount = saved.runeCount;
+    this.acceptedMentions = saved.acceptedMentions;
+    this.mentionRanges = saved.mentionRanges;
+    this.pendingFiles = saved.pendingFiles;
+    this.pendingArtifacts = saved.pendingArtifacts;
+    if (saved.replyTo) {
+      this.replyTo = saved.replyTo;
+    }
+    // A failed send must not pop the keyboard back up on touch; the user
+    // taps to retry or edit instead.
+    this.settleFocusAfterSend();
+  }
+
+  /**
+   * After a send (successful or failed) or a saved edit, touch devices
+   * blur the composer so the on-screen keyboard retracts instead of
+   * staying up over the thread the user is waiting to read. Desktop keeps
+   * today's re-focus, since Enter still sends there and the user is likely
+   * to keep typing.
+   */
+  private settleFocusAfterSend(): void {
+    if (isPrimaryInputTouch()) {
+      this.blurTextarea();
+    } else {
+      this.focusTextarea();
+    }
+  }
+
+  /** Blur the composer's textarea, retracting the on-screen keyboard. */
+  private blurTextarea(): void {
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    blurElement(slTextarea);
+  }
+
+  /**
+   * Whether the user is mid-composition, used to hold off server-pushed
+   * navigation that would pull the conversation out from under them: there
+   * is draft text, or — on a touch-primary device only — focus is inside the
+   * composer, which there means the on-screen keyboard is up. On desktop the
+   * textarea keeps focus after every send, so focus alone says nothing.
+   */
+  get isComposing(): boolean {
+    if (this.text.trim().length > 0) return true;
+    const touchPrimary =
+      typeof window !== 'undefined' && !!window.matchMedia?.(TOUCH_PRIMARY_QUERY).matches;
+    return touchPrimary && this.shadowRoot?.activeElement != null;
+  }
+
   /** Focus the textarea after send/cancel. */
   private focusTextarea(): void {
     void this.updateComplete.then(() => {
       requestAnimationFrame(() => {
         const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
         if (slTextarea) {
-          (slTextarea as HTMLElement).focus();
+          // preventScroll: this is not the fix for the off-screen-panel
+          // horizontal drift (overflow:clip + inert on the panels is), but it
+          // stops the message list from jumping when this runs while the
+          // composer's panel isn't the one on screen.
+          focusElement(slTextarea, { preventScroll: true });
         }
       });
     });
   }
 
-  /** Show the right-click send context menu. */
-  private handleSendContextMenu(e: MouseEvent): void {
-    e.preventDefault();
-    const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
+  /**
+   * Focus the textarea with the caret placed after the last character of the
+   * current draft. Used for entry points (e.g. Reply) that must not disturb
+   * the existing draft text but still need the caret at a predictable spot
+   * so typing continues the message rather than landing mid-draft.
+   */
+  private focusTextareaCaretEnd(): void {
+    void this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        void this.applyCaretEndFocus();
+      });
+    });
+  }
+
+  /**
+   * Does the actual work for `focusTextareaCaretEnd()`. If `<sl-textarea>`
+   * has not finished its own first render yet — e.g. `replyTo` is already
+   * set on initial mount, before the child element has upgraded —
+   * `getTextareaElement()` returns null because its shadow DOM doesn't exist
+   * yet. In that case, wait once for the child's own `updateComplete` (if it
+   * exposes one) and retry before giving up. If the inner textarea is still
+   * unavailable, fall back to focusing the `<sl-textarea>` host so focus is
+   * not silently dropped.
+   */
+  private async applyCaretEndFocus(): Promise<void> {
+    let ta = this.getTextareaElement();
+    if (!ta) {
+      const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+      const pendingUpdate = (slTextarea as { updateComplete?: Promise<unknown> } | null)
+        ?.updateComplete;
+      if (pendingUpdate) {
+        await pendingUpdate;
+      }
+      ta = this.getTextareaElement();
+    }
+    if (ta) {
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+      focusElement(ta, { preventScroll: true });
       return;
+    }
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    if (slTextarea) {
+      focusElement(slTextarea, { preventScroll: true });
+    }
+  }
+
+  /** Text or attachments, within the length limit, while the composer is enabled. */
+  private hasSendableContent(): boolean {
+    const hasContent =
+      this.text.trim() !== '' || this.pendingFiles.length > 0 || this.pendingArtifacts.length > 0;
+    return hasContent && this.runeCount <= MAX_MESSAGE_LENGTH && !this.disabled;
+  }
+
+  /** Is there something sendable, so the send menu has an action to offer? */
+  private canOfferSendMenu(): boolean {
+    return this.hasSendableContent() && !this.editMessage;
+  }
+
+  /**
+   * Show the send menu: the popup for a right-click, the action sheet for
+   * the browser's own touch long-press (Android fires `contextmenu` for it).
+   */
+  private handleSendContextMenu(e: MouseEvent): void {
+    const fromTouchPress = this.sendLongPress.pressing;
+    if (this.sendLongPress.contextMenu(e)) return;
+    e.preventDefault();
+    if (!this.hasSendableContent()) return;
+    if (fromTouchPress) {
+      if (this.canOfferSendMenu()) this.showSendSheet = true;
+      return;
+    }
     this.showSendContextMenu = true;
   }
+
+  /**
+   * A touch long-press on Send opens the send menu as an action sheet. The
+   * long-press swallows the press's own click, so it never also sends.
+   */
+  private readonly handleSendPointerDown = (e: PointerEvent): void => {
+    if (!this.canOfferSendMenu()) {
+      this.sendLongPress.cancel();
+      return;
+    }
+    this.sendLongPress.pointerDown(e, () => {
+      if (!this.canOfferSendMenu()) return;
+      this.showSendContextMenu = false;
+      this.showSendSheet = true;
+    });
+  };
+
+  private readonly handleSendSheetSelect = (e: CustomEvent<ActionSheetSelectDetail>): void => {
+    if (e.detail.id === 'send-interrupt') this.sendInterruptOnSheetClose = true;
+    if (e.detail.id === 'schedule-send' && !this.scheduleBlockedReason()) {
+      this.scheduleOnSheetClose = true;
+    }
+  };
+
+  /**
+   * The send sheet's items: "Send with interruption", and "Schedule send…"
+   * when the parent enables it (disabled while it cannot be used, like the
+   * popup's item).
+   */
+  private sendSheetItems(): ActionSheetItem[] {
+    if (!this.scheduleSendEnabled) return [SEND_SHEET_INTERRUPT];
+    return [
+      SEND_SHEET_INTERRUPT,
+      {
+        id: 'schedule-send',
+        label: 'Schedule send…',
+        icon: 'clock',
+        disabled: this.scheduleBlockedReason() !== '',
+      },
+    ];
+  }
+
+  /**
+   * The sheet has closed, by a choice, Cancel, Esc or the backdrop. The
+   * send runs only now: closing the dialog hands focus back to whatever
+   * had it before (often the textarea), and sending first would let that
+   * restore undo the send's touch blur and bring the keyboard back up.
+   * Cancel sends nothing and leaves the draft and focus as they were.
+   */
+  private readonly handleSendSheetClose = (): void => {
+    this.showSendSheet = false;
+    if (this.scheduleOnSheetClose) {
+      this.scheduleOnSheetClose = false;
+      this.showScheduleDialog = true;
+      return;
+    }
+    if (!this.sendInterruptOnSheetClose) return;
+    this.sendInterruptOnSheetClose = false;
+    this.doSend(true);
+  };
 
   /** Send the message with interruption from the context menu. */
   private handleSendWithInterrupt(): void {
@@ -1372,6 +2436,197 @@ export class ScionChatComposer extends LitElement {
   /** Close the send context menu. */
   private closeSendContextMenu(): void {
     this.showSendContextMenu = false;
+  }
+
+  /**
+   * Why "Schedule send…" is unavailable right now, or '' when it is
+   * available: there must be text to schedule, not an edit in progress,
+   * and no staged attachments or artifact references (they cannot be
+   * scheduled).
+   */
+  private scheduleBlockedReason(): string {
+    if (this.editMessage) return 'Finish or cancel the edit first';
+    if (this.pendingFiles.length > 0) return 'Attachments cannot be scheduled';
+    if (this.pendingArtifacts.length > 0) return 'Artifact references cannot be scheduled';
+    if (!this.text.trim()) return 'Type a message to schedule';
+    return '';
+  }
+
+  /** The "Schedule send…" menu item, disabled with a reason when unavailable. */
+  private renderScheduleMenuItem(): TemplateResult {
+    const reason = this.scheduleBlockedReason();
+    const blocked = reason !== '';
+    return html`
+      <div
+        class="send-context-item schedule-send-item ${blocked ? 'disabled' : ''}"
+        aria-disabled=${blocked ? 'true' : 'false'}
+        title=${reason}
+        @click=${this.handleScheduleMenuItem}
+      >
+        <sl-icon name="clock"></sl-icon>
+        Schedule send…
+      </div>
+    `;
+  }
+
+  private readonly handleScheduleMenuItem = (): void => {
+    if (this.scheduleBlockedReason()) return;
+    this.showSendContextMenu = false;
+    this.showScheduleDialog = true;
+  };
+
+  private readonly handleScheduleCancel = (): void => {
+    this.showScheduleDialog = false;
+  };
+
+  private readonly handleScheduleConfirm = (e: CustomEvent<ScheduleConfirmDetail>): void => {
+    this.showScheduleDialog = false;
+    this.doSchedule(e.detail.fireAt);
+  };
+
+  /**
+   * Schedule the current text for `fireAt`: clears the composer like a send
+   * and dispatches `chat-schedule`; the parent restores it via onError.
+   */
+  private doSchedule(fireAt: string): void {
+    if (this.editMessage || this.pendingFiles.length > 0 || this.pendingArtifacts.length > 0)
+      return;
+    const trimmed = this.text.trim();
+    if (!trimmed) return;
+
+    const saved = this.snapshotComposer();
+
+    const detail: ChatScheduleDetail = {
+      text: trimmed,
+      fireAt,
+      onSuccess: () => {
+        // Input already cleared — nothing to do.
+      },
+      onError: () => {
+        this.restoreComposer(saved);
+      },
+    };
+    if (this.replyTo) {
+      detail.replyToId = this.replyTo.messageId;
+    }
+
+    this.text = '';
+    this.runeCount = 0;
+    this.resetMentionTracking();
+    this.clearDraft();
+    this.settleFocusAfterSend();
+
+    this.dispatchEvent(
+      new CustomEvent<ChatScheduleDetail>('chat-schedule', {
+        detail,
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /**
+   * Put text back into the composer: the text of a cancelled scheduled
+   * message (`onlyIfEmpty`, so a draft is never replaced) or of a failed
+   * one (Copy to composer, appended to a draft on a new line). Nothing
+   * happens while a message is being edited. Returns whether the text was
+   * placed.
+   */
+  restoreText(text: string, { onlyIfEmpty = false }: { onlyIfEmpty?: boolean } = {}): boolean {
+    if (!text || this.editMessage || this.disabled) return false;
+    const hasDraft =
+      this.text.trim() !== '' || this.pendingFiles.length > 0 || this.pendingArtifacts.length > 0;
+    if (onlyIfEmpty && hasDraft) return false;
+    this.text = this.text.trim() === '' ? text : `${this.text.replace(/\s+$/, '')}\n${text}`;
+    this.runeCount = countRunes(this.text);
+    this.saveDraft();
+    return true;
+  }
+
+  /**
+   * The text field's border-box height in CSS px, or null before it
+   * renders. Read by the thread to work out how much room the field has
+   * (composer-room.ts).
+   */
+  fieldHeight(): number | null {
+    const field = this.getTextareaElement();
+    return field ? field.getBoundingClientRect().height : null;
+  }
+
+  /**
+   * The height in CSS px the tight-frame compaction frees (see the
+   * tight-frame styles): the destination chip and footer row, taken out of
+   * flow but still measurable, plus the padding it trims. 0 outside a tight
+   * frame. Read by the thread, which adds it back to the field's cap so
+   * crossing the tight threshold never moves the field (composer-room.ts).
+   */
+  tightSavings(): number {
+    const root = this.shadowRoot;
+    if (!root) return 0;
+    const outOfFlow = (el: Element | null | undefined): el is HTMLElement =>
+      !!el && getComputedStyle(el).position === 'absolute';
+    let saved = 0;
+    const chip = [...root.children].find(
+      (el) => el.localName === 'sl-dropdown' || el.classList.contains('destination-chip')
+    );
+    if (outOfFlow(chip)) saved += chip.getBoundingClientRect().height;
+    const footer = root.querySelector('.footer-row');
+    if (outOfFlow(footer)) {
+      saved +=
+        footer.getBoundingClientRect().height +
+        (parseFloat(getComputedStyle(footer).marginTop) || 0);
+    }
+    // The padding the tight frame trims: measured against its usual
+    // 0.75rem, top (in the context rows while they show) and bottom.
+    const tight = parseFloat(getComputedStyle(this).getPropertyValue('--scion-chat-tight')) || 0;
+    const column = root.querySelector('.composer');
+    if (tight > 0 && column) {
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      const rows = root.querySelector('.composer-context-rows');
+      const top = parseFloat(getComputedStyle(rows ?? column).paddingTop) || 0;
+      const bottom = parseFloat(getComputedStyle(column).paddingBottom) || 0;
+      saved += 0.75 * rem - top + (0.75 * rem - bottom);
+    }
+    return saved;
+  }
+
+  /**
+   * How much of the composer is cut off when the frame is too short for it,
+   * in CSS px: the context rows' height their wrapper clips away, plus any
+   * content past the composer's own box. 0 while everything shows. Read by
+   * the thread so it sizes the field from the composer's natural height,
+   * not the clipped one (composer-room.ts).
+   */
+  clippedHeight(): number {
+    const root = this.shadowRoot;
+    if (!root) return 0;
+    let clipped = Math.max(0, this.scrollHeight - this.clientHeight);
+    const wrapper = root.querySelector('.composer-context');
+    const rows = root.querySelector('.composer-context-rows');
+    if (wrapper && rows) {
+      clipped += Math.max(
+        0,
+        rows.getBoundingClientRect().height - wrapper.getBoundingClientRect().height
+      );
+    }
+    return clipped;
+  }
+
+  /**
+   * The field's border-box height in CSS px for `lines` lines of draft: the
+   * lines at the field's line height plus its vertical padding. Read by the
+   * thread for the field's two-line floor (composer-room.ts).
+   */
+  fieldLinesHeight(lines: number): number {
+    const field = this.getTextareaElement();
+    if (!field) return 0;
+    const style = getComputedStyle(field);
+    const lineHeight = parseFloat(style.lineHeight) || 1.4 * parseFloat(style.fontSize) || 0;
+    return (
+      lines * lineHeight +
+      (parseFloat(style.paddingTop) || 0) +
+      (parseFloat(style.paddingBottom) || 0)
+    );
   }
 
   /**

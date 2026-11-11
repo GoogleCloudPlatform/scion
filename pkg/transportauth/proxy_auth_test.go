@@ -20,6 +20,7 @@ import (
 )
 
 func TestFromEnv_ProxyAuthState_WithTransportToken(t *testing.T) {
+	isolateTransportTokenFile(t)
 	t.Setenv(EnvTransportToken, "injected-token")
 
 	src, err := FromEnv()
@@ -41,6 +42,7 @@ func TestFromEnv_ProxyAuthState_WithTransportToken(t *testing.T) {
 
 func TestFromEnv_NoTransportAuth(t *testing.T) {
 	t.Setenv(EnvTransportToken, "")
+	t.Setenv(EnvTransportTokenFile, "")
 	t.Setenv(EnvTransportAudience, "")
 	t.Setenv(EnvHubOIDCAudience, "")
 
@@ -59,6 +61,7 @@ func TestFromEnv_NoTransportAuth(t *testing.T) {
 
 func TestFromEnv_MetadataOnGCE(t *testing.T) {
 	t.Setenv(EnvTransportToken, "")
+	t.Setenv(EnvTransportTokenFile, "")
 	t.Setenv(EnvMetadataMode, "")
 	t.Setenv(EnvTransportAudience, "test-audience-for-gce")
 

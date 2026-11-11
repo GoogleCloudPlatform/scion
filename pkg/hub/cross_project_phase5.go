@@ -474,15 +474,16 @@ func RejectCrossProjectFileTransport(transport string) AttachmentTransferDecisio
 type ContentSurfaceType string
 
 const (
-	ContentSurfaceStreamEvents ContentSurfaceType = "stream_events"
-	ContentSurfaceSearch       ContentSurfaceType = "search"
-	ContentSurfacePreview      ContentSurfaceType = "preview"
-	ContentSurfaceNotification ContentSurfaceType = "notification"
-	ContentSurfaceUnread       ContentSurfaceType = "unread"
-	ContentSurfaceEditDelete   ContentSurfaceType = "edit_delete"
-	ContentSurfaceReceipt      ContentSurfaceType = "receipt"
-	ContentSurfaceTyping       ContentSurfaceType = "typing"
-	ContentSurfaceAttachment   ContentSurfaceType = "attachment"
+	ContentSurfaceStreamEvents   ContentSurfaceType = "stream_events"
+	ContentSurfaceSearch         ContentSurfaceType = "search"
+	ContentSurfacePreview        ContentSurfaceType = "preview"
+	ContentSurfaceNotification   ContentSurfaceType = "notification"
+	ContentSurfaceUnread         ContentSurfaceType = "unread"
+	ContentSurfaceEditDelete     ContentSurfaceType = "edit_delete"
+	ContentSurfaceReceipt        ContentSurfaceType = "receipt"
+	ContentSurfaceTyping         ContentSurfaceType = "typing"
+	ContentSurfaceAttachment     ContentSurfaceType = "attachment"
+	ContentSurfaceInteragentView ContentSurfaceType = "interagent_view"
 )
 
 // ContentAccessDecision captures the outcome of a content surface
@@ -611,9 +612,7 @@ func ClassifyLegacyViewQuery(msg *store.Message) LegacyViewQueryMode {
 		return LegacyViewLegacy
 	}
 	// Cross-project messages always use canonical query mode.
-	if msg.SenderProjectID != nil && *msg.SenderProjectID != "" &&
-		msg.RecipientProjectID != nil && *msg.RecipientProjectID != "" &&
-		*msg.SenderProjectID != *msg.RecipientProjectID {
+	if isCrossProjectRow(msg) {
 		return LegacyViewCanonical
 	}
 	// Messages with canonical conversation IDs use the canonical path.
@@ -621,6 +620,15 @@ func ClassifyLegacyViewQuery(msg *store.Message) LegacyViewQueryMode {
 		return LegacyViewCanonical
 	}
 	return LegacyViewLegacy
+}
+
+// isCrossProjectRow reports whether a message row's persisted provenance
+// stamps name two different, non-empty projects.
+func isCrossProjectRow(msg *store.Message) bool {
+	return msg != nil &&
+		msg.SenderProjectID != nil && *msg.SenderProjectID != "" &&
+		msg.RecipientProjectID != nil && *msg.RecipientProjectID != "" &&
+		*msg.SenderProjectID != *msg.RecipientProjectID
 }
 
 // ValidateLegacyViewClaims rejects attempts by Message Broker/plugin metadata

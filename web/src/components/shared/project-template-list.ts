@@ -26,6 +26,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
+import type { Capabilities } from '../../shared/types.js';
+import { can } from '../../shared/types.js';
+import { formatInstantWithZone } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface ProjectTemplate {
   id: string;
@@ -42,7 +48,16 @@ interface ProjectItem {
 
 @customElement('scion-project-template-list')
 export class ScionProjectTemplateList extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private templates: ProjectTemplate[] = [];
+  /**
+   * Hub-scope project capabilities. "Create Template" and "Create From" both
+   * clone a project (POST /projects/{id}/clone), which needs hub
+   * project.create, so they are hidden without it. Fail-closed.
+   */
+  @state() private hubProjectCapabilities: Capabilities | undefined;
   @state() private loading = true;
   @state() private error: string | null = null;
 
@@ -172,6 +187,17 @@ export class ScionProjectTemplateList extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    void this.loadHubProjectCapabilities();
+  }
+
+  private async loadHubProjectCapabilities(): Promise<void> {
+    const caps = await fetchHubProjectCapabilities();
+    if (!this.isConnected) return;
+    this.hubProjectCapabilities = caps;
+  }
+
+  private get canCreateProjects(): boolean {
+    return can(this.hubProjectCapabilities, 'create');
   }
 
   /** Load templates from the API. */
@@ -300,8 +326,7 @@ export class ScionProjectTemplateList extends LitElement {
       const created = (await response.json()) as { id: string };
       this.closeCreateFromDialog();
       // Navigate to the newly created project
-      window.history.pushState({}, '', `/projects/${created.id}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/projects/${created.id}`);
     } catch (err) {
       this.createFromError = err instanceof Error ? err.message : 'Failed to create project';
     } finally {
@@ -394,19 +419,24 @@ export class ScionProjectTemplateList extends LitElement {
       return html`<div class="error-banner">${this.error}</div>`;
     }
 
-    return html`
-      <div class="create-btn">
-        <sl-button size="small" variant="primary" @click=${() => this.openCreateDialog()}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Create Template
-        </sl-button>
-      </div>
+    const emptyHint = this.canCreateProjects ? ' Create one from an existing project.' : '';
 
+    return html`
+      ${this.canCreateProjects
+        ? html`
+            <div class="create-btn">
+              <sl-button size="small" variant="primary" @click=${() => this.openCreateDialog()}>
+                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                Create Template
+              </sl-button>
+            </div>
+          `
+        : nothing}
       ${this.templates.length === 0
         ? html`
             <div class="empty">
               <sl-icon name="file-earmark-plus"></sl-icon>
-              <p>No project templates yet. Create one from an existing project.</p>
+              <p>No project templates yet.${emptyHint}</p>
             </div>
           `
         : html`
@@ -418,7 +448,9 @@ export class ScionProjectTemplateList extends LitElement {
   }
 
   private renderTemplate(template: ProjectTemplate) {
-    const created = template.created ? new Date(template.created).toLocaleDateString() : '';
+    const created = template.created
+      ? formatInstantWithZone(template.created, 'date') || template.created
+      : '';
     return html`
       <div class="template-row">
         <sl-icon class="template-icon" name="file-earmark-code"></sl-icon>
@@ -432,10 +464,14 @@ export class ScionProjectTemplateList extends LitElement {
               <sl-icon name="three-dots-vertical"></sl-icon>
             </sl-button>
             <sl-menu>
-              <sl-menu-item @click=${() => this.openCreateFromDialog(template)}>
-                <sl-icon slot="prefix" name="folder-plus"></sl-icon>
-                Create From
-              </sl-menu-item>
+              ${this.canCreateProjects
+                ? html`
+                    <sl-menu-item @click=${() => this.openCreateFromDialog(template)}>
+                      <sl-icon slot="prefix" name="folder-plus"></sl-icon>
+                      Create From
+                    </sl-menu-item>
+                  `
+                : nothing}
               <sl-menu-item @click=${() => this.openRenameDialog(template)}>
                 <sl-icon slot="prefix" name="pencil"></sl-icon>
                 Rename

@@ -80,7 +80,7 @@ func runStoreTests(t *testing.T, suffix string, newStore func(t *testing.T) Stor
 		task := &Task{
 			ID:        taskID,
 			ContextID: ctxID,
-			ProjectID: "grove-1",
+			ProjectID: "project-1",
 			AgentSlug: "agent-1",
 			AgentID:   "agent-id-1",
 			State:     "submitted",
@@ -193,7 +193,7 @@ func runStoreTests(t *testing.T, suffix string, newStore func(t *testing.T) Stor
 
 		c := &Context{
 			ContextID:  ctxID,
-			ProjectID:  "grove-1",
+			ProjectID:  "project-1",
 			AgentSlug:  "agent-1",
 			AgentID:    "agent-id-1",
 			CreatedAt:  now,

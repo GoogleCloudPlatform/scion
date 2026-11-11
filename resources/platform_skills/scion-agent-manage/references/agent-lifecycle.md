@@ -2,6 +2,57 @@
 
 When to delete an agent, when to stop one, and who may authorize it.
 
+## Upgrading in place instead of replacing
+
+If a long-lived agent (lead, coordinator, architect) needs a newer template, image, or
+harness config but should keep its identity, conversations, and lineage, use
+`scion reincarnate <agent>` (or `scion reincarnate` from inside the agent, to migrate
+itself) instead of delete-and-recreate; see its `--help` for the contract.
+Patch flags (`--model`, `--image`, `--role`, `--service-account`, `--thinking-level`,
+`--harness-auth`) change that setting on the new generation.
+Reincarnating another agent needs permission to delegate its role, but the agent keeps
+its existing delegator (and so its authority) unless you change its role with `--role`.
+An agent denied with `ceiling_unrecorded` (for example, it cannot assign a service
+account after a hub upgrade) has a delegation chain without recorded provenance. Ask an
+authorized user to reincarnate it, or to recreate it directly: a user's reincarnation
+re-records the agent's delegation with that user as delegator, even without a role
+change. Reincarnating it yourself, or from another agent, keeps the chain and does not
+clear the denial.
+
+### Moving to another Runtime Broker
+
+`scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker,
+keeping its identity and its workspace (uncommitted work included). Check first with
+`--dry-run`; it changes nothing and prints every eligibility check.
+
+- **Requirement:** both brokers mount the **same NFS export** and the agent's workspace
+  is on it. The workspace is never copied or re-cloned; a move that does not meet this
+  is refused before anything changes. Both brokers must support agent move and be
+  online (an offline source is refused).
+- **What carries over:** the workspace on the export, the agent ID, slug and lineage.
+  The agent home is regenerated on the target and harness session history is not
+  carried, so write a full handoff (`--handoff-file`), as for any reincarnation.
+- **Moving yourself:** allowed only to a broker that already serves your project
+  (otherwise `409`); an agent with a GCP passthrough identity cannot move itself
+  (`403`: ask a user). Follow the five-line contract in `--help`. The CLI does not set
+  your status; it only prints that the container will be stopped shortly, so do nothing
+  after the call.
+- **Moving another agent (as an agent):** for example, a coordinator moving its child.
+  You need lifecycle permission on that agent. The target must already serve the
+  project, and must auto-provide unless your scopes include `project:agent:create`.
+  An agent never links a new broker to the project; a broker you cannot see returns
+  `404`.
+- **Moving another agent (as a user):** reaching a broker that does not serve the
+  project yet needs a signed-in user with project update, plus broker read and broker
+  dispatch unless the broker auto-provides. A user access token can only reach brokers
+  that auto-provide.
+- **Failure:** the move runs in the background after the request is accepted, so a
+  failure shows as the agent in the `error` phase with the reason in its status
+  message. A failure after the agent is assigned to the target and before the new
+  generation is running rolls the move back: the agent is left stopped on the source,
+  in the `error` phase, with its workspace intact. Start it or retry. If the target's start may have left a container,
+  the agent stays on the target in the `error` phase instead.
+
 ## Default: delete when done
 
 `scion delete <name> --non-interactive` frees system resources.  **Delete is the
@@ -23,10 +74,10 @@ accepted. Time-box it; do not leave agents stopped indefinitely.
 
 | Agent role | Deleted by | When |
 |---|---|---|
-| Developer, reviewer — clear start and end | The agent's creator/supervisor | Once output is accepted and verified |
-| Investigator, architect — may hold an open question | The agent's creator/supervisor | **Only after all questions to humans are answered** and the conversation is explicitly done |
-| Project initiator — the first agent on a project, whatever role it started as | **Only on explicit human instruction** | It is the project's continuity point from first research through closure; its starting role does not govern its lifespan |
-| Engineering manager, coordinator, project lead | **Only on explicit human instruction naming the workstream** | Human says "close down the X workstream" or equivalent |
+| Task-bounded agent — clear start and end | The agent's creator/supervisor | Once output is accepted and verified |
+| Agent with an open human question | The agent's creator/supervisor | **Only after all questions to humans are answered** and the conversation is explicitly done |
+| Lead — the first agent on a project or workstream, an agent coordinating that project or workstream, or an agent explicitly designated by a human as its lead | **Only on explicit human instruction naming the workstream** | It carries continuity from the initial request through closure, including non-code and non-repository projects |
+| Delegated supervisor with a bounded assignment, not a lead | Its creator or authorized supervisor, subject to the assigned workflow; a human where that workflow requires it | After its deliverable is accepted, verified and durable, its subtree is torn down, and its human questions are resolved |
 
 ### Hierarchy teardown: bottom-up deletion
 
@@ -35,7 +86,7 @@ hierarchy, deletion happens bottom-up — each level confirms its subtree is tor
 down before the level above deletes it:
 
 1. The parent learns work is complete; notifies the orchestrator below.
-2. The orchestrator deletes its workers (developers, reviewers).
+2. The orchestrator deletes its completed task-bounded agents.
 3. The orchestrator confirms its subtree is torn down.
 4. The parent deletes the orchestrator.
 
@@ -54,11 +105,11 @@ can delete it directly or explicit human instruction is required.
 
 3. **An agent's own readiness signal is not permission.** An agent saying it is ready for
    cleanup does not constitute user permission to delete it. Only a human can authorize
-   deletion of leads and initiators.
+   deletion of leads.
 
-4. **"Clean up the agents" means workers.** When a human says "clean up agents" or "check
-   with leads about cleanup," they mean completed **worker** agents (developers, reviewers,
-   investigators). They do **not** mean delete the leads themselves.
+4. **"Clean up the agents" means task-bounded agents.** When a human says "clean up
+   agents" or "check with leads about cleanup," they mean completed **task-bounded**
+   agents. They do **not** mean delete the leads themselves.
 
    | Human phrase | Means |
    |---|---|

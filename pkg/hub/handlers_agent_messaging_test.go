@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -86,12 +85,11 @@ func TestOutboundMessage_RoutingErrorStopsDispatch(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "routing-test-agent",
-		Slug:       "routing-test-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "routing-test-agent",
+		Slug:      "routing-test-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -175,12 +173,11 @@ func TestOutboundMessage_RateLimitsFloodingAgent(t *testing.T) {
 
 	newAgent := func(name string) string {
 		a := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       name,
-			Slug:       name,
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      name,
+			Slug:      name,
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		if err := s.CreateAgent(ctx, a); err != nil {
 			t.Fatalf("CreateAgent: %v", err)
@@ -255,12 +252,11 @@ func TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "mislabeller",
-		Slug:       "mislabeller",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "mislabeller",
+		Slug:      "mislabeller",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -277,16 +273,11 @@ func TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic(t *testing.T) {
 	}
 }
 
-// The automatic assistant-reply transcript mirror shares the agent's single
-// aggregate allowance with the messages the agent writes itself, but it may
-// only spend its own reservation of it: a chatty agent whose mirror is
-// flooding can still deliver a completion report or a blocker escalation. Low
-// value traffic must not starve high-value traffic.
-//
-// The mirror is driven well past the aggregate ceiling here, not merely up to
-// its reservation — otherwise the test would pass even with no reservation at
-// all and would prove nothing about starvation.
-func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T) {
+// The retired end-of-turn assistant-reply mirror is still sent on every turn
+// by agents running an older sciontool. The hub accepts and discards it: the
+// caller sees success, nothing is persisted, and it spends none of the
+// agent's send budget, so the agent's own messages are unaffected.
+func TestOutboundMessage_AssistantReplyIsDropped(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -306,12 +297,11 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 		t.Fatalf("CreateUser: %v", err)
 	}
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "chatty",
-		Slug:       "chatty",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "chatty",
+		Slug:      "chatty",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -321,26 +311,34 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
 	// Flood with hook-posted assistant replies, twice the agent's whole
-	// aggregate allowance. Only the mirror's reservation may get through.
-	accepted := 0
+	// allowance. Every one is accepted and dropped.
 	for range 2 * chatSendAgentRatePerMinute {
 		rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mirrored transcript", messages.TypeAssistantReply)
-		switch rr.Code {
-		case http.StatusOK:
-			accepted++
-		case http.StatusTooManyRequests:
-		default:
-			t.Fatalf("mirror send: expected 200 or 429, got %d: %s", rr.Code, rr.Body.String())
+		if rr.Code != http.StatusOK {
+			t.Fatalf("assistant-reply: expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var body map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body["status"] != "dropped" {
+			t.Fatalf("assistant-reply: expected status dropped, got %v", body)
+		}
+		if _, ok := body["message_id"]; ok {
+			t.Fatalf("assistant-reply: a dropped send must not report a message_id: %v", body)
 		}
 	}
-	if accepted != chatSendAgentMirrorRatePerMinute {
-		t.Fatalf("the flooding mirror got %d sends through, want exactly its reservation of %d",
-			accepted, chatSendAgentMirrorRatePerMinute)
+	res, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(res.Items) != 0 {
+		t.Fatalf("assistant-reply must not be persisted, found %d rows", len(res.Items))
 	}
 
 	// The agent's own message to a human is unaffected.
 	if rr := postOutbound(t, srv, project.ID, agent.ID, "task complete"); rr.Code != http.StatusOK {
-		t.Fatalf("the agent's own message must not be starved by its transcript mirror: got %d: %s",
+		t.Fatalf("the agent's own message must be delivered: got %d: %s",
 			rr.Code, rr.Body.String())
 	}
 }
@@ -390,12 +388,11 @@ func TestAgentMessage_B5_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T)
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "target-agent",
-		Slug:       "target-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "target-agent",
+		Slug:      "target-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -513,7 +510,6 @@ func TestBroadcast_B5F1_SpoofedSenderDoesNotDeriveConversationKey(t *testing.T) 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "target-agent", Slug: "target-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -634,13 +630,11 @@ func TestBroadcast_B5F1b_BroadcastedForcedTrueServerSide(t *testing.T) {
 	agent1 := &store.Agent{
 		ID: api.NewUUID(), Name: "a1", Slug: "a1",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	agent2 := &store.Agent{
 		ID: api.NewUUID(), Name: "a2", Slug: "a2",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	for _, a := range []*store.Agent{agent1, agent2} {
@@ -720,13 +714,11 @@ func TestBroadcast_R1_BroadcastingAgentDoesNotReceiveOwnMessage(t *testing.T) {
 	sender := &store.Agent{
 		ID: api.NewUUID(), Name: "sender-agent", Slug: "sender-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	peer := &store.Agent{
 		ID: api.NewUUID(), Name: "peer-agent", Slug: "peer-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	if err := s.CreateAgent(ctx, sender); err != nil {
@@ -839,19 +831,18 @@ func TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity(t *testing.T) {
 
 	// Give the attacker minimum project membership so the ActionAttach authz
 	// check added by #1347 passes and broadcastDirect actually runs.
-	// Setting CreatedBy makes createProjectMembersGroup add the
+	// Setting CreatedBy makes seedProjectCreatorMembership add the
 	// attacker as the group owner, which grants sufficient project access.
 	ensureHubMembership(ctx, s, attacker.ID)
 	project.CreatedBy = attacker.ID
 	if err := s.UpdateProject(ctx, project); err != nil {
 		t.Fatalf("UpdateProject (set CreatedBy): %v", err)
 	}
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "a1", Slug: "a1",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 		// No RuntimeBrokerID — uses broadcastDirect path.
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -929,12 +920,10 @@ func TestBroadcast_B5F1c_SelfSkipUsesAuthNotSender(t *testing.T) {
 	senderAgent := &store.Agent{
 		ID: api.NewUUID(), Name: "sender-agent", Slug: "sender-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 	}
 	peerAgent := &store.Agent{
 		ID: api.NewUUID(), Name: "peer-agent", Slug: "peer-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, senderAgent); err != nil {
 		t.Fatalf("CreateAgent sender: %v", err)
@@ -1016,13 +1005,11 @@ func TestBroker_R2_FanOutGlobalSelfSkipBySenderID(t *testing.T) {
 	sender := &store.Agent{
 		ID: api.NewUUID(), Name: "global-sender", Slug: "global-sender",
 		ProjectID: projectA.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	peer := &store.Agent{
 		ID: api.NewUUID(), Name: "global-peer", Slug: "global-peer",
 		ProjectID: projectA.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	if err := s.CreateAgent(ctx, sender); err != nil {
@@ -1099,7 +1086,6 @@ func TestBroker_R3b_WarnOnEmptySenderID(t *testing.T) {
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "warn-agent", Slug: "warn-agent",
 		ProjectID: project.ID, Phase: "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -1209,7 +1195,6 @@ func def11Setup(t *testing.T) (srv *Server, s store.Store, projectID, agentSlug,
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
@@ -1434,7 +1419,6 @@ func TestDEF19_GroupRecipient_FullHandlerPath(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}); err != nil {
 		t.Fatalf("CreateAgent A: %v", err)
 	}
@@ -1445,7 +1429,6 @@ func TestDEF19_GroupRecipient_FullHandlerPath(t *testing.T) {
 		ProjectID:       projectID,
 		RuntimeBrokerID: brokerID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 	}); err != nil {
 		t.Fatalf("CreateAgent B: %v", err)
 	}
@@ -1580,65 +1563,6 @@ func TestDEF49_DivergenceMismatch_AuthorizedButWrongAgent(t *testing.T) {
 // AC-D-9: One positive test proving the legitimate scion message @agent path
 // still works (expected GREEN on both main and after the fix).
 
-// def49Setup creates a project, two agents (attacker and target), a user
-// (the legitimate sender, DevUserID), and a dispatcher so the handler
-// doesn't fail with 503. It returns everything needed to exercise the
-// caller-supplied conversation_id authorization path.
-func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, targetAgent *store.Agent, userID string) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	projectID = tid("def49-project")
-	if err := s.CreateProject(ctx, &store.Project{
-		ID:   projectID,
-		Name: "def49-project",
-		Slug: "def49-project",
-	}); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	brokerID := tid("def49-broker")
-	if err := s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID:     brokerID,
-		Name:   "def49-broker",
-		Slug:   "def49-broker",
-		Status: store.BrokerStatusOnline,
-	}); err != nil {
-		t.Fatalf("CreateRuntimeBroker: %v", err)
-	}
-	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  projectID,
-		BrokerID:   brokerID,
-		BrokerName: "def49-broker",
-		Status:     store.BrokerStatusOnline,
-	}); err != nil {
-		t.Fatalf("AddProjectProvider: %v", err)
-	}
-
-	targetAgent = &store.Agent{
-		ID:              tid("def49-target-agent"),
-		Name:            "def49-target-agent",
-		Slug:            "def49-target-agent",
-		ProjectID:       projectID,
-		RuntimeBrokerID: brokerID,
-		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
-	}
-	if err := s.CreateAgent(ctx, targetAgent); err != nil {
-		t.Fatalf("CreateAgent (target): %v", err)
-	}
-
-	userID = DevUserID
-	_ = s.CreateUser(ctx, &store.User{
-		ID:          userID,
-		Email:       "dev@localhost",
-		DisplayName: "Development User",
-	})
-
-	srv.SetDispatcher(&recordingDispatcher{})
-	return srv, s, projectID, targetAgent, userID
-}
-
 // TestDEF49_NonMembership_DirectConversation verifies that an authenticated
 // user cannot attribute a message to a direct conversation whose DM key
 // does not name them (AC-D-8 facet a, AC-INGRESS-1 violation).
@@ -1695,8 +1619,9 @@ func TestDEF49_NonMembership_DirectConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (a): expected 403 Forbidden for non-member "+
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (a): expected the unknown-conversation answer (400) for non-member "+
 			"direct conversation attribution, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
@@ -1786,9 +1711,10 @@ func TestDEF49_CrossProject_GroupConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (c): expected 403 Forbidden for cross-project "+
-			"group conversation attribution, got %d: %s",
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (c): expected the unknown-conversation answer (400) for a group "+
+			"conversation of another project, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
 }
@@ -1900,8 +1826,8 @@ func TestDEF49_GroupConversation_UnsetProjectID(t *testing.T) {
 					},
 				})
 
-			if rec.Code != http.StatusForbidden {
-				t.Errorf("expected 403 for conversation with unset project ID (%s), got %d: %s",
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+				t.Errorf("expected the unknown-conversation answer (400) for conversation with unset project ID (%s), got %d: %s",
 					tc.name, rec.Code, rec.Body.String())
 			}
 		})
@@ -1938,12 +1864,12 @@ func TestPhase9e_GroupMessage_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDA, Name: "9e-grp-agent-a", Slug: agentSlugA,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDB, Name: "9e-grp-agent-b", Slug: agentSlugB,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	_ = s.CreateUser(ctx, &store.User{
 		ID: userID, Email: "dev@localhost", DisplayName: "Development User",
@@ -2018,12 +1944,12 @@ func TestPhase9e_GroupMessage_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDA, Name: "9e-off-agent-a", Slug: agentSlugA,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentIDB, Name: "9e-off-agent-b", Slug: agentSlugB,
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 	_ = s.CreateUser(ctx, &store.User{
 		ID: userID, Email: "dev@localhost", DisplayName: "Development User",
@@ -2133,8 +2059,6 @@ func TestPhase9e_PreResolvedConversation_EnrichesKindSurfaceDisplayName(t *testi
 	}
 }
 
-func strPtr(s string) *string { return &s }
-
 // ---------------------------------------------------------------------------
 // Native-chat DM sync: agent→user outbound message side-effects
 // ---------------------------------------------------------------------------
@@ -2152,16 +2076,10 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Use t.Cleanup instead of defer so that db.Close runs after the W6
-	// notification goroutine (go cn.NotifyDMReceived) has finished — the
-	// backfill now populates req.ThreadID, which makes the non-broker
-	// notification path fire.
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
+	// openTestMemorySQLite closes db in t.Cleanup, not defer, so db.Close
+	// runs after any background work the send started has finished.
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init WebChatStore: %v", err)
 	}
@@ -2182,12 +2100,11 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "dm-sync-agent",
-		Slug:       "dm-sync-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "dm-sync-agent",
+		Slug:      "dm-sync-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2261,11 +2178,6 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	require.Equal(t, "web", storedMsg.Channel)
 	require.True(t, strings.HasPrefix(storedMsg.ThreadID, "dm:"),
 		"ThreadID must start with 'dm:' for SSE DM fan-out")
-
-	// Allow the W6 notification goroutine (go cn.NotifyDMReceived) to
-	// complete before t.Cleanup closes the database. The goroutine checks
-	// IsConversationMuted which hits the WebChatStore's SQLite DB.
-	time.Sleep(100 * time.Millisecond)
 }
 
 // TestHandleAgentOutboundMessage_DMSyncBrokerPath verifies that when the broker
@@ -2277,16 +2189,12 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Register db.Close as a t.Cleanup BEFORE proxy.Stop so that LIFO
-	// ordering guarantees proxy.Stop runs first — draining in-flight
-	// deliverToUser callbacks (including TouchDMActivity) before the
-	// database handle is closed.
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
+	// openTestMemorySQLite registers db.Close as a t.Cleanup BEFORE
+	// proxy.Stop, so LIFO ordering guarantees proxy.Stop runs first —
+	// draining in-flight deliverToUser callbacks (including TouchDMActivity)
+	// before the database handle is closed.
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -2310,7 +2218,6 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 		Slug:            "dm-sync-broker-agent",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: "test-broker",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2393,6 +2300,70 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	require.True(t, userFound, "expected webchat_dm row for user with key %s", expectedKey)
 }
 
+// TestHandleAgentOutboundMessage_BrokerDropReturnsServiceUnavailable is a
+// regression test for ptone/scion#2311: when the broker's user-message
+// publish is dropped because the recipient's subscriber buffer is full, the
+// outbound-message endpoint must report a retryable failure instead of
+// silently answering 200 while the message is lost.
+func TestHandleAgentOutboundMessage_BrokerDropReturnsServiceUnavailable(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "broker-drop-project",
+		Slug: "broker-drop-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "human-drop@example.com",
+		DisplayName: "Human Drop",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:              api.NewUUID(),
+		Name:            "broker-drop-agent",
+		Slug:            "broker-drop-agent",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: "test-broker",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Wire a broker proxy whose bus always reports a dropped delivery, so
+	// the handler takes the broker path and PublishUserMessage fails.
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(alwaysDropUserBus{}, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	srv.SetMessageBrokerProxy(proxy)
+
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "hello into a full buffer",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code,
+		"handler response: %s", rr.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeUnavailable, resp.Error.Code)
+}
+
 // TestAgentMessage_UserSenderUsesEmailNotDisplayName verifies that the Sender
 // field for a user-originated message uses "user:<email>" — never
 // "user:<display_name>". A display name like "Preston Holmes" is not routable;
@@ -2418,12 +2389,11 @@ func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "email-test-agent",
-		Slug:       "email-test-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "email-test-agent",
+		Slug:      "email-test-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2471,12 +2441,11 @@ func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
 	t.Run("plain_message", func(t *testing.T) {
 		// Use a different agent to avoid conversation overlap.
 		agent2 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "email-test-agent-2",
-			Slug:       "email-test-agent-2",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "email-test-agent-2",
+			Slug:      "email-test-agent-2",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -2522,12 +2491,11 @@ func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
 		require.NoError(t, s.CreateUser(ctx, emailOnlyUser))
 
 		agent3 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "email-test-agent-3",
-			Slug:       "email-test-agent-3",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "email-test-agent-3",
+			Slug:      "email-test-agent-3",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent3))
 
@@ -2592,12 +2560,11 @@ func TestOutboundMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "recip-email-agent",
-		Slug:       "recip-email-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "recip-email-agent",
+		Slug:      "recip-email-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2640,12 +2607,11 @@ func TestOutboundMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
 	// --- Subtest 2: email recipient lookup (resolveOutboundRouting L179) ---
 	t.Run("email_recipient", func(t *testing.T) {
 		agent2 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "recip-email-agent-2",
-			Slug:       "recip-email-agent-2",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "recip-email-agent-2",
+			Slug:      "recip-email-agent-2",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -2687,12 +2653,11 @@ func TestGroupMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
 
 	agentSlug := "grpmsg-email-agent"
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "grpmsg-email-agent",
-		Slug:       agentSlug,
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "grpmsg-email-agent",
+		Slug:      agentSlug,
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2787,15 +2752,14 @@ func TestBroadcast_SenderUsesEmailNotDisplayName(t *testing.T) {
 	ensureHubMembership(ctx, s, user.ID)
 	project.CreatedBy = user.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "bcast-email-agent",
-		Slug:       "bcast-email-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "bcast-email-agent",
+		Slug:      "bcast-email-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2868,12 +2832,11 @@ func TestAgentMessage_UserSenderFallsBackToUUID(t *testing.T) {
 	}))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "uuid-fallback-agent",
-		Slug:       "uuid-fallback-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "uuid-fallback-agent",
+		Slug:      "uuid-fallback-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -2920,12 +2883,11 @@ func TestAgentMessage_UserSenderFallsBackToUUID(t *testing.T) {
 	// --- Subtest 2: plain message path with no-email identity ---
 	t.Run("plain_message_uuid_fallback", func(t *testing.T) {
 		agent2 := &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       "uuid-fallback-agent-2",
-			Slug:       "uuid-fallback-agent-2",
-			ProjectID:  project.ID,
-			Phase:      "running",
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      "uuid-fallback-agent-2",
+			Slug:      "uuid-fallback-agent-2",
+			ProjectID: project.ID,
+			Phase:     "running",
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -2977,12 +2939,11 @@ func TestOutboundMessage_GroupConv_AutoRegistersParticipant(t *testing.T) {
 	}))
 
 	agent := &store.Agent{
-		ID:         tid("autopart-outbound-agent"),
-		Name:       "autopart-outbound-agent",
-		Slug:       "autopart-outbound-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("autopart-outbound-agent"),
+		Name:      "autopart-outbound-agent",
+		Slug:      "autopart-outbound-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -3119,6 +3080,201 @@ func TestAgentMessage_GroupConv_AutoRegistersParticipant(t *testing.T) {
 		"agent should be auto-registered as a participant after sending to a group conversation")
 }
 
+// TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered is review
+// round 2 finding #2: a group conversation derived from a non-DM ThreadID
+// (DeriveConversationKey's case 2 — no caller-supplied conversation_id)
+// dispatches to the primary recipient agent, but only its mention
+// co-recipients were being registered as participants. The primary agent
+// itself must also get a row (G3 / AC-11: every agent dispatched into a
+// group becomes a participant).
+func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered(t *testing.T) {
+	srv, s, projectID, targetAgent, userID := def49Setup(t)
+	ctx := context.Background()
+
+	threadID := "thread-derived-topic"
+	extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+	require.NoError(t, err)
+
+	// Sanity: the conversation doesn't exist yet, so there's nothing to
+	// find a stray participant row on.
+	_, err = s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+targetAgent.ProjectID+"/agents/"+targetAgent.Slug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:dev",
+				SenderID:  userID,
+				Recipient: "agent:" + targetAgent.Slug,
+				Msg:       "hello via thread-derived group",
+				Type:      messages.TypeInstruction,
+				Channel:   "web",
+				ThreadID:  threadID,
+			},
+		})
+	require.Equal(t, http.StatusOK, rec.Code, "message to agent should succeed: %s", rec.Body.String())
+
+	conv, err := s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	parts, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	var agentFound bool
+	for _, p := range parts {
+		if p.PrincipalKind == "agent" && p.PrincipalID == targetAgent.ID {
+			agentFound = true
+		}
+	}
+	require.True(t, agentFound,
+		"AC-11/G3: the primary agent dispatched into a thread-derived group must become a participant")
+}
+
+// TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_AgentSender is
+// review round 3 finding #1: the sibling test above sends as a *user*, so it
+// only exercises the broker-dispatched registerGroupPrimary call. When the
+// sender is an *agent* — the ordinary `scion message --thread-id ...`
+// agent-to-agent path — handleAgentMessage forks into the Agent DM path
+// (ExecuteAgentDM), a different call site entirely (registerGroupPrimary in
+// the agent-DM-fork branch). This proves that site independently: deleting
+// its call, and only its call, fails this test without affecting the
+// user-sender test above.
+func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_AgentSender(t *testing.T) {
+	srv, s, projectID, targetAgent, _ := def49Setup(t)
+	ctx := context.Background()
+
+	senderAgent := &store.Agent{
+		ID:              tid("thread-derived-sender-agent"),
+		Name:            "thread-derived-sender-agent",
+		Slug:            "thread-derived-sender-agent",
+		ProjectID:       projectID,
+		RuntimeBrokerID: targetAgent.RuntimeBrokerID,
+		Phase:           "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, senderAgent))
+
+	threadID := "thread-derived-topic-agent-sender"
+	extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+	require.NoError(t, err)
+
+	sm := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Type:        messages.TypeInstruction,
+		Sender:      "agent:" + senderAgent.Slug,
+		SenderID:    senderAgent.ID,
+		Recipient:   "agent:" + targetAgent.Slug,
+		RecipientID: targetAgent.ID,
+		Msg:         "hello via thread-derived group, agent sender",
+		Channel:     "web",
+		ThreadID:    threadID,
+	}
+	reqBody, err := json.Marshal(MessageRequest{StructuredMessage: sm})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+targetAgent.ProjectID+"/agents/"+targetAgent.ID+"/message",
+		bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: senderAgent.ID},
+		ProjectID: senderAgent.ProjectID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, targetAgent.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "message to agent should succeed: %s", rr.Body.String())
+
+	conv, err := s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	parts, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	var agentFound bool
+	for _, p := range parts {
+		if p.PrincipalKind == "agent" && p.PrincipalID == targetAgent.ID {
+			agentFound = true
+		}
+	}
+	require.True(t, agentFound,
+		"AC-11/G3: the primary agent dispatched into a thread-derived group (agent sender / ExecuteAgentDM fork) must become a participant")
+}
+
+// TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_ManagedRuntime is
+// review round 3 finding #2 (conditional, accepted): the managed-runtime
+// dispatch branch in handleAgentMessage (isManagedAgentRuntime, "bypass
+// broker") has its own registerGroupPrimary call, a third call site distinct
+// from the agent-DM-fork and broker-dispatched sites already covered above.
+// Conversation/group resolution (groupConversationID) happens earlier in
+// handleAgentMessage, shared by every dispatch path regardless of
+// agent.Runtime, so a plain user-sender request against a managed-runtime
+// target agent reaches this branch the same way the broker-dispatched test
+// does. Deleting only this branch's registerGroupPrimary call fails this
+// test without affecting the other two.
+//
+// Must not run in parallel (no t.Parallel()): it swaps the package-level
+// managedBackendInst var under managedBackendMu and restores it in
+// t.Cleanup — a concurrent test that also reaches getManagedBackend could
+// observe or clobber the stub mid-swap (review round 4 finding #1's
+// optional note).
+func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_ManagedRuntime(t *testing.T) {
+	srv, s, projectID, targetAgent, userID := def49Setup(t)
+	ctx := context.Background()
+
+	managedBackendMu.Lock()
+	prevBackend := managedBackendInst
+	managedBackendInst = stubManagedAgentBackend{}
+	managedBackendMu.Unlock()
+	t.Cleanup(func() {
+		managedBackendMu.Lock()
+		managedBackendInst = prevBackend
+		managedBackendMu.Unlock()
+	})
+
+	targetAgent.Runtime = ManagedRuntimePrefix + "stub"
+	require.NoError(t, s.UpdateAgent(ctx, targetAgent))
+
+	threadID := "thread-derived-topic-managed-runtime"
+	extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+targetAgent.ProjectID+"/agents/"+targetAgent.Slug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:dev",
+				SenderID:  userID,
+				Recipient: "agent:" + targetAgent.Slug,
+				Msg:       "hello via thread-derived group, managed runtime",
+				Type:      messages.TypeInstruction,
+				Channel:   "web",
+				ThreadID:  threadID,
+			},
+		})
+	require.Equal(t, http.StatusOK, rec.Code, "message to managed agent should succeed: %s", rec.Body.String())
+
+	conv, err := s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	parts, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	var agentFound bool
+	for _, p := range parts {
+		if p.PrincipalKind == "agent" && p.PrincipalID == targetAgent.ID {
+			agentFound = true
+		}
+	}
+	require.True(t, agentFound,
+		"AC-11/G3: the primary agent dispatched into a thread-derived group (managed-runtime path) must become a participant")
+}
+
 // TestOutboundMessage_NativeGroupConvRef verifies that sending an agent
 // outbound message via conversation_ref to a native group conversation
 // (empty ExternalRef) succeeds — not 500 — and produces the correct routing.
@@ -3135,12 +3291,11 @@ func TestOutboundMessage_NativeGroupConvRef(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "native-group-agent",
-		Slug:       "native-group-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "native-group-agent",
+		Slug:      "native-group-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -3220,12 +3375,11 @@ func TestOutboundMessage_LegacyGroupConvRef(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "legacy-group-agent",
-		Slug:       "legacy-group-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "legacy-group-agent",
+		Slug:      "legacy-group-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -3304,12 +3458,11 @@ func TestOutboundMessage_UnexpectedGroupExternalRef(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "unexpected-extref-agent",
-		Slug:       "unexpected-extref-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "unexpected-extref-agent",
+		Slug:      "unexpected-extref-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

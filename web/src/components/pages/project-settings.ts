@@ -20,7 +20,7 @@
  * Displays project-scoped templates, environment variables, secrets, and danger-zone actions (delete).
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
@@ -38,17 +38,41 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { projectVisitorsVisible } from '../../shared/project-visitors.js';
+import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
+import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
+import {
+  PROFILE_DEFAULTS_FIELD,
+  effectiveIdentityForProfile,
+  knownProfiles,
+  mapFromRows,
+  profileErrorsFromBody,
+  profileOptionsForRow,
+  profilesMissingDefault,
+  rowProblem,
+  rowsFromMap,
+  sameProfileMap,
+  serviceAccountOptionsForProfile,
+  splitProfileWarnings,
+  type EffectiveIdentity,
+  type KnownProfile,
+  type ProfileDefaultRow,
+  type ProfileMessages,
+} from '../../shared/gcp-profile-defaults.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
 import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/boundary-summary-notice.js';
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
 import '../shared/project-members-editor.js';
+import '../shared/project-visitors-editor.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
@@ -59,7 +83,20 @@ import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
+import {
+  leaveVisibility,
+  PROJECT_NO_ACCESS_MESSAGE,
+  PROJECT_NO_ACCESS_TITLE,
+} from '../../client/project-leave.js';
+import '../shared/project-leave-dialog.js';
+import type { ProjectLeftDetail, ScionProjectLeaveDialog } from '../shared/project-leave-dialog.js';
+import type { ScionProjectMembersEditor } from '../shared/project-members-editor.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 
 interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -74,17 +111,33 @@ interface ProjectSettings {
   telemetryEnabled?: boolean | null | undefined;
   autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
-  defaultMaxTurns?: number | undefined;
-  defaultMaxModelCalls?: number | undefined;
+  /** null clears (inherit), 0 is Unlimited, n >= 1 a limit. */
+  defaultMaxTurns?: number | null | undefined;
+  defaultMaxModelCalls?: number | null | undefined;
   defaultMaxDuration?: string | undefined;
   defaultResources?: ProjectResourceSpec | undefined;
   defaultGCPIdentityMode?: string | undefined;
   defaultGCPIdentityServiceAccountID?: string | undefined;
+  defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string> | undefined;
   defaultModel?: string | undefined;
   defaultThinkingLevel?: number | null | undefined;
   maxAgentRole?: string | undefined;
   defaultAgentRole?: string | undefined;
 }
+
+/**
+ * The tooltip of the hub fallback indicator (ptone/scion#3925). The hub
+ * value is the last fallback, not the value an agent is sure to get: a
+ * template or harness config can set its own, which wins, so the page never
+ * calls it the value in effect.
+ */
+export function hubFallbackTooltip(displayValue: string): string {
+  return `Hub fallback: ${displayValue}. A template or harness config can set its own value, which wins over it.`;
+}
+
+/** The tooltip when the hub does not report its fallback (hubDefault "unknown"). */
+export const HUB_FALLBACK_UNKNOWN_TOOLTIP =
+  'This hub could not report its fallback for this setting; it may still have one. A template or harness config can also set its own value.';
 
 interface ResolvedHubSetting {
   projectSet: boolean;
@@ -111,8 +164,41 @@ interface RuntimeBrokerWithProvider extends RuntimeBroker {
   localPath?: string;
 }
 
+/** A stored project count limit as page state: null (inherit), 0 or n. */
+export function countLimitOrNull(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
+}
+
+/** Whether a settings PUT warning is about the default count limits. */
+export function isCountLimitWarning(w: string): boolean {
+  return /^(defaultMaxTurns|defaultMaxModelCalls)\b/.test(w);
+}
+
+/** isCountLimitWarning for a warning of unknown type: only a string can be one. */
+function isCountLimitWarningValue(w: unknown): w is string {
+  return typeof w === 'string' && isCountLimitWarning(w);
+}
+
+/**
+ * The number input's text as a count limit. Empty is Inherit (null); a
+ * positive integer is a limit; anything else is an error and changes
+ * nothing, so a typo never clears a stored limit.
+ */
+export function parseCountLimitInput(text: string): { value: number | null; error?: string } {
+  const t = text.trim();
+  if (t === '') return { value: null };
+  if (/^[1-9]\d*$/.test(t)) return { value: parseInt(t, 10) };
+  if (/^0+$/.test(t)) {
+    return { value: null, error: 'For no limit, tick Unlimited; a limit must be greater than 0.' };
+  }
+  return { value: null, error: 'Must be a whole number greater than 0, or Unlimited.' };
+}
+
 @customElement('scion-page-project-settings')
 export class ScionPageProjectSettings extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -127,6 +213,20 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private error: string | null = null;
+
+  /**
+   * The project answered 404: it is gone, or the user no longer has access
+   * (left it, or was removed). Rendered as a no-access state.
+   */
+  @state()
+  private noAccess = false;
+
+  /**
+   * `?transfer=1`: open the members editor's transfer ownership dialog once
+   * loaded. Cleared after that first open, so it never opens again.
+   */
+  @state()
+  private openTransferOnLoad = false;
 
   @state()
   private deleteLoading = false;
@@ -153,6 +253,9 @@ export class ScionPageProjectSettings extends LitElement {
   private activeResourcesTab = 'env-vars';
 
   @state()
+  private activeMembersTab = 'members';
+
+  @state()
   private activeSchedulesTab = 'events';
 
   /** Active hub-scoped pre-start hook, used for the "inherited from hub" banner. */
@@ -161,6 +264,10 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private dropdownTemplates: Template[] = [];
+
+  /** The Default Template list failed to load (the saved value is kept). */
+  @state()
+  private dropdownTemplatesLoadFailed = false;
 
   @state()
   private harnessConfigs: HarnessConfigEntry[] = [];
@@ -190,12 +297,26 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private resolvedSettings: Record<string, ResolvedHubSetting> = {};
 
-  // Default agent limits
+  // Default agent limits. A count limit is null (inherit: no project
+  // value), 0 (Unlimited) or a limit n >= 1. The loaded values decide
+  // whether a save sends the field: an untouched count limit is left out,
+  // so a save never changes it.
   @state()
-  private configDefaultMaxTurns = 0;
+  private configDefaultMaxTurns: number | null = null;
 
   @state()
-  private configDefaultMaxModelCalls = 0;
+  private configDefaultMaxModelCalls: number | null = null;
+
+  private loadedDefaultMaxTurns: number | null = null;
+  private loadedDefaultMaxModelCalls: number | null = null;
+
+  /** Per count-limit input error (by annotation key); a save is refused while any is set. */
+  @state()
+  private countLimitErrors: Record<string, string> = {};
+
+  /** The last save's warnings about the count limits (Unlimited on an older broker). */
+  @state()
+  private countLimitWarnings: string[] = [];
 
   @state()
   private configDefaultMaxDuration = '';
@@ -222,6 +343,26 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private configDefaultGCPIdentitySAID = '';
+
+  /**
+   * Per-profile default service account rows
+   * (defaultGCPIdentityServiceAccountIDByProfile, ptone/scion#3947).
+   */
+  @state()
+  private profileDefaultRows: ProfileDefaultRow[] = [];
+
+  /** The stored map the rows were loaded from, to tell whether they changed. */
+  private profileDefaultsStored: Record<string, string> = {};
+
+  private profileDefaultRowKey = 0;
+
+  /** Inline errors from the last failed save, by profile and for the map. */
+  @state()
+  private profileDefaultErrors: ProfileMessages = { byProfile: {}, general: [] };
+
+  /** Warnings from the last successful save, by profile and the rest. */
+  @state()
+  private profileDefaultWarnings: ProfileMessages = { byProfile: {}, general: [] };
 
   // Agent authorization
   @state()
@@ -303,7 +444,7 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private messagingPolicySuccess: string | null = null;
 
-  private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopBrokerRelativeTimeTick: (() => void) | null = null;
 
   static override styles = css`
     :host {
@@ -473,6 +614,14 @@ export class ScionPageProjectSettings extends LitElement {
       color: var(--sl-color-danger-600, #dc2626);
     }
 
+    .leave-blocked-reason {
+      color: var(--sl-color-warning-700, #b45309);
+    }
+
+    .delete-area + .delete-area {
+      margin-top: 1rem;
+    }
+
     .delete-area {
       display: flex;
       align-items: flex-start;
@@ -592,6 +741,10 @@ export class ScionPageProjectSettings extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .config-field .field-help-error {
+      color: var(--sl-color-danger-600, #dc2626);
+    }
+
     .config-actions {
       display: flex;
       align-items: center;
@@ -619,6 +772,49 @@ export class ScionPageProjectSettings extends LitElement {
       vertical-align: middle;
       margin-left: 0.25rem;
       cursor: help;
+    }
+
+    .profile-default-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .profile-default-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .profile-default-inputs {
+      display: grid;
+      grid-template-columns: minmax(8rem, 1fr) minmax(12rem, 2fr) auto;
+      gap: 0.5rem;
+      align-items: end;
+    }
+
+    .profile-effective {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      margin-top: 0.5rem;
+    }
+
+    .profile-effective-title {
+      font-size: 0.8125rem;
+      font-weight: 600;
+    }
+
+    .profile-effective-table {
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+
+    .profile-effective-table th,
+    .profile-effective-table td {
+      text-align: left;
+      padding: 0.25rem 0.5rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
     .config-field.hub-inherited {
@@ -848,9 +1044,18 @@ export class ScionPageProjectSettings extends LitElement {
     // Deep-link a specific Resources tab via ?tab= (e.g. ?tab=templates), used by
     // the resource detail pages' "back" links.
     if (typeof window !== 'undefined') {
-      const tab = new URLSearchParams(window.location.search).get('tab');
+      const params = new URLSearchParams(window.location.search);
+      const tab = params.get('tab');
       if (tab) {
         this.activeResourcesTab = tab;
+      }
+      // The leave dialog's Transfer ownership link from the project page.
+      // Only that param is removed from the URL once read, so a reload or
+      // Back does not open the dialog again.
+      if (params.has('transfer')) {
+        this.openTransferOnLoad = params.get('transfer') === '1';
+        params.delete('transfer');
+        replaceSearch(params);
       }
     }
     void this.loadProject();
@@ -865,19 +1070,23 @@ export class ScionPageProjectSettings extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this.brokerRelativeTimeInterval) {
-      clearInterval(this.brokerRelativeTimeInterval);
-      this.brokerRelativeTimeInterval = null;
-    }
+    this.stopBrokerRelativeTimeTick?.();
+    this.stopBrokerRelativeTimeTick = null;
   }
 
   private async loadProject(skipGitHubCheck = false): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.noAccess = false;
 
     try {
       const response = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
+      if (response.status === 404) {
+        this.noAccess = true;
+        this.project = null;
+        return;
+      }
       if (!response.ok) {
         throw new Error(
           await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
@@ -947,9 +1156,7 @@ export class ScionPageProjectSettings extends LitElement {
     this.messagingPolicyLoading = true;
     this.messagingPolicyError = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${this.projectId}/messaging-policy`
-      );
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/messaging-policy`);
       if (res.ok) {
         this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
       }
@@ -968,17 +1175,14 @@ export class ScionPageProjectSettings extends LitElement {
     this.messagingPolicyError = null;
     this.messagingPolicySuccess = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${this.projectId}/messaging-policy`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            crossProjectInbound: value,
-            expectedRevision: this.messagingPolicy.revision,
-          }),
-        }
-      );
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/messaging-policy`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          crossProjectInbound: value,
+          expectedRevision: this.messagingPolicy.revision,
+        }),
+      });
       if (res.status === 409) {
         this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
         await this.loadMessagingPolicy();
@@ -986,19 +1190,83 @@ export class ScionPageProjectSettings extends LitElement {
         return;
       }
       if (!res.ok) {
-        throw new Error(
-          await extractApiError(res, 'Failed to save')
-        );
+        throw new Error(await extractApiError(res, 'Failed to save'));
       }
       this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
       this.messagingPolicySuccess = 'Messaging policy saved.';
     } catch (err) {
-      this.messagingPolicyError =
-        err instanceof Error ? err.message : 'Failed to save policy';
+      this.messagingPolicyError = err instanceof Error ? err.message : 'Failed to save policy';
       this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
     } finally {
       this.messagingPolicySaving = false;
     }
+  }
+
+  /**
+   * Members, and, while the federation.project_visitors experiment is on
+   * and the caller holds project.manage_visitors, a Visitors tab beside it
+   * (ptone/scion#4603). Without the Visitors tab the section is unchanged.
+   */
+  private renderMembersSection() {
+    const project = this.project!;
+    const readOnly = !canAny(project._capabilities, 'update', 'manage');
+    const description =
+      'Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles.';
+    if (!projectVisitorsVisible(project._capabilities)) {
+      return html`
+        <scion-project-members-editor
+          projectId=${project.id}
+          projectName=${project.name}
+          currentUserId=${this.pageData?.user?.id ?? ''}
+          ?openTransferOnLoad=${this.openTransferOnLoad}
+          ?readOnly=${readOnly}
+          compact
+          sectionTitle="Members"
+          sectionDescription=${description}
+          @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+          @scion-transfer-opened-on-load=${() => {
+            this.openTransferOnLoad = false;
+          }}
+        ></scion-project-members-editor>
+      `;
+    }
+    return html`
+      <div class="section" data-members-section>
+        <sl-tab-group
+          @sl-tab-show=${(e: CustomEvent) => {
+            this.activeMembersTab = (e.detail as { name: string }).name;
+          }}
+        >
+          <sl-tab slot="nav" panel="members" ?active=${this.activeMembersTab === 'members'}
+            >Members</sl-tab
+          >
+          <sl-tab slot="nav" panel="visitors" ?active=${this.activeMembersTab === 'visitors'}
+            >Visitors</sl-tab
+          >
+          <sl-tab-panel name="members">
+            <scion-project-members-editor
+              projectId=${project.id}
+              projectName=${project.name}
+              currentUserId=${this.pageData?.user?.id ?? ''}
+              ?openTransferOnLoad=${this.openTransferOnLoad}
+              ?readOnly=${readOnly}
+              sectionTitle="Members"
+              sectionDescription=${description}
+              @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+              @scion-transfer-opened-on-load=${() => {
+                this.openTransferOnLoad = false;
+              }}
+            ></scion-project-members-editor>
+          </sl-tab-panel>
+          <sl-tab-panel name="visitors">
+            <scion-project-visitors-editor
+              projectId=${project.id}
+              userId=${this.pageData?.user?.id ?? ''}
+            ></scion-project-visitors-editor>
+          </sl-tab-panel>
+        </sl-tab-group>
+      </div>
+    `;
   }
 
   private renderMessagingPolicySection() {
@@ -1046,9 +1314,9 @@ export class ScionPageProjectSettings extends LitElement {
           ? html`
               <sl-alert variant="warning" open>
                 <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned off
-                at the Hub level. Your configured selection below is preserved and will take effect
-                when the Hub administrator enables cross-project messaging.
+                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned
+                off at the Hub level. Your configured selection below is preserved and will take
+                effect when the Hub administrator enables cross-project messaging.
               </sl-alert>
             `
           : ''}
@@ -1108,8 +1376,9 @@ export class ScionPageProjectSettings extends LitElement {
                 style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
               >
                 Choosing &ldquo;${policyLabels[currentValue]}&rdquo; can admit external messages to
-                existing project-mode agents. It does not grant those agents external send authority.
-                Replying requires their own Hub mode and the peer project&rsquo;s consent.
+                existing project-mode agents. It does not grant those agents external send
+                authority. Replying requires their own Hub mode and the peer project&rsquo;s
+                consent.
               </p>
             `
           : ''}
@@ -1189,8 +1458,10 @@ export class ScionPageProjectSettings extends LitElement {
         `/api/v1/templates?${params.toString()}`,
         'templates'
       );
+      this.dropdownTemplatesLoadFailed = false;
     } catch (err) {
       console.error('Failed to load dropdown templates:', err);
+      this.dropdownTemplatesLoadFailed = true;
     }
   }
 
@@ -1257,8 +1528,14 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultHarnessAuth = this.settings.defaultHarnessAuth || '';
       this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
       this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
-      this.configDefaultMaxTurns = this.settings.defaultMaxTurns || 0;
-      this.configDefaultMaxModelCalls = this.settings.defaultMaxModelCalls || 0;
+      this.configDefaultMaxTurns = countLimitOrNull(this.settings.defaultMaxTurns);
+      this.configDefaultMaxModelCalls = countLimitOrNull(this.settings.defaultMaxModelCalls);
+      this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
+      this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      // Reloaded values replace any edit, so its input errors and the last
+      // save's warnings no longer apply.
+      this.countLimitErrors = {};
+      this.countLimitWarnings = [];
       this.configDefaultMaxDuration = this.settings.defaultMaxDuration || '';
       const res = this.settings.defaultResources;
       this.configDefaultResCpuReq = res?.requests?.cpu || '';
@@ -1268,6 +1545,7 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultResDisk = res?.disk || '';
       this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
       this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
+      this.loadProfileDefaultRows(this.settings.defaultGCPIdentityServiceAccountIDByProfile);
       this.configMaxAgentRole = this.settings.maxAgentRole || '';
       this.configDefaultAgentRole = this.settings.defaultAgentRole || '';
       if (this.settings.defaultModel) {
@@ -1281,7 +1559,10 @@ export class ScionPageProjectSettings extends LitElement {
       } else {
         this.defaultModelSelection = '';
       }
-      this.defaultThinkingLevel = this.settings.defaultThinkingLevel ?? null;
+      // The API accepts 1-100 (null clears); a value outside it is clamped,
+      // so a save never sends one the API refuses.
+      const tl = this.settings.defaultThinkingLevel;
+      this.defaultThinkingLevel = typeof tl === 'number' ? Math.min(100, Math.max(1, tl)) : null;
     } catch (err) {
       console.error('Failed to load project settings:', err);
     } finally {
@@ -1291,19 +1572,14 @@ export class ScionPageProjectSettings extends LitElement {
 
   /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
   private async loadHubTelemetryDefaultFallback(): Promise<void> {
-    try {
-      const response = await apiFetch('/api/v1/settings/public');
-      if (response.ok) {
-        const data = (await response.json()) as { telemetryEnabled?: boolean };
-        this.hubTelemetryDefault = data.telemetryEnabled ?? false;
-      }
-    } catch (err) {
-      console.error('Failed to load hub telemetry default:', err);
+    const settings = await getPublicSettings();
+    if (settings) {
+      this.hubTelemetryDefault = settings.telemetryEnabled ?? false;
     }
   }
 
   /**
-   * Returns a formatted hub default hint string for a given annotation key,
+   * Returns a formatted hub fallback hint string for a given annotation key,
    * or null if no hub value is available for display.
    *
    * Used to populate placeholder text on text/number inputs and to label the
@@ -1314,17 +1590,17 @@ export class ScionPageProjectSettings extends LitElement {
     if (!entry || entry.hubDefault !== 'present' || entry.hubValue == null) {
       return null;
     }
-    return `Hub default: ${entry.hubValue}`;
+    return `Hub fallback: ${entry.hubValue}`;
   }
 
   /**
-   * Returns a select-option label incorporating the hub default value,
+   * Returns a select-option label incorporating the hub fallback value,
    * or a generic fallback label when no hub value is available.
    */
   private hubSelectLabel(annotationKey: string, fallbackLabel: string): string {
     const entry = this.resolvedSettings[annotationKey];
     if (entry?.hubDefault === 'present' && entry.hubValue != null) {
-      return `Use hub default (${entry.hubValue})`;
+      return `Use hub fallback (${entry.hubValue})`;
     }
     return fallbackLabel;
   }
@@ -1339,12 +1615,78 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
+   * A project default count limit: a number input plus an Unlimited box,
+   * as on the agent Edit page. Empty with the box clear is Inherit (null);
+   * the box sends 0 (Unlimited); a positive integer is a limit
+   * (ptone/scion#3925).
+   */
+  private renderCountLimitField(
+    label: string,
+    annotationKey: string,
+    value: number | null,
+    set: (v: number | null) => void,
+    help: string,
+    canEdit: boolean
+  ) {
+    const unlimited = value === 0;
+    return html`<div
+      class="config-field ${this.isHubDefault(annotationKey) ? 'hub-inherited' : ''}"
+    >
+      <label>${label} ${this.renderHubIndicator(annotationKey)}</label>
+      <sl-input
+        type="number"
+        inputmode="numeric"
+        placeholder=${unlimited ? 'Unlimited' : this.hubHint(annotationKey) || 'Inherit'}
+        .value=${value && value > 0 ? String(value) : ''}
+        ?disabled=${!canEdit || unlimited}
+        @sl-input=${(e: Event) => {
+          const parsed = parseCountLimitInput((e.target as HTMLInputElement).value);
+          const errors = { ...this.countLimitErrors };
+          if (parsed.error) {
+            // Keep the current value: an invalid entry never clears a stored limit.
+            errors[annotationKey] = parsed.error;
+          } else {
+            delete errors[annotationKey];
+            set(parsed.value);
+          }
+          this.countLimitErrors = errors;
+        }}
+      ></sl-input>
+      <sl-checkbox
+        size="small"
+        class="unlimited"
+        ?checked=${unlimited}
+        ?disabled=${!canEdit}
+        @sl-change=${(e: Event) => {
+          const errors = { ...this.countLimitErrors };
+          delete errors[annotationKey];
+          this.countLimitErrors = errors;
+          set((e.target as HTMLInputElement).checked ? 0 : null);
+        }}
+        >Unlimited</sl-checkbox
+      >
+      ${this.countLimitErrors[annotationKey]
+        ? html`<span class="field-help count-limit-error" style="color: var(--sl-color-danger-600);"
+            >${this.countLimitErrors[annotationKey]}</span
+          >`
+        : html`<span class="field-help">${help}</span>`}
+    </div>`;
+  }
+
+  /**
    * Renders a small hub-default indicator icon with a tooltip showing the
    * inherited hub value. Returns `nothing` when the setting is overridden at
    * the project level or when no hub default exists.
    */
   private renderHubIndicator(annotationKey: string) {
     const entry = this.resolvedSettings[annotationKey];
+    if (entry && !entry.projectSet && entry.hubDefault === 'unknown') {
+      return html`
+        <sl-tooltip content=${HUB_FALLBACK_UNKNOWN_TOOLTIP}>
+          <sl-icon name="building" class="hub-indicator-icon hub-fallback-unknown"></sl-icon>
+        </sl-tooltip>
+      `;
+    }
     if (!entry || entry.projectSet || entry.hubDefault !== 'present') {
       return nothing;
     }
@@ -1357,9 +1699,429 @@ export class ScionPageProjectSettings extends LitElement {
       }
     }
     return html`
-      <sl-tooltip content="Hub default: ${displayValue}">
+      <sl-tooltip content=${hubFallbackTooltip(displayValue)}>
         <sl-icon name="building" class="hub-indicator-icon"></sl-icon>
       </sl-tooltip>
+    `;
+  }
+
+  /**
+   * Whether every runtime broker linked to this project (the same list shown
+   * on the Brokers tab) is reliably known to be Kubernetes: at least one
+   * linked broker, and every one of them registers only "kubernetes"
+   * profiles. This deliberately does not guess — a project with no linked
+   * broker, a broker with no profile info, or a mix of runtime types across
+   * its brokers, all read as false here.
+   */
+  private get projectIsKubernetesOnly(): boolean {
+    if (this.brokers.length === 0) return false;
+    return this.brokers.every((b) => isBrokerKubernetesOnly(b));
+  }
+
+  /**
+   * Short explanation rendered into the GCP identity select's `help-text`
+   * slot when this project's linked brokers are reliably Kubernetes-only:
+   * what a Block default means there (ptone/scion#4077).
+   *
+   * Rendered as a slotted child of the `<sl-select>` (not a sibling
+   * `aria-describedby` reference) because the element that receives focus is
+   * the `role="combobox"` input inside Shoelace's shadow root, which an
+   * attribute on the host cannot reach across the shadow boundary. Shoelace
+   * wires its own `help-text` slot to that combobox's `aria-describedby`
+   * internally.
+   */
+  private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
+    if (!this.projectIsKubernetesOnly) return nothing;
+    return html`<div slot="help-text">${KUBERNETES_BLOCK_HINT}</div>`;
+  }
+
+  /**
+   * The default picker's field help. On a Kubernetes-bound project the
+   * generic "Block prevents access" does not hold (the pod's service account
+   * can still get a federated token), so Block is left to the help-text slot
+   * (KUBERNETES_BLOCK_HINT).
+   */
+  private get gcpIdentityFieldHelp(): string {
+    if (this.projectIsKubernetesOnly) {
+      return (
+        'Controls the GCP identity of new agents. "Passthrough" allows host identity, "Assign" ' +
+        'binds a specific service account, and "Block" works as described above.'
+      );
+    }
+    return (
+      'Controls GCP metadata server access for new agents. "Block" prevents access, ' +
+      '"Passthrough" allows host identity, "Assign" binds a specific service account.'
+    );
+  }
+
+  /**
+   * Describes the hub default GCP identity this project inherits while its
+   * own setting is "inherit". For "assign" it names the service account (the
+   * mode alone doesn't say which identity agents get); for "passthrough" it
+   * notes that the hub default only takes effect on the embedded broker.
+   */
+  private renderInheritedGCPIdentityHint() {
+    if (this.configDefaultGCPIdentityMode) {
+      return nothing;
+    }
+    const mode = this.resolvedSettings['scion.io/default-gcp-identity-mode'];
+    if (!mode || mode.hubDefault !== 'present' || !mode.hubValue) {
+      return nothing;
+    }
+    if (mode.hubValue === 'assign') {
+      const saEntry = this.resolvedSettings['scion.io/default-gcp-identity-service-account-id'];
+      const saID =
+        saEntry?.hubDefault === 'present' && saEntry.hubValue != null
+          ? String(saEntry.hubValue)
+          : '';
+      // No service account configured: the consumption-side ladder falls
+      // through to "Block" the same way an unverified one does; the
+      // help-text slot says what Block means on Kubernetes.
+      if (!saID && this.projectIsKubernetesOnly) {
+        return html`<span class="field-help"
+          >Inherited from hub: the hub default is "Assign", but no service account is configured, so
+          it falls back to "Block".</span
+        >`;
+      }
+      const sa = this.gcpServiceAccounts.find((s) => s.id === saID);
+      const saLabel = sa ? sa.email : saID;
+      return html`<span class="field-help"
+        >Inherited from hub: agents are assigned
+        ${saLabel || 'the hub default service account'}.</span
+      >`;
+    }
+    if (mode.hubValue === 'passthrough') {
+      if (this.projectIsKubernetesOnly) {
+        // This rung only ever reaches passthrough for a local container
+        // runtime (docker/podman) on the hub's own embedded broker
+        // (hubDefaultPassthroughAllowed + hubDefaultRuntimeAllowed,
+        // pkg/hub/default_gcp_identity.go, ptone/scion#2186) — Kubernetes is
+        // never in that allowed set, embedded broker or not. When denied,
+        // Phase 1 (ptone/scion#2338) leaves the identity unset rather than
+        // writing an explicit "block", so the broker applies its own
+        // Kubernetes default (passthrough). For a confirmed Kubernetes-bound
+        // project that denial is unconditional, so this is informational,
+        // not a rejection warning.
+        return html`<span class="field-help"
+          >Inherited from hub: passthrough only reaches a local container runtime (docker/podman) on
+          the hub's own embedded broker — Kubernetes is never eligible, so here no identity is
+          explicitly set, and this project's Kubernetes runtime applies its own default
+          automatically.</span
+        >`;
+      }
+      return html`<span class="field-help"
+        >Inherited from hub: passthrough applies only to agents on the hub's embedded broker; agents
+        on other brokers get "Block".</span
+      >`;
+    }
+    return nothing;
+  }
+
+  private loadProfileDefaultRows(map: Record<string, string> | null | undefined): void {
+    this.profileDefaultsStored = { ...(map ?? {}) };
+    this.profileDefaultRows = rowsFromMap(map, () => ++this.profileDefaultRowKey);
+  }
+
+  /** Whether the per-profile rows differ from the stored map. */
+  private get profileDefaultsDirty(): boolean {
+    const rows = this.profileDefaultRows;
+    const complete = mapFromRows(rows);
+    // An incomplete row is an edit even though it maps to nothing yet.
+    if (Object.keys(complete).length !== rows.length) return true;
+    return !sameProfileMap(complete, this.profileDefaultsStored);
+  }
+
+  /** The profiles this project's linked brokers report. */
+  private get knownBrokerProfiles(): KnownProfile[] {
+    return knownProfiles(this.brokers);
+  }
+
+  private updateProfileDefaultRow(key: number, patch: Partial<ProfileDefaultRow>): void {
+    this.profileDefaultRows = this.profileDefaultRows.map((row) =>
+      row.key === key ? { ...row, ...patch } : row
+    );
+  }
+
+  private addProfileDefaultRow(): void {
+    const free = profileOptionsForRow(
+      { key: -1, profile: '', serviceAccountId: '' },
+      this.profileDefaultRows,
+      this.knownBrokerProfiles
+    );
+    this.profileDefaultRows = [
+      ...this.profileDefaultRows,
+      {
+        key: ++this.profileDefaultRowKey,
+        profile: free.length === 1 ? (free[0] ?? '') : '',
+        serviceAccountId: '',
+      },
+    ];
+  }
+
+  private removeProfileDefaultRow(key: number): void {
+    this.profileDefaultRows = this.profileDefaultRows.filter((row) => row.key !== key);
+  }
+
+  private serviceAccountLabel(id: string): string {
+    const sa = this.gcpServiceAccounts.find((s) => s.id === id);
+    return sa ? sa.displayName || sa.email : id;
+  }
+
+  /** The hub default mode and account, when the resolved endpoint reports them. */
+  private get hubGCPIdentityDefault(): { mode: string; serviceAccountId: string } {
+    const mode = this.resolvedSettings['scion.io/default-gcp-identity-mode'];
+    const sa = this.resolvedSettings['scion.io/default-gcp-identity-service-account-id'];
+    return {
+      mode: mode?.hubDefault === 'present' && mode.hubValue ? String(mode.hubValue) : '',
+      serviceAccountId: sa?.hubDefault === 'present' && sa.hubValue ? String(sa.hubValue) : '',
+    };
+  }
+
+  private describeEffectiveIdentity(e: EffectiveIdentity, kubernetes: boolean): string {
+    const what =
+      e.mode === 'assign'
+        ? `Assign ${this.serviceAccountLabel(e.serviceAccountId)}`
+        : e.mode === 'passthrough'
+          ? 'Passthrough'
+          : e.mode === 'block'
+            ? 'Block'
+            : kubernetes
+              ? 'No identity set (the Kubernetes runtime applies its default)'
+              : 'No identity set (the runtime applies its default)';
+    switch (e.source) {
+      case 'profile':
+        return `${what} (this profile's default)`;
+      case 'project':
+        return `${what} (project default)`;
+      case 'hub':
+        return `${what} (hub default)`;
+      default:
+        return what;
+    }
+  }
+
+  private renderProfileDefaultMessages(
+    messages: readonly string[],
+    kind: 'error' | 'warning'
+  ): TemplateResult[] {
+    return messages.map((m) =>
+      kind === 'error'
+        ? html`<span class="field-help field-help-error profile-default-error" role="alert"
+            >${m}</span
+          >`
+        : html`<sl-alert class="profile-default-warning" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${m}
+          </sl-alert>`
+    );
+  }
+
+  /**
+   * The per-profile default service account editor and the identity each
+   * known profile resolves to (ptone/scion#3947).
+   */
+  private renderProfileDefaults(canEdit: boolean): TemplateResult {
+    const rows = this.profileDefaultRows;
+    const known = this.knownBrokerProfiles;
+    const knownNames = new Set(known.map((p) => p.name));
+    const errors = this.profileDefaultErrors;
+    const warnings = this.profileDefaultWarnings;
+    const missing = profilesMissingDefault(rows, known);
+    const dirty = this.profileDefaultsDirty;
+    const canAdd =
+      canEdit &&
+      profileOptionsForRow({ key: -1, profile: '', serviceAccountId: '' }, rows, known).length > 0;
+    const project = {
+      mode: this.configDefaultGCPIdentityMode,
+      serviceAccountId:
+        this.configDefaultGCPIdentityMode === 'assign' ? this.configDefaultGCPIdentitySAID : '',
+    };
+    const hub = this.hubGCPIdentityDefault;
+    const currentMap = mapFromRows(rows);
+    // The effective view lists every reported profile, plus any profile a
+    // row names that no broker reports.
+    const effectiveProfiles: KnownProfile[] = [
+      ...known,
+      ...rows
+        .filter((r) => r.profile && !knownNames.has(r.profile))
+        .map((r) => ({ name: r.profile, types: [], kubernetes: false })),
+    ];
+
+    return html`
+      <div class="config-field profile-defaults" data-field=${PROFILE_DEFAULTS_FIELD}>
+        <label id="profile-defaults-label">Per-profile default service accounts</label>
+        <span class="field-help"
+          >A default for one runtime profile wins over the project default above for agents that run
+          under that profile and choose no identity. Only verified service accounts are
+          offered.</span
+        >
+        ${rows.length > 0
+          ? html`
+              <div
+                class="profile-default-rows"
+                role="group"
+                aria-labelledby="profile-defaults-label"
+              >
+                ${rows.map((row) => this.renderProfileDefaultRow(row, canEdit, dirty))}
+              </div>
+            `
+          : html`<span class="field-help profile-defaults-empty"
+              >No per-profile defaults. Every profile uses the project default.</span
+            >`}
+        ${this.renderProfileDefaultMessages(errors.general, 'error')}
+        ${this.renderProfileDefaultMessages(warnings.general, 'warning')}
+        ${missing.length > 0
+          ? html`<sl-alert class="profile-default-sibling-warning" variant="warning" open>
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${missing.length === 1
+                ? html`Kubernetes profile "${missing[0]}" has no per-profile default while another
+                  profile has one, so its agents use the project default. That identity may not be
+                  mapped on that profile's cluster.`
+                : html`Kubernetes profiles ${missing.map((p) => `"${p}"`).join(', ')} have no
+                  per-profile default while another profile has one, so their agents use the project
+                  default. That identity may not be mapped on those clusters.`}
+            </sl-alert>`
+          : nothing}
+        <div>
+          <sl-button
+            class="profile-default-add"
+            size="small"
+            ?disabled=${!canAdd}
+            @click=${() => this.addProfileDefaultRow()}
+          >
+            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+            Add profile default
+          </sl-button>
+        </div>
+        ${effectiveProfiles.length > 0
+          ? html`
+              <div class="profile-effective">
+                <span class="profile-effective-title">Effective default identity per profile</span>
+                <table class="profile-effective-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Profile</th>
+                      <th scope="col">New agents get</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${effectiveProfiles.map(
+                      (p) => html`
+                        <tr data-profile=${p.name}>
+                          <td>${p.name}</td>
+                          <td>
+                            ${this.describeEffectiveIdentity(
+                              effectiveIdentityForProfile(p.name, currentMap, project, hub),
+                              p.kubernetes
+                            )}
+                          </td>
+                        </tr>
+                      `
+                    )}
+                  </tbody>
+                </table>
+                <span class="field-help"
+                  >For agents that choose no identity. Unsaved edits are included.</span
+                >
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderProfileDefaultRow(
+    row: ProfileDefaultRow,
+    canEdit: boolean,
+    dirty: boolean
+  ): TemplateResult {
+    const rows = this.profileDefaultRows;
+    const known = this.knownBrokerProfiles;
+    const problem = rowProblem(row, rows);
+    const rowErrors = row.profile ? (this.profileDefaultErrors.byProfile[row.profile] ?? []) : [];
+    const rowWarnings = row.profile
+      ? (this.profileDefaultWarnings.byProfile[row.profile] ?? [])
+      : [];
+    const options = profileOptionsForRow(row, rows, known);
+    const saOptions = serviceAccountOptionsForProfile(this.gcpServiceAccounts, row.profile);
+    const savedSAMissing =
+      row.serviceAccountId !== '' && !saOptions.some((sa) => sa.id === row.serviceAccountId);
+    const reported = known.some((k) => k.name === row.profile);
+    return html`
+      <div class="profile-default-row" data-profile=${row.profile}>
+        <div class="profile-default-inputs">
+          <sl-select
+            class="profile-default-profile"
+            label="Profile"
+            placeholder="Select a profile"
+            value=${row.profile}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateProfileDefaultRow(row.key, {
+                profile: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${options.map((name) => {
+              const p = known.find((k) => k.name === name);
+              const note = p
+                ? p.types.length > 0
+                  ? html` <small>(${p.types.join(', ')})</small>`
+                  : nothing
+                : html` <small>(not reported by any broker)</small>`;
+              return html`<sl-option value=${name}>${name}${note}</sl-option>`;
+            })}
+          </sl-select>
+          <sl-select
+            class="profile-default-sa"
+            label="Service account"
+            placeholder="Select a verified service account"
+            value=${row.serviceAccountId}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateProfileDefaultRow(row.key, {
+                serviceAccountId: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${saOptions.map(
+              (sa) => html`
+                <sl-option value=${sa.id}>
+                  ${sa.displayName || sa.email}
+                  <small>(${sa.email})</small>${sa.scope === 'hub' ? ' (Hub)' : ''}
+                </sl-option>
+              `
+            )}
+            ${savedSAMissing
+              ? html`<sl-option value=${row.serviceAccountId}
+                  >${row.serviceAccountId}
+                  <small>(not a verified account in this project)</small></sl-option
+                >`
+              : nothing}
+          </sl-select>
+          <sl-icon-button
+            class="profile-default-remove"
+            name="trash"
+            label=${row.profile
+              ? `Remove the default for profile ${row.profile}`
+              : 'Remove this row'}
+            ?disabled=${!canEdit}
+            @click=${() => this.removeProfileDefaultRow(row.key)}
+          ></sl-icon-button>
+        </div>
+        ${row.profile && !reported && known.length > 0
+          ? html`<span class="field-help"
+              >No broker linked to this project reports profile "${row.profile}".</span
+            >`
+          : nothing}
+        ${problem && dirty
+          ? html`<span class="field-help field-help-error profile-default-problem"
+              >${problem}</span
+            >`
+          : nothing}
+        ${this.renderProfileDefaultMessages(rowErrors, 'error')}
+        ${this.renderProfileDefaultMessages(rowWarnings, 'warning')}
+      </div>
     `;
   }
 
@@ -1380,7 +2142,9 @@ export class ScionPageProjectSettings extends LitElement {
   private async loadGCPServiceAccounts(): Promise<void> {
     try {
       const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+        // No assignStatus: the project default applies to every runtime
+        // profile, so there is no single target to report a mapping for.
+        projectServiceAccountListUrl(this.projectId, null)
       );
       if (response.ok) {
         const data = (await response.json()) as { items?: GCPServiceAccount[] };
@@ -1423,10 +2187,35 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
+  /** A failed save's message, announced to screen readers (role="alert"). */
+  private renderSettingsError(): TemplateResult | typeof nothing {
+    if (!this.settingsError) return nothing;
+    return html`<span class="config-status error" role="alert">${this.settingsError}</span>`;
+  }
+
   private async handleSaveConfig(): Promise<void> {
-    this.settingsSaving = true;
     this.settingsError = null;
     this.settingsSuccess = null;
+    this.profileDefaultErrors = { byProfile: {}, general: [] };
+    this.profileDefaultWarnings = { byProfile: {}, general: [] };
+
+    this.countLimitWarnings = [];
+    if (Object.keys(this.countLimitErrors).length > 0) {
+      this.settingsError =
+        'Fix the default count limits: each must be a whole number greater than 0, Unlimited, or empty.';
+      return;
+    }
+
+    const profileDefaultsDirty = this.profileDefaultsDirty;
+    if (
+      profileDefaultsDirty &&
+      this.profileDefaultRows.some((row) => rowProblem(row, this.profileDefaultRows))
+    ) {
+      this.settingsError = 'Complete or remove the incomplete per-profile default rows.';
+      return;
+    }
+
+    this.settingsSaving = true;
 
     try {
       // Build default resources if any field is set
@@ -1461,26 +2250,42 @@ export class ScionPageProjectSettings extends LitElement {
           ? this.defaultCustomModelId
           : this.defaultModelSelection;
 
+      // The PUT keeps any field the body leaves out, so every field this
+      // page manages is sent: "" / {} clears it, and null resets a
+      // tri-state field (telemetry, auto-expose, thinking level) to inherit.
+      // The count limits are sent only when changed: null for inherit, 0
+      // for Unlimited, n for a limit (ptone/scion#3925).
+      // activeProfile, which this page does not manage, is left out so a
+      // save keeps it. The per-profile service account map is replaced as a
+      // whole when present, so it is sent only when its rows changed ({}
+      // clears it); otherwise it is left out and kept as stored.
       const body: ProjectSettings = {
-        defaultTemplate: this.configDefaultTemplate || undefined,
-        defaultHarnessConfig: this.configDefaultHarnessConfig || undefined,
-        defaultHarnessAuth: this.configDefaultHarnessAuth || undefined,
-        defaultModel: defaultModel || undefined,
+        defaultTemplate: this.configDefaultTemplate || '',
+        defaultHarnessConfig: this.configDefaultHarnessConfig || '',
+        defaultHarnessAuth: this.configDefaultHarnessAuth || '',
+        defaultModel: defaultModel || '',
         telemetryEnabled: this.configTelemetryEnabled,
         autoExposePortsEnabled: this.configAutoExposePortsEnabled,
-        defaultMaxTurns: this.configDefaultMaxTurns || undefined,
-        defaultMaxModelCalls: this.configDefaultMaxModelCalls || undefined,
-        defaultMaxDuration: this.configDefaultMaxDuration || undefined,
-        defaultResources,
+        defaultMaxDuration: this.configDefaultMaxDuration || '',
+        defaultResources: defaultResources ?? {},
         defaultThinkingLevel: this.defaultThinkingLevel,
-        defaultGCPIdentityMode: this.configDefaultGCPIdentityMode || undefined,
+        defaultGCPIdentityMode: this.configDefaultGCPIdentityMode || '',
         defaultGCPIdentityServiceAccountID:
           this.configDefaultGCPIdentityMode === 'assign'
-            ? this.configDefaultGCPIdentitySAID || undefined
-            : undefined,
-        maxAgentRole: this.configMaxAgentRole || undefined,
-        defaultAgentRole: this.configDefaultAgentRole || undefined,
+            ? this.configDefaultGCPIdentitySAID || ''
+            : '',
+        maxAgentRole: this.configMaxAgentRole || '',
+        defaultAgentRole: this.configDefaultAgentRole || '',
       };
+      if (this.configDefaultMaxTurns !== this.loadedDefaultMaxTurns) {
+        body.defaultMaxTurns = this.configDefaultMaxTurns;
+      }
+      if (this.configDefaultMaxModelCalls !== this.loadedDefaultMaxModelCalls) {
+        body.defaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      }
+      if (profileDefaultsDirty) {
+        body.defaultGCPIdentityServiceAccountIDByProfile = mapFromRows(this.profileDefaultRows);
+      }
 
       const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {
         method: 'PUT',
@@ -1489,11 +2294,40 @@ export class ScionPageProjectSettings extends LitElement {
       });
 
       if (!response.ok) {
+        if (profileDefaultsDirty) {
+          try {
+            this.profileDefaultErrors = profileErrorsFromBody(await response.clone().json());
+          } catch {
+            // Not JSON: the page-level message below still reports it.
+          }
+        }
         throw new Error(await extractApiError(response, `Failed to save: HTTP ${response.status}`));
       }
 
-      this.settings = (await response.json()) as ProjectSettings;
-      this.settingsSuccess = 'Configuration saved.';
+      const saved = (await response.json()) as ProjectSettings & { warnings?: unknown };
+      const { warnings, ...savedSettings } = saved;
+      this.settings = savedSettings;
+      this.loadProfileDefaultRows(savedSettings.defaultGCPIdentityServiceAccountIDByProfile);
+      // The saved values are the new baseline, so the next save compares
+      // against them and sends only what changes after this one.
+      this.configDefaultMaxTurns = countLimitOrNull(savedSettings.defaultMaxTurns);
+      this.configDefaultMaxModelCalls = countLimitOrNull(savedSettings.defaultMaxModelCalls);
+      this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
+      this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      const allWarnings: unknown[] = Array.isArray(warnings) ? warnings : [];
+      this.countLimitWarnings = allWarnings.filter(isCountLimitWarningValue);
+      const otherWarnings = allWarnings.filter(
+        (w): w is string => typeof w === 'string' && !isCountLimitWarning(w)
+      );
+      this.profileDefaultWarnings = splitProfileWarnings(otherWarnings);
+      const warningCount =
+        Object.values(this.profileDefaultWarnings.byProfile).flat().length +
+        this.profileDefaultWarnings.general.length +
+        this.countLimitWarnings.length;
+      this.settingsSuccess =
+        warningCount > 0
+          ? 'Configuration saved, with warnings (see above).'
+          : 'Configuration saved.';
     } catch (err) {
       console.error('Failed to save project settings:', err);
       this.settingsError = err instanceof Error ? err.message : 'Failed to save settings';
@@ -1508,7 +2342,7 @@ export class ScionPageProjectSettings extends LitElement {
     if (
       !event?.altKey &&
       !(await showConfirm(
-        `Are you sure you want to delete "${projectName}"?\n\nAll agents in this project will be stopped and deleted.\n\nThis action cannot be undone.`
+        `Are you sure you want to delete "${projectName}"?\n\nThe Hub refuses to delete a project that still has agents; delete its agents first.\n\nThis action cannot be undone.`
       ))
     ) {
       return;
@@ -1528,8 +2362,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
 
       // Navigate back to projects list
-      window.history.pushState({}, '', '/projects');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/projects');
     } catch (err) {
       console.error('Failed to delete project:', err);
       showToast(err instanceof Error ? err.message : 'Failed to delete project');
@@ -1558,17 +2391,8 @@ export class ScionPageProjectSettings extends LitElement {
         <h1>${this.project.name} Settings</h1>
       </div>
 
-      ${this.renderConfigSection()}
-      <scion-project-members-editor
-        projectId=${this.project.id}
-        ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
-        compact
-        sectionTitle="Members"
-        sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
-      ></scion-project-members-editor>
-      ${this.renderResourcesSection()}
-      ${this.renderMessagingPolicySection()}
-      ${this.renderGitHubAppSection()}
+      ${this.renderConfigSection()} ${this.renderMembersSection()} ${this.renderResourcesSection()}
+      ${this.renderMessagingPolicySection()} ${this.renderGitHubAppSection()}
       <scion-boundary-summary-notice
         label="Access constraints affecting this project"
         .groups=${this.boundaryGroups}
@@ -1587,33 +2411,14 @@ export class ScionPageProjectSettings extends LitElement {
           `
         : ''}
       ${this.renderSchedulesSection()}
-      ${can(this.project._capabilities, 'delete')
+      ${can(this.project._capabilities, 'delete') ||
+      leaveVisibility(this.project._capabilities).kind !== 'hidden'
         ? html`
             <div class="section danger-section">
               <h2>Danger Zone</h2>
               <p>Irreversible actions that affect this project and its resources.</p>
-
-              <div class="delete-area">
-                <div class="delete-info">
-                  <h3>Delete this project</h3>
-                  <p>
-                    Permanently remove this project, its configuration, and all agents. All running
-                    agents will be stopped and deleted. This action cannot be undone.
-                  </p>
-                </div>
-                <div class="delete-actions">
-                  <sl-button
-                    variant="danger"
-                    size="small"
-                    ?loading=${this.deleteLoading}
-                    ?disabled=${this.deleteLoading}
-                    @click=${(e: MouseEvent) => this.handleDeleteProject(e)}
-                  >
-                    <sl-icon slot="prefix" name="trash"></sl-icon>
-                    Delete Project
-                  </sl-button>
-                </div>
-              </div>
+              ${this.renderLeaveRow()}
+              ${can(this.project._capabilities, 'delete') ? this.renderDeleteRow() : nothing}
             </div>
           `
         : html`
@@ -1750,7 +2555,7 @@ export class ScionPageProjectSettings extends LitElement {
                   ? html`
                       <div class="github-status-item">
                         <span class="field-help">Last Token Mint</span>
-                        <span>${new Date(status.last_token_mint).toLocaleString()}</span>
+                        <span>${formatInstantWithZone(status.last_token_mint)}</span>
                       </div>
                     `
                   : ''}
@@ -2017,9 +2822,17 @@ export class ScionPageProjectSettings extends LitElement {
                     (t) => html` <sl-option value=${t.name}>${t.displayName || t.name}</sl-option> `
                   )}
                 </sl-select>
-                <span class="field-help"
-                  >Template used when creating agents without specifying one.</span
-                >
+                ${this.dropdownTemplatesLoadFailed
+                  ? html`<span class="field-help field-help-error"
+                      >Could not load
+                      templates.${this.configDefaultTemplate
+                        ? ` The saved default (${this.configDefaultTemplate}) is kept.`
+                        : ''}
+                      Reload the page to try again.</span
+                    >`
+                  : html`<span class="field-help"
+                      >Template used when creating agents without specifying one.</span
+                    >`}
               </div>
 
               <div
@@ -2128,7 +2941,7 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                 <div style="display:flex;align-items:center;gap:0.75rem">
                   <sl-range
-                    min="0"
+                    min="1"
                     max="100"
                     step="1"
                     .value=${this.defaultThinkingLevel ?? 50}
@@ -2332,8 +3145,15 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              <div class="config-field">
-                <label>Default Service Account</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-gcp-identity-mode')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Service Account
+                  ${this.renderHubIndicator('scion.io/default-gcp-identity-mode')}</label
+                >
                 <sl-select
                   value=${this.configDefaultGCPIdentityMode || 'inherit'}
                   ?disabled=${!canEdit}
@@ -2345,16 +3165,21 @@ export class ScionPageProjectSettings extends LitElement {
                     }
                   }}
                 >
-                  <sl-option value="inherit">None (default to block)</sl-option>
+                  <sl-option value="inherit"
+                    >${this.hubSelectLabel(
+                      'scion.io/default-gcp-identity-mode',
+                      this.projectIsKubernetesOnly
+                        ? 'None (default to passthrough)'
+                        : 'None (default to block)'
+                    )}</sl-option
+                  >
                   <sl-option value="block">Block</sl-option>
                   <sl-option value="passthrough">Passthrough</sl-option>
                   <sl-option value="assign">Assign Service Account</sl-option>
+                  ${this.renderKubernetesBlockHint()}
                 </sl-select>
-                <span class="field-help"
-                  >Controls GCP metadata server access for new agents. "Block" prevents access,
-                  "Passthrough" allows host identity, "Assign" binds a specific service
-                  account.</span
-                >
+                <span class="field-help">${this.gcpIdentityFieldHelp}</span>
+                ${this.renderInheritedGCPIdentityHint()}
               </div>
 
               ${this.configDefaultGCPIdentityMode === 'assign'
@@ -2377,17 +3202,17 @@ export class ScionPageProjectSettings extends LitElement {
                                     const sa = this.gcpServiceAccounts.find(
                                       (s) => s.id === this.configDefaultGCPIdentitySAID
                                     );
-                                    if (sa && navigator.clipboard) {
-                                      void navigator.clipboard
-                                        .writeText(sa.email)
-                                        .then(() => {
-                                          this.copiedDefaultSAEmail = true;
-                                          setTimeout(() => {
-                                            this.copiedDefaultSAEmail = false;
-                                          }, 1500);
-                                        })
-                                        .catch(() => {});
-                                    }
+                                    if (!sa) return;
+                                    void copyToClipboard(sa.email).then((ok) => {
+                                      if (!ok) {
+                                        showCopyFailedToast();
+                                        return;
+                                      }
+                                      this.copiedDefaultSAEmail = true;
+                                      setTimeout(() => {
+                                        this.copiedDefaultSAEmail = false;
+                                      }, 1500);
+                                    });
                                   }}
                                 ></sl-icon-button>
                               </sl-tooltip>
@@ -2411,8 +3236,9 @@ export class ScionPageProjectSettings extends LitElement {
                                 (sa) => html`
                                   <sl-option value=${sa.id}>
                                     ${sa.displayName || sa.email}
-                                    <small>(${sa.email})</small
-                                    >${sa.scope === 'hub' ? ' (Hub)' : ''}
+                                    <small>(${sa.email})</small>${sa.scope === 'hub'
+                                      ? ' (Hub)'
+                                      : ''}
                                   </sl-option>
                                 `
                               )
@@ -2423,11 +3249,14 @@ export class ScionPageProjectSettings extends LitElement {
                       </div>
                       <span class="field-help"
                         >The GCP service account to assign to new agents by default. Only verified
-                        accounts are shown.</span
+                        accounts are shown. This default applies to any runtime profile that has no
+                        default of its own, so no mapping state is shown here; the agent create and
+                        configure pickers show it for the agent's Kubernetes profile.</span
                       >
                     </div>
                   `
                 : ''}
+              ${this.renderProfileDefaults(canEdit)}
             </div>
           </sl-tab-panel>
 
@@ -2437,50 +3266,31 @@ export class ScionPageProjectSettings extends LitElement {
                 >Applied to new agents unless overridden by template or agent config.</span
               >
 
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-max-turns')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Max Turns ${this.renderHubIndicator('scion.io/default-max-turns')}</label
-                >
-                <sl-input
-                  type="number"
-                  placeholder=${this.hubHint('scion.io/default-max-turns') || 'No limit'}
-                  .value=${this.configDefaultMaxTurns ? String(this.configDefaultMaxTurns) : ''}
-                  ?disabled=${!canEdit}
-                  @sl-input=${(e: Event) => {
-                    this.configDefaultMaxTurns =
-                      parseInt((e.target as HTMLInputElement).value) || 0;
-                  }}
-                ></sl-input>
-                <span class="field-help">Maximum conversation turns per agent.</span>
-              </div>
-
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-max-model-calls')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Max Model Calls
-                  ${this.renderHubIndicator('scion.io/default-max-model-calls')}</label
-                >
-                <sl-input
-                  type="number"
-                  placeholder=${this.hubHint('scion.io/default-max-model-calls') || 'No limit'}
-                  .value=${this.configDefaultMaxModelCalls
-                    ? String(this.configDefaultMaxModelCalls)
-                    : ''}
-                  ?disabled=${!canEdit}
-                  @sl-input=${(e: Event) => {
-                    this.configDefaultMaxModelCalls =
-                      parseInt((e.target as HTMLInputElement).value) || 0;
-                  }}
-                ></sl-input>
-                <span class="field-help">Maximum LLM API calls per agent.</span>
-              </div>
+              ${this.renderCountLimitField(
+                'Default Max Turns',
+                'scion.io/default-max-turns',
+                this.configDefaultMaxTurns,
+                (v) => (this.configDefaultMaxTurns = v),
+                'Maximum conversation turns per agent.',
+                canEdit
+              )}
+              ${this.renderCountLimitField(
+                'Default Max Model Calls',
+                'scion.io/default-max-model-calls',
+                this.configDefaultMaxModelCalls,
+                (v) => (this.configDefaultMaxModelCalls = v),
+                'Maximum LLM API calls per agent.',
+                canEdit
+              )}
+              ${this.countLimitWarnings.map(
+                (w) =>
+                  html`<div
+                    class="field-help count-limit-warning"
+                    style="color: var(--sl-color-warning-700);"
+                  >
+                    ${w}
+                  </div>`
+              )}
 
               <div
                 class="config-field ${this.isHubDefault('scion.io/default-max-duration')
@@ -2619,9 +3429,7 @@ export class ScionPageProjectSettings extends LitElement {
         ${canEdit && this.activeConfigTab !== 'brokers'
           ? html`
               <div class="config-actions">
-                ${this.settingsError
-                  ? html`<span class="config-status error">${this.settingsError}</span>`
-                  : ''}
+                ${this.renderSettingsError()}
                 ${this.settingsSuccess
                   ? html`<span class="config-status success">${this.settingsSuccess}</span>`
                   : ''}
@@ -2872,9 +3680,10 @@ export class ScionPageProjectSettings extends LitElement {
       const data = (await response.json()) as { brokers: RuntimeBrokerWithProvider[] };
       this.brokers = data.brokers || [];
 
-      // Start relative time refresh if we have brokers
-      if (this.brokers.length > 0 && !this.brokerRelativeTimeInterval) {
-        this.brokerRelativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+      // Start relative time refresh if we have brokers. The fetch can resolve
+      // after the page was disconnected; do not start a timer nobody stops.
+      if (this.isConnected && this.brokers.length > 0 && !this.stopBrokerRelativeTimeTick) {
+        this.stopBrokerRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
       }
     } catch (err) {
       console.error('Failed to load brokers:', err);
@@ -2925,29 +3734,8 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '\u2014';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (Number.isNaN(new Date(dateString).getTime())) return '\u2014';
+    return formatRelative(dateString);
   }
 
   private renderBrokersContent() {
@@ -3061,7 +3849,115 @@ export class ScionPageProjectSettings extends LitElement {
     `;
   }
 
+  /**
+   * The Danger Zone's Leave this project row (ptone/scion#7494), above
+   * Delete, offered as the project's capabilities say.
+   */
+  private renderLeaveRow(): TemplateResult | typeof nothing {
+    const leave = leaveVisibility(this.project?._capabilities);
+    if (leave.kind === 'hidden') return nothing;
+    return html`
+      <div class="delete-area" data-leave-row>
+        <div class="delete-info">
+          <h3>Leave this project</h3>
+          <p>
+            Remove your own roles in this project. You'll see what leaving changes before you
+            confirm.
+          </p>
+          ${leave.kind === 'blocked'
+            ? html`<p class="leave-blocked-reason" data-leave-blocked>${leave.reason}</p>`
+            : nothing}
+        </div>
+        <div class="delete-actions">
+          <sl-button
+            variant="danger"
+            outline
+            size="small"
+            data-leave-project
+            ?disabled=${leave.kind === 'blocked'}
+            @click=${() => this.openLeaveDialog()}
+          >
+            <sl-icon slot="prefix" name="box-arrow-right"></sl-icon>
+            Leave Project
+          </sl-button>
+        </div>
+      </div>
+      <scion-project-leave-dialog
+        projectId=${this.projectId}
+        projectName=${this.project?.name ?? ''}
+        ?transferAvailable=${can(this.project?._capabilities, 'manage')}
+        @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+        @scion-leave-transfer-ownership=${() => void this.openTransferFromLeave()}
+      ></scion-project-leave-dialog>
+    `;
+  }
+
+  private renderDeleteRow(): TemplateResult {
+    return html`
+      <div class="delete-area">
+        <div class="delete-info">
+          <h3>Delete this project</h3>
+          <p>
+            Permanently remove this project and its configuration. A project that still has agents
+            cannot be deleted; delete its agents first. This action cannot be undone.
+          </p>
+        </div>
+        <div class="delete-actions">
+          <sl-button
+            variant="danger"
+            size="small"
+            ?loading=${this.deleteLoading}
+            ?disabled=${this.deleteLoading}
+            @click=${(e: MouseEvent) => this.handleDeleteProject(e)}
+          >
+            <sl-icon slot="prefix" name="trash"></sl-icon>
+            Delete Project
+          </sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private openLeaveDialog(): void {
+    if (leaveVisibility(this.project?._capabilities).kind !== 'enabled') return;
+    const dialog = this.shadowRoot?.querySelector<ScionProjectLeaveDialog>(
+      'scion-project-leave-dialog'
+    );
+    void dialog?.show();
+  }
+
+  /** After a leave that kept access, reload: the capabilities may have changed. */
+  private onProjectLeft(e: CustomEvent<ProjectLeftDetail>): void {
+    if (e.detail.result.remainingAccess !== 'none') void this.loadProject(true);
+  }
+
+  /** The leave dialog's Transfer ownership link: the members editor's transfer dialog. */
+  private async openTransferFromLeave(): Promise<void> {
+    this.activeMembersTab = 'members';
+    // Let the members tab render and become visible before scrolling to it.
+    await this.updateComplete;
+    const editor = this.shadowRoot?.querySelector<ScionProjectMembersEditor>(
+      'scion-project-members-editor'
+    );
+    editor?.scrollIntoView({ block: 'start' });
+    editor?.openTransferOwnership();
+  }
+
   private renderError() {
+    if (this.noAccess) {
+      return html`
+        <a href="/projects" class="back-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          Back to Projects
+        </a>
+
+        <div class="error-state" data-project-no-access>
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <h2>${PROJECT_NO_ACCESS_TITLE}</h2>
+          <p>${PROJECT_NO_ACCESS_MESSAGE}</p>
+        </div>
+      `;
+    }
     return html`
       <a href="/projects/${this.projectId}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>

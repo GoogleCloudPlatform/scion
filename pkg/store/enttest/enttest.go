@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 )
 
 // NewClient returns a fresh, migrated Ent client for the active backend with
@@ -44,6 +45,24 @@ import (
 func NewClient(t *testing.T) *ent.Client {
 	t.Helper()
 	return newClient(t)
+}
+
+// SQLiteOnlyMarker prefixes the skip message SkipOnPostgres writes. The
+// Postgres CI job (make test-launch-store-postgres) fails on any skipped test
+// unless the test's own skip message carries this marker with its name, so
+// a test that is SQLite-only by design is allowed without a name list in the
+// Makefile, and any other skip still fails the job.
+const SQLiteOnlyMarker = "enttest-sqlite-only:"
+
+// SkipOnPostgres skips t when the Postgres backend is active. Use it, and
+// only it, for tests that are SQLite-only by design (raw SQLite SQL such as
+// typeof()/quote(), or assertions on SQLite's TEXT timestamp storage). It is
+// a no-op on SQLite. The skip message is "<SQLiteOnlyMarker> <t.Name()> <reason>".
+func SkipOnPostgres(t testing.TB, reason string) {
+	t.Helper()
+	if Active() {
+		t.Skipf("%s %s %s", SQLiteOnlyMarker, t.Name(), reason)
+	}
 }
 
 // MainSetup prepares package-level backend resources. Call from TestMain before
@@ -61,7 +80,9 @@ func MainTeardown() { teardown() }
 // production SQLite behavior.
 func newSQLiteClient(t *testing.T) *ent.Client {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
+	// Diag runs every store test through the transaction diagnostics
+	// wrapper, as in production (output discarded).
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1, Diag: txdiag.QuietConfig()})
 	if err != nil {
 		t.Fatalf("open sqlite ent client: %v", err)
 	}

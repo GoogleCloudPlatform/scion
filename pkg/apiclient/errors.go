@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 // APIError represents a structured error response from the API.
@@ -29,15 +31,50 @@ type APIError struct {
 	Message    string                 // Human-readable message
 	Details    map[string]interface{} // Additional context
 	RequestID  string                 // Request tracking ID
+	// RetryAfterSeconds is the response's Retry-After header, in seconds,
+	// when present and parseable as a non-negative integer (the only form
+	// the Hub's rate-limited/keys-unavailable responses send — see contract
+	// C§2.4a). 0 means the header was absent or not a plain integer (e.g.
+	// an HTTP-date form, which this field does not parse); callers must not
+	// treat 0 as "retry immediately."
+	RetryAfterSeconds int
 }
 
 // Error implements the error interface.
 func (e *APIError) Error() string {
+	msg := e.Message + e.messageDeniedSuffix()
 	if e.RequestID != "" {
 		return fmt.Sprintf("%s: %s (status: %d, request: %s)",
-			e.Code, e.Message, e.StatusCode, e.RequestID)
+			e.Code, msg, e.StatusCode, e.RequestID)
 	}
-	return fmt.Sprintf("%s: %s (status: %d)", e.Code, e.Message, e.StatusCode)
+	return fmt.Sprintf("%s: %s (status: %d)", e.Code, msg, e.StatusCode)
+}
+
+// messageDeniedSuffix returns the server's denial reason and the two
+// message modes for a message_denied error, e.g.
+// " [reason: mode_branch_no_edge, sender mode: branch, recipient mode:
+// branch]". The reason is the Hub's API-safe denial code. The Hub sends these as details on every message_denied
+// response; without them the CLI could only say "Message delivery denied"
+// (ptone/scion#4411). It returns "" for any other error, or when the
+// details carry none of the fields.
+func (e *APIError) messageDeniedSuffix() string {
+	if e.Code != ErrCodeMessageDenied || len(e.Details) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, f := range []struct{ key, label string }{
+		{"reason", "reason"},
+		{"senderMode", "sender mode"},
+		{"recipientMode", "recipient mode"},
+	} {
+		if v, ok := e.Details[f.key].(string); ok && v != "" {
+			parts = append(parts, f.label+": "+v)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(parts, ", ") + "]"
 }
 
 // IsNotFound returns true if the error is a 404 Not Found.
@@ -89,6 +126,29 @@ const (
 	ErrCodeInternalError   = "internal_error"
 	ErrCodeRuntimeError    = "runtime_error"
 	ErrCodeUnavailable     = "unavailable"
+
+	// ErrCodeAgentNotFound is the hub's code for a 404 caused specifically by
+	// an unknown agent (pkg/hub/errors.go ErrCodeAgentNotFound), as opposed
+	// to a generic not_found (e.g. "Project not found").
+	ErrCodeAgentNotFound = "agent_not_found"
+
+	// ErrCodeDeleteInProgress is the hub's 409 code for a request that lost
+	// to a delete of the same agent (pkg/hub/errors.go
+	// ErrCodeDeleteInProgress). The answer may carry details.warnings, which
+	// reports the outcome of the hub's removal of a container the broker had
+	// already started.
+	ErrCodeDeleteInProgress = "delete_in_progress"
+	// ErrCodeStartOutcomeUnknown is the hub's 504 code for a create or env
+	// submit whose dispatch to the runtime broker ended without an answer.
+	// The agent was kept and may still be starting (pkg/hub/apierr).
+	ErrCodeStartOutcomeUnknown = "start_outcome_unknown"
+	// ErrCodeOutcomeUnknown is the hub's 502 code for an exec whose request
+	// reached the runtime broker without a result coming back: it may have
+	// executed. The hub does not retry it, and neither should the client.
+	ErrCodeOutcomeUnknown = "outcome_unknown"
+	// ErrCodeMessageDenied is returned when message-send authorization
+	// denies a delivery. Details carry reason, senderMode and recipientMode.
+	ErrCodeMessageDenied = "message_denied"
 )
 
 // errorResponse matches the API error response format.
@@ -101,8 +161,19 @@ type errorResponse struct {
 	} `json:"error"`
 }
 
+// maxErrorResponseBodyBytes bounds how much of an error response body
+// ParseErrorResponse reads to avoid unbounded memory allocation.
+const maxErrorResponseBodyBytes = 64 * 1024
+
 // ParseErrorResponse parses an API error response body.
 func ParseErrorResponse(resp *http.Response) *APIError {
+	if resp == nil {
+		return &APIError{
+			Code:    ErrCodeInternalError,
+			Message: "nil response",
+		}
+	}
+
 	apiErr := &APIError{
 		StatusCode: resp.StatusCode,
 		Code:       statusToCode(resp.StatusCode),
@@ -110,10 +181,25 @@ func ParseErrorResponse(resp *http.Response) *APIError {
 	}
 
 	// Try to get the request ID from the header
-	apiErr.RequestID = resp.Header.Get("X-Request-ID")
+	if resp.Header != nil {
+		apiErr.RequestID = resp.Header.Get("X-Request-ID")
+
+		// Retry-After (RFC 7231 §7.1.3): the Hub only ever sends the
+		// delta-seconds form on 429/503 keys responses, never the HTTP-date
+		// form, so a plain non-negative integer is the only shape parsed here.
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
+				apiErr.RetryAfterSeconds = secs
+			}
+		}
+	}
+
+	if resp.Body == nil {
+		return apiErr
+	}
 
 	// Try to parse the response body
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBodyBytes))
 	if err != nil {
 		return apiErr
 	}

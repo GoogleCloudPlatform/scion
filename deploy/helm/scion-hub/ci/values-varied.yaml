@@ -66,12 +66,13 @@ hub:
     - name: HUB_FEATURE_FLAGS
       value: alpha-scheduling
 
-  # The args append path. --log-level is on none of the four reserved lists and
-  # is not a setting the chart delivers through another channel, which is what
-  # makes it a legitimate entry rather than a test of the guard; the guard's own
-  # coverage is in hack/verify.sh's negative renders.
+  # The args append path. --template-cache-max is a real `server start` flag,
+  # is on none of the four reserved lists and is not a setting the chart
+  # delivers through another channel, which is what makes it a legitimate entry
+  # rather than a test of the guard; the guard's own coverage is in
+  # hack/verify.sh's negative renders.
   args:
-    - --log-level=debug
+    - --template-cache-max=209715200
 
   # An ordinary pod label. The guard rejecting selector-label collisions has its
   # negatives in hack/verify.sh; this is the positive - a label that must pass
@@ -109,11 +110,21 @@ probes:
     # liveness block and its coupling to hub.webPort render nowhere else.
     enabled: true
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   sessionSecret: ci-varied-session-secret-not-real
   # The false branch of the ternary. Every other permutation renders true (the
   # new default); this is the only one that tests the other arm.
   requireStableSigningKey: false
+  # PROBE VALUE. The global backendServices form, with a trailing slash: the
+  # chart renders it stripped, as the hub's preflight reads it.
+  proxy:
+    iap:
+      audience: /projects/123456789012/global/backendServices/1111111111111111111/
 
 database:
   # Four rendered settings keys that otherwise carry one value each forever.

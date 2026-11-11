@@ -112,6 +112,7 @@ A backend answers three questions for any (project, agent):
    ```
    <export-root>/projects/<project-id>/workspace               # Shared-plain & Worktree-per-agent
    <export-root>/projects/<project-id>/shared-dirs/<name>      # shared directories
+   <export-root>/projects/<project-id>/provision               # provisioning sentinel + lock (k8s init container only, #2670)
    ```
 
 2. **Provision** — ensure the directory exists and, for git projects, is cloned/worktree'd

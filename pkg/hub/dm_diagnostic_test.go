@@ -45,18 +45,16 @@ func TestDMDiagnostic_CleanState(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agentA := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "diag-a",
-		Slug:       "diag-a",
-		ProjectID:  project.ID,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "diag-a",
+		Slug:      "diag-a",
+		ProjectID: project.ID,
 	}
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "diag-b",
-		Slug:       "diag-b",
-		ProjectID:  project.ID,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "diag-b",
+		Slug:      "diag-b",
+		ProjectID: project.ID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
 	require.NoError(t, s.CreateAgent(ctx, agentB))
@@ -138,25 +136,22 @@ func TestDMDiagnostic_ExtraneousParticipant(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agentA := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "diag-extra-a",
-		Slug:       "diag-extra-a",
-		ProjectID:  project.ID,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "diag-extra-a",
+		Slug:      "diag-extra-a",
+		ProjectID: project.ID,
 	}
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "diag-extra-b",
-		Slug:       "diag-extra-b",
-		ProjectID:  project.ID,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "diag-extra-b",
+		Slug:      "diag-extra-b",
+		ProjectID: project.ID,
 	}
 	intruder := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "diag-intruder",
-		Slug:       "diag-intruder",
-		ProjectID:  project.ID,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "diag-intruder",
+		Slug:      "diag-intruder",
+		ProjectID: project.ID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
 	require.NoError(t, s.CreateAgent(ctx, agentB))
@@ -220,18 +215,16 @@ func TestDMDiagnostic_MissingParticipant(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agentA := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "diag-miss-a",
-		Slug:       "diag-miss-a",
-		ProjectID:  project.ID,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "diag-miss-a",
+		Slug:      "diag-miss-a",
+		ProjectID: project.ID,
 	}
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "diag-miss-b",
-		Slug:       "diag-miss-b",
-		ProjectID:  project.ID,
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "diag-miss-b",
+		Slug:      "diag-miss-b",
+		ProjectID: project.ID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
 	require.NoError(t, s.CreateAgent(ctx, agentB))
@@ -278,11 +271,10 @@ func TestDMDiagnostic_MixedConversations(t *testing.T) {
 	agents := make([]*store.Agent, 4)
 	for i := range agents {
 		agents[i] = &store.Agent{
-			ID:         api.NewUUID(),
-			Name:       fmt.Sprintf("diag-mixed-%d", i),
-			Slug:       fmt.Sprintf("diag-mixed-%d", i),
-			ProjectID:  project.ID,
-			Visibility: store.VisibilityPrivate,
+			ID:        api.NewUUID(),
+			Name:      fmt.Sprintf("diag-mixed-%d", i),
+			Slug:      fmt.Sprintf("diag-mixed-%d", i),
+			ProjectID: project.ID,
 		}
 		require.NoError(t, s.CreateAgent(ctx, agents[i]))
 	}

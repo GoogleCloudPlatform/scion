@@ -30,38 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// envGatherMockBrokerClient extends mockRuntimeBrokerClient with env-gather methods.
-type envGatherMockBrokerClient struct {
-	mockRuntimeBrokerClient
-
-	// Env-gather fields
-	createWithGatherCalled bool
-	gatherReturnEnvReqs    *RemoteEnvRequirementsResponse
-}
-
-func (m *envGatherMockBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	m.createWithGatherCalled = true
-	m.lastBrokerID = brokerID
-	m.lastEndpoint = brokerEndpoint
-	m.lastCreateReq = req
-	if m.returnErr != nil {
-		return nil, nil, m.returnErr
-	}
-	if m.gatherReturnEnvReqs != nil {
-		return nil, m.gatherReturnEnvReqs, nil
-	}
-	// All env satisfied
-	return &RemoteAgentResponse{
-		Agent: &RemoteAgentInfo{
-			ID:     req.ID,
-			Slug:   req.Slug,
-			Name:   req.Name,
-			Status: "running",
-		},
-		Created: true,
-	}, nil, nil
-}
-
 // TestEnvGather_HubDispatch_AllSatisfied tests that when env-gather is enabled
 // and all env vars are satisfied, the agent starts normally.
 func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
@@ -110,7 +78,8 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 		},
 	}
 
-	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather failed: %v", err)
 	}
@@ -167,7 +136,8 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 		},
 	}
 
-	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	createRes, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	envReqs := createRes.EnvRequirements()
 	if err != nil {
 		t.Fatalf("DispatchAgentCreateWithGather failed: %v", err)
 	}
@@ -221,7 +191,7 @@ func TestEnvGather_HubDispatch_FinalizeEnv_Replay(t *testing.T) {
 		"API_KEY": "gathered-api-key",
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
 	if err != nil {
 		t.Fatalf("DispatchFinalizeEnv failed: %v", err)
 	}
@@ -286,7 +256,7 @@ func TestEnvGather_FinalizeReplay_EmptyPendingEnvGather(t *testing.T) {
 		"GEMINI_API_KEY": "gathered-key",
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
 	if err != nil {
 		t.Fatalf("DispatchFinalizeEnv on fresh broker instance should succeed, got: %v", err)
 	}
@@ -348,7 +318,7 @@ func TestEnvGather_FinalizeReplay_MergePrecedence(t *testing.T) {
 		"API_KEY": "cli-gathered-value",
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
 	if err != nil {
 		t.Fatalf("DispatchFinalizeEnv failed: %v", err)
 	}
@@ -399,7 +369,7 @@ func TestEnvGather_FinalizeReplay_StillMissing(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{"KEY_A": "val"})
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{"KEY_A": "val"})
 	if err == nil {
 		t.Fatal("expected ErrEnvStillMissing, got nil")
 	}
@@ -781,7 +751,7 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 	// Store env vars in project scope
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
 		ID:            tid("env-1"),
-		Key:           "GROVE_API_KEY",
+		Key:           "PROJECT_API_KEY",
 		Value:         "project-key-value",
 		Scope:         "project",
 		ScopeID:       tid("project-env"),
@@ -813,9 +783,9 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 	if mockClient.lastCreateReq == nil {
 		t.Fatal("expected CreateReq to be captured")
 	}
-	if mockClient.lastCreateReq.ResolvedEnv["GROVE_API_KEY"] != "project-key-value" {
-		t.Errorf("expected GROVE_API_KEY=project-key-value in resolved env, got %q",
-			mockClient.lastCreateReq.ResolvedEnv["GROVE_API_KEY"])
+	if mockClient.lastCreateReq.ResolvedEnv["PROJECT_API_KEY"] != "project-key-value" {
+		t.Errorf("expected PROJECT_API_KEY=project-key-value in resolved env, got %q",
+			mockClient.lastCreateReq.ResolvedEnv["PROJECT_API_KEY"])
 	}
 }
 
@@ -954,6 +924,24 @@ func TestEnvGather_BuildResponse_SecretScope(t *testing.T) {
 		Name:      "scope-test-agent",
 		OwnerID:   "owner-1",
 		ProjectID: tid("project-1"),
+	}
+
+	// The owner's user secret labels a key only for an agent whose
+	// delegation chain is recorded to that owner, so record the owner's
+	// principal edge to the agent in its project.
+	if err := st.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser, DelegatorID: agent.OwnerID,
+		DelegateType: store.DelegationPrincipalAgent, DelegateID: agent.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: agent.ProjectID, Role: string(AgentRoleFull), Active: true,
+		AuthorityProvenance: store.AuthorityProvenance{
+			ProvenanceVersion:    store.ProvenanceVersionV1,
+			SourcePrincipalKind:  store.DelegationPrincipalUser,
+			SourcePrincipalID:    agent.OwnerID,
+			SourceCredentialKind: store.SourceCredentialSession,
+		},
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	brokerReqs := &RemoteEnvRequirementsResponse{

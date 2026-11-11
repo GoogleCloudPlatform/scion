@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -38,10 +37,26 @@ func (p ProjectOption) DisplayName() string {
 
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
-	ListProjects(ctx context.Context) ([]ProjectOption, error)
-	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
-	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
+	// ListUserProjects lists the projects visible to the linked user.
+	// linkedUser ("user:<email>") is the Slack user's linked Scion account,
+	// sent with the request. Use this for every user-facing project picker.
+	ListUserProjects(ctx context.Context, linkedUser string) ([]ProjectOption, error)
+	// ListAgents lists the agents of a project. linkedUser ("user:<email>")
+	// is the Slack user's linked Scion account, sent with the request.
+	ListAgents(ctx context.Context, projectID, linkedUser string) ([]AgentInfo, error)
+}
+
+// headerOnBehalfOf names the linked Scion user a request is made for.
+const headerOnBehalfOf = "X-Scion-On-Behalf-Of"
+
+// setLinkedUser adds the linked user to a hub request. It must be called
+// before the request is signed.
+func setLinkedUser(req *http.Request, linkedUser string) {
+	if linkedUser == "" {
+		return
+	}
+	req.Header.Set(headerOnBehalfOf, linkedUser)
+	req.Header.Set(apiclient.HeaderSignedHeaders, "x-scion-on-behalf-of")
 }
 
 // httpHubClient implements HubClient using HTTP calls to the Hub API.
@@ -81,83 +96,14 @@ type hubAgent struct {
 	Activity string `json:"activity"`
 }
 
-func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
+func (c *httpHubClient) ListUserProjects(ctx context.Context, linkedUser string) ([]ProjectOption, error) {
 	url := c.hubURL + "/api/v1/projects"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list projects returned status %d", resp.StatusCode)
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list projects response: %w", err)
-	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
-func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/broker/projects"
-
-	slog.Debug("Listing fresh projects from hub broker endpoint", "url", url, "broker_id", c.brokerID)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list fresh projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list fresh projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list fresh projects returned status %d", resp.StatusCode)
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list fresh projects response: %w", err)
-	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
-func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setLinkedUser(req, linkedUser)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -170,7 +116,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list user projects returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("list user projects: %w", parseHubError(resp))
 	}
 
 	var result hubProjectsResponse
@@ -185,13 +131,14 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	return projects, nil
 }
 
-func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+func (c *httpHubClient) ListAgents(ctx context.Context, projectID, linkedUser string) ([]AgentInfo, error) {
 	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setLinkedUser(req, linkedUser)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -204,7 +151,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list agents returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("list agents: %w", parseHubError(resp))
 	}
 
 	var result hubAgentsResponse

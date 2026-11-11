@@ -1,0 +1,745 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Agent lifecycle transactions: soft delete, hard delete,
+// restore and the reincarnation claim each commit the agent-row write, the
+// delegation-edge (de)activation, the registered hooks and one mutation
+// audit record in a single store transaction.
+//
+// Soft and hard delete run inside the delete engine's finalize transaction,
+// through agentFinalizeHook. Restore and the reincarnation claim open their
+// own transaction.
+
+// Mutation types written by the lifecycle transactions.
+const (
+	mutationTypeAgentSoftDelete       = "agent_soft_delete"
+	mutationTypeAgentHardDelete       = "agent_hard_delete"
+	mutationTypeAgentRestore          = "agent_restore"
+	mutationTypeAgentReincarnateClaim = "agent_reincarnate_claim"
+)
+
+// errAgentNotSoftDeleted is returned by restoreAgentTx when the agent is not
+// in the soft-deleted state.
+var errAgentNotSoftDeleted = errors.New("agent is not in deleted state")
+
+// errRestoreEdgeConflict wraps the store.ErrAlreadyExists a restore gets when
+// a delegation edge it would reactivate conflicts with an active edge. The
+// restore handler maps only this sentinel to 409, so an ErrAlreadyExists
+// from another write in the restore transaction is not reported as an edge
+// conflict.
+var errRestoreEdgeConflict = errors.New("restore: a delegation edge to reactivate conflicts with an active edge")
+
+// errRestoreDelegatorNotLive is returned by restoreAgentTx when the delegator
+// of an edge deactivated by the soft delete is not live: a user that is
+// missing or not active, or an agent that is missing or soft-deleted. The
+// restore writes nothing and the deactivation records stay intact.
+var errRestoreDelegatorNotLive = errors.New("restore: a delegator of the agent's delegation edges is not live")
+
+// errRestoreDelegatorLookup wraps a store error from the delegator check. The
+// restore writes nothing.
+var errRestoreDelegatorLookup = errors.New("restore: delegator lookup failed")
+
+// AgentTxHook runs inside a lifecycle transaction, after the agent-row write
+// and the delegation-edge (de)activation and before the audit record, with a
+// transaction-scoped store. agent is the row as written by the transaction
+// (for hard delete, the row as it was just before it was removed). Hooks run
+// in registration order.
+//
+// A non-nil error rolls back the whole operation. For soft and hard delete
+// that fails the delete with finalize_failed: the agent stays in the
+// finalizing state and start is refused until a retried or forced delete
+// succeeds. Return an error only for work that must commit atomically with
+// the lifecycle change; log and swallow anything best-effort. Hooks must not
+// perform broker or network I/O, call launch_* store methods, or call any
+// store method that cannot run inside a transaction.
+type AgentTxHook func(ctx context.Context, tx store.Store, agent *store.Agent, actor AuditActor) error
+
+type namedAgentTxHook struct {
+	name string
+	hook AgentTxHook
+}
+
+// agentLifecycleHooks holds the four hook registries. They are separate:
+// soft-delete hooks do not run on hard delete. The zero value is ready.
+type agentLifecycleHooks struct {
+	mu          sync.Mutex
+	softDelete  []namedAgentTxHook
+	hardDelete  []namedAgentTxHook
+	restore     []namedAgentTxHook
+	reincarnate []namedAgentTxHook
+}
+
+func (h *agentLifecycleHooks) register(list *[]namedAgentTxHook, kind, name string, hook AgentTxHook) {
+	if name == "" || hook == nil {
+		panic(fmt.Sprintf("agent lifecycle %s hook: empty name or nil hook", kind))
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, existing := range *list {
+		if existing.name == name {
+			panic(fmt.Sprintf("agent lifecycle %s hook %q registered twice", kind, name))
+		}
+	}
+	*list = append(*list, namedAgentTxHook{name: name, hook: hook})
+}
+
+func (h *agentLifecycleHooks) snapshot(list *[]namedAgentTxHook) []namedAgentTxHook {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]namedAgentTxHook(nil), (*list)...)
+}
+
+// RegisterSoftDeleteHook registers h to run in every soft-delete
+// transaction. See AgentTxHook for the contract.
+func (s *Server) RegisterSoftDeleteHook(name string, h AgentTxHook) {
+	s.lifecycleTxHooks.register(&s.lifecycleTxHooks.softDelete, "soft-delete", name, h)
+}
+
+// RegisterHardDeleteHook registers h to run in every hard-delete
+// transaction. See AgentTxHook for the contract.
+func (s *Server) RegisterHardDeleteHook(name string, h AgentTxHook) {
+	s.lifecycleTxHooks.register(&s.lifecycleTxHooks.hardDelete, "hard-delete", name, h)
+}
+
+// RegisterRestoreHook registers h to run in every restore transaction. See
+// AgentTxHook for the contract.
+func (s *Server) RegisterRestoreHook(name string, h AgentTxHook) {
+	s.lifecycleTxHooks.register(&s.lifecycleTxHooks.restore, "restore", name, h)
+}
+
+// RegisterReincarnateClaimHook registers h to run in every reincarnation
+// claim transaction. See AgentTxHook for the contract.
+func (s *Server) RegisterReincarnateClaimHook(name string, h AgentTxHook) {
+	s.lifecycleTxHooks.register(&s.lifecycleTxHooks.reincarnate, "reincarnate-claim", name, h)
+}
+
+func runAgentTxHooks(ctx context.Context, kind string, hooks []namedAgentTxHook, tx store.Store, agent *store.Agent, actor AuditActor) error {
+	for _, h := range hooks {
+		if err := h.hook(ctx, tx, agent, actor); err != nil {
+			return fmt.Errorf("agent %s hook %q: %w", kind, h.name, err)
+		}
+	}
+	return nil
+}
+
+// agentFinalizeHook is the hook the delete engine's finalize transaction
+// runs (finalizeAgentDeletion): the agentDeletionFinalizeSeam var first,
+// then this Server's lifecycle finalize for the mode.
+func (s *Server) agentFinalizeHook(ctx context.Context, tx store.Store, a *store.Agent, mode store.DeletionFinalizeMode) error {
+	if err := agentDeletionFinalizeSeam(ctx, tx, a, mode); err != nil {
+		return err
+	}
+	actor := auditActorFromContext(ctx)
+	switch mode {
+	case store.DeletionFinalizeSoft:
+		if err := s.softDeleteAgentTx(ctx, tx, a, actor); err != nil {
+			return err
+		}
+	case store.DeletionFinalizeHard:
+		if err := s.hardDeleteAgentTx(ctx, tx, a, actor); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("agent finalize: %w: mode %q", store.ErrInvalidInput, mode)
+	}
+	return recordUserDeletionAgentStoppedTx(ctx, tx, a)
+}
+
+// lifecycleAudit builds a lifecycle mutation audit record for agentID with
+// the JSON summary, attributed to actor (the hub when actor is empty).
+func lifecycleAudit(mutationType, agentID string, actor AuditActor, now time.Time, summary any) (*store.MutationAuditRecord, error) {
+	after, err := json.Marshal(summary)
+	if err != nil {
+		return nil, err
+	}
+	record := &store.MutationAuditRecord{
+		MutationType: mutationType,
+		TargetType:   "agent",
+		TargetID:     agentID,
+		AfterSummary: string(after),
+		Timestamp:    now,
+	}
+	actor.ApplyActor(record)
+	applyHubActorFallback(record)
+	return record, nil
+}
+
+// softDeleteAgentTx runs inside the finalize transaction of a soft delete,
+// after the engine set DeletedAt. In order: stamp a fresh operation ID as
+// SoftDeleteOpID on the row, deactivate the agent's delegation edges under
+// that ID (cause agent_soft_delete), run the soft-delete hooks, and write the
+// agent_soft_delete audit record. a is the post-write row. The agent's
+// service-account assignment is deactivated under the same operation ID and
+// cause, so a restore returns exactly it. As in agentHardDeleteWork, only the
+// edges where the agent is the delegate are deactivated; its doc comment
+// gives the reason.
+func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent in softDeleteAgentTx", store.ErrInvalidInput)
+	}
+	opID := api.NewUUID()
+	now := time.Now()
+
+	row := *a
+	row.SoftDeleteOpID = opID
+	if err := tx.SetAgentSoftDeleteOpID(ctx, row.ID, opID); err != nil {
+		return fmt.Errorf("soft delete: stamp operation ID: %w", err)
+	}
+	d := store.Deactivation{
+		Cause: store.EdgeDeactivationAgentSoftDelete,
+		At:    &now,
+		OpID:  opID,
+	}
+	n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, row.ID, d)
+	if err != nil {
+		return fmt.Errorf("soft delete: deactivate delegation edges: %w", err)
+	}
+	assignments, err := tx.DeactivateAgentServiceAccountAssignments(ctx, row.ID, d)
+	if err != nil {
+		return fmt.Errorf("soft delete: deactivate service-account assignments: %w", err)
+	}
+	if err := runAgentTxHooks(ctx, "soft-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.softDelete), tx, &row, actor); err != nil {
+		return err
+	}
+	record, err := lifecycleAudit(mutationTypeAgentSoftDelete, row.ID, actor, now, struct {
+		OpID                   string `json:"op_id"`
+		EdgesDeactivated       int    `json:"edges_deactivated"`
+		AssignmentsDeactivated int    `json:"assignments_deactivated"`
+	}{opID, n, assignments})
+	if err != nil {
+		return err
+	}
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("soft delete audit: %w", err)
+	}
+	return nil
+}
+
+// agentHardDeleteWork is the work every removal of an agent row must commit
+// with it: deactivate the agent's delegation edges and its service-account
+// assignments with d (neither has a foreign key to the agent, so the rows
+// survive as history), then run the hard-delete hooks. Both the hard delete
+// (hardDeleteAgentTx) and the rollback of a committed create
+// (compensateAgentCreate) run it, so a hook registered for hard delete also
+// runs when a create is rolled back. label prefixes store errors; a hook
+// error is returned as is.
+//
+// Only the edges where the agent is the delegate are deactivated. Edges where
+// it is the delegator are left as they are: authorization re-loads each
+// agent delegator in a chain. The delegation ceiling walk
+// (walkDelegationChainHops, through checkAgentHoldsPermission) and the
+// standing check (resolveChainRoot with checkChain) refuse a chain that
+// reaches a missing or soft-deleted agent, and a restore reactivates an edge
+// only when its delegator is live (checkRestoreDelegatorsLive). A project
+// delete, which removes every agent of the project in one transaction,
+// deactivates both sides (deactivateProjectAgentEdges).
+func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string) (edges, assignments int, err error) {
+	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%s: deactivate delegation edges: %w", label, err)
+	}
+	assignments, err = tx.DeactivateAgentServiceAccountAssignments(ctx, a.ID, d)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%s: deactivate service-account assignments: %w", label, err)
+	}
+	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
+		return 0, 0, err
+	}
+	return edges, assignments, nil
+}
+
+// hardDeleteAgentTx runs inside the finalize transaction of a hard delete,
+// after the engine removed the agent row and its dependents. In order:
+// agentHardDeleteWork with cause agent_hard_delete (edges, service-account
+// assignments, hard-delete hooks), then the agent_hard_delete audit record.
+// a is the row as it was just before the delete; the row itself is not
+// readable.
+//
+// The hard delete of an incomplete create is a hard delete like any other;
+// its audit summary carries incomplete_create=true.
+func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent in hardDeleteAgentTx", store.ErrInvalidInput)
+	}
+	opID := api.NewUUID()
+	now := time.Now()
+
+	n, assignments, err := s.agentHardDeleteWork(ctx, tx, a, actor, store.Deactivation{
+		Cause: store.EdgeDeactivationAgentHardDelete,
+		At:    &now,
+		OpID:  opID,
+	}, "hard delete")
+	if err != nil {
+		return err
+	}
+	// A delete run by the test identity purge records the stamp it relied
+	// on (fixturePurgeBasisFor: only when the context carries the purge's
+	// basis and the agent's own stamp names the same root).
+	basis := fixturePurgeBasisFor(ctx, a.Fixture)
+	if basis != nil {
+		actor.CorrelationID = basis.RunID
+	}
+	record, err := lifecycleAudit(mutationTypeAgentHardDelete, a.ID, actor, now, struct {
+		OpID                   string             `json:"op_id"`
+		EdgesDeactivated       int                `json:"edges_deactivated"`
+		AssignmentsDeactivated int                `json:"assignments_deactivated"`
+		IncompleteCreate       bool               `json:"incomplete_create,omitempty"`
+		SoftDeleteOpID         string             `json:"soft_delete_op_id,omitempty"`
+		ProvenanceBasis        *fixturePurgeBasis `json:"provenance_basis,omitempty"`
+	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID, basis})
+	if err != nil {
+		return err
+	}
+	if basis != nil {
+		// The provenance_basis column (Phase 3c); a failure aborts the
+		// hard delete.
+		if err := writeFixturePurgeAuditTx(ctx, tx, record, *basis); err != nil {
+			return fmt.Errorf("hard delete audit: %w", err)
+		}
+		return nil
+	}
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("hard delete audit: %w", err)
+	}
+	return nil
+}
+
+// restoreAgentTx restores the soft-deleted agent a in one transaction. a is
+// the row the caller loaded and gated; the restore write is guarded by its
+// state_version. SetAgentSoftDeleteOpID does not bump state_version, so the
+// operation ID is re-read with GetAgent inside the transaction and that
+// value, not the one on a, selects the edges. In order: re-read the
+// operation ID, check that the delegator of every edge deactivated under it
+// is live, clear DeletedAt and SoftDeleteOpID, re-assert the identity keys,
+// reactivate exactly those edges and the service-account assignment
+// deactivated under the same operation ID (none when the operation ID is
+// empty), run the restore hooks, and write the agent_restore audit record. Before all
+// of that it refuses, with errAgentOwnerUserMissing, an agent whose guard
+// user no longer exists (lockAgentGuardUserTx, the same choice of user as
+// create: owner, else ancestry root, else creator when there is no owner);
+// that is normally a deleted user, but it can be a legacy root agent that
+// has since been purged, which cannot be told apart from one.
+//
+// A delegator that is not live returns errRestoreDelegatorNotLive, a store
+// error during that check errRestoreDelegatorLookup, a conflicting active
+// edge errRestoreEdgeConflict and a concurrent change
+// store.ErrVersionConflict; each rolls everything back. On success a
+// carries the restored row.
+func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor AuditActor) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent in restoreAgentTx", store.ErrInvalidInput)
+	}
+	if a.DeletedAt.IsZero() {
+		return errAgentNotSoftDeleted
+	}
+	now := time.Now()
+
+	row := *a
+	row.DeletedAt = time.Time{}
+	row.SoftDeleteOpID = ""
+	row.Updated = now
+	hooks := s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.restore)
+	lapsedClaim := false
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		// An agent whose guard user no longer exists is not restored
+		// (ptone/scion#2769): the user delete refuses while the user has
+		// agents, but soft-deleted agents do not count. The guard user is
+		// chosen as on create (lockAgentGuardUserTx): the owner, else the
+		// ancestry root, else the creator when there is no owner (a
+		// scheduled agent). The check takes a shared lock on that user's
+		// row first, so it serializes with a concurrent user delete on
+		// PostgreSQL. User row first: no path locks an agent, project or
+		// group row and then a user row, so this cannot deadlock with the
+		// delete. A legacy owner that is an existing agent is not refused.
+		if err := lockAgentGuardUserTx(ctx, tx, &row); err != nil {
+			return err
+		}
+		cur, err := tx.GetAgent(ctx, row.ID)
+		if err != nil {
+			return err
+		}
+		if cur.DeletedAt.IsZero() {
+			return errAgentNotSoftDeleted
+		}
+		opID := cur.SoftDeleteOpID
+		if opID != "" {
+			if err := checkRestoreDelegatorsLive(ctx, tx, row.ID, opID); err != nil {
+				return err
+			}
+		}
+		if err := tx.UpdateAgent(ctx, &row); err != nil {
+			return err
+		}
+		if err := tx.SetAgentSoftDeleteOpID(ctx, row.ID, ""); err != nil {
+			return err
+		}
+		if err := tx.ReplaceAgentIdentityKeys(ctx, row.ID, row.ProjectID, api.IdentityKeysFor(row.Slug, row.Name)); err != nil {
+			return err
+		}
+		reactivated, assignmentsReactivated := 0, 0
+		if opID != "" {
+			n, err := tx.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, row.ID, store.EdgeDeactivationAgentSoftDelete, opID)
+			if errors.Is(err, store.ErrAlreadyExists) {
+				return fmt.Errorf("%w: %w", errRestoreEdgeConflict, err)
+			}
+			if err != nil {
+				return fmt.Errorf("restore: reactivate delegation edges: %w", err)
+			}
+			reactivated = n
+			// The assignment the soft delete deactivated returns with the
+			// edges; a newer active assignment is a conflict.
+			m, err := tx.ReactivateAgentServiceAccountAssignments(ctx, row.ID, store.EdgeDeactivationAgentSoftDelete, opID)
+			if errors.Is(err, store.ErrAlreadyExists) {
+				return fmt.Errorf("%w: %w", errRestoreEdgeConflict, err)
+			}
+			if err != nil {
+				return fmt.Errorf("restore: reactivate service-account assignments: %w", err)
+			}
+			assignmentsReactivated = m
+		}
+		if err := runAgentTxHooks(ctx, "restore", hooks, tx, &row, actor); err != nil {
+			return err
+		}
+		record, err := lifecycleAudit(mutationTypeAgentRestore, row.ID, actor, now, struct {
+			OpID                   string `json:"op_id,omitempty"`
+			EdgesReactivated       int    `json:"edges_reactivated"`
+			AssignmentsReactivated int    `json:"assignments_reactivated"`
+		}{opID, reactivated, assignmentsReactivated})
+		if err != nil {
+			return err
+		}
+		if err := tx.CreateMutationAudit(ctx, record); err != nil {
+			return fmt.Errorf("restore audit: %w", err)
+		}
+		lapsedClaim = cur.DeletionState == store.DeletionStateDeleting
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// A purge of the agent's retained files whose hub stopped mid-dispatch
+	// leaves its claim (deleting, lease lapsed) on the soft-deleted row
+	// (retained_files_purge.go, ptone/scion#4744). A live claim refuses the
+	// restore earlier (deleteBlocksStart) or conflicts with it (the claim
+	// bumps state_version); a lapsed one must not stay on the restored
+	// agent. UpdateAgentDeletion runs its own transaction, so this follows
+	// the restore's commit; a failure leaves the marker, which then reads
+	// as an abandoned delete, and is logged.
+	if lapsedClaim {
+		// The restore has committed: finish the clear even if the
+		// caller's request has ended meanwhile, within its own bound.
+		clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
+		defer cancel()
+		lapsedBefore := time.Now()
+		none := store.DeletionStateNone
+		pred := store.DeletionPredicate{States: []string{store.DeletionStateDeleting}, DeletedAtNull: true, LeaseExpiredBefore: &lapsedBefore}
+		set := store.DeletionFields{State: &none, ClearLeaseAt: true, KeepUpdated: true}
+		if _, err := s.store.UpdateAgentDeletion(clearCtx, row.ID, pred, set); err != nil {
+			s.agentLifecycleLog.Warn("restore: could not clear a lapsed purge claim", "agent_id", row.ID, "error", err)
+		} else if fresh, err := s.store.GetAgent(clearCtx, row.ID); err != nil {
+			s.agentLifecycleLog.Warn("restore: could not re-read the agent after clearing a lapsed purge claim", "agent_id", row.ID, "error", err)
+		} else {
+			row = *fresh
+		}
+	}
+	*a = row
+	return nil
+}
+
+// checkRestoreDelegatorsLive checks the delegator of every edge deactivated
+// for agentID under the soft delete opID. A user delegator is live when it
+// exists and is active; an agent delegator when it exists and is not
+// soft-deleted. It reads only, so the restore writes nothing when it fails.
+func checkRestoreDelegatorsLive(ctx context.Context, tx store.Store, agentID, opID string) error {
+	edges, err := tx.GetDeactivatedDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.EdgeDeactivationAgentSoftDelete, opID)
+	if err != nil {
+		return fmt.Errorf("%w: list deactivated edges: %w", errRestoreDelegatorLookup, err)
+	}
+	for _, e := range edges {
+		live, err := delegatorLive(ctx, tx, e.DelegatorType, e.DelegatorID)
+		if err != nil {
+			return fmt.Errorf("%w: %s %s: %w", errRestoreDelegatorLookup, e.DelegatorType, e.DelegatorID, err)
+		}
+		if !live {
+			return fmt.Errorf("%w: %s %s", errRestoreDelegatorNotLive, e.DelegatorType, e.DelegatorID)
+		}
+	}
+	return nil
+}
+
+// delegatorLive reports whether the delegator of an edge is live. A missing
+// principal is not live; any other store error is returned.
+func delegatorLive(ctx context.Context, tx store.Store, delegatorType, delegatorID string) (bool, error) {
+	switch delegatorType {
+	case store.DelegationPrincipalUser:
+		u, err := tx.GetUser(ctx, delegatorID)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return u.Status == store.UserStatusActive, nil
+	case store.DelegationPrincipalAgent:
+		a, err := tx.GetAgent(ctx, delegatorID)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return a.DeletedAt.IsZero(), nil
+	default:
+		return false, nil
+	}
+}
+
+// reincarnateAuthority is the authority a reincarnation by another
+// principal re-records: a new delegation edge from the requester, with the
+// requester's frozen provenance and ceiling. It is set for a role-changing
+// reincarnation, and for a user's reincarnation that keeps the role of an
+// agent whose own edge is missing or unrecorded, or whose chain has an
+// unrecorded hop (ptone/scion#3948), where Role is the stored role. nil for a
+// self-reincarnation and for any other reincarnation that keeps the role,
+// which keep the existing edge unchanged (ptone/scion#3762).
+type reincarnateAuthority struct {
+	DelegatorType string
+	DelegatorID   string
+	Role          string
+	Ceiling       store.EffectCeiling
+	Provenance    store.AuthorityProvenance
+	// Assignment, set only on a same-role repair, is the agent's
+	// service-account assignment re-recorded from the requester, who passed
+	// the assignment gate for the agent's account (resolveRepairAssignment).
+	Assignment *store.AgentServiceAccountAssignment
+	// AssignmentNotRecorded, set only on a same-role repair whose requester
+	// did not pass that gate, is the plan warning; the agent keeps its
+	// existing assignment.
+	AssignmentNotRecorded string
+	// OwnerMaterialNotice, when set, is the plan warning that the owner's
+	// unshared material will not be delivered after this re-record
+	// (ownerMaterialReRecordNotice).
+	OwnerMaterialNotice string
+	// OwnerReclaim is set when the re-record is an owner reclaim
+	// (reincarnateOwnerReclaims). The claim audit then reports
+	// owner_reclaim and the replaced edges' delegators (prior_delegator).
+	OwnerReclaim bool
+	// RuntimeReadNotice, when set, is the plan warning that runtime reads
+	// of the owner's shared secrets are refused after this re-record
+	// (runtimeReadReRecordNotice).
+	RuntimeReadNotice string
+}
+
+// reincarnateClaimTx claims agent for a reincarnation in one transaction.
+// agent carries the state_version the caller read and, in
+// ReincarnationUpdatedAt, the claim time. In order: the claim,
+// ClaimAgentReincarnation (a single conditional update that sets
+// reincarnation_state pending; refused with store.ErrVersionConflict after a
+// concurrent change, a *store.ClaimHeldError while a start claim is held, or
+// store.ErrClaimPredicate while a reincarnation is already in flight), the
+// reincarnation record, the authority
+// re-record when auth is non-nil (deactivate the agent's active edges with
+// cause reincarnate_replaced, create the requester's edge), the
+// service-account assignment replacement when sa is non-nil (a
+// --service-account patch, or the re-record of a same-role repair; the
+// requester is its source), the
+// reincarnate-claim hooks, and the agent_reincarnate_claim audit record.
+// Any error rolls everything back, so nothing is claimed.
+//
+// Without sa the existing assignment stays in force: the agent ID and its
+// account do not change. When sa names another account than the agent's
+// active row (or the agent has none), the replacement is restorable: the
+// replaced row is deactivated with cause reincarnate_replaced under the
+// reincarnation ID, and the new row takes the reincarnation ID as its own
+// ID. A failure that restores the previous configuration then restores the
+// replaced row with it (restoreReincarnationAssignment). When sa names the
+// same account, the row is replaced as by any other write (sa_replaced) and
+// stays after a failure, like the re-recorded edge.
+func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec *store.AgentReincarnation, auth *reincarnateAuthority, sa *store.AgentServiceAccountAssignment, actor AuditActor) error {
+	if agent == nil {
+		return fmt.Errorf("%w: nil agent in reincarnateClaimTx", store.ErrInvalidInput)
+	}
+	if auth != nil && auth.Provenance.ProvenanceVersion == 0 {
+		return fmt.Errorf("%w: reincarnation provenance not recorded", errAgentCreateWriteInvalid)
+	}
+	if sa != nil && (sa.ProvenanceVersion == 0 || sa.ServiceAccountID == "") {
+		return fmt.Errorf("%w: service-account assignment provenance not recorded", errAgentCreateWriteInvalid)
+	}
+	opID := api.NewUUID()
+	now := time.Now()
+	row := *agent
+	hooks := s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.reincarnate)
+	claimedAt := now
+	if row.ReincarnationUpdatedAt != nil {
+		claimedAt = *row.ReincarnationUpdatedAt
+	}
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		// The claim: the state_version compare-and-set, refused while a
+		// start claim is held or a reincarnation is already in flight.
+		newVersion, err := tx.ClaimAgentReincarnation(ctx, row.ID, row.StateVersion, claimedAt)
+		if err != nil {
+			return err
+		}
+		row.StateVersion = newVersion
+		row.ReincarnationState = store.ReincarnationStatePending
+		if err := tx.CreateAgentReincarnation(ctx, rec); err != nil {
+			return err
+		}
+		replaced := 0
+		priorDelegator := ""
+		if auth != nil {
+			if auth.OwnerReclaim {
+				priorDelegator, err = activeDelegators(ctx, tx, row.ID)
+				if err != nil {
+					return fmt.Errorf("reincarnate: read delegation edges: %w", err)
+				}
+			}
+			n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, row.ID, store.Deactivation{
+				Cause: store.EdgeDeactivationReincarnateReplaced,
+				At:    &now,
+				OpID:  opID,
+			})
+			if err != nil {
+				return fmt.Errorf("reincarnate: deactivate delegation edges: %w", err)
+			}
+			replaced = n
+			edge := &store.DelegationEdge{
+				DelegatorType:       auth.DelegatorType,
+				DelegatorID:         auth.DelegatorID,
+				DelegateType:        store.DelegationPrincipalAgent,
+				DelegateID:          row.ID,
+				ScopeType:           store.RoleScopeProject,
+				ScopeID:             row.ProjectID,
+				Role:                auth.Role,
+				Active:              true,
+				AuthorityProvenance: auth.Provenance,
+				EffectCeiling:       auth.Ceiling,
+			}
+			if err := tx.CreateDelegationEdge(ctx, edge); err != nil {
+				return fmt.Errorf("reincarnate: record delegation edge: %w", err)
+			}
+		}
+		restorable := false
+		if sa != nil {
+			sa.AgentID = row.ID
+			sa.ProjectID = row.ProjectID
+			changed, err := claimChangesAssignedAccount(ctx, tx, row.ID, sa.ServiceAccountID)
+			if err != nil {
+				return fmt.Errorf("reincarnate: read service-account assignment: %w", err)
+			}
+			if changed {
+				restorable = true
+				sa.ID = rec.ID
+				err = tx.ReplaceAgentServiceAccountAssignmentWith(ctx, sa, store.Deactivation{
+					Cause: store.EdgeDeactivationReincarnateReplaced,
+					At:    &now,
+					OpID:  rec.ID,
+				})
+			} else {
+				err = tx.ReplaceAgentServiceAccountAssignment(ctx, sa)
+			}
+			if err != nil {
+				return fmt.Errorf("reincarnate: record service-account assignment: %w", err)
+			}
+		}
+		if err := runAgentTxHooks(ctx, "reincarnate-claim", hooks, tx, &row, actor); err != nil {
+			return err
+		}
+		// service_account_recorded is true when the claim recorded an
+		// assignment, false on a same-role repair whose requester did not
+		// pass the assignment gate, and absent otherwise.
+		var saRecorded *bool
+		switch {
+		case sa != nil:
+			saRecorded = new(bool)
+			*saRecorded = true
+		case auth != nil && auth.AssignmentNotRecorded != "":
+			saRecorded = new(bool)
+		}
+		record, err := lifecycleAudit(mutationTypeAgentReincarnateClaim, row.ID, actor, now, struct {
+			OpID                 string `json:"op_id"`
+			ReincarnationID      string `json:"reincarnation_id"`
+			ReRecorded           bool   `json:"re_recorded"`
+			EdgesReplaced        int    `json:"edges_replaced"`
+			ServiceAccountRecord *bool  `json:"service_account_recorded,omitempty"`
+			AssignmentRestorable bool   `json:"service_account_restorable,omitempty"`
+			OwnerReclaim         bool   `json:"owner_reclaim,omitempty"`
+			PriorDelegator       string `json:"prior_delegator,omitempty"`
+		}{opID, rec.ID, auth != nil, replaced, saRecorded, restorable, auth != nil && auth.OwnerReclaim, priorDelegator})
+		if err != nil {
+			return err
+		}
+		if err := tx.CreateMutationAudit(ctx, record); err != nil {
+			return fmt.Errorf("reincarnate claim audit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	*agent = row
+	return nil
+}
+
+// activeDelegators returns the delegators of agentID's active delegation
+// edges as "type:id", sorted and comma-separated ("" when it has none).
+func activeDelegators(ctx context.Context, tx store.Store, agentID string) (string, error) {
+	edges, err := tx.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID)
+	if err != nil {
+		return "", err
+	}
+	var out []string
+	for _, e := range edges {
+		if e.Active {
+			out = append(out, e.DelegatorType+":"+e.DelegatorID)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ","), nil
+}
+
+// claimChangesAssignedAccount reports whether a reincarnation claim that
+// records an assignment for serviceAccountID changes the agent's account:
+// the agent has no active assignment, or its one active row names another
+// account. More than one active row is ambiguous and is not treated as a
+// change, so the claim replaces it as any other write does.
+func claimChangesAssignedAccount(ctx context.Context, tx store.Store, agentID, serviceAccountID string) (bool, error) {
+	rows, err := tx.GetActiveAgentServiceAccountAssignments(ctx, agentID)
+	if err != nil {
+		return false, err
+	}
+	switch len(rows) {
+	case 0:
+		return true, nil
+	case 1:
+		return rows[0].ServiceAccountID != serviceAccountID, nil
+	}
+	return false, nil
+}

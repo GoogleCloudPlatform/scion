@@ -42,7 +42,6 @@ var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 func BridgePathPatterns() []logging.PathPattern {
 	return []logging.PathPattern{
 		{Prefix: "/projects/", ProjectIdx: 0, AgentIdx: 2}, // /projects/{slug}/agents/{slug}/...
-		{Prefix: "/groves/", ProjectIdx: 0, AgentIdx: 2},   // /groves/{slug}/agents/{slug}/...
 	}
 }
 
@@ -72,7 +71,12 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, 
 	}
 	// Initialize per-user auth validators based on the configured scheme.
 	switch cfg.Auth.Scheme {
-	case "hubUAT":
+	case "hubUAT", "hubBearer":
+		// hubBearer reuses the same Hub-introspecting validator as hubUAT —
+		// both call GET /api/v1/auth/me and cache by token hash. The schemes
+		// differ only in authMiddleware: hubUAT requires the scion_pat_
+		// prefix, hubBearer does not (the Hub is the sole arbiter of what
+		// bearer credential it accepts).
 		s.uatValidator = NewUATValidator(cfg.Hub.Endpoint, cfg.Auth.UATCacheTTL)
 	case "hubJWT":
 		// JWTValidator is initialized later via SetJWTValidator once the
@@ -147,21 +151,25 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Hub.Endpoint == "" {
 		return fmt.Errorf("hub.endpoint is required")
 	}
+	if !hubEndpointOK(cfg.Hub.Endpoint) {
+		// Fixed text: the endpoint may carry user information.
+		return fmt.Errorf("hub.endpoint must be a URL with a host, no user information, query or fragment")
+	}
 	if cfg.Hub.User == "" {
 		return fmt.Errorf("hub.user is required")
 	}
 	switch cfg.Auth.Scheme {
-	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT", "federation", "geGoogle":
+	case "", "apiKey", "bearer", "none", "hubUAT", "hubBearer", "hubJWT", "federation", "geGoogle":
 		// valid
 	default:
-		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT, federation, geGoogle)", cfg.Auth.Scheme)
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubBearer, hubJWT, federation, geGoogle)", cfg.Auth.Scheme)
 	}
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
 	// api_key is required for legacy schemes and the default (empty) scheme.
-	// hubUAT, hubJWT, and federation do not use api_key — they validate per-user/agent credentials instead.
-	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" && cfg.Auth.Scheme != "federation" && cfg.Auth.Scheme != "geGoogle" {
+	// hubUAT, hubBearer, hubJWT, and federation do not use api_key — they validate per-user/agent credentials instead.
+	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubBearer" && cfg.Auth.Scheme != "hubJWT" && cfg.Auth.Scheme != "federation" && cfg.Auth.Scheme != "geGoogle" {
 		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
 	}
 	if cfg.Auth.Scheme == "hubJWT" && cfg.Hub.SigningKey == "" && cfg.Hub.SigningKeySecret == "" {
@@ -191,6 +199,8 @@ func (s *Server) WarnOnOpenAuth() {
 		s.log.Warn("auth.scheme is empty: bridge will accept credentials from both X-API-Key and Authorization headers")
 	case "hubUAT":
 		s.log.Info("bridge auth: hubUAT — per-user Scion UAT authentication enabled")
+	case "hubBearer":
+		s.log.Info("bridge auth: hubBearer — any bearer credential the Hub accepts (e.g. a forwarded Google token) is admitted via Hub introspection and forwarded verbatim downstream")
 	case "hubJWT":
 		s.log.Info("bridge auth: hubJWT — per-user Scion JWT authentication enabled")
 	case "federation":
@@ -218,17 +228,13 @@ func (s *Server) Handler() http.Handler {
 
 	// Per-agent routes — the SDK handler handles JSON-RPC protocol.
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	// Agent cards a federated user may message (authenticated, per caller).
+	mux.HandleFunc("GET /projects/{projectSlug}/agents", s.handleFederatedUserAgentCards)
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 	// Direct POST to agent base URL — GE clients may POST JSON-RPC directly
 	// to the agent root (without /jsonrpc suffix).
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
-
-	// Legacy per-agent routes (backward compatibility for "grove" naming).
-	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
-	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
-	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
-	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
 
 	// v0.3 REST compat routes — catch-all under per-agent prefix delegates to
 	// the SDK v0.3 REST handler (if configured) after stripping the prefix.
@@ -236,7 +242,6 @@ func (s *Server) Handler() http.Handler {
 	// patterns above take precedence over this wildcard.
 	if s.v0RESTHandler != nil {
 		mux.HandleFunc("/projects/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
-		mux.HandleFunc("/groves/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
 	}
 
 	// Health, readiness, and metrics.
@@ -380,6 +385,77 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleFederatedUserAgentCards answers GET /projects/{projectSlug}/agents
+// for a federated user caller with the cards of the project's agents it may
+// message: the agents the hub lists for the caller's credential with
+// ?messageable=true, narrowed to the project's exposed agents. Cards carry
+// only what the hub's list shows (name and slug). Any refusal, including an
+// unknown project or a project the caller holds no grant on, is the uniform
+// refusal. Other callers get 404: the route lists cards per caller only for
+// federated users.
+func (s *Server) handleFederatedUserAgentCards(w http.ResponseWriter, r *http.Request) {
+	caller := callerIdentityFromContext(r.Context())
+	if caller == nil || !caller.IsFederatedUser() {
+		http.NotFound(w, r)
+		return
+	}
+	projectSlug := r.PathValue("projectSlug")
+	if !slugRE.MatchString(projectSlug) {
+		writeFederatedUserRefusal(w)
+		return
+	}
+	projectCfg := s.bridge.GetProjectConfig(projectSlug)
+	if projectCfg == nil {
+		writeFederatedUserRefusal(w)
+		return
+	}
+
+	agents, err := s.bridge.federatedUserMessageableAgents(r.Context(), caller, projectSlug)
+	if err != nil {
+		if isHubRefusal(err) {
+			writeFederatedUserRefusal(w)
+			return
+		}
+		s.log.Warn("federated user agent list failed", "project", projectSlug, "error", err)
+		http.Error(w, "unable to list agents from Scion Hub", http.StatusBadGateway)
+		return
+	}
+
+	cards := make([]map[string]interface{}, 0, len(agents))
+	for _, a := range agents {
+		slug := a.Slug
+		if slug == "" {
+			slug = a.Name
+		}
+		if !slugRE.MatchString(slug) || s.bridge.AuthorizeExposed(projectSlug, slug) != nil {
+			continue
+		}
+		name := a.Name
+		if name == "" {
+			name = slug
+		}
+		description := fmt.Sprintf("Scion agent %s in project %s", slug, projectSlug)
+		cards = append(cards, s.bridge.buildAgentCard(projectSlug, slug, name, description, nil))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"agents": cards}); err != nil {
+		s.log.Error("failed to encode agent cards response", "error", err)
+	}
+}
+
+// isFederatedUserRequest reports whether r comes from a federated user
+// caller. Such a request for an agent that is not exposed (or a project
+// that is not configured) still goes on to the SDK handler: the executor
+// answers it with the uniform refusal (ScionExecutor.Execute), the same
+// answer as for an unknown agent or one the hub does not let the caller
+// message. Every other method on such a route sees only the caller's own
+// tasks (the task store is scoped per route and caller).
+func isFederatedUserRequest(r *http.Request) bool {
+	return callerIdentityFromContext(r.Context()).IsFederatedUser()
+}
+
 // handleJSONRPC validates the project/agent routing and delegates to the SDK handler.
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	projectSlug := r.PathValue("projectSlug")
@@ -390,7 +466,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil {
+	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil && !isFederatedUserRequest(r) {
 		writeJSONRPCError(w, nil, -32602, "agent not found")
 		return
 	}
@@ -424,7 +500,7 @@ func (s *Server) handleV0REST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil {
+	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil && !isFederatedUserRequest(r) {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
@@ -490,9 +566,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// Per-agent card: exactly /projects/{slug}/agents/{slug}/.well-known/agent-card.json
-		// or agent.json, or legacy /groves/{slug}/agents/{slug}/.well-known/agent-card.json
+		// or agent.json
 		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && (segments[5] == "agent-card.json" || segments[5] == "agent.json") {
+		if len(segments) == 6 && segments[0] == "projects" && segments[2] == "agents" && segments[4] == ".well-known" && (segments[5] == "agent-card.json" || segments[5] == "agent.json") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -539,6 +615,34 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if err != nil {
 				s.log.Debug("UAT validation failed", "error", err)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := withCallerIdentity(r.Context(), caller)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+
+		case "hubBearer":
+			// hubBearer forwards any bearer credential the Hub itself
+			// accepts — including a Google user ID token attached by an
+			// upstream caller (e.g. Gemini Enterprise) — to the Hub's
+			// GET /api/v1/auth/me for admission. Unlike hubUAT, there is no
+			// scion_pat_ prefix check: the Hub is the single authority for
+			// what bearer credential it accepts, and rejects anything else
+			// via /auth/me.
+			token := extractBearerOrAPIKey(r)
+			if token == "" {
+				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
+				return
+			}
+			if uatV == nil {
+				s.log.Error("hubBearer scheme configured but UAT validator not initialized")
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			caller, err := uatV.Validate(r.Context(), token)
+			if err != nil {
+				s.log.Info("bearer token rejected by Scion Hub", "error", err)
+				http.Error(w, "unauthorized: token rejected by Scion Hub", http.StatusUnauthorized)
 				return
 			}
 			ctx := withCallerIdentity(r.Context(), caller)
@@ -619,6 +723,30 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				s.log.Debug("federation token decode failed", "error", err)
 				http.Error(w, "unauthorized: malformed token", http.StatusUnauthorized)
 				return
+			}
+			// A user credential names a person: the hub says which account
+			// it belongs to (GET /api/v1/auth/me under the same
+			// credential). A project visitor account makes it a federated
+			// user caller; the hub refuses a user with no such account.
+			// The bridge passes a hub refusal on, and answers 502 when the
+			// hub could not be asked.
+			// Agent credentials are unchanged.
+			if caller.IsFederatedUser() {
+				identified, idErr := s.bridge.identifyFederatedUser(r.Context(), caller)
+				if idErr != nil {
+					s.log.Debug("federated user not admitted by hub", "error", idErr)
+					if isHubUnauthenticated(idErr) {
+						http.Error(w, "unauthorized: credential rejected by Scion Hub", http.StatusUnauthorized)
+						return
+					}
+					if isHubRefusal(idErr) {
+						writeFederatedUserRefusal(w)
+						return
+					}
+					http.Error(w, "unable to verify caller with Scion Hub", http.StatusBadGateway)
+					return
+				}
+				caller = identified
 			}
 			ctx := withCallerIdentity(r.Context(), caller)
 			next.ServeHTTP(w, r.WithContext(ctx))

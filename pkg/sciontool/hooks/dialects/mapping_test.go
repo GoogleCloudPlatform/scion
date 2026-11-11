@@ -263,29 +263,34 @@ func TestMappingDialect_Parse_MissingEventName(t *testing.T) {
 	})
 }
 
-func TestMappingDialect_Parse_AssistantTextField(t *testing.T) {
-	spec := MappingDialectSpec{
-		Dialect:        "test",
-		EventNameField: "event",
-		Mappings: map[string]MappingEntrySpec{
-			"AgentStop": {
-				Event: hooks.EventAgentEnd,
-				Fields: map[string]string{
-					"assistant_text": ".response.text",
-				},
-			},
-		},
-	}
-	md := NewMappingDialect(spec)
+// TestLoadMappingDialect_IgnoresRetiredAssistantTextField verifies that a
+// dialect file written before the assistant_text field was retired still
+// loads and parses: the unknown field is ignored, other fields still map.
+func TestLoadMappingDialect_IgnoresRetiredAssistantTextField(t *testing.T) {
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "dialect.yaml")
+	require.NoError(t, os.WriteFile(specPath, []byte(`
+dialect: old-harness
+event_name_field: event
+mappings:
+  AgentStop:
+    event: agent-end
+    fields:
+      message: title
+      assistant_text: last_assistant_message
+`), 0o644))
+
+	md, err := LoadMappingDialect(specPath)
+	require.NoError(t, err)
 
 	event, err := md.Parse(map[string]interface{}{
-		"event": "AgentStop",
-		"response": map[string]interface{}{
-			"text": "Here is the answer.",
-		},
+		"event":                  "AgentStop",
+		"title":                  "turn done",
+		"last_assistant_message": "Here is the answer.",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "Here is the answer.", event.Data.AssistantText)
+	assert.Equal(t, hooks.EventAgentEnd, event.Name)
+	assert.Equal(t, "turn done", event.Data.Message)
 }
 
 func TestMappingDialect_Parse_TokenFieldMappings(t *testing.T) {
@@ -317,6 +322,113 @@ func TestMappingDialect_Parse_TokenFieldMappings(t *testing.T) {
 	assert.Equal(t, int64(200), event.Data.InputTokens)
 	assert.Equal(t, int64(75), event.Data.OutputTokens)
 	assert.Equal(t, int64(50), event.Data.CachedTokens)
+}
+
+// TestMappingDialect_Parse_CacheWriteAndReasoningTokenFieldMappings pins the
+// two new explicit yaml field targets (design §3.7 "Hook token plumbing"):
+// cache_write_tokens and reasoning_tokens, parsed the same way as the
+// existing token fields (positive int64 only; zero, negative and a missing
+// path all leave the field unset).
+func TestMappingDialect_Parse_CacheWriteAndReasoningTokenFieldMappings(t *testing.T) {
+	spec := MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "event",
+		Mappings: map[string]MappingEntrySpec{
+			"ModelDone": {
+				Event: hooks.EventModelEnd,
+				Fields: map[string]string{
+					"cache_write_tokens": ".stats.cacheWriteTokens",
+					"reasoning_tokens":   ".stats.reasoningTokens",
+				},
+			},
+		},
+	}
+	md := NewMappingDialect(spec)
+
+	t.Run("positive", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{
+				"cacheWriteTokens": float64(30),
+				"reasoningTokens":  float64(15),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(30), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(15), event.Data.ReasoningTokens)
+	})
+
+	t.Run("zero", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{
+				"cacheWriteTokens": float64(0),
+				"reasoningTokens":  float64(0),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(0), event.Data.ReasoningTokens)
+	})
+
+	t.Run("negative", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{
+				"cacheWriteTokens": float64(-5),
+				"reasoningTokens":  float64(-1),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(0), event.Data.ReasoningTokens)
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(0), event.Data.ReasoningTokens)
+	})
+}
+
+func TestMappingDialect_Parse_ModelFieldMapping(t *testing.T) {
+	md := NewMappingDialect(MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "event",
+		Mappings: map[string]MappingEntrySpec{
+			"ModelDone": {
+				Event:  hooks.EventModelEnd,
+				Fields: map[string]string{"model": ".info.modelName"},
+			},
+			"Unmapped": {Event: hooks.EventModelEnd},
+		},
+	})
+
+	event, err := md.Parse(map[string]interface{}{
+		"event": "ModelDone",
+		"info":  map[string]interface{}{"modelName": "provider/model-x"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "provider/model-x", event.Data.Model)
+
+	// Missing or non-string values leave Model empty, so the handler falls
+	// back to SCION_MODEL, then "unknown".
+	event, err = md.Parse(map[string]interface{}{
+		"event": "ModelDone",
+		"info":  map[string]interface{}{"modelName": float64(3)},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, event.Data.Model)
+
+	// No mapping entry for model: a top-level "model" key is not picked up
+	// implicitly.
+	event, err = md.Parse(map[string]interface{}{"event": "Unmapped", "model": "m"})
+	require.NoError(t, err)
+	assert.Empty(t, event.Data.Model)
 }
 
 func TestMappingDialect_Parse_TokenExtraction(t *testing.T) {
@@ -738,4 +850,54 @@ func TestMappingDialect_FullHarnessEvents(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMappingDialect_Parse_SuccessField pins how a mapped success path is
+// read: a bool as is, a string only as the status word "success" (any case),
+// and a missing value leaves success false.
+func TestMappingDialect_Parse_SuccessField(t *testing.T) {
+	md := NewMappingDialect(MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "hook_event_name",
+		Mappings: map[string]MappingEntrySpec{
+			"ToolResult": {
+				Event:  hooks.EventToolEnd,
+				Fields: map[string]string{"success": "result.status"},
+			},
+		},
+	})
+	cases := []struct {
+		name   string
+		result map[string]interface{}
+		want   bool
+	}{
+		{"bool true", map[string]interface{}{"status": true}, true},
+		{"bool false", map[string]interface{}{"status": false}, false},
+		{"string success", map[string]interface{}{"status": "success"}, true},
+		{"string success any case", map[string]interface{}{"status": "SUCCESS"}, true},
+		{"other string", map[string]interface{}{"status": "failure"}, false},
+		{"string true is not success", map[string]interface{}{"status": "true"}, false},
+		{"empty string", map[string]interface{}{"status": ""}, false},
+		{"number", map[string]interface{}{"status": float64(1)}, false},
+		{"missing", map[string]interface{}{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event, err := md.Parse(map[string]interface{}{
+				"hook_event_name": "ToolResult",
+				"result":          tc.result,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, event.Data.Success)
+		})
+	}
+
+	t.Run("missing path keeps a top-level bool", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"hook_event_name": "ToolResult",
+			"success":         true,
+		})
+		require.NoError(t, err)
+		assert.True(t, event.Data.Success)
+	})
 }

@@ -22,9 +22,9 @@
 // REPL usage:
 //
 //	scion-broker-repl --hub-url http://localhost:8080
-//	repl> sub scion.grove.mygrove.agent.*.messages
-//	repl> pub scion.grove.mygrove.agent.alice.messages hello world
-//	repl> unsub scion.grove.mygrove.agent.*.messages
+//	repl> sub scion.project.myproject.agent.*.messages
+//	repl> pub scion.project.myproject.agent.alice.messages hello world
+//	repl> unsub scion.project.myproject.agent.*.messages
 //	repl> quit
 package main
 

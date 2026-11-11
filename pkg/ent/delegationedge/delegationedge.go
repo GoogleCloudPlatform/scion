@@ -15,6 +15,48 @@ const (
 	Label = "delegation_edge"
 	// FieldID holds the string denoting the id field in the database.
 	FieldID = "id"
+	// FieldProvenanceVersion holds the string denoting the provenance_version field in the database.
+	FieldProvenanceVersion = "provenance_version"
+	// FieldSourcePrincipalKind holds the string denoting the source_principal_kind field in the database.
+	FieldSourcePrincipalKind = "source_principal_kind"
+	// FieldSourcePrincipalID holds the string denoting the source_principal_id field in the database.
+	FieldSourcePrincipalID = "source_principal_id"
+	// FieldSourceCredentialKind holds the string denoting the source_credential_kind field in the database.
+	FieldSourceCredentialKind = "source_credential_kind"
+	// FieldSourceCredentialID holds the string denoting the source_credential_id field in the database.
+	FieldSourceCredentialID = "source_credential_id"
+	// FieldSourceEventID holds the string denoting the source_event_id field in the database.
+	FieldSourceEventID = "source_event_id"
+	// FieldSourceScheduleID holds the string denoting the source_schedule_id field in the database.
+	FieldSourceScheduleID = "source_schedule_id"
+	// FieldSourceAuthorizationRevision holds the string denoting the source_authorization_revision field in the database.
+	FieldSourceAuthorizationRevision = "source_authorization_revision"
+	// FieldInitiatorPrincipalKind holds the string denoting the initiator_principal_kind field in the database.
+	FieldInitiatorPrincipalKind = "initiator_principal_kind"
+	// FieldInitiatorPrincipalID holds the string denoting the initiator_principal_id field in the database.
+	FieldInitiatorPrincipalID = "initiator_principal_id"
+	// FieldInitiatorCredentialKind holds the string denoting the initiator_credential_kind field in the database.
+	FieldInitiatorCredentialKind = "initiator_credential_kind"
+	// FieldInitiatorCredentialID holds the string denoting the initiator_credential_id field in the database.
+	FieldInitiatorCredentialID = "initiator_credential_id"
+	// FieldCeilingKind holds the string denoting the ceiling_kind field in the database.
+	FieldCeilingKind = "ceiling_kind"
+	// FieldCeilingVersion holds the string denoting the ceiling_version field in the database.
+	FieldCeilingVersion = "ceiling_version"
+	// FieldCeilingPermissionIds holds the string denoting the ceiling_permission_ids field in the database.
+	FieldCeilingPermissionIds = "ceiling_permission_ids"
+	// FieldCeilingBoundaryKind holds the string denoting the ceiling_boundary_kind field in the database.
+	FieldCeilingBoundaryKind = "ceiling_boundary_kind"
+	// FieldCeilingBoundaryProjectID holds the string denoting the ceiling_boundary_project_id field in the database.
+	FieldCeilingBoundaryProjectID = "ceiling_boundary_project_id"
+	// FieldCeilingSourceExpiresAt holds the string denoting the ceiling_source_expires_at field in the database.
+	FieldCeilingSourceExpiresAt = "ceiling_source_expires_at"
+	// FieldDeactivationCause holds the string denoting the deactivation_cause field in the database.
+	FieldDeactivationCause = "deactivation_cause"
+	// FieldDeactivatedAt holds the string denoting the deactivated_at field in the database.
+	FieldDeactivatedAt = "deactivated_at"
+	// FieldDeactivationOpID holds the string denoting the deactivation_op_id field in the database.
+	FieldDeactivationOpID = "deactivation_op_id"
 	// FieldDelegatorType holds the string denoting the delegator_type field in the database.
 	FieldDelegatorType = "delegator_type"
 	// FieldDelegatorID holds the string denoting the delegator_id field in the database.
@@ -44,6 +86,27 @@ const (
 // Columns holds all SQL columns for delegationedge fields.
 var Columns = []string{
 	FieldID,
+	FieldProvenanceVersion,
+	FieldSourcePrincipalKind,
+	FieldSourcePrincipalID,
+	FieldSourceCredentialKind,
+	FieldSourceCredentialID,
+	FieldSourceEventID,
+	FieldSourceScheduleID,
+	FieldSourceAuthorizationRevision,
+	FieldInitiatorPrincipalKind,
+	FieldInitiatorPrincipalID,
+	FieldInitiatorCredentialKind,
+	FieldInitiatorCredentialID,
+	FieldCeilingKind,
+	FieldCeilingVersion,
+	FieldCeilingPermissionIds,
+	FieldCeilingBoundaryKind,
+	FieldCeilingBoundaryProjectID,
+	FieldCeilingSourceExpiresAt,
+	FieldDeactivationCause,
+	FieldDeactivatedAt,
+	FieldDeactivationOpID,
 	FieldDelegatorType,
 	FieldDelegatorID,
 	FieldDelegateType,
@@ -68,6 +131,40 @@ func ValidColumn(column string) bool {
 }
 
 var (
+	// DefaultProvenanceVersion holds the default value on creation for the "provenance_version" field.
+	DefaultProvenanceVersion int
+	// DefaultSourcePrincipalKind holds the default value on creation for the "source_principal_kind" field.
+	DefaultSourcePrincipalKind string
+	// DefaultSourcePrincipalID holds the default value on creation for the "source_principal_id" field.
+	DefaultSourcePrincipalID string
+	// DefaultSourceCredentialKind holds the default value on creation for the "source_credential_kind" field.
+	DefaultSourceCredentialKind string
+	// DefaultSourceCredentialID holds the default value on creation for the "source_credential_id" field.
+	DefaultSourceCredentialID string
+	// DefaultSourceEventID holds the default value on creation for the "source_event_id" field.
+	DefaultSourceEventID string
+	// DefaultSourceAuthorizationRevision holds the default value on creation for the "source_authorization_revision" field.
+	DefaultSourceAuthorizationRevision int
+	// DefaultInitiatorPrincipalKind holds the default value on creation for the "initiator_principal_kind" field.
+	DefaultInitiatorPrincipalKind string
+	// DefaultInitiatorPrincipalID holds the default value on creation for the "initiator_principal_id" field.
+	DefaultInitiatorPrincipalID string
+	// DefaultInitiatorCredentialKind holds the default value on creation for the "initiator_credential_kind" field.
+	DefaultInitiatorCredentialKind string
+	// DefaultInitiatorCredentialID holds the default value on creation for the "initiator_credential_id" field.
+	DefaultInitiatorCredentialID string
+	// DefaultCeilingKind holds the default value on creation for the "ceiling_kind" field.
+	DefaultCeilingKind string
+	// DefaultCeilingVersion holds the default value on creation for the "ceiling_version" field.
+	DefaultCeilingVersion int32
+	// DefaultCeilingBoundaryKind holds the default value on creation for the "ceiling_boundary_kind" field.
+	DefaultCeilingBoundaryKind string
+	// DefaultCeilingBoundaryProjectID holds the default value on creation for the "ceiling_boundary_project_id" field.
+	DefaultCeilingBoundaryProjectID string
+	// DefaultDeactivationCause holds the default value on creation for the "deactivation_cause" field.
+	DefaultDeactivationCause string
+	// DefaultDeactivationOpID holds the default value on creation for the "deactivation_op_id" field.
+	DefaultDeactivationOpID string
 	// DelegatorIDValidator is a validator for the "delegator_id" field. It is called by the builders before save.
 	DelegatorIDValidator func(string) error
 	// DelegateIDValidator is a validator for the "delegate_id" field. It is called by the builders before save.
@@ -165,6 +262,111 @@ type OrderOption func(*sql.Selector)
 // ByID orders the results by the id field.
 func ByID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldID, opts...).ToFunc()
+}
+
+// ByProvenanceVersion orders the results by the provenance_version field.
+func ByProvenanceVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldProvenanceVersion, opts...).ToFunc()
+}
+
+// BySourcePrincipalKind orders the results by the source_principal_kind field.
+func BySourcePrincipalKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourcePrincipalKind, opts...).ToFunc()
+}
+
+// BySourcePrincipalID orders the results by the source_principal_id field.
+func BySourcePrincipalID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourcePrincipalID, opts...).ToFunc()
+}
+
+// BySourceCredentialKind orders the results by the source_credential_kind field.
+func BySourceCredentialKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceCredentialKind, opts...).ToFunc()
+}
+
+// BySourceCredentialID orders the results by the source_credential_id field.
+func BySourceCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceCredentialID, opts...).ToFunc()
+}
+
+// BySourceEventID orders the results by the source_event_id field.
+func BySourceEventID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceEventID, opts...).ToFunc()
+}
+
+// BySourceScheduleID orders the results by the source_schedule_id field.
+func BySourceScheduleID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceScheduleID, opts...).ToFunc()
+}
+
+// BySourceAuthorizationRevision orders the results by the source_authorization_revision field.
+func BySourceAuthorizationRevision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceAuthorizationRevision, opts...).ToFunc()
+}
+
+// ByInitiatorPrincipalKind orders the results by the initiator_principal_kind field.
+func ByInitiatorPrincipalKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalKind, opts...).ToFunc()
+}
+
+// ByInitiatorPrincipalID orders the results by the initiator_principal_id field.
+func ByInitiatorPrincipalID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalID, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialKind orders the results by the initiator_credential_kind field.
+func ByInitiatorCredentialKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialKind, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialID orders the results by the initiator_credential_id field.
+func ByInitiatorCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialID, opts...).ToFunc()
+}
+
+// ByCeilingKind orders the results by the ceiling_kind field.
+func ByCeilingKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingKind, opts...).ToFunc()
+}
+
+// ByCeilingVersion orders the results by the ceiling_version field.
+func ByCeilingVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingVersion, opts...).ToFunc()
+}
+
+// ByCeilingPermissionIds orders the results by the ceiling_permission_ids field.
+func ByCeilingPermissionIds(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingPermissionIds, opts...).ToFunc()
+}
+
+// ByCeilingBoundaryKind orders the results by the ceiling_boundary_kind field.
+func ByCeilingBoundaryKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingBoundaryKind, opts...).ToFunc()
+}
+
+// ByCeilingBoundaryProjectID orders the results by the ceiling_boundary_project_id field.
+func ByCeilingBoundaryProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingBoundaryProjectID, opts...).ToFunc()
+}
+
+// ByCeilingSourceExpiresAt orders the results by the ceiling_source_expires_at field.
+func ByCeilingSourceExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingSourceExpiresAt, opts...).ToFunc()
+}
+
+// ByDeactivationCause orders the results by the deactivation_cause field.
+func ByDeactivationCause(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeactivationCause, opts...).ToFunc()
+}
+
+// ByDeactivatedAt orders the results by the deactivated_at field.
+func ByDeactivatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeactivatedAt, opts...).ToFunc()
+}
+
+// ByDeactivationOpID orders the results by the deactivation_op_id field.
+func ByDeactivationOpID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeactivationOpID, opts...).ToFunc()
 }
 
 // ByDelegatorType orders the results by the delegator_type field.

@@ -21,6 +21,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=hub-config.sh
 source "${SCRIPT_DIR}/hub-config.sh"
 
+# Fail before provisioning anything if certificates are needed but
+# CERT_EMAIL is not set, or, without TLS (SKIP_TLS=true), if the base URL
+# that will take effect is not the https:// URL of an upstream terminator.
+if [[ "${SKIP_TLS}" != "true" ]]; then
+    require_cert_email
+else
+    require_no_tls_https_base_url
+    export HUB_BASE_URL
+fi
+
 echo "=== Scion Hub Full Deployment: ${HUB_NAME} ==="
 
 # Step 0: Preflight Checks
@@ -46,16 +56,28 @@ echo "--- Step 3: Setting up Repository ---"
 # Step 4: DNS and Certificates
 echo ""
 echo "--- Step 4: DNS and Certificates ---"
-./scripts/starter-hub/gce-certs.sh
+if [[ "${SKIP_TLS}" == "true" ]]; then
+    echo "SKIP_TLS=true: skipping DNS and certificate setup (gce-certs.sh)."
+else
+    ./scripts/starter-hub/gce-certs.sh
+fi
 
 # Step 5: Build and Start Hub
 echo ""
 echo "--- Step 5: Building and Starting Hub ---"
-./scripts/starter-hub/gce-start-hub.sh --full
+if [[ "${SKIP_TLS}" == "true" ]]; then
+    ./scripts/starter-hub/gce-start-hub.sh --full --no-tls
+else
+    ./scripts/starter-hub/gce-start-hub.sh --full
+fi
 
 echo ""
 echo "=== Full Deployment Complete ==="
-echo "Your Scion Hub should now be available at https://${HUB_DOMAIN}"
+if [[ "${SKIP_TLS}" == "true" ]]; then
+    echo "Your Scion Hub runs on ${INSTANCE_NAME}, port 8080, behind your TLS terminator at ${HUB_BASE_URL}."
+else
+    echo "Your Scion Hub should now be available at https://${HUB_DOMAIN}"
+fi
 echo ""
 echo "Note: To enable agent telemetry, upload the GCP credentials key to the Hub:"
 echo "  scion secret set scion-telemetry-gcp-credentials \\"

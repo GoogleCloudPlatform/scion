@@ -17,7 +17,6 @@ package hub
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -36,7 +35,8 @@ var containerRootPath = "/"
 // workspaceMountRoot returns the absolute path at which the configured
 // workspace storage backend is mounted, or "" when the config does not name
 // one. It is the single place the mount location is derived, so the readiness
-// check and hub-managed project paths cannot drift apart.
+// check and the hub's workspace Layout (config.ProjectStorageLayout, with volumeMountBase) cannot drift
+// apart.
 //
 // For the volume backends the mount root is <volumeMountBase>/<volume_name>;
 // the volume name is what identifies the mount point, since neither
@@ -70,8 +70,8 @@ func workspaceMountRoot(wsCfg *config.V1WorkspaceStorageConfig) string {
 //
 // Presence alone does not answer that question. The hub image declares no USER
 // and runs as root, so when the volume is mounted somewhere other than the
-// expected path, initHubManagedProject's MkdirAll happily creates the
-// directory on the container's ephemeral overlay. From then on a plain
+// expected path, a directory created under the expected path lands on the
+// container's ephemeral overlay. From then on a plain
 // os.Stat succeeds and readiness would report healthy forever while every
 // project tree is written to storage that vanishes on reschedule. Comparing
 // device IDs distinguishes the two: a directory created on the overlay shares
@@ -88,9 +88,8 @@ func workspaceMountRoot(wsCfg *config.V1WorkspaceStorageConfig) string {
 // since that state silently reinstates the bug this function exists to catch.
 // It happens when a FileInfo does not carry a unix stat (a fake FileInfo or a
 // filesystem implementation outside package os) or when the container root
-// cannot be stat'ed. Note this file needs syscall.Stat_t at compile time and
-// so builds only on unix targets, which is everything build-release.yml ships;
-// on a platform without that type it would not compile rather than fail open.
+// cannot be stat'ed, and on every non-unix platform, where deviceID
+// (device_id_other.go) reports no device number.
 func isMountedVolume(fi os.FileInfo, rootPath string) (mounted, determinable bool) {
 	dev, ok := deviceID(fi)
 	if !ok {
@@ -107,30 +106,4 @@ func isMountedVolume(fi os.FileInfo, rootPath string) (mounted, determinable boo
 	}
 
 	return dev != rootDev, true
-}
-
-// deviceID returns the filesystem device ID for fi, and whether it could be
-// determined.
-func deviceID(fi os.FileInfo) (uint64, bool) {
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return uint64(st.Dev), true
-}
-
-// warnEphemeralProjectPath reports, once per slug, that a hub-managed project
-// is being served from the pod's local disk because the shared volume has no
-// content for it yet.
-//
-// Once per slug rather than once per call: hubManagedProjectPath is on the
-// WebDAV, clone and cache request paths, so a deployment sitting in this state
-// would otherwise emit a line per request for as long as it runs. The
-// condition is a property of the deployment, not of the request.
-func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
-	if _, alreadyWarned := s.warnedEphemeralProjects.LoadOrStore(slug, struct{}{}); alreadyWarned {
-		return
-	}
-	s.projectsLogger().Warn("hub-managed project served from ephemeral local path; gke-shared-volume mount has no content yet",
-		"slug", slug, "local_path", localPath, "volume_path", volumePath)
 }

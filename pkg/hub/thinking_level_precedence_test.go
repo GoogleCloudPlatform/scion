@@ -17,14 +17,10 @@
 package hub
 
 import (
-	"context"
-	"log/slog"
 	"net/http"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,37 +35,6 @@ import (
 // into the container is pkg/agent/run.go's existing guarded read of
 // SCION_THINKING_LEVEL and cannot be exercised without a container runtime, so
 // no test here is entitled to claim the value "reaches the harness".
-
-// setupThinkingLevelDispatch wires the agent-create HTTP handler to a real
-// HTTPAgentDispatcher backed by a mock RuntimeBrokerClient, so the assertion
-// can be made on the RemoteCreateAgentRequest the hub actually builds — the
-// stub AgentDispatcher used by most create tests short-circuits before
-// buildCreateRequest and would never run the env injectors.
-func setupThinkingLevelDispatch(t *testing.T) (*Server, store.Store, *store.Project, *mockRuntimeBrokerClient) {
-	t.Helper()
-
-	// This stub only satisfies setupCreateAgentServer's signature: it is
-	// replaced by the SetDispatcher call below before any request is served
-	// and is never invoked, so createPhase here is not load-bearing. The live
-	// dispatcher is the real HTTPAgentDispatcher constructed below.
-	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{createPhase: string(state.PhaseRunning)})
-	ctx := context.Background()
-
-	// The real dispatcher refuses to dispatch to a broker with no endpoint.
-	// The endpoint is deliberately un-dialable: .invalid is reserved by
-	// RFC 2606 and can never resolve, so if a future change makes this path
-	// dial for real it fails loudly here instead of quietly reaching whatever
-	// happens to be listening on a plausible localhost port.
-	broker, err := s.GetRuntimeBroker(ctx, project.DefaultRuntimeBrokerID)
-	require.NoError(t, err)
-	broker.Endpoint = "http://broker.invalid"
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
-
-	mockClient := &mockRuntimeBrokerClient{}
-	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
-
-	return srv, s, project, mockClient
-}
 
 // TestCreateAgent_ProjectThinkingLevelAnnotation_ReachesDispatch is the Gap 1A
 // regression test: before injectThinkingLevelEnv existed, a project's

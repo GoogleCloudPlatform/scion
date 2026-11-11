@@ -18,10 +18,10 @@
 # =====================================
 # This script tests the full hub secret storage feature by exercising the
 # scion CLI commands for setting, getting, listing, and clearing
-# secrets at user and grove scopes, including type-aware secrets
+# secrets at user and project scopes, including type-aware secrets
 # (environment, variable, file) and the hub env --secret redirect.
 #
-# It starts a Hub server with dev auth, links a test grove, and runs
+# It starts a Hub server with dev auth, links a test project, and runs
 # the complete set of secret CRUD operations.
 #
 # Usage:
@@ -303,35 +303,31 @@ start_hub_server() {
     log_success "Authentication configured (dev token)"
 }
 
-setup_test_grove() {
-    log_section "Setting Up Test Grove"
+setup_test_project() {
+    log_section "Setting Up Test Project"
 
-    local grove_dir="$TEST_DIR/test-grove"
-    mkdir -p "$grove_dir"
+    local project_dir="$TEST_DIR/test-project"
+    mkdir -p "$project_dir"
 
-    # Initialize a grove
-    cd "$grove_dir"
+    # Initialize a project
+    cd "$project_dir"
     git init -q .
     git commit --allow-empty -m "init" -q
 
     $SCION init -y 2>&1 || true
-    log_success "Grove initialized at $grove_dir"
+    log_success "Project initialized at $project_dir"
 
-    # Link grove to the Hub
+    # Link project to the Hub
     if $SCION hub link -y 2>&1; then
-        log_success "Grove linked to Hub"
+        log_success "Project linked to Hub"
     else
-        log_error "Failed to link grove to Hub"
+        log_error "Failed to link project to Hub"
         exit 1
     fi
 
-    # Extract the grove ID for later use
-    GROVE_ID=$($SCION config get grove_id 2>/dev/null || echo "")
-    if [[ -z "$GROVE_ID" ]]; then
-        # Fall back to reading settings.yaml directly
-        GROVE_ID=$(grep 'grove_id:' "$grove_dir/.scion/settings.yaml" 2>/dev/null | awk '{print $2}' || echo "")
-    fi
-    log_info "Grove ID: ${GROVE_ID:-<not found>}"
+    # Extract the project ID for later use
+    PROJECT_ID=$($SCION config get project_id 2>/dev/null || echo "")
+    log_info "Project ID: ${PROJECT_ID:-<not found>}"
 }
 
 # ============================================================================
@@ -535,79 +531,79 @@ test_phase2_secret_types() {
 }
 
 # ============================================================================
-# Phase 3: Grove-Scoped Secrets
+# Phase 3: Project-Scoped Secrets
 # ============================================================================
 
-test_phase3_grove_scope() {
-    log_section "Phase 3: Grove-Scoped Secrets"
+test_phase3_project_scope() {
+    log_section "Phase 3: Project-Scoped Secrets"
 
-    # 3.1 List grove secrets (should be empty)
+    # 3.1 List project secrets (should be empty)
     assert_output_contains \
-        "3.1  List grove secrets (empty)" \
+        "3.1  List project secrets (empty)" \
         "No secrets found" \
-        $SCION hub secret get --grove="$GROVE_ID"
+        $SCION hub secret get --project="$PROJECT_ID"
 
-    # 3.2 Set a grove-scoped secret
+    # 3.2 Set a project-scoped secret
     assert_output_contains \
-        "3.2  Set grove-scoped secret" \
+        "3.2  Set project-scoped secret" \
         "Created" \
-        $SCION hub secret set --grove="$GROVE_ID" GROVE_SECRET grove_secret_val
+        $SCION hub secret set --project="$PROJECT_ID" PROJECT_SECRET project_secret_val
 
-    # 3.3 Set a grove-scoped file secret
+    # 3.3 Set a project-scoped file secret
     assert_output_contains \
-        "3.3  Set grove-scoped file secret" \
+        "3.3  Set project-scoped file secret" \
         "Created" \
-        $SCION hub secret set --grove="$GROVE_ID" --type file --target /app/config.json GROVE_CONFIG '{"env":"prod"}'
+        $SCION hub secret set --project="$PROJECT_ID" --type file --target /app/config.json PROJECT_CONFIG '{"env":"prod"}'
 
-    # 3.4 Get specific grove secret
+    # 3.4 Get specific project secret
     assert_output_contains \
-        "3.4  Get grove secret metadata" \
-        "GROVE_SECRET" \
-        $SCION hub secret get --grove="$GROVE_ID" GROVE_SECRET
+        "3.4  Get project secret metadata" \
+        "PROJECT_SECRET" \
+        $SCION hub secret get --project="$PROJECT_ID" PROJECT_SECRET
 
-    # 3.5 List grove secrets
+    # 3.5 List project secrets
     assert_output_contains \
-        "3.5  List grove secrets (contains GROVE_SECRET)" \
-        "GROVE_SECRET" \
-        $SCION hub secret get --grove="$GROVE_ID"
+        "3.5  List project secrets (contains PROJECT_SECRET)" \
+        "PROJECT_SECRET" \
+        $SCION hub secret get --project="$PROJECT_ID"
 
     assert_output_contains \
-        "3.5b List grove secrets (contains GROVE_CONFIG)" \
-        "GROVE_CONFIG" \
-        $SCION hub secret get --grove="$GROVE_ID"
+        "3.5b List project secrets (contains PROJECT_CONFIG)" \
+        "PROJECT_CONFIG" \
+        $SCION hub secret get --project="$PROJECT_ID"
 
-    # 3.6 Grove and user scopes are independent
+    # 3.6 Project and user scopes are independent
     assert_output_not_contains \
-        "3.6  User scope does not contain grove secrets" \
-        "GROVE_SECRET" \
+        "3.6  User scope does not contain project secrets" \
+        "PROJECT_SECRET" \
         $SCION hub secret get
 
     assert_output_not_contains \
-        "3.6b Grove scope does not contain user secrets" \
+        "3.6b Project scope does not contain user secrets" \
         "API_KEY" \
-        $SCION hub secret get --grove="$GROVE_ID"
+        $SCION hub secret get --project="$PROJECT_ID"
 
-    # 3.7 Update grove secret
+    # 3.7 Update project secret
     assert_output_contains \
-        "3.7  Update grove secret" \
+        "3.7  Update project secret" \
         "Updated" \
-        $SCION hub secret set --grove="$GROVE_ID" GROVE_SECRET updated_grove_val
+        $SCION hub secret set --project="$PROJECT_ID" PROJECT_SECRET updated_project_val
 
-    # 3.8 Clear grove secret
+    # 3.8 Clear project secret
     assert_output_contains \
-        "3.8  Clear grove secret" \
+        "3.8  Clear project secret" \
         "Deleted" \
-        $SCION hub secret clear --grove="$GROVE_ID" GROVE_CONFIG
+        $SCION hub secret clear --project="$PROJECT_ID" PROJECT_CONFIG
 
-    # 3.9 Verify cleared grove secret is gone
+    # 3.9 Verify cleared project secret is gone
     assert_failure \
-        "3.9  Verify cleared grove secret is gone" \
-        $SCION hub secret get --grove="$GROVE_ID" GROVE_CONFIG
+        "3.9  Verify cleared project secret is gone" \
+        $SCION hub secret get --project="$PROJECT_ID" PROJECT_CONFIG
 
-    # 3.10 JSON output shows grove scope
+    # 3.10 JSON output shows project scope
     TESTS_RUN=$((TESTS_RUN + 1))
     local json_output=""
-    json_output=$($SCION hub secret get --grove="$GROVE_ID" --json GROVE_SECRET 2>/dev/null) || true
+    json_output=$($SCION hub secret get --project="$PROJECT_ID" --json PROJECT_SECRET 2>/dev/null) || true
     local json_scope=""
     json_scope=$(echo "$json_output" | jq -r '.scope // empty' 2>/dev/null) || true
     if [[ "$json_scope" == "project" ]]; then
@@ -619,8 +615,8 @@ test_phase3_grove_scope() {
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
-    # Clean up grove secrets
-    $SCION hub secret clear --grove="$GROVE_ID" GROVE_SECRET 2>/dev/null || true
+    # Clean up project secrets
+    $SCION hub secret clear --project="$PROJECT_ID" PROJECT_SECRET 2>/dev/null || true
 
     log_info "Phase 3 complete"
 }
@@ -697,10 +693,10 @@ test_phase5_edge_cases() {
         "5.4  Clear non-existent secret fails" \
         $SCION hub secret clear NON_EXISTENT_SECRET_ZZZZZ
 
-    # 5.5 Cannot use --grove and --broker at the same time
+    # 5.5 Cannot use --project and --broker at the same time
     assert_failure \
-        "5.5  Reject --grove and --broker together" \
-        $SCION hub secret get --grove="$GROVE_ID" --broker=fake-broker-id
+        "5.5  Reject --project and --broker together" \
+        $SCION hub secret get --project="$PROJECT_ID" --broker=fake-broker-id
 
     # 5.6 Set and update multiple times
     $SCION hub secret set MULTI_SECRET "first" > /dev/null 2>&1
@@ -747,11 +743,11 @@ test_phase6_cleanup() {
         "No secrets found" \
         $SCION hub secret get
 
-    # 6.2 Verify grove scope is empty
+    # 6.2 Verify project scope is empty
     assert_output_contains \
-        "6.2  Grove scope empty after cleanup" \
+        "6.2  Project scope empty after cleanup" \
         "No secrets found" \
-        $SCION hub secret get --grove="$GROVE_ID"
+        $SCION hub secret get --project="$PROJECT_ID"
 
     log_info "Phase 6 complete"
 }
@@ -770,11 +766,11 @@ run_all_tests() {
     check_prerequisites
     build_scion
     start_hub_server
-    setup_test_grove
+    setup_test_project
 
     test_phase1_user_scope_crud
     test_phase2_secret_types
-    test_phase3_grove_scope
+    test_phase3_project_scope
     test_phase4_env_secret_redirect
     test_phase5_edge_cases
     test_phase6_cleanup

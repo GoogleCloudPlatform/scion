@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,13 +44,23 @@ const fallbackMinBudget = 10 * time.Second
 
 // fallbackContext returns a context for the fallback resolver. If the primary
 // ctx is still healthy and has a usable budget left it is used as-is, so the
-// caller's cancellation and deadline are preserved. If it is already cancelled
-// or expired — or so close to its deadline that the fallback could not finish
-// (e.g. the Hub call consumed nearly all of the caller's budget) — the context
-// is detached from the cancellation signal and given a bounded budget so the
-// fallback can still complete. Values (logging, tracing) are preserved either
-// way.
+// caller's cancellation and deadline are preserved. If its deadline has
+// expired — or is so close that the fallback could not finish (e.g. the Hub
+// call consumed nearly all of the caller's budget) — the context is detached
+// from the deadline and given a bounded budget so the fallback can still
+// complete. Values (logging, tracing) are preserved either way.
+//
+// An explicitly cancelled ctx (context.Canceled, not DeadlineExceeded) is
+// returned as-is, so the fallback fails at once: cancellation means the
+// caller has gone away (the agent was deleted or stopped, or the Hub
+// abandoned the request), and nobody is left to use the result. Detaching in
+// that case kept a deleted agent's start running for up to fallbackTimeout,
+// long enough for its failure handling to run against a newer agent that had
+// since taken the same name.
 func fallbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx, func() {}
+	}
 	if ctx.Err() == nil {
 		if dl, ok := ctx.Deadline(); !ok || time.Until(dl) >= fallbackMinBudget {
 			// Healthy with a usable budget — inherit deadline and cancellation.
@@ -58,6 +69,21 @@ func fallbackContext(ctx context.Context) (context.Context, context.CancelFunc) 
 	}
 	// Spent, or too little budget left — detach with a bounded budget.
 	return context.WithTimeout(context.WithoutCancel(ctx), fallbackTimeout)
+}
+
+// RouteFilter may be implemented by a resolver registered via
+// RegisterFallback to claim specific refs for direct handling, routing them
+// directly to itself instead of through the primary (Hub) resolver, for refs
+// the primary structurally cannot serve — for example a ref whose credential
+// lives only on the broker. The check must be cheap and deterministic: no
+// I/O, in particular no network call. It runs for every ref in a scheme
+// group before the primary is even attempted, so a ref it claims never costs
+// that group a wasted Hub round trip or a Hub-side resolution attempt that
+// can only fail or fall back.
+type RouteFilter interface {
+	// PreferFallback reports whether ref must be routed directly to this
+	// resolver instead of being attempted against the primary first.
+	PreferFallback(ref api.SkillReference) bool
 }
 
 // RoutingSkillResolver dispatches SkillReferences to scheme-specific resolvers.
@@ -166,6 +192,45 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 				})
 			}
 			continue
+		}
+
+		// Let the fallback claim any refs the primary structurally cannot
+		// serve (RouteFilter) before the primary is attempted at all. This
+		// both saves the wasted round trip and keeps the primary from ever
+		// seeing a ref it can only fail or fall back on.
+		if fb != nil {
+			if filter, ok := fb.(RouteFilter); ok {
+				routedToPrimary := schemeRefs[:0:0] // fresh backing array; schemeRefs must not be mutated in place
+				var directRefs []api.SkillReference
+				for _, ref := range schemeRefs {
+					if filter.PreferFallback(ref) {
+						directRefs = append(directRefs, ref)
+					} else {
+						routedToPrimary = append(routedToPrimary, ref)
+					}
+				}
+				if len(directRefs) > 0 {
+					dr, err := fb.Resolve(ctx, directRefs, opts)
+					if err != nil {
+						// Only the direct refs failed: report each of them and
+						// still resolve the refs routed to the primary and the
+						// other scheme groups.
+						slog.Warn("fallback skill resolver failed for directly routed refs",
+							"scheme", scheme,
+							"fallback", resolverNameOf(fb),
+							"refs", len(directRefs),
+							"error", err)
+						dr = &ResolveResult{Errors: perRefErrors(directRefs,
+							fmt.Sprintf("fallback resolver for scheme %q failed: %v", scheme, err))}
+					}
+					result.Resolved = append(result.Resolved, dr.Resolved...)
+					result.Errors = append(result.Errors, dr.Errors...)
+				}
+				schemeRefs = routedToPrimary
+				if len(schemeRefs) == 0 {
+					continue
+				}
+			}
 		}
 
 		sr, err := resolver.Resolve(ctx, schemeRefs, opts)
@@ -278,6 +343,16 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 	merged.Resolved = append(merged.Resolved, fr.Resolved...)
 	merged.Errors = append(merged.Errors, fr.Errors...)
 	return merged
+}
+
+// perRefErrors returns a resolve_failed ResolveError with msg for each of
+// refs.
+func perRefErrors(refs []api.SkillReference, msg string) []ResolveError {
+	errs := make([]ResolveError, len(refs))
+	for i, ref := range refs {
+		errs[i] = ResolveError{URI: ref.URI, Code: SkillErrCodeResolveFailed, Message: msg}
+	}
+	return errs
 }
 
 // refKey builds a map key identifying a skill reference by URI and alias. The

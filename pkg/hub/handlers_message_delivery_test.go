@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,49 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// setupMessageTestAgent creates a project, runtime broker, and agent for message tests.
-func setupMessageTestAgent(t *testing.T, s store.Store, phase string) (projectID, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:       tid("msg-broker"),
-		Name:     "msg-broker",
-		Slug:     "msg-broker",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create runtime broker: %v", err)
-	}
-
-	project := &store.Project{
-		ID:   tid("msg-project"),
-		Slug: "msg-project",
-		Name: "msg-project",
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	agent := &store.Agent{
-		ID:              tid("msg-agent"),
-		Slug:            "msg-agent",
-		Name:            "msg-agent",
-		ProjectID:       project.ID,
-		Phase:           phase,
-		RuntimeBrokerID: broker.ID,
-		Visibility:      store.VisibilityPrivate,
-		Created:         time.Now(),
-		Updated:         time.Now(),
-	}
-	if err := s.CreateAgent(ctx, agent); err != nil {
-		t.Fatalf("failed to create agent: %v", err)
-	}
-
-	return project.ID, agent.ID
-}
 
 // --- Stream H: Agent phase pre-check tests ---
 
@@ -122,7 +78,7 @@ func TestHandleAgentMessage_StoppedReturns409(t *testing.T) {
 	agent := &store.Agent{
 		ID: tid("msg-agent-stop"), Slug: "stopped-agent", Name: "stopped-agent",
 		ProjectID: project.ID, Phase: string(state.PhaseStopped),
-		RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+		RuntimeBrokerID: broker.ID,
 	}
 	_ = s.CreateAgent(ctx, agent)
 
@@ -165,7 +121,7 @@ func TestHandleAgentMessage_ErrorReturns409(t *testing.T) {
 	agent := &store.Agent{
 		ID: tid("msg-agent-err"), Slug: "error-agent", Name: "error-agent",
 		ProjectID: project.ID, Phase: string(state.PhaseError),
-		RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+		RuntimeBrokerID: broker.ID,
 	}
 	_ = s.CreateAgent(ctx, agent)
 
@@ -187,7 +143,7 @@ func TestHandleAgentMessage_ErrorReturns409(t *testing.T) {
 	if errResp.Error.Code != ErrCodeAgentNotRunning {
 		t.Errorf("expected error code %q, got %q", ErrCodeAgentNotRunning, errResp.Error.Code)
 	}
-	if want := `Agent "error-agent" is in error state. Use 'scion resume' to restart.`; errResp.Error.Message != want {
+	if want := `Agent "error-agent" is in error state. Use 'scion resume --force' to best-effort resume its previous session, or 'scion start' for a fresh one.`; errResp.Error.Message != want {
 		t.Errorf("expected message %q, got %q", want, errResp.Error.Message)
 	}
 }
@@ -208,7 +164,7 @@ func TestHandleAgentMessage_ProvisioningReturns409(t *testing.T) {
 	agent := &store.Agent{
 		ID: tid("msg-agent-prov"), Slug: "prov-agent", Name: "prov-agent",
 		ProjectID: project.ID, Phase: string(state.PhaseProvisioning),
-		RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+		RuntimeBrokerID: broker.ID,
 	}
 	_ = s.CreateAgent(ctx, agent)
 
@@ -300,7 +256,7 @@ func TestHandleProjectBroadcast_Returns202WithTargeting(t *testing.T) {
 		agent := &store.Agent{
 			ID: api.NewUUID(), Slug: tc.slug, Name: tc.slug,
 			ProjectID: project.ID, Phase: tc.phase,
-			RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+			RuntimeBrokerID: broker.ID,
 		}
 		_ = s.CreateAgent(ctx, agent)
 	}
@@ -367,7 +323,7 @@ func TestHandleProjectBroadcast_AllRunning(t *testing.T) {
 		agent := &store.Agent{
 			ID: api.NewUUID(), Slug: slug, Name: slug,
 			ProjectID: project.ID, Phase: string(state.PhaseRunning),
-			RuntimeBrokerID: broker.ID, Visibility: store.VisibilityPrivate,
+			RuntimeBrokerID: broker.ID,
 		}
 		_ = s.CreateAgent(ctx, agent)
 	}
@@ -435,25 +391,6 @@ func TestHandleProjectBroadcast_NoAgents(t *testing.T) {
 }
 
 // --- Stream D: Synchronous broker retry tests ---
-
-// errorDispatcher wraps brokerMockDispatcher to return a fixed error.
-type errorDispatcher struct {
-	brokerMockDispatcher
-	err        error
-	deferCount int32
-	calls      atomic.Int32
-}
-
-func (d *errorDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
-	n := d.calls.Add(1)
-	if d.deferCount > 0 && int32(n) <= atomic.LoadInt32(&d.deferCount) {
-		return ErrMessageDeferred
-	}
-	if d.err != nil {
-		return d.err
-	}
-	return nil
-}
 
 func TestHandleAgentMessage_BrokerError502(t *testing.T) {
 	srv, s := testServer(t)

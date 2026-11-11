@@ -9,6 +9,7 @@ import (
 
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/api/option"
@@ -442,5 +443,88 @@ func TestGCPMonitoringDescriptorAndTimeSeriesIdentity(t *testing.T) {
 				t.Fatalf("descriptor missing %s", key)
 			}
 		}
+	}
+}
+
+// usageTokensPoint builds a scion.usage.tokens admission candidate with the
+// given token_type value, matching the shape UsageDeriver.record actually
+// emits (usage.go): a delta, monotonic sum on usageMetricScope with only
+// harness/model/token_type point labels.
+func usageTokensPoint(tokenType string) *metricpb.ResourceMetrics {
+	metric := &metricpb.Metric{
+		Name: telemetrycontract.MetricUsageTokens,
+		Unit: "{token}",
+		Data: &metricpb.Metric_Sum{Sum: &metricpb.Sum{
+			AggregationTemporality: metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+			IsMonotonic:            true,
+			DataPoints: []*metricpb.NumberDataPoint{{
+				StartTimeUnixNano: 1, TimeUnixNano: 2,
+				Value: &metricpb.NumberDataPoint_AsInt{AsInt: 5},
+				Attributes: []*commonpb.KeyValue{
+					metricStringLabel("harness", "claude"),
+					metricStringLabel("model", "claude-sonnet-5"),
+					metricStringLabel(telemetrycontract.TokenTypeLabel, tokenType),
+				},
+			}},
+		}},
+	}
+	return testMetricResource("sciontool", usageMetricScope, "", "usage", metric)
+}
+
+// TestUsageTokensClosedEnumEnforcedAtGCPAdmission pins that token_type is a
+// closed enum (design §3.2, "Any other value is an admission error"), and it
+// must be enforced where the point is admitted, not merely by the deriver's
+// own producer code.
+func TestUsageTokensClosedEnumEnforcedAtGCPAdmission(t *testing.T) {
+	for _, tokenType := range telemetrycontract.TokenTypes {
+		s := newMetricStreams()
+		s.gcp = true
+		if err := s.add([]*metricpb.ResourceMetrics{usageTokensPoint(tokenType)}); err != nil {
+			t.Fatalf("token_type=%q rejected, want admitted: %v", tokenType, err)
+		}
+	}
+	for _, bad := range []string{"", "bogus", "INPUT", "input "} {
+		s := newMetricStreams()
+		s.gcp = true
+		if err := s.add([]*metricpb.ResourceMetrics{usageTokensPoint(bad)}); err == nil {
+			t.Fatalf("token_type=%q was admitted, want rejection (closed enum)", bad)
+		}
+	}
+}
+
+// TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission pins that the
+// contract's closed token_type enum (design §3.2, "Any other value is an
+// admission error") is enforced on the generic OTLP path too, not only GCP.
+// usageTokensPoint's shape admits on the generic path too (it carries no
+// GCP-only fields), so it can be reused directly with s.gcp left false.
+func TestUsageTokensClosedEnumEnforcedOnGenericOTLPAdmission(t *testing.T) {
+	for _, tokenType := range telemetrycontract.TokenTypes {
+		s := newMetricStreams()
+		if err := s.add([]*metricpb.ResourceMetrics{usageTokensPoint(tokenType)}); err != nil {
+			t.Fatalf("token_type=%q rejected, want admitted: %v", tokenType, err)
+		}
+	}
+	for _, bad := range []string{"", "bogus", "INPUT", "input "} {
+		s := newMetricStreams()
+		if err := s.add([]*metricpb.ResourceMetrics{usageTokensPoint(bad)}); err == nil {
+			t.Fatalf("token_type=%q was admitted on the generic OTLP path, want rejection (closed enum)", bad)
+		}
+	}
+}
+
+// TestTokenTypeLabelRestrictedToUsageTokensMetric pins that token_type is
+// meaningful only on scion.usage.tokens. cloudPointFieldsFor must not let it
+// slip onto any other reserved counter, such as gen_ai.api.calls.
+func TestTokenTypeLabelRestrictedToUsageTokensMetric(t *testing.T) {
+	metric := testNumber(telemetrycontract.MetricAPICalls, metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, 1, 2, 1,
+		metricStringLabel("harness", "claude"), metricStringLabel("model", "claude-sonnet-5"),
+		metricStringLabel("status", telemetrycontract.StatusSuccess),
+		metricStringLabel(telemetrycontract.TokenTypeLabel, telemetrycontract.TokenTypeInput))
+	metric.Unit = hookCounterUnit(telemetrycontract.MetricAPICalls)
+	input := testMetricResource("sciontool", hookMetricScope, "", "hook", metric)
+	s := newMetricStreams()
+	s.gcp = true
+	if err := s.add([]*metricpb.ResourceMetrics{input}); err == nil {
+		t.Fatal("token_type on gen_ai.api.calls was admitted, want rejection (restricted to scion.usage.tokens)")
 	}
 }

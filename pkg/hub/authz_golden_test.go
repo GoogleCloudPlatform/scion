@@ -42,227 +42,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// goldenFixture sets up a shared world for the golden decision tests:
-//
-//   - Two projects (alpha, beta) with members groups and agents
-//   - A super-admin user, a hub-admin user
-//   - A hub-member user who is a member of project alpha only
-//   - A hub-member user with NO project memberships
-//   - A project-owner user for alpha
-//   - A project-admin user for alpha
-//   - Agents in both projects, with ancestry chains for progeny tests
-//   - Progeny policies for secrets, env vars, and skill injections
-type goldenFixture struct {
-	authz *AuthzService
-	store store.Store
-
-	projectAlpha *store.Project
-	projectBeta  *store.Project
-
-	// Groups
-	hubMembersGroup   *store.Group
-	alphaMembersGroup *store.Group
-	betaMembersGroup  *store.Group
-	alphaAgentsGroup  *store.Group
-	betaAgentsGroup   *store.Group
-
-	// Users
-	superAdminID   string
-	hubAdminID     string
-	memberAlphaID  string // hub member AND alpha project member
-	memberNoneID   string // hub member with NO project memberships
-	projectOwnerID string // owner of project alpha
-	projectAdminID string // admin of project alpha
-
-	// Agents
-	agentAlpha *store.Agent // agent in project alpha
-	agentBeta  *store.Agent // agent in project beta
-
-	// Progeny test resources
-	secretID         string
-	envVarID         string
-	skillInjectionID string
-}
-
-func newGoldenFixture(t *testing.T) *goldenFixture {
-	t.Helper()
-	authz, s := authzTestSetup(t)
-	ctx := context.Background()
-
-	f := &goldenFixture{
-		authz:            authz,
-		store:            s,
-		superAdminID:     tid("golden-superadmin"),
-		hubAdminID:       tid("golden-hubadmin"),
-		memberAlphaID:    tid("golden-member-alpha"),
-		memberNoneID:     tid("golden-member-none"),
-		projectOwnerID:   tid("golden-proj-owner"),
-		projectAdminID:   tid("golden-proj-admin"),
-		secretID:         tid("golden-secret"),
-		envVarID:         tid("golden-envvar"),
-		skillInjectionID: tid("golden-skill-inj"),
-	}
-
-	// --- Projects ---
-	f.projectAlpha = &store.Project{
-		ID: tid("golden-project-alpha"), Name: "Alpha", Slug: "golden-alpha",
-		OwnerID: f.projectOwnerID,
-	}
-	f.projectBeta = &store.Project{
-		ID: tid("golden-project-beta"), Name: "Beta", Slug: "golden-beta",
-		OwnerID: tid("golden-beta-owner"),
-	}
-	require.NoError(t, s.CreateProject(ctx, f.projectAlpha))
-	require.NoError(t, s.CreateProject(ctx, f.projectBeta))
-
-	// --- Groups ---
-	// hub-members group (the seeded one may already exist from testServer)
-	hmGroup, err := s.GetGroupBySlug(ctx, "hub-members")
-	if err != nil {
-		hmGroup = &store.Group{
-			ID: api.NewUUID(), Name: "Hub Members", Slug: "hub-members",
-			GroupType: store.GroupTypeExplicit,
-		}
-		require.NoError(t, s.CreateGroup(ctx, hmGroup))
-	}
-	f.hubMembersGroup = hmGroup
-
-	f.alphaMembersGroup = &store.Group{
-		ID: api.NewUUID(), Name: "Alpha Members",
-		Slug: "project:golden-alpha:members", GroupType: store.GroupTypeExplicit,
-		ProjectID: f.projectAlpha.ID,
-	}
-	f.betaMembersGroup = &store.Group{
-		ID: api.NewUUID(), Name: "Beta Members",
-		Slug: "project:golden-beta:members", GroupType: store.GroupTypeExplicit,
-		ProjectID: f.projectBeta.ID,
-	}
-	f.alphaAgentsGroup = &store.Group{
-		ID: api.NewUUID(), Name: "Alpha Agents",
-		Slug: "project:golden-alpha:agents", GroupType: store.GroupTypeProjectAgents,
-		ProjectID: f.projectAlpha.ID,
-	}
-	f.betaAgentsGroup = &store.Group{
-		ID: api.NewUUID(), Name: "Beta Agents",
-		Slug: "project:golden-beta:agents", GroupType: store.GroupTypeProjectAgents,
-		ProjectID: f.projectBeta.ID,
-	}
-	require.NoError(t, s.CreateGroup(ctx, f.alphaMembersGroup))
-	require.NoError(t, s.CreateGroup(ctx, f.betaMembersGroup))
-	require.NoError(t, s.CreateGroup(ctx, f.alphaAgentsGroup))
-	require.NoError(t, s.CreateGroup(ctx, f.betaAgentsGroup))
-
-	// --- Users ---
-	// Super-admin
-	createTestUserWithRole(t, s, f.superAdminID, "superadmin@golden.test", "admin", store.SystemRoleSuperAdmin)
-	// Hub admin
-	createTestUserWithRole(t, s, f.hubAdminID, "hubadmin@golden.test", "member", store.SystemRoleHubAdmin)
-	// Hub member who is also alpha project member
-	createTestUserWithRole(t, s, f.memberAlphaID, "member-alpha@golden.test", "member", store.SystemRoleHubMember)
-	// Hub member with NO project memberships
-	createTestUserWithRole(t, s, f.memberNoneID, "member-none@golden.test", "member", store.SystemRoleHubMember)
-	// Project owner of alpha (also a hub member)
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: f.projectOwnerID, Email: "proj-owner@golden.test",
-		DisplayName: "Project Owner", Role: "member", Status: "active",
-	}))
-	// Project admin of alpha (also a hub member)
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: f.projectAdminID, Email: "proj-admin@golden.test",
-		DisplayName: "Project Admin", Role: "member", Status: "active",
-	}))
-
-	// --- Hub Members group memberships ---
-	for _, uid := range []string{f.memberAlphaID, f.memberNoneID, f.projectOwnerID, f.projectAdminID} {
-		_ = s.AddGroupMember(ctx, &store.GroupMember{
-			GroupID: f.hubMembersGroup.ID, MemberID: uid,
-			MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember,
-		})
-	}
-
-	// --- Alpha project memberships ---
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID: f.alphaMembersGroup.ID, MemberID: f.projectOwnerID,
-		MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleOwner,
-	}))
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID: f.alphaMembersGroup.ID, MemberID: f.projectAdminID,
-		MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleAdmin,
-	}))
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID: f.alphaMembersGroup.ID, MemberID: f.memberAlphaID,
-		MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember,
-	}))
-
-	// --- Project role bindings for alpha members ---
-	createTestUserWithProjectRole(t, s, f.projectOwnerID, "proj-owner@golden.test",
-		f.projectAlpha.ID, store.ProjectRoleOwner)
-	createTestUserWithProjectRole(t, s, f.projectAdminID, "proj-admin@golden.test",
-		f.projectAlpha.ID, store.ProjectRoleAdmin)
-	createTestUserWithProjectRole(t, s, f.memberAlphaID, "member-alpha@golden.test",
-		f.projectAlpha.ID, store.ProjectRoleMember)
-
-	// --- Agents ---
-	f.agentAlpha = &store.Agent{
-		ID: tid("golden-agent-alpha"), Slug: "golden-agent-alpha",
-		Name: "Alpha Agent", ProjectID: f.projectAlpha.ID,
-		Phase:    string(state.PhaseRunning),
-		OwnerID:  f.projectOwnerID,
-		Ancestry: []string{f.projectOwnerID},
-	}
-	f.agentBeta = &store.Agent{
-		ID: tid("golden-agent-beta"), Slug: "golden-agent-beta",
-		Name: "Beta Agent", ProjectID: f.projectBeta.ID,
-		Phase:   string(state.PhaseRunning),
-		OwnerID: tid("golden-beta-owner"),
-	}
-	require.NoError(t, s.CreateAgent(ctx, f.agentAlpha))
-	require.NoError(t, s.CreateAgent(ctx, f.agentBeta))
-
-	// CO1: Legacy per-project member policies removed. Authorization is
-	// handled exclusively by RoleBindings and the AK1 kernel. The
-	// createTestUserWithProjectRole helper above creates the necessary
-	// project-scoped RoleBindings.
-
-	// --- Progeny resources (CO1: relationship grants replace DelegatedFrom policies) ---
-	// The RelationshipGrantResolver uses store.ListProgenySecrets/EnvVars/SkillInjections
-	// to check progeny access. These store methods filter for AllowProgeny=true and
-	// CreatedBy IN ancestry.
-
-	// Secret with progeny access
-	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
-		ID:           f.secretID,
-		Key:          "golden-secret",
-		Scope:        "user",
-		ScopeID:      f.projectOwnerID,
-		AllowProgeny: true,
-		CreatedBy:    f.projectOwnerID,
-	}))
-
-	// EnvVar with progeny access
-	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{
-		ID:           f.envVarID,
-		Key:          "golden-envvar",
-		Value:        "test-value",
-		Scope:        "user",
-		ScopeID:      f.projectOwnerID,
-		AllowProgeny: true,
-		CreatedBy:    f.projectOwnerID,
-	}))
-
-	// Skill injection with progeny access
-	require.NoError(t, s.AddSkillInjection(ctx, &store.SkillInjection{
-		ID:           f.skillInjectionID,
-		Scope:        "user",
-		ScopeID:      f.projectOwnerID,
-		SkillURI:     "test://golden-skill",
-		AllowProgeny: true,
-		CreatedBy:    f.projectOwnerID,
-	}))
-
-	return f
-}
-
 // =============================================================================
 // Golden Decision 1: Hub member listing projects
 // =============================================================================
@@ -389,7 +168,8 @@ func TestGolden_ProjectOwnerFullAccess(t *testing.T) {
 	}
 
 	// Owner should be able to do everything on project resources
-	for _, action := range []Action{ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage} {
+	// Agent start/stop are authorized as ActionLifecycle (agent.lifecycle).
+	for _, action := range []Action{ActionRead, ActionUpdate, ActionDelete, ActionLifecycle, ActionMessage} {
 		decision := f.authz.CheckAccess(ctx, owner, alphaAgentRes, action)
 		assert.True(t, decision.Allowed,
 			"project owner should have %s access on project agents", action)
@@ -436,18 +216,27 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 		ParentType: "project", ParentID: f.projectAlpha.ID,
 	}
 
-	// Admin should read, update, attach, message agents
-	// CO1: start/stop are enforced through ActionAttach, not as independent permissions.
+	// Admin should read, update, message agents
 	// ActionMessage is a scope-level permission but project-admin role includes agent.message.
-	for _, action := range []Action{ActionRead, ActionUpdate, ActionAttach, ActionMessage} {
+	for _, action := range []Action{ActionRead, ActionUpdate, ActionMessage} {
 		decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, action)
 		assert.True(t, decision.Allowed,
 			"project admin should have %s access on project agents", action)
 	}
 
+	// admin must NOT attach to another member's agent —
+	// the agent runs with its owner's user-scoped secrets.
+	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionAttach)
+	assert.False(t, decision.Allowed,
+		"project admin should NOT have attach access on another member's agent")
+	// admin may open another member's forwarded ports.
+	decision = f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionPortAccess)
+	assert.True(t, decision.Allowed,
+		"project admin should have port_access on project agents: %s", decision.Reason)
+
 	// CO1 CUTOVER: Admin cannot delete agents — project-admin role excludes
 	// delete action. This is an INTENTIONAL restriction.
-	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionDelete)
+	decision = f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionDelete)
 	assert.False(t, decision.Allowed,
 		"project admin should NOT have delete access (project-admin role excludes delete)")
 }
@@ -533,8 +322,16 @@ func TestGolden_SuperAdminFullAccess(t *testing.T) {
 	assert.True(t, decision.Allowed, "super-admin should access any project")
 
 	// Hub-level resources too
+	// Hub-type requests name their permission: (hub, update) is shared by
+	// several registry permissions.
 	hubRes := Resource{Type: "hub", ID: "settings"}
-	decision = f.authz.CheckAccess(ctx, admin, hubRes, ActionUpdate)
+	decision = f.authz.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(admin),
+		Credential: credentialContextForIdentity(admin),
+		Resource:   hubRes,
+		Action:     ActionUpdate,
+		Permission: "hub.settings.update",
+	})
 	assert.True(t, decision.Allowed, "super-admin should access hub settings")
 }
 
@@ -801,18 +598,23 @@ func TestGolden_AgentRelationshipGrantDelegationCeiling(t *testing.T) {
 
 	agent := dcAgentIdentity(ceilingAgentID, f.projectAlpha.ID, AgentRoleFull)
 
-	// Resource in Beta with the AGENT's ID in Ancestry. This triggers:
+	// Agent in Beta with the AGENT's ID in Ancestry. This triggers:
 	//  - Kernel deny: synthetic binding scoped to Alpha, resource in Beta.
-	//  - Ancestor relationship grant: agent is in Ancestry.
-	//  - Scope restriction passes: project.read is in agent scopes.
+	//  - Ancestor relationship grant: agent is in Ancestry, and
+	//    agent.lifecycle is listed for agent ancestors of agents.
+	//  - Scope restriction passes: agent.lifecycle is in agent scopes.
 	//  - Ceiling: edge scoped to Beta exists, user holds permission in Beta.
 	resource := Resource{
-		Type: "project", ID: f.projectBeta.ID,
-		Ancestry: []string{ceilingAgentID},
+		Type: "agent", ID: tid("relceil-child"),
+		ParentType: "project", ParentID: f.projectBeta.ID,
+		// The chain root is a different user, so the delegator's own
+		// authority on the resource comes only from its Beta role (an
+		// ancestor relationship of the delegator would also supply it).
+		Ancestry: []string{tid("relceil-other-root"), ceilingAgentID},
 	}
 
 	// ALLOWED: relationship grant fires (kernel denied), ceiling passes.
-	decision := f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	decision := f.authz.CheckAccess(ctx, agent, resource, ActionLifecycle)
 	assert.True(t, decision.Allowed,
 		"agent should be allowed via ancestry relationship grant when ceiling passes; got reason: %s", decision.Reason)
 	assert.Contains(t, decision.Reason, "relationship grant",
@@ -832,7 +634,7 @@ func TestGolden_AgentRelationshipGrantDelegationCeiling(t *testing.T) {
 	// denies because the delegator no longer holds the permission. Before
 	// the C-1 fix, this would incorrectly return allowed because Step 9
 	// returned early before Step 10 (ceiling check).
-	decision = f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	decision = f.authz.CheckAccess(ctx, agent, resource, ActionLifecycle)
 	assert.False(t, decision.Allowed,
 		"agent MUST be denied via ceiling even when allowed by relationship grant (C-1 fix)")
 	assert.Contains(t, decision.Reason, "delegator",
@@ -869,6 +671,8 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 		CreatedBy: f.projectOwnerID,
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, progenyAgent))
+	createDCEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID,
+		store.DelegationPrincipalAgent, progenyAgent.ID, store.RoleScopeProject, f.projectAlpha.ID, string(AgentRoleFull))
 
 	// Use an ancestry-bearing agent identity (nil scopes → fail-closed restriction)
 	agentIdentity := &testProgenyAgentIdentity{
@@ -881,15 +685,20 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 		Type: "secret",
 		ID:   f.secretID,
 	}
-	// Agent scope restriction blocks progeny grants through CheckAccess because
-	// "secret.read" has no AgentScopes mapping in the permissions registry.
-	// The nil-scope agent gets fail-closed restriction which blocks the
-	// relationship grant, and the final decision falls through to the kernel
-	// denial ("no candidate bindings").
-	decision := f.authz.CheckAccess(ctx, agentIdentity, secretRes, ActionRead)
+	// Progeny secret reads name project.secret_read, as the production
+	// callers do. The nil-scope agent gets the fail-closed credential scope
+	// restriction, which also applies to the relationship candidate; the
+	// deny reason names the restriction kind.
+	decision := f.authz.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(agentIdentity),
+		Credential: credentialContextForIdentity(agentIdentity),
+		Resource:   secretRes,
+		Action:     ActionRead,
+		Permission: permissionProjectSecretRead,
+	})
 	assert.False(t, decision.Allowed,
-		"progeny grant is restricted by agent credential scope in CheckAccess path")
-	assert.Equal(t, "no candidate bindings", decision.Reason)
+		"progeny grant is restricted by agent credential scope")
+	assert.Equal(t, "relationship grant restricted by credential_scope", decision.Reason)
 
 	// An agent NOT in the ancestry should also be denied
 	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-agent")}, ProjectID: f.projectBeta.ID}}
@@ -904,10 +713,9 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 
 // TestGolden_AgentProgenyEnvVarAccess verifies progeny access to env vars.
 //
-// Post-cutover: Same as secrets (item 11). The relationship resolver identifies
-// progeny access, but the agent scope restriction blocks it through CheckAccess
-// because "envvar.read" has no AgentScopes mapping. Production agent env var
-// reads use direct handler checks, not CheckAccess.
+// Post-cutover: No registry permission covers (envvar, read), so CheckAccess
+// cannot resolve a permission and denies. Production agent env var reads use
+// direct handler checks, not CheckAccess.
 //
 // Reference: design.md §6.
 func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
@@ -924,13 +732,12 @@ func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
 		Type: "envvar",
 		ID:   f.envVarID,
 	}
-	// Agent scope restriction blocks progeny grants through CheckAccess.
-	// The nil-scope agent gets fail-closed restriction, and the final decision
-	// falls through to the kernel denial.
+	// No registry permission covers this resource type, so a request that
+	// names no permission cannot be resolved and is denied.
 	decision := f.authz.CheckAccess(ctx, agentIdentity, envVarRes, ActionRead)
 	assert.False(t, decision.Allowed,
-		"progeny grant is restricted by agent credential scope in CheckAccess path")
-	assert.Equal(t, "no candidate bindings", decision.Reason)
+		"a request with no resolvable permission is denied")
+	assert.Equal(t, unresolvablePermissionReason, decision.Reason)
 
 	// Negative case: an agent NOT in the ancestry should also be denied
 	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-envvar")}, ProjectID: f.projectBeta.ID}}
@@ -946,9 +753,8 @@ func TestGolden_AgentProgenyEnvVarAccess(t *testing.T) {
 // TestGolden_AgentProgenySkillInjectionAccess verifies progeny access to skill
 // injections.
 //
-// Post-cutover: Same as secrets (item 11). The relationship resolver identifies
-// progeny access, but the agent scope restriction blocks it through CheckAccess
-// because "skill_injection.read" has no AgentScopes mapping.
+// Post-cutover: No registry permission covers (skill_injection, read), so
+// CheckAccess cannot resolve a permission and denies.
 //
 // Reference: design.md §6.
 func TestGolden_AgentProgenySkillInjectionAccess(t *testing.T) {
@@ -965,13 +771,12 @@ func TestGolden_AgentProgenySkillInjectionAccess(t *testing.T) {
 		Type: "skill_injection",
 		ID:   f.skillInjectionID,
 	}
-	// Agent scope restriction blocks progeny grants through CheckAccess.
-	// The nil-scope agent gets fail-closed restriction, and the final decision
-	// falls through to the kernel denial.
+	// No registry permission covers this resource type, so a request that
+	// names no permission cannot be resolved and is denied.
 	decision := f.authz.CheckAccess(ctx, agentIdentity, skillRes, ActionRead)
 	assert.False(t, decision.Allowed,
-		"progeny grant is restricted by agent credential scope in CheckAccess path")
-	assert.Equal(t, "no candidate bindings", decision.Reason)
+		"a request with no resolvable permission is denied")
+	assert.Equal(t, unresolvablePermissionReason, decision.Reason)
 
 	// Negative case: an agent NOT in the ancestry should also be denied
 	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-skill")}, ProjectID: f.projectBeta.ID}}
@@ -1156,6 +961,22 @@ func (a *testProgenyAgentIdentity) OriginUserID() string {
 	return ""
 }
 func (a *testProgenyAgentIdentity) TokenID() string { return "" }
+
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *testProgenyAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification: those functions switch on
+// concrete type, not Type(), so a package-hub test fake that is passed
+// through CheckAccess/Decide (as this one is, below) must opt in explicitly
+// rather than being classified from its Type() == "agent" string.
+func (a *testProgenyAgentIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindAgent, CredentialKindAgentJWT
+}
 
 // =============================================================================
 // C1 Regression: Members-group owner cannot escalate to project-owner

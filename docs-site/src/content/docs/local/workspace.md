@@ -2,7 +2,7 @@
 title: About Workspaces
 ---
 
-Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container. This is where the agent reads code, makes changes, and runs commands.
+Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container. In worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`; see [Linked git projects](#linked-git-projects)); scripts should use `$PWD` or `git rev-parse --show-toplevel`. This is where the agent reads code, makes changes, and runs commands.
 
 Scion provides flexible options for how this workspace is backed on your host machine, ranging from isolated git worktrees to direct directory mounts.
 
@@ -14,7 +14,7 @@ When you start an agent, Scion determines its workspace based on the following p
     If you provide a path via `--workspace`, Scion mounts that directory directly. This works in both Git and non-Git environments.
 
 2.  **Git Worktree** (Git repositories):
-    If you are in a Git repository and do not provide an explicit workspace, Scion uses [Git Worktrees](https://git-scm.com/docs/git-worktree) to give the agent its own isolated working directory and branch.
+    A repository you use with Scion is linked to a Hub on its first command. On the local workstation Hub, each new agent gets a [git worktree](https://git-scm.com/docs/git-worktree) of your checkout and its own branch (section 2). On a remote Hub, and for projects linked before local worktrees existed, each agent clones the repository's remote instead. See [Linked git projects](#linked-git-projects).
 
 3.  **Project Root / CWD** (Non-Git environments):
     If you are not in a Git repository, Scion mounts the project root (or current directory for global agents) directly.
@@ -26,7 +26,7 @@ When you start an agent, Scion determines its workspace based on the following p
 You can tell Scion exactly which directory to use as the workspace. This is useful for:
 - Working on a specific subfolder.
 - Using a shared directory across multiple agents.
-- Working on a path outside the current repository without creating a worktree.
+- Working on a registered git worktree outside the repository root, or a directory outside a non-git project.
 
 ### Absolute vs. Relative Paths
 
@@ -41,9 +41,9 @@ If you specify an absolute host path, Scion mounts that exact directory directly
 scion start my-agent "run analysis" --workspace /home/user/my-service
 ```
 
-- **Behavior**: The specified directory is mounted directly to `/workspace`.
+- **Behavior**: The specified directory is mounted directly to `/workspace`. The Runtime Broker resolves symlinks and checks the path against its [Volume Source Restrictions](/scion/reference/orchestrator-settings/#volume-source-restrictions), refusing `/`, system directories, your home directory, and `~/.scion` outside the project's own workspaces and shared directories (`~/.scion/projects/<slug>/workspaces/` and `~/.scion/projects/<slug>/shared/`).
 - **Isolation**: **None**. Changes made by the agent are immediately visible on the host and to any other agents sharing this directory.
-- **Git**: No new worktree or branch is created, even if inside a repo.
+- **Git**: No new worktree or branch is created automatically. In a git project, a workspace in a subdirectory of the repository or outside the repository root must already be a registered git worktree of that repository; a plain subdirectory or an unregistered path outside the repository root is refused at start (see [Git that Scion runs on the host](#git-that-scion-runs-on-the-host)).
 
 #### Relative Paths (Contained Subdirectory Mounts)
 
@@ -56,17 +56,17 @@ scion start my-agent "fix web bugs" --workspace packages/web
 
 - **Behavior**: Scion resolves the subdirectory path against the project root, performs strict containment checks (preventing directory traversal and escaping via symlinks), and mounts only that subtree to `/workspace`.
 - **Isolation**: The agent has **full containment** — it cannot see or access any files or folders outside of that specific subdirectory.
-- **Support**: Supported for directory (non-git) projects — both linked and hub-managed.
+- **Support**: Supported for directory (non-git) projects — both linked and hub-managed. In a git repository, a subdirectory workspace must be a registered git worktree of that repository; plain subdirectories are refused at start.
 - **Git-Clone Projects Limitation**: Relative `--workspace` paths are **not supported** for per-agent git (clone-based) projects and will be rejected with an error. For those projects, use an absolute path or omit the `--workspace` flag.
 
 ---
 
-## 2. Git Worktrees (Automatic Isolation)
+## 2. Git Worktrees
 
-When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees**. This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
+In a repository linked to the local workstation Hub, each new agent gets a git worktree of your checkout at `.scion/agents/<name>/workspace` (see [Linked git projects](#linked-git-projects) for the requirements and the checks). Agents imported from a release that ran them without a Hub keep their worktrees at the same place. Each agent has its own isolated working directory and branch, so agents can work on different branches at the same time without touching your own working directory. The rules below describe how those worktrees are set up.
 
 ### Prerequisites
-- Git **2.47.0** or newer is required (for relative path support).
+- Git **2.48.0** or newer is required (for relative path support).
 
 ### Branch Resolution
 Scion determines which branch to check out in the worktree:
@@ -87,8 +87,10 @@ Scion determines which branch to check out in the worktree:
 ### Reusing Existing Worktrees
 If you request a branch that is already checked out in another worktree (e.g., by another agent or manually created), Scion detects this.
 - Instead of failing or creating a conflict, Scion **mounts the existing worktree path**.
-- A warning is displayed: `Warning: Relying on existing worktree for branch '...'`.
+- A warning is logged: `Relying on existing worktree for branch '...'`. With the workstation server it appears in `~/.scion/server.log`, not in the CLI.
+- If that worktree is your own checkout (the agent is named after the branch you have checked out), the agent edits your working tree directly.
 - This allows multiple agents to collaborate on the same branch/worktree if desired.
+- An existing worktree is reused only while its directory is still in place. If git still lists the branch in a worktree that no longer exists, the start fails with an error that names that path; run `git worktree remove "<path>"` in the repository and start again. Scion removes only the agent's own worktree entry, when provisioning and when cleaning up, and does not prune other worktrees (except when a Runtime Broker cannot remove a partly created worktree; it then prunes stale entries so the start can be retried).
 
 ---
 
@@ -96,6 +98,7 @@ If you request a branch that is already checked out in another worktree (e.g., b
 
 In non-git projects (where no `.git` directory is found):
 - Scion defaults to mounting the **project root** (the directory containing `.scion`).
+- An explicit project path on a Runtime Broker (for example from `scion hub link` or `POST /api/v1/projects/:id/providers`) must contain its own `.scion` directory or `.scion` marker file (and `.scion` cannot be a symlink pointing outside the project path); otherwise agent create, start, and restart refuse the path with `409 project_path_not_initialized` instead of mounting its parent directory. Initialize the directory with `scion init` first, or create `mkdir <path>/.scion`.
 - For global agents, it defaults to the **current working directory**.
 - All agents share the same files. There is no isolation or branching.
 
@@ -107,8 +110,8 @@ When a Scion Hub is enabled, workspace strategy changes depending on the project
 
 ### Hub-Managed Projects (no git repository)
 Hub-Managed projects allow you to create project workspaces directly through the Hub API and Web Dashboard **without an external Git repository**.
-- The Hub automatically initializes a seeded `.scion` structure.
-- Workspace files are managed locally by the Hub and its distributed runtime brokers.
+- The Hub automatically initializes a seeded `.scion` structure (`projects/<uuid>/.scion` on shared workspace storage).
+- Workspace files live in `projects/<uuid>/workspace` on shared workspace storage (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on local storage, and are reached by Runtime Brokers through the same shared workspace storage backend or a co-located Runtime Broker.
 - You can directly download individual workspace files or generate ZIP archives of entire projects using the Hub API or Web Dashboard, making it easy to export your data.
 
 ### Git Projects (clone-based, Hub-managed)
@@ -148,39 +151,343 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SCION_GIT_CLONE_URL` | HTTPS URL of the repository to clone | *(required)* |
+| `SCION_GIT_CLONE_URL` | URL of the repository to clone. Set by the broker from the project's clone settings only; a value in agent, settings or harness-config env is ignored | *(set by the broker)* |
 | `SCION_GIT_BRANCH` | Branch to clone | `main` |
 | `SCION_GIT_DEPTH` | Clone depth (set to `0` for full clone, omission defaults to shallow depth `1`) | `1` |
+| `SCION_GIT_TOKEN_REMOTE` | The project's git remote, as the Hub recorded it. Set by the broker only | *(none)* |
 
-Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
+Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets, a GitHub App installation, or your personal environment through the env-gather flow. The clone uses the token only when the clone URL is HTTPS and names the project's git remote (the same host and owner/repository as `SCION_GIT_TOKEN_REMOTE`). A personal token (a user-scoped `GITHUB_TOKEN`, an agent or storage environment variable, a token collected through env-gather, or a broker/hub-scoped secret) is offered only when the project's recorded remote is on the GitHub host (`github.com`, or the host of `github_app.api_base_url` for GitHub Enterprise), whereas a project-bound credential (the project's GitHub App installation token or a project-scoped `GITHUB_TOKEN` secret) applies to the project's recorded remote on any host. A clone URL that names another host or repository, for example through a `scion.dev/clone-url` label, is cloned without the token, and no credential helper is configured for it. On every start of an existing clone-per-agent workspace, `sciontool init` reconciles `~/.gitconfig` to remove any unscoped `credential.helper` and any stale host-scoped helper when no token is offered, and agent-start clones run without host credential helpers, extra HTTP headers, or askpass. The same rule applies to the Kubernetes workspace-provisioning init container.
 
-### Linked Projects (clone-based, even when the repo is local)
+The clone URL must use `https`, `ssh` (including the `git@host:path` form) or `git`. Every project repository clone path (on the Runtime Broker host, in `sciontool init` inside the container, in the Cloud Run runtime, and in the Kubernetes workspace-provisioning init container, including `worktree-per-agent` starts) checks the URL before any clone or filesystem work and refuses a local path, a `file://` or `http://` URL, a `<transport>::<address>` remote-helper form, or a URL starting with `-` (`the repository URL must use https, ssh or git; local paths and other URL schemes are not cloned`): the agent is not started. A create request answers HTTP 422, and a start fails with the same fixed message; neither repeats the URL. Clones run with `GIT_ALLOW_PROTOCOL=https:ssh:git`, `protocol.file.allow=never`, and `http.followRedirects=false`.
 
-When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, **all agents started via the Hub use clone-based provisioning**, even if the broker machine already has the repository checked out locally.
+### Linked git projects
 
-This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects. Local worktrees are a local-mode feature only.
+This section is the reference for how agents in a git repository on your machine get their
+workspace; other pages link here.
+
+A repository on your machine becomes a **linked project** when it links to a Hub: on its first
+command against the local workstation Hub (no prompt), or with `scion hub link`. Run `scion init`
+in the repository first. In a git repository without its own `.scion`, where the project would
+otherwise fall back to the global project (no `--global` or `--project` given), `scion hub link`
+and the automatic link refuse with:
+
+```
+this git repository is not a scion project yet; run 'scion init' here first (or pass --global to link the global project)
+```
+
+A `.scion`-less repository inside another scion project is not refused: it links that parent
+project, so run `scion init` in the repository itself.
+
+`scion init` adds an untracked `.scion/` to your checkout and, unless it is already ignored, appends `.scion/agents/` to your `.gitignore`.
+
+#### On the local workstation Hub: a worktree of your checkout
+
+A repository that links to the local workstation Hub is registered with the `worktree-per-agent`
+mode. Each new agent then gets a git worktree of **your checkout** at
+`.scion/agents/<name>/workspace`, on its own branch (see [Branch resolution](#branch-resolution)).
+The CLI says so when the agent starts:
+
+```
+Using hub, git worktree per agent for repo <remote>
+  (for a checkout linked on this machine, each agent gets a worktree of it under .scion/agents/<name>/workspace; otherwise the runtime broker makes per-agent worktrees of its own clone)
+```
+
+- **No clone and no token.** Nothing is fetched from the remote.
+- **What the agent sees.** The worktree starts from your checkout's current commit, so commits you
+  have not pushed are visible to the agent; uncommitted changes are not.
+- **Branches land in your repository.** The agent's branch shows up in `git branch`; merge it
+  directly.
+- **The working directory is the worktree, not `/workspace`.** Your repository is mounted in the
+  container at `/repo-root`, and the agent starts in `/repo-root/.scion/agents/<name>/workspace`.
+  `/workspace` is not mounted for these agents. Scripts and instructions should use `$PWD` or
+  `git rev-parse --show-toplevel` instead of a hard-coded `/workspace`.
+- **Deleting an agent deletes its branch**, including commits you have not merged, unless you pass
+  `--preserve-branch` to `scion delete`.
+- **Git 2.48 or newer.** The first agent worktree sets `repositoryformatversion=1` and
+  `extensions.relativeWorktrees` in your repository's git config. From then on, git older than 2.48
+  cannot read that checkout (it reports an unknown repository extension).
+- **No reincarnate** for these agents yet; to rebuild an agent's home, delete it and start it again.
+- This applies to the Runtime Broker inside the workstation server. Kubernetes runtimes are not
+  routed this way.
+
+:::caution[An agent named after your checked-out branch works in your checkout]
+If an agent's name matches the branch you have checked out, the agent attaches to your own
+checkout, as it did before the Hub was required, and edits your working tree directly, uncommitted changes included.
+The warning ("Relying on existing worktree") appears only in `~/.scion/server.log`, not in the
+CLI. Give agents names that are not your current branch.
+:::
+
+Before each start, the broker checks the checkout. If a check fails, the start stops; it never
+falls back to a clone. The CLI shows:
+
+```
+Error: failed to start agent via Hub: runtime broker failure: <reason> (broker code: local_worktree_refused, broker status: 409, request: <id>)
+```
+
+where `<reason>` starts with `cannot create a local worktree for this agent:` and names the cause
+and the fix:
+
+| Cause | Reason (after the prefix) |
+| --- | --- |
+| git too old | `git >= 2.48.0 required for worktree-per-agent mode (--relative-paths), found <version>; upgrade git on this machine` |
+| not a git checkout | `the project's local path <path> is not in a git checkout; restore the checkout there, or run 'scion hub link' from the project's git checkout` |
+| repository root unreadable | `git could not determine the repository root of the project's checkout at <path>; check that git can read that repository (for example, its ownership and safe.directory setting)` |
+| no origin | `the project's checkout at <repo> has no origin remote, but the hub project's repository is <url>; add it with 'git remote add origin <url>'` |
+| different origin | `the project's checkout at <repo> has origin <url>, but the hub project's repository is <url>; point origin at the hub project's repository, or link this checkout as its own project` |
+
+Agents that already have a workspace keep it: agents imported from a release that ran them without
+a Hub keep their worktrees at `.scion/agents/<name>/workspace`, and agents that already have a
+clone keep their clone.
+
+#### Projects linked earlier: still cloning
+
+The workspace mode is set when a hub project is created and cannot be changed. A repository that
+was linked to the local workstation Hub by hand before local worktrees existed keeps cloning (see
+the next section) until you re-link it to a new hub project. Running `scion hub unlink` and then
+`scion hub link` is not enough: it re-attaches the old project. To re-link:
+
+1. Finish the project's agents, or delete them with `scion delete <name>`.
+2. Delete the hub project: `scion hub projects delete <name>`. This removes the project's agent
+   records on the Hub for every broker.
+3. In the repository, run `scion hub link` (or any agent command, which links automatically). The
+   new project is registered with the `worktree-per-agent` mode; check with
+   `scion hub projects info <name> --format json` (the text output does not show labels). When a
+   git checkout that already has a local project directory (`~/.scion/project-configs/<slug>__<short-id>`)
+   is linked to a new Hub project, agent commands such as `scion list`, `start`, `stop`, `resume` and
+   `delete` resolve the Hub project from the link (`hub.project_id` in the project's `settings.yaml`)
+   rather than the earlier local project ID in `.scion/project-id`.
+
+#### On a remote Hub: a clone per agent
+
+A repository linked to a remote Hub, or one of the projects above that still clones, gets
+clone-based provisioning: each new agent clones the repository's remote over HTTPS inside its
+container, on branch `scion/<agent-name>`. The Hub enforces one workspace strategy for the
+project, whichever broker an agent lands on.
 
 **What this means in practice:**
 
-- **SSH credentials are not used** for workspace provisioning. Even if your machine has SSH keys configured for the repo, agents always clone via HTTPS using `GITHUB_TOKEN`.
-- **A `GITHUB_TOKEN` is required.** Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it):
+- **SSH credentials are not used** for workspace provisioning. Agents clone via HTTPS using `GITHUB_TOKEN`.
+- **A `GITHUB_TOKEN` is required** for private repositories. Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it; a non-interactive `scion start` or `scion resume` sends it only with `--send-env`, and fails without it naming the missing keys and the `--send-env` flag):
   ```bash
-  scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+  scion hub secret set --project=my-project GITHUB_TOKEN ghp_xxxxxxxxxxxx
   ```
-- **The CLI will tell you** when this mode is in effect. When starting an agent via a Hub-linked git project, you will see:
+- **The CLI will tell you** when this mode is in effect:
   ```
   Using hub, cloning repo https://github.com/org/repo.git
-    (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)
   ```
-- **Merging agent work** is done via git push and pull request, not by merging worktrees back into your local checkout.
+- **The agent works from the remote's state**, not from your checkout, and its branch reaches you only after it pushes. Merge agent work via git push and pull request.
 
-To return to local worktree-based mode, disable hub integration:
+To give agents on a remote Hub git worktrees instead of separate clones, create the project with the
+`worktree-per-agent` [workspace sharing mode](/scion/local/workspaces-and-sharing/): the broker then
+makes a worktree per agent of its own shared clone. The mode is set when the project is created on
+the Hub and cannot be changed later.
 
-```bash
-scion hub disable
-# or run with --no-hub
-scion start my-agent --no-hub "fix the bug"
-```
+#### Git that Scion runs on the host
+
+The Runtime Broker and the Hub run git on the host during provisioning clones and in repositories that
+agent containers can also write: your linked checkout (when it creates, lists, or removes an agent's
+worktree or checks whether a branch exists), the shared clone of a `worktree-per-agent` project, and the clone of a shared-workspace
+project (including the shared-workspace clone's local branch-creation fallback when the requested branch is not on the remote, and every step of a shared-workspace pull: reading the current branch, remote URL, and `HEAD`/`FETCH_HEAD` commits, fetching, fast-forwarding, and reading the pulled commit list). Before each of these commands in an existing repository,
+Scion reads the repository's config (`.git/config`, and a worktree's `config.worktree`) as data and
+**refuses the command, naming the key**, if the config contains an `include`/`includeIf` directive
+or any key outside an allow-list, and verifies after the command that the repository config did not change during the run. This is deny-by-default: a key that is not known to be safe stops
+the agent start or workspace pull rather than being ignored.
+
+- **A repository Scion manages** (the shared checkout of a `worktree-per-agent` project, the clone
+  of a shared-workspace project) allows only the keys git and Scion write for it: the core
+  repository format settings, `extensions.*`, a remote's `url`/`fetch`, `branch.<name>` tracking,
+  identity, `gc.auto`, `branch.autoSetupMerge`.
+- **Your own linked checkout** allows those plus a wider set of keys that cannot run a command or
+  redirect network traffic: `core.autocrlf`/`eol` and similar, `pull.*`/`push.*` defaults, a
+  remote's `pushurl`/`tagopt`/`prune`, `branch.<name>` metadata, `color.*`, `advice.*`, `rerere.*`,
+  `status.*`, `maintenance.*`, sparse-checkout toggles, `init.defaultBranch`, inert git-lfs data
+  keys, `gpg.format` and `user.signingKey` (signing data only), and `submodule.<name>.update` **only**
+  as `none`/`checkout`/`rebase`/`merge`, `submodule.<name>.url` **only** for an `https`/`ssh` remote.
+  Four more keys are allowed only with a strictly valid value: `grep.threads` (a non-negative
+  integer), `branch.<name>.vscode-merge-base` (a valid ref name), `remote.<name>.promisor` (a
+  boolean) and `remote.<name>.partialclonefilter` (`blob:none`, `blob:limit=<n>`, `tree:<depth>`,
+  `object:type=<type>`, `sparse:oid=<object id>`, or a `combine:` of those; `sparse:path` is refused).
+  A few keys that would run a command are allowed here only because a fixed command-line setting
+  overrides them on every call (`core.hooksPath`, `core.fsmonitor`, `core.pager`,
+  `submodule.recurse`), so such a repository value never runs a command.
+- **Refused on both** (so an agent cannot make the broker's or your own git run a command): any
+  `credential.*`, `url.*.insteadOf`, `http.*`, `gpg.*` program/signing-file keys, any `*.program`,
+  `alias.*`, `core.sshCommand`/`editor`, a remote's `uploadpack`/`receivepack`/`proxy`, diff/merge
+  command or textconv drivers, non-standard `filter.*` drivers, and any key not on the list. If a
+  command is refused, the error names the key; remove it from the repository's `.git/config` (or
+  `config.worktree`).
+- **Partial clones:** a partial clone made by current git (`git clone --filter=...`, which records
+  `remote.<name>.promisor` and `remote.<name>.partialclonefilter`) is allowed; git then fetches
+  missing objects from that remote's own URL. `extensions.partialClone` (written by older git) and
+  `index.sparse` (sparse-index checkouts) are not on the allow-list, so host-side git in such a
+  repository is refused and an agent cannot start there.
+- As defence in depth these commands also run with `LC_ALL=C` (dropping any inherited `LC_ALL`), with hooks, the file-system monitor and the pager
+  off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
+  transport disabled and the `file://` transport allowed only for a top-level operation the user
+  drives directly (`protocol.file.allow=user`; git's own indirect uses such as submodule fetches are
+  blocked), submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
+  config-file, transport and `GIT_ALLOW_PROTOCOL` settings). **Note:** a `GIT_ALLOW_PROTOCOL` set by
+  the host operator overrides the `protocol.*.allow` pins.
+- **Subcommand-first arguments and discovery mode:** host git (`HostGitCommand`) refuses argument lists
+  that are empty or start with an option (`-`), so the first argument is always the git subcommand.
+  When run in a directory with no `.git` entry and no `GIT_DIR` in the environment (discovery mode,
+  including the Runtime Broker's workspace git probe), host git runs only `rev-parse` in the
+  symlink-resolved directory (with `GIT_CEILING_DIRECTORIES` set to its parent when ceiling is on) and
+  verifies after the command that the directory still resolves to the same path and gained no `.git`
+  or `HEAD` entry.
+- **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, never from a
+  tracked `.lfsconfig` (which an agent could point at an arbitrary server).
+  - A repository Scion manages (the shared checkout and the shared-workspace clone) and every
+    provisioning clone skip the LFS smudge on the host (`GIT_LFS_SKIP_SMUDGE=1`); agents fetch LFS
+    objects in-container.
+  - Your linked checkout pins the endpoint derived from the `origin` remote URL, with its auth mode
+    pinned to `basic` (`lfs.<endpoint>.access`), when the origin is `http(s)` **and** the committed
+    `.lfsconfig` neither names its own endpoint (`lfs.url`/`pushurl`, `remote.*.lfsurl`) nor sets any
+    `lfs.<url>.access`. If it does either (its objects may legitimately live on a separate server, or
+    it selects an auth mode such as `negotiate`), or the origin is `ssh`/scp or absent, the smudge is
+    skipped and a warning names the pointer files and says to run `git lfs pull` in the checkout.
+    Scion never contacts the `.lfsconfig` endpoint.
+  - The git-lfs **post-checkout hook** does not run; it only marks LFS-lockable files read-only.
+  - git-lfs's own config writes are tolerated: `lfs.repositoryformatversion`, and `lfs.<url>.access`
+    (only `basic`/`none`) and `lfs.<url>.locksverify` with an http(s) URL subsection.
+- **Clone URL validation and token binding:** when a project is created or updated (`POST /api/v1/projects`,
+  `PATCH /api/v1/projects/:id`), its `gitRepo` URL is validated before it is stored: only `https://`,
+  `http://` (only when `SCION_ALLOW_INSECURE_CLONE_HTTP=1` is set on the server), `ssh://`, and
+  `git@host:path` SCP-like URLs with a valid hostname and repository path are accepted (`file://`,
+  `ext::`, other transport helpers, bare filesystem paths, embedded credentials, query strings,
+  fragments, and control characters are rejected with `400`). Credentials are never embedded in a
+  clone URL and never left in a workspace's `.git/config`. A git token is supplied only through a
+  credential helper scoped to the clone URL's host (so it is offered to that host and no other, in
+  particular not to an LFS endpoint), and only for an `http(s)` URL; for any other URL the token is
+  ignored. On project workspace clones and shared-workspace pulls, a personal token is offered only
+  when `gitRepo` is on the GitHub host (`github.com`, or the host of `github_app.api_base_url` for
+  GitHub Enterprise), while a project-bound credential (the project's GitHub App installation token or
+  project-scoped `GITHUB_TOKEN` secret) is offered for the project's recorded HTTPS remote on any host.
+  The scoped helper also disables any other configured credential helper for the command, so nothing
+  persists the token. On a shared storage layout (`server.project_storage`), the Hub provisions
+  `shared-plain` git workspaces; if a Runtime Broker reaches its backstop clone path because the Hub's
+  provisioning sentinel is missing, it offers the agent's git token only when the clone URL is HTTPS
+  and names the project's recorded remote (`SCION_GIT_TOKEN_REMOTE`), and otherwise runs with no token
+  and no host git credentials.
+- **Host credentials:** a host-side command that talks to a remote (a clone, a shared-workspace
+  fetch, a template import) offers no credential of the host's own. It runs without the host user's
+  global and system git config, `~/.netrc`, TLS client certificates (`http.sslCert`/`http.sslKey`), Kerberos tickets, and ssh agent, keys and ssh config, and
+  with credential helpers, extra HTTP headers and askpass cleared. Without a project git token it runs
+  anonymously; with one, the token is the only credential. Over ssh it offers no host identity and
+  checks the server's host key strictly against the host user's and the system's `known_hosts`, without
+  writing them; a project token never authenticates ssh. To trust a private CA, set
+  `GIT_SSL_CAINFO` (or use the system trust store); for a proxy, set `https_proxy`/`no_proxy` in the
+  Hub or Runtime Broker environment.
+- **ssh repository URLs on the Hub:** a clone or fetch the Hub runs itself (provisioning a
+  shared-workspace project at project create or project clone, and a shared-workspace pull) refuses a
+  project clone URL (its `scion.dev/clone-url` label, else `gitRepo`) that uses ssh (`ssh://`,
+  `git+ssh://`, `ssh+git://` or `git@host:path`). The refusal comes before any git or filesystem work,
+  as HTTP 422 with a fixed message that names no URL. With a git credential for the project (a
+  project git secret, the GitHub App, or the creator's GitHub token) the message is `a project git
+  secret authenticates https only; use an https repository URL`; without one it is `an ssh repository
+  URL is not supported for hub-side git; use an https repository URL`. Use the repository's
+  `https://` URL. Clones that a Runtime Broker or an agent runs are not affected.
+- **Updating a shared workspace** (pull) re-validates the project's stored `gitRepo` URL, verifies
+  that the checkout's `origin` remote URL matches `gitRepo` (`origin remote mismatch` otherwise), and
+  fetches from `gitRepo` (with the project's git credential for HTTPS remotes; an SSH URL is refused,
+  as above), then fast-forwards the current branch.
+
+Your own git commands in your checkout are not affected. Scion also mounts the repository's git
+metadata into agents so that an agent cannot change what git does for you or for other agents, and
+**checks the repository's git config before starting the agent**:
+
+- **Agent-start repository git config check:** Before starting an agent in a git repository
+  (`worktree-per-agent`, `shared-plain`, or an explicit worktree) on Docker, Podman, or the Apple
+  `container` runtime, Scion checks `.git/config`, the worktree config layers the agent can reach
+  (`.git/config.worktree` and `.git/worktrees/<name>/config.worktree`), and every reachable submodule
+  admin directory (`.git/modules/` and `.git/worktrees/<name>/modules/`) and index gitlink against the
+  linked-checkout allow-list above. The agent's git inside the container reads these layers without
+  the host-side `-c` command-line pins, so settings that name a command or a hook location
+  (`core.editor`, `core.hooksPath`, `core.fsmonitor`, `core.pager`, `core.sshCommand`, `core.askpass`,
+  `core.gitProxy`, `sequence.editor`, `*.program`, `alias.*`, `pager.*`, diff and merge driver
+  commands, non-standard `filter.*` drivers, a remote's `uploadpack`/`receivepack`/`vcs`, and
+  `uploadpack.packObjectsHook`) are **never given to agents**:
+  - On Docker and Podman, the agent reads a private copy of `.git/config`. Such settings in
+    `.git/config` are **left out of that copy**, the agent starts, and its status message names the
+    keys left out (`agent git config: left out core.editor, ... from the agent's copy of .git/config`).
+  - The same settings in a `config.worktree` layer or a submodule config, which the agent reads as
+    they are, **refuse the start**, as they do on the Apple `container` runtime, where the agent reads
+    `.git/config` directly.
+  - Every other key outside the allow-list (`credential.*` in a raw layer, `url.*.insteadOf`,
+    `http.*`, `gpg.*` signing-file keys, and so on), and `include`/`includeIf`, refuse the start
+    everywhere. A refusal names every refused key in one message, with the file to edit for each.
+  A root-level `.git/commondir` or
+  `.git/gitdir` file in any git layout, or an unsafe submodule directory or gitlink (a symlinked
+  module directory, a `.git` directory inside a submodule work tree, or a gitfile pointing outside
+  `modules/`), also refuses the start. The refusal (`agent git config refused: ...`, with error code `git_config_refused`, HTTP `422` on synchronous create, start, and restart and on the asynchronous launch phase message) names every refused key (never its value or host path) and the config file to edit (`.git/config`, `config.worktree`,
+  `the worktree's config.worktree`, or `modules/<name>/config` / `config.worktree`), or tells you to
+  remove `.git/commondir` / `.git/gitdir` or remove/repair the submodule directory or git link. Put
+  personal git preferences (`core.editor`, hooks, pager, SSH command, aliases) and credential helpers
+  in your global `~/.gitconfig` or pass `-c` / `GIT_EDITOR` per command (`GIT_EDITOR=true git ...` or
+  `git -c core.editor=true ...`), never in the repository config.
+
+In the worktree layouts, the whole `.git` root is mounted **read-only**, so an agent cannot create a
+root-level file git honours (such as a `commondir` that would redirect where git reads config, hooks
+and refs from). Only the paths an in-container git must write are re-opened read-write: `objects/`,
+`refs/`, `logs/`, the git-lfs object store (`.git/lfs`), and the agent's own worktree admin directory.
+The rerere cache (`.git/rr-cache`) is re-opened read-write only if it already exists — Scion never
+creates it, because creating it would turn on rerere in your own checkout. On docker and podman,
+`.git/config` is served from each agent's own **private, read-only copy** in place of the shared one;
+the private copy has credential-bearing settings stripped (`credential.*`, `http.extraheader`,
+`http.cookiefile`, client TLS key and certificate paths `http.sslKey` and `http.sslCert` with or
+without a URL subsection while keeping `http.sslCAInfo` and `http.sslCAPath`, and plaintext password
+keys `sendemail.smtppass`, `imap.pass`, `git-p4.password`, and `gitcvs.dbpass`; embedded userinfo is
+also scrubbed from URL-valued keys `remote.*.url`/`pushurl`/`lfsurl`/`lfspushurl`,
+`lfs.url`/`pushurl`, `url.*.insteadof`/`pushinsteadof`, `http.proxy`, `remote.*.proxy`,
+`submodule.*.url`, `bundle.*.uri`, `fetch.bundleuri`, `imap.host`,
+`svn-remote.*.url`/`pushurl`/`commiturl`/`rewriteroot`, and `svn.commiturl`, as well as from
+`branch.*.remote`, `branch.*.pushremote`, and `remote.pushdefault` when their value is a URL or
+remote-helper form rather than a remote name) and is pre-seeded (the agent's branch
+upstream plus `push.autoSetupRemote`) so that a bare `git push` exits 0 — without the pre-seed a bare
+push fails with "no upstream branch". (In raw layers that are mounted read-only without redaction —
+`config.worktree` and submodule configs — any of those credential-bearing settings refuses the agent
+start.) `git push -u origin <branch>` exits 0 and reaches the remote
+either way; git cannot persist the upstream (the private `.git/config` is read-only) and prints an
+`error:`, but the push still succeeds.
+That copy also disables automatic housekeeping (`gc.auto=0`, `maintenance.auto=false`) so routine
+commands do not try to write lock files in the read-only root. Personal git preferences inside the
+agent go in the agent's own global git config, which is writable, not in the repository config. On the
+Apple runtime agents read the repository's git config directly (the runtime cannot bind a single
+private file), so the private-copy settings above (credential stripping, the push pre-seed, the
+housekeeping defaults) do not apply there; keep credentials out of repository git config (use a
+credential helper in your global git config). An Apple agent whose repository `.git/config` holds
+any of the credential-bearing settings above is refused at start, naming the key that must be cleared; use a
+credential helper in your global git config, or run the project on a runtime that provides the private
+config copy.
+
+A shared-workspace git project (agents sharing one checkout) is refused outright on the Apple runtime,
+which cannot bind the per-agent private `.git/config`; use a worktree-per-agent project or a non-Apple
+runtime.
+
+Commit, branch creation, fetch, pull, push and rebase work normally. Because the `.git` root is
+read-only, a few operations that write a lock or state file directly in it do not work inside an agent:
+deleting a branch or a tag and `git fetch --prune` (all need `packed-refs.lock`), `git gc` /
+`git pack-refs`, and fetching into a shallow clone. These fail cleanly, without corrupting the
+repository. `git stash` still round-trips (the stash ref lives in the writable `refs/` overlay), though
+it may print a cosmetic `packed-refs.lock` warning.
+
+This applies to the worktree-per-agent and outside-root layouts, where each agent has its own
+worktree. In the shared-workspace layout agents share one working tree and the `.git` root stays
+writable; both the agent-start check and the host-side git controls refuse to run if a root-level
+`commondir` or `gitdir` is present in the repository.
+
+A workspace in a subdirectory of a repository, or outside the repository root, must be a registered git worktree of that repository (for an outside-root worktree, only `/repo-root/.git` and `/workspace` are mounted into the container, not the full repository root). Plain subdirectory workspaces and unregistered workspaces outside the repository root are refused at start, because the per-agent git metadata cannot be mounted for them.
+
+On Docker and Podman, a project `.scion` that is mounted read-only — one in a registered outside-root
+checkout, one in a subdirectory of the workspace, or a nested `.scion` directory inside the agent's
+own workspace (config-only agents) — must already contain an `agents` directory.
+The runtime masks `.scion/agents` in the container but does not create it under a read-only mount, so
+when it is missing the start is refused; create it once with `mkdir <path>/.scion/agents` (`scion
+init` lists `.scion/agents/` in `.gitignore`) and start the agent again.
+
+On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
+shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets
+its own clone of the repository, or run the project on a local or Docker Runtime Broker.
 
 ---
 
@@ -193,7 +500,8 @@ Project Shared Directories provide a persistent, mutable storage layer that can 
 To ensure that newly created projects have an immediate space for agent file transfers, message attachments, and logs, the Hub can automatically provision a default shared directory named `scratchpad` upon project creation.
 
 - **Auto-Provisioning Toggle**: This behavior is controlled by the `project_defaults.default_scratchpad` setting in the Hub's operational settings (default is **`ON` / `true`**).
-- **Inbound Message Attachments**: In isolated workspace modes, Scion automatically routes agent message attachments through the default `scratchpad` shared volume to prevent silent delivery failures.
+- **Inbound Message Attachments**: With the `hub.attachment_artifacts` [experiment](/scion/reference/experiments/) on (on by default wherever the artifact service is ready, including the workstation server's local artifact store), chat attachments and `scion message --attach` files are delivered directly to each recipient agent's `~/.scion/inbox/<message-id>/`, and a copy is placed in the project's `scratchpad` shared directory only for project-wide space threads (see [Messaging — Attachments for agents](/scion/hosted/user/messaging/#attachments-for-agents)). When `hub.attachment_artifacts` is turned off, Scion routes message attachments (including direct messages on the local backend) through the `scratchpad` shared volume.
+- **Attachment copies expire**: Copies of attachments under the scratchpad's `.attachments/` directory and in `~/.scion/inbox/` are removed after `messaging.attachment_inbox_retention_days` (default 7 days). This covers chat attachments, `scion message --attach` files, chat plugin downloads and terminal drag-and-drop uploads. Downloading an attachment from chat history is not affected.
 
 ### Managing Shared Directories
 
@@ -213,6 +521,27 @@ scion shared-dir info <name>
 scion shared-dir remove <name>
 ```
 
+### Removing a Shared Directory
+
+Removing a shared directory deletes its data:
+
+- **On a shared backend** (`server.project_storage.backend` `nfs`, `cloudrun-volume` or `gke-shared-volume`): removing the declaration through the Hub (Web UI or API) deletes the directory and everything in it from the shared export or volume, which every agent of the project mounts.
+- **On the local backend**: unchanged. The directory on the Hub host or the co-located Runtime Broker is deleted, as before.
+- **The `scratchpad` directory** cannot be removed while the Hub's project default `default_scratchpad` is on. The request is refused with `409`.
+
+### When the Backing Directory Is Created
+
+Creating a shared directory and creating its backing directory on disk are separate steps:
+
+- **Local CLI (`scion shared-dir create`)** creates the backing directory immediately.
+- **Hub (Web UI or API)** creates the backing directory when the shared directory is declared, if the Hub can reach the storage it belongs in: the shared export or volume (`server.project_storage.backend` `nfs`, `cloudrun-volume` or `gke-shared-volume`), a hub-managed project's storage on the Hub host, or the project's directory on a Runtime Broker running in the same server as the Hub. Otherwise it is created on first use:
+  - when an agent in the project starts on a Runtime Broker. Each Runtime Broker creates the directory locally, or on the shared export or volume.
+  - when a file is first written or uploaded to it through the Hub.
+
+Until the directory exists, listing the shared directory's files through the Hub returns an empty list, and reading a file returns not found. Listing or reading never creates the directory.
+
+A write through the Hub only creates the directory in storage the Hub itself can reach: the NFS export, a hub-managed project's storage on the Hub host, or the project's directory on a Runtime Broker running in the same server as the Hub. It never creates the directory on a remote Runtime Broker; that copy appears only when an agent of the project starts on that Runtime Broker. For a git project with no co-located Runtime Broker and no NFS storage, a write through the Hub is rejected and creates nothing.
+
 ### Mounting Shared Directories
 
 When an agent is created in a project that has shared directories, they are automatically mounted into the agent's container.
@@ -222,6 +551,8 @@ Each shared directory's mount location depends on its `in_workspace` setting:
 - **`in_workspace: true`:** `/workspace/.scion-volumes/<name>` — mounted inside the workspace tree.
 
 A shared directory is mounted at one of these locations, not both.
+
+By default, shared directories live on the host that runs the agent. In hosted deployments, an operator can set [`server.project_storage.backend`](/scion/reference/server-config/#project-storage-serverproject_storage) to `nfs`. Every Runtime Broker then resolves a project's shared directories (and workspaces) to the same NFS export, so agents on different Runtime Brokers share the same files. A directory that should stay on each node, such as a build cache, is a `volumes:` entry, not a shared directory; the Runtime Broker checks every `volumes:` source against its [Volume Source Restrictions](/scion/reference/orchestrator-settings/#volume-source-restrictions) and refuses paths that resolve into its control files under `~/.scion`.
 
 ### Common Patterns
 
@@ -344,7 +675,7 @@ When you delete an agent:
 ```bash
 scion delete <agent-name>
 ```
-- **Worktrees**: The worktree directory is removed and git metadata is pruned.
+- **Worktrees**: The worktree directory and git's entry for that one worktree are removed. Scion does not run a repository-wide `git worktree prune`, so other worktrees' entries are left alone.
 - **Branches**: By default, the branch is deleted. Use `--preserve-branch` (or `-b`) to keep it.
 - **Explicit Workspaces**: Directories mounted via `--workspace` are **NOT** deleted. Scion only cleans up resources it created.
 

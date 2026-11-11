@@ -51,7 +51,7 @@ export class ScionPageProfileTeams extends LitElement {
         .slice(0, 6);
       if (this._code.length === 6) {
         this._autoLinked = true;
-        this._autoSubmit();
+        void this._autoSubmit();
       }
     }
   }

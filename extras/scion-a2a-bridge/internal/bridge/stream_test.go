@@ -200,17 +200,17 @@ func TestActiveTaskTracking(t *testing.T) {
 		agentTasks:  make(map[string][]string),
 	}
 
-	b.registerActiveTask("task-1", "grove1:agent-a")
-	b.registerActiveTask("task-2", "grove1:agent-a")
-	b.registerActiveTask("task-3", "grove1:agent-b")
+	b.registerActiveTask("task-1", "project1:agent-a")
+	b.registerActiveTask("task-2", "project1:agent-a")
+	b.registerActiveTask("task-3", "project1:agent-b")
 
 	// Check activeTasks maps taskID to agentKey.
 	b.tasksMu.RLock()
-	if b.activeTasks["task-1"].aKey != "grove1:agent-a" {
-		t.Errorf("task-1 agent key = %q, want %q", b.activeTasks["task-1"].aKey, "grove1:agent-a")
+	if b.activeTasks["task-1"].aKey != "project1:agent-a" {
+		t.Errorf("task-1 agent key = %q, want %q", b.activeTasks["task-1"].aKey, "project1:agent-a")
 	}
-	agentATaskCount := len(b.agentTasks["grove1:agent-a"])
-	agentBTaskCount := len(b.agentTasks["grove1:agent-b"])
+	agentATaskCount := len(b.agentTasks["project1:agent-a"])
+	agentBTaskCount := len(b.agentTasks["project1:agent-b"])
 	b.tasksMu.RUnlock()
 
 	if agentATaskCount != 2 {
@@ -220,17 +220,17 @@ func TestActiveTaskTracking(t *testing.T) {
 		t.Errorf("agent-b tasks = %d, want 1", agentBTaskCount)
 	}
 
-	b.unregisterActiveTask("task-1", "grove1:agent-a")
+	b.unregisterActiveTask("task-1", "project1:agent-a")
 	b.tasksMu.RLock()
-	agentATaskCount = len(b.agentTasks["grove1:agent-a"])
+	agentATaskCount = len(b.agentTasks["project1:agent-a"])
 	b.tasksMu.RUnlock()
 	if agentATaskCount != 1 {
 		t.Errorf("agent-a tasks after unregister = %d, want 1", agentATaskCount)
 	}
 
-	b.unregisterActiveTask("task-2", "grove1:agent-a")
+	b.unregisterActiveTask("task-2", "project1:agent-a")
 	b.tasksMu.RLock()
-	_, exists := b.agentTasks["grove1:agent-a"]
+	_, exists := b.agentTasks["project1:agent-a"]
 	b.tasksMu.RUnlock()
 	if exists {
 		t.Error("expected agent-a entry to be removed from agentTasks map")
@@ -545,12 +545,12 @@ func TestHandleBrokerMessage_WritesToEventLog(t *testing.T) {
 	now := time.Now()
 	taskID := "task-broker-1"
 	store.CreateTask(ctx, &state.Task{
-		ID: taskID, ContextID: "ctx-1", ProjectID: "grove1", AgentSlug: "agent-a",
+		ID: taskID, ContextID: "ctx-1", ProjectID: "project1", AgentSlug: "agent-a",
 		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
 	// Register the active task so correlation works via local cache.
-	b.registerActiveTask(taskID, "grove1:agent-a")
+	b.registerActiveTask(taskID, "project1:agent-a")
 
 	// Simulate a message arriving from the broker.
 	msg := &state.TaskEvent{

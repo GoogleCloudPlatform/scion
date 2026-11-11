@@ -21,8 +21,9 @@
  * Uses Shoelace components for UI and integrates with shared Scion components.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 // Import shared components
 import './shared/nav.js';
@@ -34,6 +35,15 @@ import { showAccessDeniedToast } from '../utils/access-denied.js';
 import { performLogout } from '../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
+import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
+import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { ARTIFACTS_FLAG } from '../client/artifacts-flag.js';
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  testHubBannerStyles,
+} from './shared/test-hub-banner.js';
+import { renderTestIdentityChip, testIdentityChipStyles } from './shared/test-identity-chip.js';
 
 /**
  * Page title configuration
@@ -42,6 +52,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
   '/projects': 'Projects',
   '/agents': 'Agents',
+  '/terminals': 'Terminals',
   '/brokers': 'Brokers',
   '/settings': 'Settings',
   '/admin/scheduler': 'Scheduler',
@@ -87,12 +98,18 @@ export class ScionApp extends LitElement {
   private _accessDeniedHandler = this.handleAccessDenied.bind(this);
   private _pageTitleHandler = this.handlePageTitle.bind(this);
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this);
+
   static override styles = css`
+    ${testHubBannerStyles}
+    ${testIdentityChipStyles}
+
     :host {
       display: flex;
-      height: 100vh;
-      height: 100dvh;
+      height: var(--scion-app-height, 100dvh);
       background: var(--scion-bg, #f8fafc);
+      touch-action: manipulation;
     }
 
     /* Desktop sidebar */
@@ -101,12 +118,28 @@ export class ScionApp extends LitElement {
       flex-shrink: 0;
       position: sticky;
       top: 0;
-      height: 100vh;
+      height: var(--scion-app-height, 100dvh);
+      /* Landscape on a notched phone (the page uses viewport-fit=cover):
+         the nav moves clear of the notch and the home indicator, and the
+         sidebar paints the nav's surface under the gaps. 0 elsewhere. */
+      box-sizing: border-box;
+      padding-left: env(safe-area-inset-left, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    /* The sidebar sits between the header and the left edge and takes the
+       left inset itself, so the header does not repeat it. */
+    scion-header {
+      --scion-header-inset-left: 0px;
     }
 
     @media (max-width: 768px) {
       .sidebar {
         display: none;
+      }
+      scion-header {
+        --scion-header-inset-left: env(safe-area-inset-left, 0px);
       }
     }
 
@@ -117,12 +150,16 @@ export class ScionApp extends LitElement {
     }
 
     /* Mobile drawer */
+    /* The drawer grows by the left inset and pads it, so the nav keeps its
+       width and clears the notch in landscape. 0 elsewhere. */
     .mobile-drawer {
-      --size: 280px;
+      --size: calc(280px + env(safe-area-inset-left, 0px));
     }
 
     .mobile-drawer::part(panel) {
       background: var(--scion-surface, #ffffff);
+      padding-left: env(safe-area-inset-left, 0px);
+      box-sizing: border-box;
     }
 
     .mobile-drawer::part(close-button) {
@@ -144,15 +181,35 @@ export class ScionApp extends LitElement {
     /* Content wrapper */
     .content {
       flex: 1;
+      /* The artifact page's sticky review toolbar (.g-sticky) offsets its top
+         by this top padding, and by the 1rem at 640px below: change both. */
       padding: 1.5rem;
+      /* The last of the scrolled content clears the home indicator (the
+         page uses viewport-fit=cover); the inset is 0 elsewhere. */
+      padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));
+      /* Likewise clear of the notch and rounded corners in landscape. The
+         right edge always meets the screen; the left only once the sidebar
+         gives way to the drawer (below), as the sidebar takes the left
+         inset itself. */
+      padding-right: max(1.5rem, env(safe-area-inset-right, 0px));
       overflow: auto;
+      overscroll-behavior: contain;
       display: flex;
       flex-direction: column;
+    }
+
+    @media (max-width: 768px) {
+      .content {
+        padding-left: max(1.5rem, env(safe-area-inset-left, 0px));
+      }
     }
 
     @media (max-width: 640px) {
       .content {
         padding: 1rem;
+        padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+        padding-inline: max(1rem, env(safe-area-inset-left, 0px))
+          max(1rem, env(safe-area-inset-right, 0px));
       }
     }
 
@@ -196,6 +253,7 @@ export class ScionApp extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    enterAppFrame();
     window.addEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.addEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
     this.updateDocumentTitle();
@@ -208,6 +266,7 @@ export class ScionApp extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    exitAppFrame();
     window.removeEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.removeEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
   }
@@ -215,6 +274,8 @@ export class ScionApp extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) {
       this.updateDocumentTitle();
+      // Retry a status fetch that failed earlier; a no-op once it is known.
+      this._testHubBanner.ensure();
     }
   }
 
@@ -245,7 +306,7 @@ export class ScionApp extends LitElement {
     showAccessDeniedToast(detail);
   }
 
-  override render() {
+  override render(): TemplateResult {
     const pageTitle = this.getPageTitle();
 
     return html`
@@ -276,6 +337,10 @@ export class ScionApp extends LitElement {
 
       <!-- Main Content -->
       <main class="main">
+        <!-- Test-hub banner: keyed on the path, so every navigation renders
+             a fresh element even if the previous one was removed. -->
+        ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
+        ${renderTestIdentityChip(this.user)}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}
@@ -291,75 +356,86 @@ export class ScionApp extends LitElement {
           </div>
         </div>
       </main>
-
     `;
   }
 
   /**
-   * Get the page title based on current path
+   * Get the page title based on current path. Matches on the pathname only:
+   * currentPath carries the query string (and may carry a hash), which must
+   * not turn a valid route into "Page Not Found".
    */
   private getPageTitle(): string {
+    const path = this.currentPath.split(/[?#]/, 1)[0];
     // Check for exact match
-    if (PAGE_TITLES[this.currentPath]) {
-      return PAGE_TITLES[this.currentPath];
+    if (PAGE_TITLES[path]) {
+      return PAGE_TITLES[path];
     }
 
     // Check for pattern matches
-    if (this.currentPath === '/projects/new') {
+    if (path === '/projects/new') {
       return 'Create Project';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/settings$/)) {
+    if (path.match(/^\/projects\/[^/]+\/settings$/)) {
       return 'Project Settings';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/schedules$/)) {
+    if (path.match(/^\/projects\/[^/]+\/schedules$/)) {
       return 'Schedules';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/metrics$/)) {
+    if (path.match(/^\/projects\/[^/]+\/metrics$/)) {
       return 'Project Metrics';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
+    if (path.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) && isFeatureEnabled(ARTIFACTS_FLAG)) {
+      return 'Artifact';
+    }
+    if (path === '/artifacts' && isFeatureEnabled(ARTIFACTS_FLAG)) {
+      return 'Artifacts';
+    }
+    if (path.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
       return 'Template';
     }
-    if (this.currentPath.startsWith('/projects/')) {
+    if (path.startsWith('/projects/')) {
       return 'Project';
     }
-    if (this.currentPath === '/agents/new') {
+    if (path === '/agents/new') {
       return 'Create Agent';
     }
-    if (this.currentPath.match(/^\/agents\/[^/]+\/terminal$/)) {
+    if (path.match(/^\/agents\/[^/]+\/terminal$/)) {
       return 'Terminal';
     }
-    if (this.currentPath.match(/^\/agents\/[^/]+\/configure$/)) {
-      return 'Configure Agent';
+    if (path === '/terminals' || path.match(/^\/terminals\/[^/]+$/)) {
+      return 'Terminals';
     }
-    if (this.currentPath.startsWith('/agents/')) {
+    if (path.match(/^\/agents\/[^/]+\/edit$/)) {
+      return 'Edit Agent';
+    }
+    if (path.startsWith('/agents/')) {
       return 'Agent';
     }
-    if (this.currentPath.startsWith('/brokers/')) {
+    if (path.startsWith('/brokers/')) {
       return 'Broker';
     }
-    if (this.currentPath.match(/^\/settings\/harness-configs\/[^/]+$/)) {
+    if (path.match(/^\/settings\/harness-configs\/[^/]+$/)) {
       return 'Harness Config';
     }
-    if (this.currentPath.match(/^\/settings\/templates\/[^/]+$/)) {
+    if (path.match(/^\/settings\/templates\/[^/]+$/)) {
       return 'Template';
     }
-    if (this.currentPath.match(/^\/admin\/groups\/[^/]+$/)) {
+    if (path.match(/^\/admin\/groups\/[^/]+$/)) {
       return 'Group';
     }
-    if (this.currentPath === '/admin/maintenance') {
+    if (path === '/admin/maintenance') {
       return 'Maintenance';
     }
-    if (this.currentPath.match(/^\/admin\/integrations\/[^/]+$/)) {
+    if (path.match(/^\/admin\/integrations\/[^/]+$/)) {
       return 'Integration';
     }
-    if (this.currentPath === '/skills/new') {
+    if (path === '/skills/new') {
       return 'Create Skill';
     }
-    if (this.currentPath.startsWith('/skills/')) {
+    if (path.startsWith('/skills/')) {
       return 'Skill';
     }
-    if (this.currentPath.match(/^\/admin\/skill-registries\/[^/]+$/)) {
+    if (path.match(/^\/admin\/skill-registries\/[^/]+$/)) {
       return 'Skill Registry';
     }
 

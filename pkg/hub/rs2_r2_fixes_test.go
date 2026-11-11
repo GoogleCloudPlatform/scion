@@ -585,7 +585,7 @@ func TestRS2_CredentialChangeCursorReplay(t *testing.T) {
 
 	// Mint UAT scoped to project A.
 	// Use project:read — project-member does not hold project:manage under A2.
-	uatA := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
+	uatA := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "project:list"})
 
 	// Get page 1 with UAT A — should see only project A (scoped)
 	rec := doRequestWithUAT(t, srv, uatA, http.MethodGet, "/api/v1/projects", nil)
@@ -628,8 +628,8 @@ func TestRS2_CredentialChangeCursorReplay(t *testing.T) {
 		// Mint two UATs for the same user, same project, same scope.
 		// Each CreateToken call generates a distinct credential record with a unique ID.
 		// Use project:read — project-member does not hold project:manage under A2.
-		uatA1 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
-		uatA2 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
+		uatA1 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "agent:list"})
+		uatA2 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "agent:list"})
 
 		// Both UATs see projA's agents
 		recA1 := doRequestWithUAT(t, srv, uatA1, http.MethodGet, "/api/v1/agents", nil)
@@ -697,7 +697,7 @@ func TestRS2_CredentialChangeCursorReplay(t *testing.T) {
 
 		// Mint a different UAT scoped to projB.
 		// Use project:read — project-member does not hold project:manage under A2.
-		uatB := mintScopedUAT(t, srv, user.ID, projB.ID, []string{"project:read"})
+		uatB := mintScopedUAT(t, srv, user.ID, projB.ID, []string{"project:read", "project:list"})
 
 		// Even without pagination, the cursor binding includes credential context.
 		// Use session JWT to get a cursor, then replay with UAT B.
@@ -900,8 +900,10 @@ func TestRS2_ProductionAgentJWT(t *testing.T) {
 // POST /api/v1/projects/{id}/transfer-ownership to atomically transfer
 // ownership from UserA to UserB. It verifies Mine/Shared classification
 // before and after the transfer for both project and agent endpoints,
-// proving that classification follows active RoleBindings (not legacy
-// Project.OwnerID which remains stale after transfer). Also tests mine=true.
+// proving that classification follows active RoleBindings. Transfer moves
+// Project.OwnerID to the new owner (ptone/scion#2554); the final subtest
+// writes a stale legacy OwnerID back into the store to prove classification
+// does not depend on it. Also tests mine=true.
 func TestRS2_TransferredOwnership(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -983,11 +985,11 @@ func TestRS2_TransferredOwnership(t *testing.T) {
 
 	// ---- AFTER TRANSFER: verify Mine/Shared classification follows RoleBindings ----
 
-	// Verify Project.OwnerID is STILL userA (stale metadata; transfer only changes RoleBindings)
+	// Transfer moves Project.OwnerID to the new owner (ptone/scion#2554).
 	updatedProj, err := s.GetProject(ctx, proj.ID)
 	require.NoError(t, err)
-	assert.Equal(t, userA.ID, updatedProj.OwnerID,
-		"after transfer: Project.OwnerID must remain stale (userA)")
+	assert.Equal(t, userB.ID, updatedProj.OwnerID,
+		"OwnerID follows the transfer")
 
 	t.Run("after_transfer_userB_mine_includes_project", func(t *testing.T) {
 		// UserB (new owner via transfer) — Mine must include project
@@ -1051,6 +1053,48 @@ func TestRS2_TransferredOwnership(t *testing.T) {
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 		assert.Contains(t, extractAgentIDs(resp.Agents), ag.ID,
 			"after transfer: Shared agents for userA must include agent (has member binding)")
+	})
+
+	t.Run("stale_legacy_owner_id_does_not_drive_classification", func(t *testing.T) {
+		// Legacy data: a project whose OwnerID still names the old owner
+		// after the bindings moved. Classification must follow bindings.
+		// SetProjectOwnerID is the only OwnerID writer (ptone/scion#2597).
+		require.NoError(t, s.SetProjectOwnerID(ctx, proj.ID, userA.ID))
+		stale, err := s.GetProject(ctx, proj.ID)
+		require.NoError(t, err)
+		require.Equal(t, userA.ID, stale.OwnerID, "precondition: OwnerID names the old owner")
+
+		// Precondition: the bindings say userA is a member and userB the
+		// owner, so this subtest does not rely on the earlier ones.
+		ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		require.NoError(t, err)
+		bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, proj.ID)
+		require.NoError(t, err)
+		hasRole := func(userID, roleDefID string) bool {
+			for _, b := range bindings {
+				if b.PrincipalType == store.RoleBindingPrincipalUser && b.PrincipalID == userID && b.RoleDefinitionID == roleDefID {
+					return true
+				}
+			}
+			return false
+		}
+		require.True(t, hasRole(userA.ID, memberRD.ID), "precondition: userA holds a member binding")
+		require.False(t, hasRole(userA.ID, ownerRD.ID), "precondition: userA holds no owner binding")
+		require.True(t, hasRole(userB.ID, ownerRD.ID), "precondition: userB holds the owner binding")
+
+		projectIDs := func(u *store.User, scope string) []string {
+			rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/projects?scope="+scope, nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			var resp ListProjectsResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			return extractProjectIDs(resp.Projects)
+		}
+		assert.Contains(t, projectIDs(userB, "mine"), proj.ID,
+			"stale OwnerID: Mine for userB (owner binding) must include project")
+		assert.NotContains(t, projectIDs(userA, "mine"), proj.ID,
+			"stale OwnerID: Mine for userA (member binding) must NOT include project")
+		assert.Contains(t, projectIDs(userA, "shared"), proj.ID,
+			"stale OwnerID: Shared for userA (member binding) must include project")
 	})
 }
 

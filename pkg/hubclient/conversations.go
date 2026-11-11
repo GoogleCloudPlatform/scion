@@ -57,10 +57,20 @@ type conversationService struct {
 
 // ListConversationsOptions configures conversation listing.
 type ListConversationsOptions struct {
-	Kind      string
-	Surface   string
+	Kind    string
+	Surface string
+	// ProjectID narrows the list to conversations in exactly this project —
+	// it drops every conversation whose ProjectID doesn't match, including
+	// every DM (DMs have no ProjectID). This is the existing, unchanged
+	// semantics for API callers.
 	ProjectID string
-	Limit     int
+	// IncludeProjectGroups is purely additive (design doc §3.2 addendum,
+	// review round 1 finding #2): it unions in every group conversation in
+	// this project that the caller can read, without narrowing the rest of
+	// the list. Use this instead of ProjectID to add "all my project's
+	// groups" without losing DMs or other projects' conversations.
+	IncludeProjectGroups string
+	Limit                int
 }
 
 // ConversationMessagesOptions configures message listing within a conversation.
@@ -76,12 +86,42 @@ type CreateConversationRequest struct {
 	DisplayName string `json:"displayName"`
 	ProjectID   string `json:"projectId,omitempty"`
 	Kind        string `json:"kind,omitempty"`
+	// ThreadGroupID files the new group conversation into this project
+	// thread group (ptone/scion#4424). The group must be in the
+	// conversation's project. An older hub with its thread groups
+	// experiment off answers 400 when it is set.
+	ThreadGroupID string `json:"threadGroupId,omitempty"`
 }
 
 // ConversationDetail wraps a conversation with its participants.
 type ConversationDetail struct {
 	store.Conversation
-	Participants []store.ConversationParticipant `json:"participants,omitempty"`
+	Participants []ConversationParticipantDetail `json:"participants,omitempty"`
+	// DMPeer is the other party of a direct conversation, relative to the
+	// caller. Set by the hub on list responses only.
+	DMPeer *ConversationPeer `json:"dmPeer,omitempty"`
+	// ThreadName is the linked webchat topic name of a native group
+	// conversation without a display name. Set on list responses only.
+	ThreadName string `json:"threadName,omitempty"`
+}
+
+// ConversationParticipantDetail is a conversation participant as the hub
+// returns it on the single-conversation GET.
+type ConversationParticipantDetail struct {
+	store.ConversationParticipant
+	// MessageMode is the participant agent's message mode (none, lineage,
+	// branch, project, hub). The hub sets it only for agents in the
+	// conversation's project (for a conversation without a project, a DM or
+	// legacy group, the calling agent's project); it is
+	// empty for users and for agents outside that project (ptone/scion#4411).
+	MessageMode string `json:"messageMode,omitempty"`
+}
+
+// ConversationPeer identifies the other principal of a direct conversation.
+type ConversationPeer struct {
+	Kind string `json:"kind"`           // user | agent
+	ID   string `json:"id"`             // principal UUID
+	Name string `json:"name,omitempty"` // empty if the hub could not resolve it
 }
 
 // AddParticipantRequest is the request to add a participant to a conversation.
@@ -108,6 +148,9 @@ func (s *conversationService) List(ctx context.Context, opts *ListConversationsO
 		}
 		if opts.ProjectID != "" {
 			query.Set("project_id", opts.ProjectID)
+		}
+		if opts.IncludeProjectGroups != "" {
+			query.Set("include_project_groups", opts.IncludeProjectGroups)
 		}
 		if opts.Limit > 0 {
 			query.Set("limit", strconv.Itoa(opts.Limit))
@@ -137,7 +180,7 @@ func (s *conversationService) Get(ctx context.Context, id string) (*Conversation
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ConversationDetail](resp)
+	return apiclient.DecodeRequired[ConversationDetail](resp)
 }
 
 // ListMessages returns messages in a conversation.
@@ -181,7 +224,7 @@ func (s *conversationService) GetMessage(ctx context.Context, conversationID, me
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.Message](resp)
+	return apiclient.DecodeRequired[store.Message](resp)
 }
 
 // Create creates a new conversation.
@@ -190,7 +233,7 @@ func (s *conversationService) Create(ctx context.Context, req *CreateConversatio
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ConversationDetail](resp)
+	return apiclient.DecodeRequired[ConversationDetail](resp)
 }
 
 // SetDefaultAgent sets the default agent for a conversation.
@@ -209,7 +252,7 @@ func (s *conversationService) AddParticipant(ctx context.Context, conversationID
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.ConversationParticipant](resp)
+	return apiclient.DecodeRequired[store.ConversationParticipant](resp)
 }
 
 // Leave removes the caller from a conversation.

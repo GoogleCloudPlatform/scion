@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	harnessFS "github.com/GoogleCloudPlatform/scion/harnesses"
+	"github.com/GoogleCloudPlatform/scion/pkg/internal/nativetelemetrytest"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
@@ -33,6 +34,10 @@ func TestNativeTelemetryProvisionedChildEnv(t *testing.T) {
 				name = harnessName + "/enabled"
 			}
 			t.Run(name, func(t *testing.T) {
+				// The supervisor child inherits os.Environ(); an ambient
+				// reserved key (e.g. CLAUDE_CODE_ENABLE_TELEMETRY=1 in an
+				// agent container) would trip the policy conflict check.
+				nativetelemetrytest.ClearEnv(t)
 				home := t.TempDir()
 				bundle := filepath.Join(home, ".scion", "harness")
 				if err := os.MkdirAll(filepath.Join(bundle, "inputs"), 0755); err != nil {

@@ -1,0 +1,22 @@
+{
+  "profile_map": {
+    "fast": "k8s-agents-fast",
+    "slow": "k8s-agents-slow"
+  },
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "notice",
+      "path": "profiles.*",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "differ in harness_overrides.claude.env, harness_overrides.claude.image, resources;",
+        "k8s-agents-fast (fast), k8s-agents-slow (slow)",
+        "add a field choice for target k8s-agents"
+      ]
+    }
+  ]
+}

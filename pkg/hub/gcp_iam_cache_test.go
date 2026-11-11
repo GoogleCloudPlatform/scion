@@ -24,59 +24,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// countingChecker wraps a FakeCallerPermissionChecker and tracks call counts
-// per target SA email.
-type countingChecker struct {
-	mu    sync.Mutex
-	inner *store.FakeCallerPermissionChecker
-	calls int
-}
-
-func newCountingChecker() *countingChecker {
-	return &countingChecker{
-		inner: store.NewFakeCallerPermissionChecker(),
-	}
-}
-
-func (c *countingChecker) CanActAs(ctx context.Context, caller store.Principal, targetSA *store.GCPServiceAccount) (store.ActAsResult, error) {
-	c.mu.Lock()
-	c.calls++
-	c.mu.Unlock()
-	return c.inner.CanActAs(ctx, caller, targetSA)
-}
-
-func (c *countingChecker) callCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.calls
-}
-
-var (
-	cacheCaller = store.Principal{
-		Kind:                store.PrincipalAgent,
-		ID:                  "agent-1",
-		ServiceAccountEmail: "caller@proj.iam.gserviceaccount.com",
-	}
-
-	cacheCaller2 = store.Principal{
-		Kind:                store.PrincipalAgent,
-		ID:                  "agent-2",
-		ServiceAccountEmail: "caller2@proj.iam.gserviceaccount.com",
-	}
-
-	cacheTargetSA = &store.GCPServiceAccount{
-		ID:        "sa-1",
-		Email:     "target@proj.iam.gserviceaccount.com",
-		ProjectID: "proj",
-	}
-
-	cacheTargetSA2 = &store.GCPServiceAccount{
-		ID:        "sa-2",
-		Email:     "target2@proj.iam.gserviceaccount.com",
-		ProjectID: "proj",
-	}
-)
-
 func TestCachedChecker_MissCallsInner(t *testing.T) {
 	inner := newCountingChecker()
 	inner.inner.AllowTarget(cacheTargetSA.Email)

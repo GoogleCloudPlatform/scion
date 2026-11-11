@@ -1,0 +1,120 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"database/sql"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+func assertListMessageIDsForAttachment(t *testing.T, wcs WebChatStore) {
+	t.Helper()
+	ctx := context.Background()
+	att := hubtestutil.TID("ref-store-attachment")
+	other := hubtestutil.TID("ref-store-other-attachment")
+	msgA, msgB, msgC := hubtestutil.TID("ref-store-msg-a"), hubtestutil.TID("ref-store-msg-b"), hubtestutil.TID("ref-store-msg-c")
+	for _, link := range [][2]string{{msgA, att}, {msgB, att}, {msgC, att}, {msgA, other}} {
+		require.NoError(t, wcs.LinkAttachmentToMessage(ctx, link[0], link[1]))
+	}
+
+	all, err := wcs.ListMessageIDsForAttachment(ctx, att, 20)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{msgA, msgB, msgC}, all)
+
+	limited, err := wcs.ListMessageIDsForAttachment(ctx, att, 2)
+	require.NoError(t, err)
+	assert.Len(t, limited, 2, "the limit is applied")
+
+	none, err := wcs.ListMessageIDsForAttachment(ctx, hubtestutil.TID("ref-store-unlinked"), 20)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
+func TestListMessageIDsForAttachment_SQLite(t *testing.T) {
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
+	require.NoError(t, wcs.Init())
+	assertListMessageIDsForAttachment(t, wcs)
+	assert.True(t, sqliteIndexExists(db, "idx_webchat_message_attachment_attachment"))
+}
+
+func TestListMessageIDsForAttachment_Postgres(t *testing.T) {
+	dsn := hubtestutil.RequirePostgresDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	pgDropWebchatTables(t, db)
+	t.Cleanup(func() { pgDropWebchatTables(t, db) })
+
+	wcs := NewWebChatStore(db, "postgres")
+	require.NoError(t, wcs.Init())
+	assertListMessageIDsForAttachment(t, wcs)
+	assert.True(t, pgIndexExists(db, "idx_webchat_message_attachment_attachment"))
+}
+
+func assertTopicLookupInProject(t *testing.T, wcs WebChatStore) {
+	t.Helper()
+	ctx := context.Background()
+	projA, projB := hubtestutil.TID("ref-store-proj-a"), hubtestutil.TID("ref-store-proj-b")
+	keep, live, gone := hubtestutil.TID("ref-store-topic-keep"), hubtestutil.TID("ref-store-topic-live"), hubtestutil.TID("ref-store-topic-gone")
+	for _, id := range []string{keep, live, gone} {
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{ID: id, ProjectID: projB, Name: "t-" + id[:8], CreatedBy: "u", CreatedAt: time.Now().UTC()}))
+	}
+	require.NoError(t, wcs.DeleteTopic(ctx, gone))
+
+	_, err := wcs.GetTopicConversationIDInProject(ctx, projB, live)
+	require.NoError(t, err, "a live topic of the project is found")
+	_, err = wcs.GetTopicConversationIDIncludingDeletedInProject(ctx, projB, gone)
+	require.NoError(t, err, "a deleted topic of the project is found by the including-deleted lookup")
+	_, err = wcs.GetTopicConversationIDInProject(ctx, projB, gone)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a deleted topic is not live")
+
+	for _, id := range []string{live, gone} {
+		_, err = wcs.GetTopicConversationIDInProject(ctx, projA, id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "a topic of another project is not found")
+		_, err = wcs.GetTopicConversationIDIncludingDeletedInProject(ctx, projA, id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "a topic of another project is not found")
+	}
+}
+
+func TestTopicConversationLookupInProject_OtherProjectNotFound(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
+		wcs := NewWebChatStore(db, "sqlite")
+		require.NoError(t, wcs.Init())
+		assertTopicLookupInProject(t, wcs)
+	})
+	t.Run("postgres", func(t *testing.T) {
+		dsn := hubtestutil.RequirePostgresDSN(t)
+		db, err := sql.Open("pgx", dsn)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		pgDropWebchatTables(t, db)
+		t.Cleanup(func() { pgDropWebchatTables(t, db) })
+		wcs := NewWebChatStore(db, "postgres")
+		require.NoError(t, wcs.Init())
+		assertTopicLookupInProject(t, wcs)
+	})
+}

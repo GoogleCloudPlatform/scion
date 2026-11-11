@@ -427,7 +427,7 @@ The existing `eventToState()` mapping splits into phase and activity:
 | `tool-start` | (none) | → `executing` + set toolName (respects sticky*) |
 | `tool-end` | (none) | → `idle` + clear toolName (respects sticky) |
 | `agent-end` | (none) | → `idle` (respects sticky) |
-| `notification` | (none) | → `waiting_for_input` (sets sticky) |
+| `notification` | (none) | → `waiting_for_input` (sets sticky; keeps `limits_exceeded`, `crashed` and an agent-set wait) |
 | `pre-stop` | → `stopping` | clear |
 | `session-end` | → `stopped` | clear |
 

@@ -38,6 +38,12 @@ const (
 	FieldResources = "resources"
 	// FieldRuntimes holds the string denoting the runtimes field in the database.
 	FieldRuntimes = "runtimes"
+	// FieldDefaultProfile holds the string denoting the default_profile field in the database.
+	FieldDefaultProfile = "default_profile"
+	// FieldWorkspaceStorage holds the string denoting the workspace_storage field in the database.
+	FieldWorkspaceStorage = "workspace_storage"
+	// FieldHealth holds the string denoting the health field in the database.
+	FieldHealth = "health"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -52,12 +58,44 @@ const (
 	FieldGcpHostServiceAccountEmail = "gcp_host_service_account_email"
 	// FieldGcpHostProjectID holds the string denoting the gcp_host_project_id field in the database.
 	FieldGcpHostProjectID = "gcp_host_project_id"
+	// FieldGcpHostSource holds the string denoting the gcp_host_source field in the database.
+	FieldGcpHostSource = "gcp_host_source"
+	// FieldHostIdentityObservedEmail holds the string denoting the host_identity_observed_email field in the database.
+	FieldHostIdentityObservedEmail = "host_identity_observed_email"
+	// FieldHostIdentityObservation holds the string denoting the host_identity_observation field in the database.
+	FieldHostIdentityObservation = "host_identity_observation"
+	// FieldHostIdentityObservedAt holds the string denoting the host_identity_observed_at field in the database.
+	FieldHostIdentityObservedAt = "host_identity_observed_at"
 	// FieldConnectedHubID holds the string denoting the connected_hub_id field in the database.
 	FieldConnectedHubID = "connected_hub_id"
 	// FieldConnectedSessionID holds the string denoting the connected_session_id field in the database.
 	FieldConnectedSessionID = "connected_session_id"
 	// FieldConnectedAt holds the string denoting the connected_at field in the database.
 	FieldConnectedAt = "connected_at"
+	// FieldRuntimeTargetID holds the string denoting the runtime_target_id field in the database.
+	FieldRuntimeTargetID = "runtime_target_id"
+	// FieldRuntimeTargetType holds the string denoting the runtime_target_type field in the database.
+	FieldRuntimeTargetType = "runtime_target_type"
+	// FieldRuntimeTargetDisplayName holds the string denoting the runtime_target_display_name field in the database.
+	FieldRuntimeTargetDisplayName = "runtime_target_display_name"
+	// FieldRuntimeTargetPresentation holds the string denoting the runtime_target_presentation field in the database.
+	FieldRuntimeTargetPresentation = "runtime_target_presentation"
+	// FieldRuntimeTargetPresentationHash holds the string denoting the runtime_target_presentation_hash field in the database.
+	FieldRuntimeTargetPresentationHash = "runtime_target_presentation_hash"
+	// FieldPresentationEpoch holds the string denoting the presentation_epoch field in the database.
+	FieldPresentationEpoch = "presentation_epoch"
+	// FieldPresentationSeq holds the string denoting the presentation_seq field in the database.
+	FieldPresentationSeq = "presentation_seq"
+	// FieldPresentationFencedAt holds the string denoting the presentation_fenced_at field in the database.
+	FieldPresentationFencedAt = "presentation_fenced_at"
+	// FieldPresentationObservedAt holds the string denoting the presentation_observed_at field in the database.
+	FieldPresentationObservedAt = "presentation_observed_at"
+	// FieldConversionPlanPresentation holds the string denoting the conversion_plan_presentation field in the database.
+	FieldConversionPlanPresentation = "conversion_plan_presentation"
+	// FieldConversionPlanPresentationHash holds the string denoting the conversion_plan_presentation_hash field in the database.
+	FieldConversionPlanPresentationHash = "conversion_plan_presentation_hash"
+	// FieldConversionPlanObservedAt holds the string denoting the conversion_plan_observed_at field in the database.
+	FieldConversionPlanObservedAt = "conversion_plan_observed_at"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -81,6 +119,9 @@ var Columns = []string{
 	FieldSupportedHarnesses,
 	FieldResources,
 	FieldRuntimes,
+	FieldDefaultProfile,
+	FieldWorkspaceStorage,
+	FieldHealth,
 	FieldLabels,
 	FieldAnnotations,
 	FieldEndpoint,
@@ -88,9 +129,25 @@ var Columns = []string{
 	FieldAutoProvide,
 	FieldGcpHostServiceAccountEmail,
 	FieldGcpHostProjectID,
+	FieldGcpHostSource,
+	FieldHostIdentityObservedEmail,
+	FieldHostIdentityObservation,
+	FieldHostIdentityObservedAt,
 	FieldConnectedHubID,
 	FieldConnectedSessionID,
 	FieldConnectedAt,
+	FieldRuntimeTargetID,
+	FieldRuntimeTargetType,
+	FieldRuntimeTargetDisplayName,
+	FieldRuntimeTargetPresentation,
+	FieldRuntimeTargetPresentationHash,
+	FieldPresentationEpoch,
+	FieldPresentationSeq,
+	FieldPresentationFencedAt,
+	FieldPresentationObservedAt,
+	FieldConversionPlanPresentation,
+	FieldConversionPlanPresentationHash,
+	FieldConversionPlanObservedAt,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -120,6 +177,12 @@ var (
 	DefaultConnectionState string
 	// DefaultAutoProvide holds the default value on creation for the "auto_provide" field.
 	DefaultAutoProvide bool
+	// DefaultGcpHostSource holds the default value on creation for the "gcp_host_source" field.
+	DefaultGcpHostSource string
+	// DefaultRuntimeTargetType holds the default value on creation for the "runtime_target_type" field.
+	DefaultRuntimeTargetType string
+	// DefaultRuntimeTargetDisplayName holds the default value on creation for the "runtime_target_display_name" field.
+	DefaultRuntimeTargetDisplayName string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -198,14 +261,19 @@ func ByRuntimes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimes, opts...).ToFunc()
 }
 
-// ByLabels orders the results by the labels field.
-func ByLabels(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldLabels, opts...).ToFunc()
+// ByDefaultProfile orders the results by the default_profile field.
+func ByDefaultProfile(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDefaultProfile, opts...).ToFunc()
 }
 
-// ByAnnotations orders the results by the annotations field.
-func ByAnnotations(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldAnnotations, opts...).ToFunc()
+// ByWorkspaceStorage orders the results by the workspace_storage field.
+func ByWorkspaceStorage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWorkspaceStorage, opts...).ToFunc()
+}
+
+// ByHealth orders the results by the health field.
+func ByHealth(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHealth, opts...).ToFunc()
 }
 
 // ByEndpoint orders the results by the endpoint field.
@@ -233,6 +301,26 @@ func ByGcpHostProjectID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGcpHostProjectID, opts...).ToFunc()
 }
 
+// ByGcpHostSource orders the results by the gcp_host_source field.
+func ByGcpHostSource(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGcpHostSource, opts...).ToFunc()
+}
+
+// ByHostIdentityObservedEmail orders the results by the host_identity_observed_email field.
+func ByHostIdentityObservedEmail(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHostIdentityObservedEmail, opts...).ToFunc()
+}
+
+// ByHostIdentityObservation orders the results by the host_identity_observation field.
+func ByHostIdentityObservation(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHostIdentityObservation, opts...).ToFunc()
+}
+
+// ByHostIdentityObservedAt orders the results by the host_identity_observed_at field.
+func ByHostIdentityObservedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHostIdentityObservedAt, opts...).ToFunc()
+}
+
 // ByConnectedHubID orders the results by the connected_hub_id field.
 func ByConnectedHubID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldConnectedHubID, opts...).ToFunc()
@@ -246,6 +334,66 @@ func ByConnectedSessionID(opts ...sql.OrderTermOption) OrderOption {
 // ByConnectedAt orders the results by the connected_at field.
 func ByConnectedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldConnectedAt, opts...).ToFunc()
+}
+
+// ByRuntimeTargetID orders the results by the runtime_target_id field.
+func ByRuntimeTargetID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetID, opts...).ToFunc()
+}
+
+// ByRuntimeTargetType orders the results by the runtime_target_type field.
+func ByRuntimeTargetType(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetType, opts...).ToFunc()
+}
+
+// ByRuntimeTargetDisplayName orders the results by the runtime_target_display_name field.
+func ByRuntimeTargetDisplayName(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetDisplayName, opts...).ToFunc()
+}
+
+// ByRuntimeTargetPresentation orders the results by the runtime_target_presentation field.
+func ByRuntimeTargetPresentation(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetPresentation, opts...).ToFunc()
+}
+
+// ByRuntimeTargetPresentationHash orders the results by the runtime_target_presentation_hash field.
+func ByRuntimeTargetPresentationHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetPresentationHash, opts...).ToFunc()
+}
+
+// ByPresentationEpoch orders the results by the presentation_epoch field.
+func ByPresentationEpoch(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationEpoch, opts...).ToFunc()
+}
+
+// ByPresentationSeq orders the results by the presentation_seq field.
+func ByPresentationSeq(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationSeq, opts...).ToFunc()
+}
+
+// ByPresentationFencedAt orders the results by the presentation_fenced_at field.
+func ByPresentationFencedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationFencedAt, opts...).ToFunc()
+}
+
+// ByPresentationObservedAt orders the results by the presentation_observed_at field.
+func ByPresentationObservedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationObservedAt, opts...).ToFunc()
+}
+
+// ByConversionPlanPresentation orders the results by the conversion_plan_presentation field.
+func ByConversionPlanPresentation(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversionPlanPresentation, opts...).ToFunc()
+}
+
+// ByConversionPlanPresentationHash orders the results by the conversion_plan_presentation_hash field.
+func ByConversionPlanPresentationHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversionPlanPresentationHash, opts...).ToFunc()
+}
+
+// ByConversionPlanObservedAt orders the results by the conversion_plan_observed_at field.
+func ByConversionPlanObservedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversionPlanObservedAt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

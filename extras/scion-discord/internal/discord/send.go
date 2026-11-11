@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -215,12 +214,17 @@ var containerPathPrefixes = []string{
 // equivalent. If the path doesn't start with /scion-volumes/ or
 // /workspace/.scion-volumes/, it is returned unchanged.
 //
+// The shared dir resolves through its storage backend (local or nfs), the
+// same resolution agents use to mount it. An error is returned only when
+// the shared dir cannot be resolved (for example an nfs mount that is
+// unavailable); callers must report it rather than search elsewhere.
+//
 // The returned path is NOT validated for confinement; callers MUST pass it
 // through safeResolve or safeResolveMulti before use.
-func translateContainerPath(path, projectSlug, projectID string) string {
+func translateContainerPath(path, projectSlug, projectID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return path
+		return path, nil
 	}
 
 	for _, prefix := range containerPathPrefixes {
@@ -229,7 +233,7 @@ func translateContainerPath(path, projectSlug, projectID string) string {
 			bare := strings.TrimSuffix(prefix, "/")
 			if path == bare {
 				// e.g. "/scion-volumes" with no shared dir name — can't translate.
-				return path
+				return path, nil
 			}
 			continue
 		}
@@ -239,7 +243,7 @@ func translateContainerPath(path, projectSlug, projectID string) string {
 		if after == "" {
 			// Path is exactly the prefix (e.g. "/scion-volumes/") — no shared
 			// dir name, so we can't translate.
-			return path
+			return path, nil
 		}
 
 		// Split into shared dir name and optional remainder.
@@ -251,10 +255,13 @@ func translateContainerPath(path, projectSlug, projectID string) string {
 			sharedDirName = after
 		}
 
-		hostSharedDir := config.SharedDirHostPath(home, projectSlug, projectID, sharedDirName)
-		return filepath.Join(hostSharedDir, remainder)
+		hostSharedDir, err := resolveSharedDirHostPath(home, projectSlug, projectID, sharedDirName)
+		if err != nil {
+			return "", fmt.Errorf("resolve shared dir %q: %w", sharedDirName, err)
+		}
+		return filepath.Join(hostSharedDir, remainder), nil
 	}
-	return path
+	return path, nil
 }
 
 // HandleSend handles the /scion send <path> command.
@@ -281,7 +288,17 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		h.log.Error("Failed to resolve channel link", "channel_id", i.ChannelID, "error", err)
 	}
 	if link != nil && link.Active {
-		pathArg = translateContainerPath(pathArg, link.ProjectSlug, link.ProjectID)
+		translated, err := translateContainerPath(pathArg, link.ProjectSlug, link.ProjectID)
+		if err != nil {
+			h.log.Error("Failed to translate shared dir path", "path", pathArg, "error", err)
+			if isSharedDirStorageUnavailable(err) {
+				h.followup(s, i, "Cannot look up that file: the project's shared storage is unavailable on this broker. Ask an operator to check it.")
+			} else {
+				h.followup(s, i, "Cannot look up that file: the shared dir path is not valid.")
+			}
+			return
+		}
+		pathArg = translated
 	}
 
 	// Resolve search roots: per-project roots from channel link, with

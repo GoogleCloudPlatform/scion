@@ -34,14 +34,13 @@ func FormatLegacyAsNewDelivery(
 		return ""
 	}
 
-	// Use the legacy Plain/Raw flags as delivery options.
+	// Use the legacy Plain flag as the delivery option.
 	opts := DeliveryOptions{
 		Plain: msg.Plain,
-		Raw:   msg.Raw,
 	}
 
-	// Short-circuit: plain/raw messages return raw text only.
-	if opts.Plain || opts.Raw {
+	// Short-circuit: plain messages return the message text only.
+	if opts.Plain {
 		return msg.Msg
 	}
 

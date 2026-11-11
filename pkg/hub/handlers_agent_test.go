@@ -21,8 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,39 +195,6 @@ func TestAgentStatusUpdate_Heartbeat(t *testing.T) {
 	assert.True(t, updated.LastSeen.After(initialTime), "LastSeen should be updated")
 }
 
-// setupOfflineBrokerAgent creates a project, an offline broker, and an agent assigned to that broker.
-func setupOfflineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Project, *store.RuntimeBroker, *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid(fmt.Sprintf("project-offline-%s", suffix)),
-		Name: fmt.Sprintf("Offline Project %s", suffix),
-		Slug: fmt.Sprintf("offline-project-%s", suffix),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:     tid(fmt.Sprintf("broker-offline-%s", suffix)),
-		Name:   fmt.Sprintf("Offline Broker %s", suffix),
-		Slug:   fmt.Sprintf("offline-broker-%s", suffix),
-		Status: store.BrokerStatusOffline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	agent := &store.Agent{
-		ID:              tid(fmt.Sprintf("agent-offline-%s", suffix)),
-		Slug:            fmt.Sprintf("agent-offline-%s-slug", suffix),
-		Name:            fmt.Sprintf("Agent Offline %s", suffix),
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return project, broker, agent
-}
-
 func TestDeleteAgent_BrokerOffline(t *testing.T) {
 	srv, s := testServer(t)
 
@@ -266,56 +236,6 @@ func TestDeleteAgent_NoBroker(t *testing.T) {
 	// Verify agent was deleted
 	_, err := s.GetAgent(ctx, agent.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
-}
-
-// deleteDispatcher tracks whether DispatchAgentDelete was called and can simulate errors.
-type deleteDispatcher struct {
-	createAgentDispatcher
-	deleteErr        error
-	deleteCalls      int
-	lastDeleteFiles  bool
-	lastRemoveBranch bool
-}
-
-func (d *deleteDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
-	d.deleteCalls++
-	d.lastDeleteFiles = deleteFiles
-	d.lastRemoveBranch = removeBranch
-	return d.deleteErr
-}
-
-// setupOnlineBrokerAgent creates a project, an online broker, and an agent assigned to that broker.
-func setupOnlineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Project, *store.RuntimeBroker, *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid(fmt.Sprintf("project-online-%s", suffix)),
-		Name: fmt.Sprintf("Online Project %s", suffix),
-		Slug: fmt.Sprintf("online-project-%s", suffix),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:       tid(fmt.Sprintf("broker-online-%s", suffix)),
-		Name:     fmt.Sprintf("Online Broker %s", suffix),
-		Slug:     fmt.Sprintf("online-broker-%s", suffix),
-		Status:   store.BrokerStatusOnline,
-		Endpoint: "http://localhost:9800",
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	agent := &store.Agent{
-		ID:              tid(fmt.Sprintf("agent-online-%s", suffix)),
-		Slug:            fmt.Sprintf("agent-online-%s-slug", suffix),
-		Name:            fmt.Sprintf("Agent Online %s", suffix),
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return project, broker, agent
 }
 
 func TestDeleteAgent_DispatchesToBroker(t *testing.T) {
@@ -362,6 +282,33 @@ func TestDeleteAgent_DispatchFailure_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 	_, err := s.GetAgent(ctx, agent.ID)
 	assert.NoError(t, err, "agent should still exist when broker dispatch fails")
+}
+
+// UAT F4 (#1846): a broker 409 (ambiguous target) is surfaced as a 409 with
+// the broker's message, not as a 502 runtime error.
+func TestDeleteAgent_BrokerConflict_Returns409(t *testing.T) {
+	srv, s := testServer(t)
+
+	disp := &deleteDispatcher{
+		deleteErr: fmt.Errorf("dispatch: %w", &brokerStatusError{
+			StatusCode: http.StatusConflict,
+			Body:       `{"error":{"code":"conflict","message":"agent 'dev' is ambiguous: 2 agents match in project \"p\""}}`,
+		}),
+	}
+	srv.SetDispatcher(disp)
+
+	_, _, agent := setupOnlineBrokerAgent(t, s, "ambig")
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeConflict, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "ambiguous")
+
+	_, err := s.GetAgent(context.Background(), agent.ID)
+	assert.NoError(t, err, "agent should still exist when the broker refuses the delete")
 }
 
 func TestDeleteAgent_DispatchFailure_ForceDeleteSucceeds(t *testing.T) {
@@ -443,6 +390,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, contrib))
@@ -733,8 +681,8 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping, blocked by credential scope restriction")
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping, so the denial is answered as a missing agent")
 	})
 
 	t.Run("Agent cannot GET details of agents in different project", func(t *testing.T) {
@@ -771,131 +719,6 @@ func TestDeleteProjectAgent_BrokerOffline(t *testing.T) {
 	ctx := context.Background()
 	_, err := s.GetAgent(ctx, agent.ID)
 	assert.NoError(t, err, "agent should still exist when broker is offline")
-}
-
-// createAgentDispatcher is a mock dispatcher for createAgent handler tests.
-// It allows controlling the status that DispatchAgentCreate reports back.
-type createAgentDispatcher struct {
-	createPhase   string // status to set on agent during DispatchAgentCreate
-	createRuntime string
-	createStatus  string
-	envReqs       *RemoteEnvRequirementsResponse
-	deleteCalled  bool
-	deleteErr     error
-	startCalled   bool
-	execOutput    string
-	execExitCode  int
-}
-
-func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
-	if d.createPhase != "" {
-		agent.Phase = d.createPhase
-	}
-	if d.createRuntime != "" {
-		agent.Runtime = d.createRuntime
-	}
-	if d.createStatus != "" {
-		agent.ContainerStatus = d.createStatus
-	}
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
-	agent.Phase = string(state.PhaseCreated)
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
-	d.startCalled = true
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
-	d.deleteCalled = true
-	return d.deleteErr
-}
-func (d *createAgentDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *createAgentDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	if err := d.DispatchAgentCreate(context.Background(), agent); err != nil {
-		return nil, err
-	}
-	return d.envReqs, nil
-}
-
-// failingCreateDispatcher is a mock dispatcher whose DispatchAgentCreateWithGather
-// always returns an error, simulating a broker-side failure (e.g. auth resolution error).
-// It tracks whether DispatchAgentDelete is called so tests can verify cleanup behaviour.
-type failingCreateDispatcher struct {
-	createAgentDispatcher
-	createErr         error
-	deleteCalledFiles bool
-	deleteBranch      bool
-}
-
-func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	return nil, d.createErr
-}
-func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
-	d.deleteCalled = true
-	d.deleteCalledFiles = deleteFiles
-	d.deleteBranch = removeBranch
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
-}
-func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return d.execOutput, d.execExitCode, nil
-}
-func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
-}
-
-// setupCreateAgentServer creates a test server with a dispatcher and a project+broker ready for agent creation.
-func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid("project-create"),
-		Name: "Create Test Project",
-		Slug: "create-test-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-create"),
-		Name:   "Create Test Broker",
-		Slug:   "create-test-broker",
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	provider := &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.AddProjectProvider(ctx, provider))
-
-	project.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateProject(ctx, project))
-
-	srv.SetDispatcher(disp)
-	return srv, s, project
 }
 
 func TestCreateAgent_BrokerStatusPreserved(t *testing.T) {
@@ -2111,7 +1934,7 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 			HarnessConfig:    "claude-default",
 			AuthSelectedType: "api-key",
 			SystemPrompt:     "You are a code reviewer.",
-			MaxTurns:         50,
+			MaxTurns:         api.IntPtr(50),
 		},
 	})
 
@@ -2133,7 +1956,7 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 	// Verify the full inline config is preserved
 	require.NotNil(t, resp.Agent.AppliedConfig.InlineConfig, "InlineConfig should be preserved")
 	assert.Equal(t, "You are a code reviewer.", resp.Agent.AppliedConfig.InlineConfig.SystemPrompt)
-	assert.Equal(t, 50, resp.Agent.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(50), resp.Agent.AppliedConfig.InlineConfig.MaxTurns)
 	assert.Equal(t, "claude-opus-4-6", resp.Agent.AppliedConfig.InlineConfig.Model)
 
 	// Verify persisted in store
@@ -2860,6 +2683,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -2999,6 +2823,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -4086,6 +3911,14 @@ func TestCreateAgent_DispatchFailure_CleansUpBroker(t *testing.T) {
 	// Verify agent record was deleted from hub store
 	_, err := s.GetAgent(ctx, "auth-fail-agent")
 	assert.ErrorIs(t, err, store.ErrNotFound, "agent should be deleted from hub store after dispatch failure")
+
+	// ptone/scion#1986: a dispatch failure must not strand either quota
+	// reservation the create path took before dispatching.
+	require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, disp.capturedAgent.ID),
+		"a failed create must release the per-broker reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, disp.capturedAgent.ID),
+		"a failed create must release the per-project reservation")
 }
 
 // --- GCP Identity Assignment Tests ---
@@ -4169,11 +4002,8 @@ func TestCreateAgent_GCPIdentityPassthrough(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, disp)
 
 	// P8: passthrough requires a broker host SA. Set it on the test broker.
-	broker, err := s.GetRuntimeBroker(context.Background(), tid("broker-create"))
+	_, err := s.SetRuntimeBrokerGCPHost(context.Background(), tid("broker-create"), "host@test.iam.gserviceaccount.com", "test")
 	require.NoError(t, err)
-	broker.GCPHostServiceAccountEmail = "host@test.iam.gserviceaccount.com"
-	broker.GCPHostProjectID = "test"
-	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), broker))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "gcp-passthrough-agent",
@@ -4204,11 +4034,14 @@ func TestCreateAgent_GCPIdentityNoField(t *testing.T) {
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	// When no GCP identity is specified, default to "block" to prevent
-	// leaking the underlying compute identity.
-	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should default to block when not specified")
-	assert.Equal(t, store.GCPMetadataModeBlock, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
-	assert.Empty(t, resp.Agent.AppliedConfig.GCPIdentity.ServiceAccountID)
+	// When no GCP identity is specified anywhere (no request field, no
+	// project default, no hub default), AppliedConfig.GCPIdentity is left
+	// unset (nil) rather than an explicit "block" record, so the broker can
+	// apply its own runtime-aware default: "block" on every runtime except
+	// Kubernetes (unchanged, still keeping the underlying compute identity
+	// unavailable by default), "passthrough" on Kubernetes, since Kubernetes
+	// does not support "block" (ptone/scion#2328 phase 1).
+	assert.Nil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should stay unset when not specified anywhere, letting the broker apply its runtime-aware default")
 }
 
 func TestCreateAgent_GCPIdentityInvalidMode(t *testing.T) {
@@ -4369,7 +4202,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a broker owned by the same user, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
@@ -4386,6 +4219,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -4447,7 +4281,7 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a broker owned by a DIFFERENT user
 	broker := &store.RuntimeBroker{
@@ -4521,7 +4355,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Broker owned by someone else, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
@@ -4538,6 +4372,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -4824,6 +4659,385 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	assert.Equal(t, 0, resp2.ExitCode)
 }
 
+// TestHandleAgentExec_BrokerAgentNotFound pins ptone/scion#3443: when the
+// broker answers exec with 404 agent_not_found (the agent's container or pod
+// is gone), the hub reports 409 agent_not_running instead of a 502 broker
+// failure. Other broker errors keep the 502.
+func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus int
+		wantCode   string
+		wantMsg    string
+		// wantPhase/wantExitReason: the agent row after the call
+		// (ptone/scion#3470).
+		wantPhase      string
+		wantExitReason string
+	}{
+		{
+			name:       "agent_not_found",
+			status:     http.StatusNotFound,
+			body:       `{"error":{"code":"agent_not_found","message":"agent not found"}}`,
+			wantStatus: http.StatusConflict,
+			wantCode:   ErrCodeAgentNotRunning,
+			wantMsg:    "Agent has no running container on its runtime broker",
+
+			wantPhase:      string(state.PhaseError),
+			wantExitReason: string(state.ExitReasonContainerMissing),
+		},
+		{
+			name:       "other 404 code",
+			status:     http.StatusNotFound,
+			body:       `{"error":{"code":"not_found","message":"no such route"}}`,
+			wantStatus: http.StatusBadGateway,
+			wantCode:   ErrCodeRuntimeError,
+			wantMsg:    "Failed to execute command on runtime broker",
+
+			wantPhase: string(state.PhaseRunning),
+		},
+		{
+			name:       "broker internal error",
+			status:     http.StatusInternalServerError,
+			body:       `{"error":{"code":"internal_error","message":"boom"}}`,
+			wantStatus: http.StatusBadGateway,
+			wantCode:   ErrCodeRuntimeError,
+			wantMsg:    "Failed to execute command on runtime broker",
+
+			wantPhase: string(state.PhaseRunning),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			// Count exec requests that reach the fake broker, so the test
+			// cannot pass via a short-circuit before dispatch.
+			var execHits atomic.Int32
+			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/exec") {
+					execHits.Add(1)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(fakeBroker.Close)
+
+			project := &store.Project{ID: tid("project-exec-anf"), Name: "Exec ANF", Slug: "exec-anf"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-exec-anf"), Name: "Exec ANF Broker", Slug: "exec-anf-broker",
+				Endpoint: fakeBroker.URL, Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: tid("agent-exec-anf"), Slug: tid("agent-exec-anf"), Name: "Exec ANF Agent",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID, Phase: string(state.PhaseRunning),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec", map[string]interface{}{
+				"command": []string{"tmux", "capture-pane", "-p"},
+			})
+			require.Equal(t, tc.wantStatus, rec.Code, "response body: %s", rec.Body.String())
+
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, tc.wantCode, errResp.Error.Code)
+			assert.Contains(t, errResp.Error.Message, tc.wantMsg)
+			assert.Positive(t, execHits.Load(), "exec request never reached the fake broker")
+
+			got, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, got.Phase)
+			assert.Equal(t, tc.wantExitReason, got.ExitReason)
+		})
+	}
+}
+
+// TestHandleAgentExec_BrokerAgentNotFound_ConcurrentChange pins the race
+// guard of ptone/scion#3470: when the agent row changes while the exec is
+// with the broker (a start or restart claim, a new run, a versioned write, or
+// a status report), the broker's agent_not_found answer does not overwrite
+// it. The caller still gets the 409.
+func TestHandleAgentExec_BrokerAgentNotFound_ConcurrentChange(t *testing.T) {
+	cases := []struct {
+		name string
+		// change runs inside the fake broker, before it answers.
+		change func(t *testing.T, s store.Store, agentID string)
+	}{
+		{
+			name: "restart claim taken",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				_, err := s.ClaimAgentStart(context.Background(), agentID, "other-hub", store.StartClaimRestart, "", time.Minute)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "new run dispatched",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				_, err := s.SetAgentRunID(context.Background(), agentID, "run-2", nil)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "versioned write",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				a, err := s.GetAgent(context.Background(), agentID)
+				require.NoError(t, err)
+				a.Message = "touched"
+				require.NoError(t, s.UpdateAgent(context.Background(), a))
+			},
+		},
+		{
+			name: "status report",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				require.NoError(t, s.UpdateAgentStatus(context.Background(), agentID, store.AgentStatusUpdate{Activity: "thinking"}))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			agentID := tid("agent-exec-race")
+			var execHits atomic.Int32
+			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/exec") {
+					execHits.Add(1)
+					tc.change(t, s, agentID)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"agent_not_found","message":"agent not found"}}`))
+			}))
+			t.Cleanup(fakeBroker.Close)
+
+			project := &store.Project{ID: tid("project-exec-race"), Name: "Exec Race", Slug: "exec-race"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-exec-race"), Name: "Exec Race Broker", Slug: "exec-race-broker",
+				Endpoint: fakeBroker.URL, Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: agentID, Slug: agentID, Name: "Exec Race Agent",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID, Phase: string(state.PhaseRunning),
+				LastSeen: time.Now().Add(-time.Hour),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			_, err := s.SetAgentRunID(ctx, agentID, "run-1", nil)
+			require.NoError(t, err)
+
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/exec", map[string]interface{}{
+				"command": []string{"tmux", "capture-pane", "-p"},
+			})
+			require.Equal(t, http.StatusConflict, rec.Code, "response body: %s", rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, ErrCodeAgentNotRunning, errResp.Error.Code)
+			require.Positive(t, execHits.Load(), "exec request never reached the fake broker")
+
+			got, err := s.GetAgent(ctx, agentID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase, "a concurrent change must not be overwritten")
+			assert.Empty(t, got.ExitReason)
+		})
+	}
+}
+
+// execMarkCountingStore counts the exec reconcile's conditional store write.
+type execMarkCountingStore struct {
+	store.Store
+	marks atomic.Int32
+}
+
+func (s *execMarkCountingStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre store.ContainerMissingPrecondition, message string) (*store.Agent, error) {
+	s.marks.Add(1)
+	return s.Store.MarkAgentContainerMissingIfUnchanged(ctx, id, brokerID, cutoff, pre, message)
+}
+
+// TestHandleAgentExec_BrokerAgentNotFound_HubSkips pins the hub-side skips
+// of the exec reconcile (ptone/scion#3470): an agent with a lifecycle op in
+// flight on this hub, a reincarnation in flight, or a lifecycle dispatch
+// queued for its broker is left alone without attempting the store write
+// (a queued dispatch or an op that has not yet taken a start claim is not
+// covered by the store's compare-and-set). The caller still gets the 409.
+func TestHandleAgentExec_BrokerAgentNotFound_HubSkips(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup runs after the agent is created, before the exec request;
+		// it may return a cleanup.
+		setup     func(t *testing.T, srv *Server, s store.Store, a *store.Agent) func()
+		wantMarks int32
+		wantPhase string
+	}{
+		{
+			name:      "no skip writes",
+			wantMarks: 1,
+			wantPhase: string(state.PhaseError),
+		},
+		{
+			name: "lifecycle op in flight",
+			setup: func(t *testing.T, srv *Server, _ store.Store, a *store.Agent) func() {
+				return srv.beginLifecycleOp(a.ID)
+			},
+			wantPhase: string(state.PhaseRunning),
+		},
+		{
+			name: "reincarnation in flight",
+			setup: func(t *testing.T, _ *Server, s store.Store, a *store.Agent) func() {
+				cur, err := s.GetAgent(context.Background(), a.ID)
+				require.NoError(t, err)
+				cur.ReincarnationState = store.ReincarnationStateStarting
+				require.NoError(t, s.UpdateAgent(context.Background(), cur))
+				return nil
+			},
+			wantPhase: string(state.PhaseRunning),
+		},
+		{
+			name: "lifecycle dispatch queued",
+			setup: func(t *testing.T, _ *Server, s store.Store, a *store.Agent) func() {
+				require.NoError(t, s.InsertBrokerDispatch(context.Background(), &store.BrokerDispatch{
+					ID: tid("dispatch-exec-skip"), BrokerID: a.RuntimeBrokerID, AgentID: a.ID,
+					AgentSlug: a.Slug, ProjectID: a.ProjectID, Op: "restart", State: "pending",
+				}))
+				return nil
+			},
+			wantPhase: string(state.PhaseRunning),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			counting := &execMarkCountingStore{Store: srv.store}
+			srv.store = counting
+
+			var execHits atomic.Int32
+			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/exec") {
+					execHits.Add(1)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"agent_not_found","message":"agent not found"}}`))
+			}))
+			t.Cleanup(fakeBroker.Close)
+
+			project := &store.Project{ID: tid("project-exec-skip"), Name: "Exec Skip", Slug: "exec-skip"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-exec-skip"), Name: "Exec Skip Broker", Slug: "exec-skip-broker",
+				Endpoint: fakeBroker.URL, Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: tid("agent-exec-skip"), Slug: tid("agent-exec-skip"), Name: "Exec Skip Agent",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID, Phase: string(state.PhaseRunning),
+				LastSeen: time.Now().Add(-time.Hour),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			if tc.setup != nil {
+				if cleanup := tc.setup(t, srv, s, agent); cleanup != nil {
+					defer cleanup()
+				}
+			}
+
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(srv.store, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec", map[string]interface{}{
+				"command": []string{"tmux", "capture-pane", "-p"},
+			})
+			require.Equal(t, http.StatusConflict, rec.Code, "response body: %s", rec.Body.String())
+			require.Positive(t, execHits.Load(), "exec request never reached the fake broker")
+
+			assert.Equal(t, tc.wantMarks, counting.marks.Load(), "conditional store writes attempted")
+			got, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, got.Phase)
+		})
+	}
+}
+
+// TestSubmitAgentEnv_ReservedTarget_Rejected verifies that POST
+// /api/v1/agents/{id}/env — the CLI's env-gather submission endpoint — is
+// also a reserved-target write site: a caller cannot use it to set a scion
+// control-plane env var, the same as create/patch on the secret and env-var
+// endpoints. A real dispatcher is wired up (rather than leaving it unset) so
+// a 400 from "no runtime broker available" can't be mistaken for this
+// rejection: the assertion checks the specific error message, not just the
+// status code.
+func TestSubmitAgentEnv_ReservedTarget_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-submitenv-reserved"),
+		Name: "Submit Env Reserved Project",
+		Slug: "submitenv-reserved-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-submitenv-reserved"),
+		Name:   "Submit Env Reserved Broker",
+		Slug:   "submitenv-reserved-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("agent-submitenv-reserved"),
+		Slug:            tid("agent-submitenv-reserved"),
+		Name:            "Submit Env Reserved Agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseProvisioning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	dispatchCalled := false
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			dispatchCalled = true
+			return &RemoteAgentResponse{
+				Agent:   &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Phase: string(state.PhaseRunning)},
+				Created: true,
+			}, nil, nil
+		},
+	}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/env", map[string]interface{}{
+		"env": map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "response body: %s", rec.Body.String())
+	checkJSONError(t, rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.Contains(t, errResp.Error.Message, "reserved", "expected the reserved-target rejection message, got: %s", errResp.Error.Message)
+
+	require.False(t, dispatchCalled, "expected rejection before any dispatch to the broker")
+}
+
 func TestHandleProjectAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -5000,6 +5214,53 @@ func TestBrokerHeartbeat_RejectsPhaseRegression(t *testing.T) {
 		"heartbeat should not regress phase from running to starting")
 }
 
+// TestBrokerHeartbeat_RejectsRunningToCreatedRegression pins ptone/scion#494:
+// a heartbeat reporting phase=created for an agent the hub has as running
+// must not regress it. PhaseCreated has ordinal 1, so it counts as active
+// and the heartbeat's ordinal guard suppresses the downgrade.
+func TestBrokerHeartbeat_RejectsRunningToCreatedRegression(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-hb-created"), Name: "HB Created Project", Slug: "hb-created-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hb-created"), Name: "HB Created Broker", Slug: "hb-created-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: tid("agent-hb-created"), Slug: "hb-created-slug", Name: "HB Created Agent",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:  project.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				Phase:           string(state.PhaseCreated),
+				ContainerStatus: "created",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), updated.Phase,
+		"heartbeat should not regress phase from running to created")
+}
+
 // TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost verifies that a
 // dying container's async sciontool /status POST (phase=stopped,
 // activity=crashed) cannot clobber a suspended agent's phase. If it did, a
@@ -5044,6 +5305,198 @@ func TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost(t *testing.T) {
 		"suspended phase must be sticky against async status POST")
 	assert.NotEqual(t, string(state.ActivityCrashed), updated.Activity,
 		"crashed activity must not stick on a suspended agent")
+}
+
+// TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied
+// pins ptone/scion#2267: Guard 0b (reincarnation-sticky) must apply to a
+// status POST that carries only a message or only exit fields, not just to
+// phase/activity reports. The dropped report is not written and the
+// response says so.
+func TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		phase      state.Phase
+		reincState string
+		body       string
+	}{
+		{"message only", state.PhaseStarting, store.ReincarnationStateStopping, `{"message":"x"}`},
+		{"exit code only", state.PhaseStarting, store.ReincarnationStateStopping, `{"exitCode":137}`},
+		{"exit reason only", state.PhaseStarting, store.ReincarnationStateStopping, `{"exitReason":"crashed"}`},
+		// A suspended agent whose reincarnation is pending (the worker has
+		// not written its first step yet): Guard 0b must win over Guard 0
+		// (suspended), which would only blank Phase/Activity.
+		{"suspended, reincarnation pending, message only", state.PhaseSuspended, store.ReincarnationStatePending, `{"message":"x"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-reinc-msg"), Name: "Reinc Msg Project", Slug: "reinc-msg-project"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			agent := &store.Agent{
+				ID: tid("agent-reinc-msg"), Slug: "reinc-msg-slug", Name: "Reinc Msg Agent",
+				ProjectID: project.ID, Phase: string(tc.phase),
+				Message: "Reincarnating",
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			agent.ReincarnationState = tc.reincState
+			require.NoError(t, s.UpdateAgent(ctx, agent))
+			past := backdateAgentWriteTimestamps(t, s, agent.ID)
+			before, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.Equal(t, tc.reincState, before.ReincarnationState)
+
+			rec := postAgentStatusAsAgent(t, srv, agent, tc.body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+			assert.Equal(t, false, resp["applied"])
+			assert.Equal(t, "reincarnation_in_flight", resp["reason"])
+
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "Reincarnating", after.Message, "message must not change while a reincarnation is in flight")
+			assert.Equal(t, before.ExitCode, after.ExitCode)
+			assert.Equal(t, before.ExitReason, after.ExitReason)
+			assert.Equal(t, string(tc.phase), after.Phase)
+			assertAgentWriteTimestampsAt(t, after, past)
+		})
+	}
+}
+
+// backdateAgentWriteTimestamps sets the agent's last_seen and updated
+// columns to a fixed time an hour in the past and returns it, so a test can
+// tell "no store write happened" from "a write happened within the
+// timestamp resolution".
+func backdateAgentWriteTimestamps(t *testing.T, s store.Store, agentID string) time.Time {
+	t.Helper()
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err := db.ExecContext(context.Background(),
+		"UPDATE agents SET last_seen = ?, updated = ? WHERE id = ?", past, past, agentID)
+	require.NoError(t, err)
+	got, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	require.True(t, got.LastSeen.Equal(past) && got.Updated.Equal(past),
+		"sanity: backdated timestamps must be stored (last_seen=%v updated=%v want %v)", got.LastSeen, got.Updated, past)
+	return past
+}
+
+// assertAgentWriteTimestampsAt asserts that no store write has touched the
+// agent since backdateAgentWriteTimestamps set its timestamps to past.
+func assertAgentWriteTimestampsAt(t *testing.T, agent *store.Agent, past time.Time) {
+	t.Helper()
+	assert.True(t, agent.LastSeen.Equal(past) && agent.Updated.Equal(past),
+		"a dropped report must skip the store write (last_seen=%v updated=%v want %v)", agent.LastSeen, agent.Updated, past)
+}
+
+// TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied: a status
+// POST that Guard 0c (a delete in progress, or a soft-deleted row) blanks
+// completely is not written, and the response says
+// {"applied":false,"reason":"delete_in_progress"} — the same guarded-no-op
+// signal as a reincarnation (ptone/scion#2267).
+func TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mark func(t *testing.T, s store.Store, agent *store.Agent)
+	}{
+		{"live delete", func(t *testing.T, s store.Store, agent *store.Agent) {
+			seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
+		}},
+		{"soft deleted", func(t *testing.T, s store.Store, agent *store.Agent) {
+			agent.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(context.Background(), agent))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-del-msg"), Name: "Del Msg Project", Slug: "del-msg-project"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			agent := &store.Agent{
+				ID: tid("agent-del-msg"), Slug: "del-msg-slug", Name: "Del Msg Agent",
+				ProjectID: project.ID, Phase: string(state.PhaseRunning), Message: "old",
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			tc.mark(t, s, agent)
+			past := backdateAgentWriteTimestamps(t, s, agent.ID)
+
+			rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x","exitCode":1}`)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+			assert.Equal(t, false, resp["applied"])
+			assert.Equal(t, "delete_in_progress", resp["reason"])
+
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "old", after.Message)
+			assert.Nil(t, after.ExitCode)
+			assertAgentWriteTimestampsAt(t, after, past)
+		})
+	}
+}
+
+// TestAgentStatusUpdate_ReincarnationInFlight_PartialApply pins the
+// documented partial-apply behaviour: a report that mixes guarded fields
+// with fields the guards do not own has the guarded fields dropped, the
+// rest written, and is reported as applied.
+func TestAgentStatusUpdate_ReincarnationInFlight_PartialApply(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-reinc-partial"), Name: "Reinc Partial Project", Slug: "reinc-partial-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-reinc-partial"), Slug: "reinc-partial-slug", Name: "Reinc Partial Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseStarting), Message: "Reincarnating",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	agent.ReincarnationState = store.ReincarnationStateProvisioning
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x","taskSummary":"summary"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, true, resp["applied"])
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Reincarnating", after.Message, "the guarded message must be dropped")
+	assert.Equal(t, "summary", after.TaskSummary, "the unguarded field must be written")
+}
+
+// TestAgentStatusUpdate_MessageOnlyPostApplied is the counterpart to the
+// test above: with no reincarnation in flight a message-only POST is
+// written and reported as applied.
+func TestAgentStatusUpdate_MessageOnlyPostApplied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-msg-only"), Name: "Msg Only Project", Slug: "msg-only-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-msg-only"), Slug: "msg-only-slug", Name: "Msg Only Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), Activity: string(state.ActivityWorking),
+		Message: "old",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, true, resp["applied"])
+	_, hasReason := resp["reason"]
+	assert.False(t, hasReason)
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "x", after.Message)
+	assert.Equal(t, string(state.PhaseRunning), after.Phase)
+	assert.Equal(t, string(state.ActivityWorking), after.Activity)
 }
 
 // TestBrokerHeartbeat_DoesNotRevertSuspendedAgent verifies that a racing broker

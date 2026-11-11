@@ -23,10 +23,21 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	entskill "github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	entskillversion "github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/Masterminds/semver/v3"
+	"github.com/google/uuid"
+)
+
+// defaultSkillListLimit and maxSkillListLimit mirror the pagination bounds
+// used elsewhere in this package (see defaultAgentListLimit): a caller-
+// supplied ?limit is honored up to the max, and an unset or invalid limit
+// falls back to the default.
+const (
+	defaultSkillListLimit = 50
+	maxSkillListLimit     = 200
 )
 
 // SkillStore implements store.SkillStore using Ent ORM.
@@ -54,7 +65,6 @@ func entSkillToStore(e *ent.Skill) *store.Skill {
 		OwnerID:       e.OwnerID,
 		CreatedBy:     e.CreatedBy,
 		UpdatedBy:     e.UpdatedBy,
-		Visibility:    e.Visibility,
 		Created:       e.Created,
 		Updated:       e.Updated,
 	}
@@ -116,7 +126,6 @@ func (s *SkillStore) CreateSkill(ctx context.Context, skill *store.Skill) error 
 		SetOwnerID(skill.OwnerID).
 		SetCreatedBy(skill.CreatedBy).
 		SetUpdatedBy(skill.UpdatedBy).
-		SetVisibility(skill.Visibility).
 		SetCreated(skill.Created).
 		SetUpdated(skill.Updated).
 		Save(ctx)
@@ -181,7 +190,6 @@ func (s *SkillStore) UpdateSkill(ctx context.Context, skill *store.Skill) error 
 		SetStatus(entskill.Status(skill.Status)).
 		SetOwnerID(skill.OwnerID).
 		SetUpdatedBy(skill.UpdatedBy).
-		SetVisibility(skill.Visibility).
 		SetUpdated(skill.Updated).
 		Save(ctx)
 	if err != nil {
@@ -238,20 +246,45 @@ func (s *SkillStore) ListSkills(ctx context.Context, filter store.SkillFilter, o
 			query.Where(entskill.TagsContainsFold(`"` + tag + `"`))
 		}
 	}
+	// ptone/scion#1901 (pagination follow-up): push the caller's read
+	// boundary into the query itself, before COUNT and before LIMIT. A
+	// post-query, per-row filter (as the handler still does for defense in
+	// depth) is not enough on its own: with more out-of-scope rows than fit
+	// in one page, the boundary check can discard an entire page and leave
+	// the caller's own accessible rows unreachable.
+	if pred := skillAccessScopePredicate(filter.AccessScope); pred != nil {
+		query.Where(pred)
+	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = defaultSkillListLimit
+	}
+	if limit > maxSkillListLimit {
+		limit = maxSkillListLimit
 	}
 
+	if opts.Cursor != "" {
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(skillBeforeCursor(cursorCreated, cursorID))
+	}
+
+	// Fetch one extra row to detect whether a further page exists.
 	rows, err := query.
-		Order(entskill.ByCreated(entsql.OrderDesc())).
-		Limit(limit).
+		Order(entskill.ByCreated(entsql.OrderDesc()), entskill.ByID(entsql.OrderDesc())).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -262,10 +295,65 @@ func (s *SkillStore) ListSkills(ctx context.Context, filter store.SkillFilter, o
 		items = append(items, *entSkillToStore(e))
 	}
 
-	return &store.ListResult[store.Skill]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+	result := &store.ListResult[store.Skill]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
+	}
+	return result, nil
+}
+
+// skillBeforeCursor returns a predicate for keyset pagination after the
+// given cursor, ordered the same way as the ListSkills query (created desc,
+// id desc).
+func skillBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Skill {
+	return keysetBeforeCursor(entskill.FieldCreated, entskill.FieldID, cursorCreated, cursorID)
+}
+
+// skillAccessScopePredicate translates a store.SkillAccessScope into the
+// disjunction of conditions under which a skill is visible to the caller:
+// hub-scoped, owned-by-the-caller user scope, or a project the caller
+// belongs to. Visibility no longer widens this (ptone/scion#1903): a skill's
+// creation scope is the only read boundary. A nil scope means "no
+// restriction" (the admin bypass) and returns a nil predicate so the caller
+// adds nothing to the query.
+func skillAccessScopePredicate(scope *store.SkillAccessScope) predicate.Skill {
+	if scope == nil {
+		return nil
+	}
+
+	var terms []predicate.Skill
+	if scope.IncludeHubScope {
+		terms = append(terms, entskill.ScopeIn(store.SkillScopeGlobal, store.SkillScopeCore))
+	}
+	if scope.CallerID != "" {
+		terms = append(terms, entskill.And(
+			entskill.ScopeEQ(store.SkillScopeUser),
+			entskill.ScopeIDEQ(scope.CallerID),
+		))
+	}
+	switch {
+	case scope.AllProjects:
+		// Every project-scoped skill, in any project: the caller decides
+		// project admission per row (store.SkillAccessScope.AllProjects).
+		terms = append(terms, entskill.ScopeEQ(store.SkillScopeProject))
+	case len(scope.ProjectIDs) > 0:
+		terms = append(terms, entskill.And(
+			entskill.ScopeEQ(store.SkillScopeProject),
+			entskill.ScopeIDIn(scope.ProjectIDs...),
+		))
+	}
+
+	if len(terms) == 0 {
+		// A non-nil scope with no matching terms (e.g. an anonymous caller)
+		// authorizes nothing. No skill ID is ever the nil UUID, so this
+		// predicate matches no rows.
+		return entskill.IDEQ(uuid.Nil)
+	}
+	return entskill.Or(terms...)
 }
 
 // Version operations
@@ -325,9 +413,20 @@ func (s *SkillStore) GetSkillVersionByNumber(ctx context.Context, skillID, versi
 	return entSkillVersionToStore(e), nil
 }
 
-func (s *SkillStore) ListSkillVersions(ctx context.Context, skillID string, opts store.ListOptions) (*store.ListResult[store.SkillVersion], error) {
+func (s *SkillStore) ListSkillVersions(ctx context.Context, skillID string, filter store.SkillVersionFilter, opts store.ListOptions) (*store.ListResult[store.SkillVersion], error) {
 	query := s.client.SkillVersion.Query().
 		Where(entskillversion.SkillIDEQ(skillID))
+	if len(filter.Statuses) > 0 {
+		statuses := make([]entskillversion.Status, 0, len(filter.Statuses))
+		for _, st := range filter.Statuses {
+			status := entskillversion.Status(st)
+			if err := entskillversion.StatusValidator(status); err != nil {
+				return nil, fmt.Errorf("%w: unknown skill version status %q", store.ErrInvalidInput, st)
+			}
+			statuses = append(statuses, status)
+		}
+		query = query.Where(entskillversion.StatusIn(statuses...))
+	}
 
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
@@ -403,7 +502,18 @@ func (s *SkillStore) DeleteSkillVersion(ctx context.Context, id string) error {
 	return nil
 }
 
-// ResolveSkillVersion resolves a version constraint to a specific published version.
+// ResolveSkillVersion resolves a version constraint to a specific published or
+// deprecated version.
+//
+// Every constraint form considers only published and deprecated versions;
+// draft and archived versions never resolve.
+//
+// A content-addressed constraint ("sha256:...") matches a version's stored
+// (v1) content hash. When several versions share that hash (the same files
+// republished under a new version number), the oldest wins: created
+// ascending, then ID ascending. The status set and the order are the same as
+// the hub's v2 content-hash lookup, so v1 and v2 lookups pick the same
+// version (ptone/scion#6248).
 func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*store.SkillVersion, error) {
 	// Content-addressed lookup
 	if len(constraint) > 7 && constraint[:7] == "sha256:" {
@@ -411,7 +521,9 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 			Where(
 				entskillversion.SkillIDEQ(skillID),
 				entskillversion.ContentHashEQ(constraint),
+				entskillversion.StatusIn(entskillversion.StatusPublished, entskillversion.StatusDeprecated),
 			).
+			Order(entskillversion.ByCreated(entsql.OrderAsc()), entskillversion.ByID(entsql.OrderAsc())).
 			First(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -471,7 +583,8 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 		return nil, store.ErrNotFound
 	}
 
-	// Exact match — return regardless of status (pinned consumers get what they asked for)
+	// Exact match among published and deprecated versions; a deprecated version
+	// is returned too (pinned consumers get what they asked for).
 	exactVer, err := semver.NewVersion(constraint)
 	if err == nil {
 		for _, v := range versions {

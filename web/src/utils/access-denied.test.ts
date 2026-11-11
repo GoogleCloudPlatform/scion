@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AccessDeniedDetail } from '../client/api.js';
+import { ACCESS_DENIED_UNREADABLE_REASON } from '../client/api.js';
 import { formatAccessDenied, showAccessDeniedToast, _resetDedupState } from './access-denied.js';
 
 /**
@@ -68,6 +69,12 @@ describe('formatAccessDenied', () => {
     expect(result.secondary).toBe('Permission needed: manage on agent');
   });
 
+  it('labels a chat_post denial (chat_post_denied) as posting in chat', () => {
+    const detail: AccessDeniedDetail = { action: 'chat_post', resource: 'project' };
+    const result = formatAccessDenied(detail);
+    expect(result.secondary).toBe('Permission needed: post in chat on project');
+  });
+
   it('passes through unknown action codes as-is', () => {
     const detail: AccessDeniedDetail = { action: 'custom_action', resource: 'widget' };
     const result = formatAccessDenied(detail);
@@ -99,11 +106,43 @@ describe('formatAccessDenied', () => {
     expect(result.secondary).toBeUndefined();
   });
 
+  it('shows the friendly sentence for an unreadable (aborted) 403 body (ptone/scion#2583)', () => {
+    const result = formatAccessDenied({ reason: ACCESS_DENIED_UNREADABLE_REASON });
+    expect(result.primary).toBe("You don't have permission to perform this action.");
+    expect(result.secondary).toBeUndefined();
+  });
+
   it('omits secondary when action is just "forbidden" with no resource', () => {
     const detail: AccessDeniedDetail = { action: 'forbidden', reason: 'Insufficient permissions' };
     const result = formatAccessDenied(detail);
     expect(result.primary).toBe("You don't have permission to perform this action.");
     expect(result.secondary).toBeUndefined();
+  });
+
+  it('shows the server message, not the code, for an unstructured identity_assign_denied 403', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'identity_assign_denied',
+      reason: 'Hub-scoped service account assignment requires gcpIamCheckMode=enforce.',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe(
+      'Hub-scoped service account assignment requires gcpIamCheckMode=enforce.'
+    );
+    expect(result.secondary).toBeUndefined();
+  });
+
+  it('falls back to a friendly sentence for identity_assign_denied with a generic message', () => {
+    const result = formatAccessDenied({
+      action: 'identity_assign_denied',
+      reason: 'Insufficient permissions',
+    });
+    expect(result.primary).toBe("You're not permitted to assign this service account.");
+    expect(result.secondary).toBeUndefined();
+  });
+
+  it('labels a structured assign denial', () => {
+    const result = formatAccessDenied({ action: 'assign', resource: 'gcp_service_account' });
+    expect(result.secondary).toBe('Permission needed: assign on gcp_service_account');
   });
 
   it('shows secondary when action is "forbidden" but resource is present', () => {
@@ -312,6 +351,106 @@ describe('showAccessDeniedToast', () => {
     expect(alert!.querySelector('img')).toBeNull();
     const span = alert!.querySelector('span');
     expect(span!.textContent).toContain('<img');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// showAccessDeniedToast — no competing sl-after-hide listener (#1733)
+// ---------------------------------------------------------------------------
+
+describe('showAccessDeniedToast cleanup (#1733)', () => {
+  beforeEach(() => {
+    _resetDedupState();
+  });
+
+  afterEach(() => {
+    document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    vi.restoreAllMocks();
+    _resetDedupState();
+  });
+
+  it('does NOT register an app-owned sl-after-hide listener on the two-line toast', () => {
+    // Track sl-after-hide listeners registered on sl-alert elements
+    const afterHideListeners: Array<() => void> = [];
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(
+      (tag: string, options?: ElementCreationOptions) => {
+        const el = origCreate(tag, options);
+        if (tag === 'sl-alert') {
+          const origAdd = el.addEventListener.bind(el);
+          vi.spyOn(el, 'addEventListener').mockImplementation(
+            (type: string, listener: EventListenerOrEventListenerObject, opts?: unknown) => {
+              if (type === 'sl-after-hide' && typeof listener === 'function') {
+                afterHideListeners.push(listener as () => void);
+              }
+              origAdd(type, listener, opts as AddEventListenerOptions);
+            }
+          );
+          (el as unknown as Record<string, unknown>).toast = vi.fn();
+        }
+        return el;
+      }
+    );
+
+    showAccessDeniedToast({
+      action: 'delete',
+      resource: 'agent',
+      reason: 'Insufficient permissions',
+    });
+
+    // The two-line path in showAccessDeniedToast must NOT register
+    // any sl-after-hide listener — Shoelace's toast() handles cleanup.
+    expect(afterHideListeners.length).toBe(0);
+  });
+
+  it('does NOT register an app-owned sl-after-hide listener on the single-line toast', () => {
+    const afterHideListeners: Array<() => void> = [];
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(
+      (tag: string, options?: ElementCreationOptions) => {
+        const el = origCreate(tag, options);
+        if (tag === 'sl-alert') {
+          const origAdd = el.addEventListener.bind(el);
+          vi.spyOn(el, 'addEventListener').mockImplementation(
+            (type: string, listener: EventListenerOrEventListenerObject, opts?: unknown) => {
+              if (type === 'sl-after-hide' && typeof listener === 'function') {
+                afterHideListeners.push(listener as () => void);
+              }
+              origAdd(type, listener, opts as AddEventListenerOptions);
+            }
+          );
+          (el as unknown as Record<string, unknown>).toast = vi.fn();
+        }
+        return el;
+      }
+    );
+
+    // Legacy 403 with no detail → goes through showToast() single-line path
+    showAccessDeniedToast({});
+
+    // Neither path should register sl-after-hide listeners
+    expect(afterHideListeners.length).toBe(0);
+  });
+
+  it('element is not removed from DOM by app code on sl-after-hide', () => {
+    stubAlertToast();
+
+    showAccessDeniedToast({
+      action: 'delete',
+      resource: 'agent',
+      reason: 'Insufficient permissions',
+    });
+
+    const alert = document.querySelector('sl-alert');
+    expect(alert).not.toBeNull();
+    expect(document.body.contains(alert)).toBe(true);
+
+    // Simulate Shoelace firing sl-after-hide
+    alert!.dispatchEvent(new Event('sl-after-hide'));
+
+    // Element should still be in DOM — only Shoelace's toast() cleanup
+    // (which is stubbed in tests) should remove it.
+    expect(document.body.contains(alert)).toBe(true);
   });
 });
 

@@ -17,12 +17,15 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/storedtime"
 	"github.com/google/uuid"
 )
 
@@ -71,23 +74,32 @@ type WebChatStore interface {
 
 	// GetThreads returns thread watermarks for the given user and project,
 	// ordered by last_activity_at descending, limited to `limit` rows.
-	// This is the backing query for GET /api/v1/chat/threads.
+	// The wave-1 thread-rail route this backed is gone; the remaining
+	// caller is a test that reads back TouchThread's watermark write.
 	GetThreads(ctx context.Context, userID, projectID string, limit int) ([]WebChatThread, error)
-
-	// MarkThreadRead advances the last_read_at watermark for the given
-	// (user, project, agent) thread to the current time.
-	MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error
 
 	// --- Wave-2 Topic methods ---
 
 	// GetTopicConversationID returns the conversation_id for a webchat topic.
 	// Returns ("", store.ErrNotFound) if the topic does not exist or is soft-deleted.
 	// Returns ("", nil) if the topic exists but has no conversation_id yet.
+	//
+	// Not scoped to a project: do not use it to resolve a caller-supplied
+	// thread or key; use GetTopicConversationIDInProject.
 	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
 
 	// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
 	// webchat topic regardless of its deletion state.
+	//
+	// Not scoped to a project: do not use it to resolve a caller-supplied
+	// thread or key; use GetTopicConversationIDIncludingDeletedInProject.
 	GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error)
+
+	// GetTopicConversationIDInProject and
+	// GetTopicConversationIDIncludingDeletedInProject are the same lookups
+	// for a topic of projectID only (messaging.TopicConversationLookup).
+	GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error)
+	GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error)
 
 	// CreateTopic inserts a new topic. Returns an error on name conflict
 	// within the same project.
@@ -97,9 +109,16 @@ type WebChatStore interface {
 	GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error)
 
 	// ListTopics returns all non-deleted topics for a project, ordered by
-	// last_activity_at DESC. If no #general topic exists, one is lazily
-	// created (covers pre-existing projects).
+	// last_activity_at DESC. It creates nothing; EnsureGeneralTopic is what
+	// creates a project's #general topic.
 	ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error)
+
+	// ListTopicsByProjects returns the non-deleted topics of every project
+	// in projectIDs in one query: the union of ListTopics over those
+	// projects, ordered by project_id and then last_activity_at DESC. It
+	// creates nothing. Callers bound len(projectIDs) to stay under the
+	// driver's bind-parameter limit.
+	ListTopicsByProjects(ctx context.Context, projectIDs []string) ([]WebChatTopic, error)
 
 	// UpdateTopic applies partial updates (rename, set/clear default_agent).
 	UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error
@@ -135,19 +154,31 @@ type WebChatStore interface {
 	// SetMuted updates the muted flag for a user+conversation pair.
 	SetMuted(ctx context.Context, userID, conversationKey string, muted bool) error
 
-	// IsConversationMuted returns whether the given user has muted the
-	// conversation identified by conversationKey. Returns false if no
-	// read-state row exists (unmuted by default).
-	IsConversationMuted(ctx context.Context, userID, conversationKey string) (bool, error)
-
 	// --- Wave-2 User-prefs methods ---
 
 	// GetUserPrefs returns the user's rail preferences.
 	// Returns defaults (activity sort) if no row exists.
 	GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error)
 
-	// SetUserPrefs upserts the user's rail preferences.
+	// SetUserPrefs upserts the user's rail preferences. When the write
+	// changes thread_groups, it also clears thread_groups_migrated_at in the
+	// same statement, so the personal groups are migrated again
+	// (ptone/scion#4424, design section 5a). ThreadGroupsMigrated is ignored.
 	SetUserPrefs(ctx context.Context, userID string, prefs WebChatUserPrefs) error
+
+	// ListUserPrefsPendingThreadGroupMigration returns the rail preferences
+	// whose personal thread groups still need the automatic migration to
+	// project thread groups: thread_groups is non-empty and
+	// thread_groups_migrated_at is NULL. Ordered by user ID.
+	ListUserPrefsPendingThreadGroupMigration(ctx context.Context) ([]WebChatUserPrefs, error)
+
+	// MarkUserPrefsThreadGroupsMigrated sets thread_groups_migrated_at and
+	// writes newThreadOrder, but only if the row is still unmarked and its
+	// thread_groups and thread_order still equal the values the migration
+	// read (a compare-and-set). It reports whether the row was written; on
+	// false, a concurrent write (a user-prefs PUT or another hub's pass)
+	// won and the row is left for the next pass, if still unmarked.
+	MarkUserPrefsThreadGroupsMigrated(ctx context.Context, userID, threadGroups, oldThreadOrder, newThreadOrder string) (bool, error)
 
 	// --- Wave-2 DM methods ---
 
@@ -190,7 +221,18 @@ type WebChatStore interface {
 	GetAttachmentsByMessages(ctx context.Context, messageIDs []string) (map[string][]AttachmentMeta, error)
 
 	// LinkAttachmentToMessage associates an attachment with a message.
+	//
+	// A linked file downloads for every reader of the message
+	// (canReadAttachment), so a caller may link only a file that either
+	// passed send validation for that message (attachmentUsableIn: the
+	// sender's own direct-message upload, or a file of the topic's project)
+	// or belongs to the sending agent (hub ingest from its own project, or
+	// attachmentOwnedBySender). Do not add a caller without one of these
+	// checks.
 	LinkAttachmentToMessage(ctx context.Context, messageID, attachmentID string) error
+	// ListMessageIDsForAttachment returns up to limit IDs of messages the
+	// attachment is linked to.
+	ListMessageIDsForAttachment(ctx context.Context, attachmentID string, limit int) ([]string, error)
 
 	// --- Phase-3 Message extension methods ---
 
@@ -208,7 +250,8 @@ type WebChatStore interface {
 	// SetMessageEdited marks a message as edited at the given time.
 	SetMessageEdited(ctx context.Context, messageID string, editedAt time.Time) error
 
-	// SetMessageDeleted marks a message as soft-deleted at the given time.
+	// SetMessageDeleted marks a message as soft-deleted at the given time,
+	// removing its mentions and stars in the same transaction.
 	SetMessageDeleted(ctx context.Context, messageID string, deletedAt time.Time) error
 
 	// UpdateMessageContent updates the content of a message in the Ent
@@ -229,7 +272,8 @@ type WebChatStore interface {
 	// Returns the number of rows affected.
 	UpdateThreadID(ctx context.Context, oldThreadID, newThreadID string) (int, error)
 
-	// DeleteDM removes all webchat_dm rows for the given conversation key.
+	// DeleteDM removes all webchat_dm rows for the given conversation key,
+	// and the scheduled messages of that conversation.
 	DeleteDM(ctx context.Context, conversationKey string) error
 
 	// MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.
@@ -243,6 +287,27 @@ type WebChatStore interface {
 	// CountMessages returns the number of messages for the given thread_id.
 	// Used for idempotency checks during DM promotion.
 	CountMessages(ctx context.Context, threadID string) (int, error)
+
+	// --- Per-recipient mention records ---
+
+	// RecordMentions stores one webchat_mention row per user in userIDs,
+	// recording that messageID in conversationKey mentioned that user.
+	// Re-recording an existing (user, message) pair is a no-op.
+	RecordMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) error
+
+	// UnreadMentionKeys returns the subset of conversationKeys in which
+	// userID has at least one recorded mention newer than userID's own
+	// read watermark for that conversation, by the messages table's
+	// (created, id) order. Only userID's own mention and read-state rows
+	// are consulted.
+	//
+	// A watermark that does not resolve to a stored message (no read-state
+	// row, an empty watermark left by mark-unread on a single-message
+	// thread, or an ID with no messages row) counts every recorded mention
+	// in that conversation as unread. Callers bound this with their own
+	// unread check: handleListThreads only reports hasUnreadMention when
+	// hasUnread is also true.
+	UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error)
 }
 
 // ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
@@ -292,6 +357,13 @@ type WebChatTopic struct {
 	LastActivityAt time.Time  `json:"lastActivityAt"`
 	DeletedAt      *time.Time `json:"deletedAt,omitempty"`    // nil = not deleted
 	MessageCount   int        `json:"messageCount,omitempty"` // populated by PromoteDM
+
+	// DefaultAgentID is write-only input to CreateTopic (design doc §3.1
+	// F1 table, topic-create row): when set and CreateTopic mints a new
+	// linked conversation, it seeds that conversation's default_agent_id
+	// in the same INSERT. It is not a webchat_topic column — GetTopic and
+	// ListTopics never populate it — so it always reads back empty.
+	DefaultAgentID string `json:"-"`
 }
 
 // PromoteKeys bundles the two keys needed to identify a DM's messages during
@@ -309,6 +381,17 @@ type PromoteKeys struct {
 type TopicUpdate struct {
 	Name         *string // nil = no change
 	DefaultAgent *string // nil = no change, pointer to empty = clear
+
+	// DefaultAgentID mirrors DefaultAgent onto the linked conversation's
+	// owner column (conversations.default_agent_id), in the same
+	// transaction as the topic UPDATE (design doc: F1 write-time
+	// convergence). nil = don't touch the conversation row; pointer to
+	// empty = clear it (SQL NULL); else the agent UUID.
+	//
+	// This is a companion field, not a replacement for DefaultAgent: the
+	// topic column stays the UI-facing projection (slug or ID), while this
+	// field always carries the UUID that the conversation column owns.
+	DefaultAgentID *string
 }
 
 // WebChatReadState holds per-user, per-conversation state.
@@ -333,6 +416,11 @@ type WebChatUserPrefs struct {
 	ThreadSortMode string `json:"threadSortMode"`         // "activity", "alpha", "custom"
 	ThreadOrder    string `json:"threadOrder,omitempty"`  // JSON {"projectId": ["threadId1", ...]}
 	ThreadGroups   string `json:"threadGroups,omitempty"` // JSON {"projectId": [{"id":"..","name":"..","threadIds":[..]}]}
+	// ThreadGroupsMigrated reports whether thread_groups_migrated_at is set:
+	// the automatic migration has copied these personal groups into project
+	// thread groups (design section 5a). It is read-only and not part of the
+	// API.
+	ThreadGroupsMigrated bool `json:"-"`
 }
 
 // WebChatDM represents one side of a DM conversation.
@@ -346,6 +434,10 @@ type WebChatDM struct {
 	LastActivityAt  time.Time
 }
 
+// ErrInvalidSearchCursor is returned (wrapped) by SearchChatMessages when the
+// client-supplied cursor cannot be parsed. Handlers map it to 400.
+var ErrInvalidSearchCursor = errors.New("invalid search cursor")
+
 // ChatSearchFilter defines query parameters for searching chat messages.
 type ChatSearchFilter struct {
 	Query           string   // search text (required, min 2 chars)
@@ -354,6 +446,21 @@ type ChatSearchFilter struct {
 	ProjectIDs      []string // scope to visible projects (for "all" search)
 	Limit           int      // max results (default 50)
 	Cursor          string   // keyset pagination cursor (base64-encoded "timestamp|id")
+
+	// DMParticipantUserID restricts DM threads ("dm:..." keys) when the search
+	// is not scoped to a single ConversationKey: a DM is returned only if this
+	// user occupies one of its user slots. Empty means no DM threads are
+	// returned at all (fail closed). It has no effect when ConversationKey is
+	// set, because the caller authorizes that conversation directly.
+	DMParticipantUserID string
+}
+
+// dmParticipantBounds returns the exact key prefix and suffix that identify
+// userID as a participant of a DM key of the form dm:<kind>:<id>:<kind>:<id>.
+// They mirror isDMParticipant: the first slot matches the prefix, the second
+// slot matches the suffix.
+func dmParticipantBounds(userID string) (prefix, suffix string) {
+	return "dm:user:" + userID + ":", ":user:" + userID
 }
 
 // ChatSearchResult represents a single search result.
@@ -371,13 +478,34 @@ type ChatSearchResult struct {
 // NewWebChatStore creates a new WebChatStore backed by the given database.
 // The driverName selects the SQL dialect: "postgres" or "pgx" for Postgres,
 // anything else (including "" and "sqlite") for SQLite.
-func NewWebChatStore(db *sql.DB, driverName string) WebChatStore {
+func NewWebChatStore(db *sql.DB, driverName string, opts ...WebChatStoreOption) WebChatStore {
+	var o webChatStoreOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	switch driverName {
 	case "postgres", "pgx":
 		return &pgWebChatStore{db: db}
 	default:
-		return &sqliteWebChatStore{db: db}
+		return &sqliteWebChatStore{db: db, searchDB: o.searchDB}
 	}
+}
+
+// WebChatStoreOption configures a store built by NewWebChatStore.
+type WebChatStoreOption func(*webChatStoreOptions)
+
+type webChatStoreOptions struct {
+	searchDB *sql.DB
+}
+
+// WithSearchDB gives a SQLite store a separate read-only handle for
+// SearchChatMessages (ptone/scion#7586), opened by entc.OpenSQLiteSearchReader.
+// A slow search then holds a connection of its own, not the main handle's
+// single connection that every other request needs. A nil db, or a Postgres
+// store, keeps searching on the main handle: Postgres bounds a search with a
+// READ ONLY transaction and statement_timeout on its shared pool instead.
+func WithSearchDB(db *sql.DB) WebChatStoreOption {
+	return func(o *webChatStoreOptions) { o.searchDB = db }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +516,17 @@ func NewWebChatStore(db *sql.DB, driverName string) WebChatStore {
 // Uses ? placeholders and SQLite-appropriate DDL types (TEXT, INTEGER).
 type sqliteWebChatStore struct {
 	db *sql.DB
+	// searchDB is the read-only search handle (WithSearchDB), or nil to
+	// search on db.
+	searchDB *sql.DB
+}
+
+// searchHandle returns the handle SearchChatMessages reads through.
+func (s *sqliteWebChatStore) searchHandle() *sql.DB {
+	if s.searchDB != nil {
+		return s.searchDB
+	}
+	return s.db
 }
 
 // DefaultMigrationBatchSize is the number of rows updated per batch
@@ -447,6 +586,10 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
 CREATE INDEX IF NOT EXISTS idx_webchat_topic_project_activity
     ON webchat_topic (project_id, deleted_at, last_activity_at);
 
+-- Soft-deleted topics, for the chat retention grace purge.
+CREATE INDEX IF NOT EXISTS idx_webchat_topic_deleted
+    ON webchat_topic (deleted_at) WHERE deleted_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS webchat_read_state (
     user_id          TEXT NOT NULL,
     conversation_key TEXT NOT NULL,
@@ -463,7 +606,8 @@ CREATE TABLE IF NOT EXISTS webchat_user_prefs (
     space_order     TEXT,
     thread_sort_mode TEXT NOT NULL DEFAULT 'activity',
     thread_order    TEXT,
-    thread_groups   TEXT
+    thread_groups   TEXT,
+    thread_groups_migrated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS webchat_dm (
@@ -505,6 +649,9 @@ CREATE TABLE IF NOT EXISTS webchat_message_attachment (
 CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
     ON webchat_message_attachment (message_id);
 
+CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_attachment
+    ON webchat_message_attachment (attachment_id);
+
 -- Phase-3: message extension data (reply-to, edit, delete)
 CREATE TABLE IF NOT EXISTS webchat_message_ext (
     message_id TEXT PRIMARY KEY,
@@ -512,6 +659,22 @@ CREATE TABLE IF NOT EXISTS webchat_message_ext (
     edited_at TEXT,
     deleted_at TEXT
 );
+
+-- Per-recipient mention records: one row per (message, mentioned user).
+-- The primary key serves deletes by message; the (user_id,
+-- conversation_key) index serves the thread list's unread-mention read.
+CREATE TABLE IF NOT EXISTS webchat_mention (
+    user_id          TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_user_conversation
+    ON webchat_mention (user_id, conversation_key);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_conversation
+    ON webchat_mention (conversation_key);
 `
 	_, err := s.db.Exec(ddl)
 	if err != nil {
@@ -539,6 +702,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
 	}
 
+	// Scheduled chat messages (webchat_scheduled_store*.go).
+	if err := s.initScheduledMessages(); err != nil {
+		return err
+	}
+
+	// Starred messages (webchat_star_store*.go); created whether or not
+	// the web.chat_starred_messages experiment is on.
+	if err := s.initMessageStars(); err != nil {
+		return err
+	}
+
 	// Run idempotent migrations.
 	if err := s.runMigrations(); err != nil {
 		return fmt.Errorf("webchat store: migrations: %w", err)
@@ -557,7 +731,7 @@ DO UPDATE SET
     last_message_id = excluded.last_message_id,
     last_activity_at = excluded.last_activity_at
 `
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, messageID, activityAt)
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, messageID, activityAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: touch thread: %w", err)
 	}
@@ -574,7 +748,7 @@ DO UPDATE SET
     last_channel = excluded.last_channel,
     last_message_at = excluded.last_message_at
 `
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, messageAt)
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, messageAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: record channel: %w", err)
 	}
@@ -648,41 +822,15 @@ SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), 
 		if err := rows.Scan(&t.AgentID, &t.LastMessageID, &activityStr, &readStr); err != nil {
 			return nil, fmt.Errorf("webchat store: scan thread: %w", err)
 		}
-		if activityStr != "" {
-			if parsed, err := time.Parse(time.RFC3339Nano, activityStr); err == nil {
-				t.LastActivityAt = parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", activityStr); err == nil {
-				t.LastActivityAt = parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", activityStr); err == nil {
-				t.LastActivityAt = parsed
-			}
-		}
-		if readStr != nil && *readStr != "" {
-			if parsed, err := time.Parse(time.RFC3339Nano, *readStr); err == nil {
-				t.LastReadAt = &parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", *readStr); err == nil {
-				t.LastReadAt = &parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", *readStr); err == nil {
+		t.LastActivityAt = parseSQLiteTime(activityStr)
+		if readStr != nil {
+			if parsed := parseSQLiteTime(*readStr); !parsed.IsZero() {
 				t.LastReadAt = &parsed
 			}
 		}
 		threads = append(threads, t)
 	}
 	return threads, rows.Err()
-}
-
-// MarkThreadRead advances the last_read_at watermark to now.
-func (s *sqliteWebChatStore) MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error {
-	const query = `
-UPDATE webchat_thread
-   SET last_read_at = ?
- WHERE user_id = ? AND project_id = ? AND agent_id = ?
-`
-	_, err := s.db.ExecContext(ctx, query, time.Now().UTC().Format(time.RFC3339Nano), userID, projectID, agentID)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark thread read: %w", err)
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -784,11 +932,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
-		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+		// conversations is an ent table: bind a time.Time, not RFC3339 text.
+		createdAt := topic.CreatedAt.UTC()
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES (?, ?, 'group', 'native', ?, '', ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, now, now)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES (?, ?, 'group', 'native', ?, '', ?, ?, 'active', ?, ?)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), createdAt, createdAt)
 		if err != nil {
 			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
 		}
@@ -874,7 +1023,61 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	return topics, nil
 }
 
-// UpdateTopic applies partial updates to a topic.
+// ListTopicsByProjects returns non-deleted topics for several projects in
+// one query, ordered by project_id and then last_activity_at DESC.
+func (s *sqliteWebChatStore) ListTopicsByProjects(ctx context.Context, projectIDs []string) ([]WebChatTopic, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(projectIDs))
+	args := make([]interface{}, len(projectIDs))
+	for i, id := range projectIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(`
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       COALESCE(last_activity_at, ''), deleted_at
+  FROM webchat_topic
+ WHERE project_id IN (%s) AND deleted_at IS NULL
+ ORDER BY project_id, last_activity_at DESC
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var topics []WebChatTopic
+	for rows.Next() {
+		var t WebChatTopic
+		var isGeneral int
+		var createdAtStr, activityStr string
+		var deletedAtStr *string
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &isGeneral, &t.DefaultAgent,
+			&t.ConversationID,
+			&t.CreatedBy, &createdAtStr, &t.LastMessageID, &activityStr, &deletedAtStr); err != nil {
+			return nil, fmt.Errorf("webchat store: scan topic: %w", err)
+		}
+		t.IsGeneral = isGeneral != 0
+		t.CreatedAt = parseSQLiteTime(createdAtStr)
+		t.LastActivityAt = parseSQLiteTime(activityStr)
+		topics = append(topics, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects rows: %w", err)
+	}
+	return topics, nil
+}
+
+// UpdateTopic applies partial updates to a topic. When updates.DefaultAgentID
+// is set, it also converges the linked conversation's default_agent_id in
+// the same transaction (design doc: F1 write-time convergence) — skipped
+// when the topic has no linked conversation or the conversations table
+// doesn't exist (INVARIANT U-TX-1: hasConversationsTable() is called before
+// BeginTx).
 func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
@@ -887,16 +1090,51 @@ func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, up
 		sets = append(sets, "default_agent = ?")
 		args = append(args, nullableString(*updates.DefaultAgent))
 	}
-	if len(sets) == 0 {
+	if len(sets) == 0 && updates.DefaultAgentID == nil {
 		return nil
 	}
 
-	args = append(args, topicID)
-	query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = ? AND deleted_at IS NULL",
-		strings.Join(sets, ", "))
-	_, err := s.db.ExecContext(ctx, query, args...)
+	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
+	// called BEFORE BeginTx.
+	updateConv := updates.DefaultAgentID != nil && s.hasConversationsTable()
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("webchat store: update topic: %w", err)
+		return fmt.Errorf("webchat store: begin update topic tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if len(sets) > 0 {
+		topicArgs := append(append([]interface{}{}, args...), topicID)
+		query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = ? AND deleted_at IS NULL",
+			strings.Join(sets, ", "))
+		if _, err := tx.ExecContext(ctx, query, topicArgs...); err != nil {
+			return fmt.Errorf("webchat store: update topic: %w", err)
+		}
+	}
+
+	if updateConv {
+		// The subquery naturally no-ops (zero rows affected, not an error)
+		// when the topic's conversation_id is NULL — a legacy unlinked
+		// topic. This UPDATE only ever touches default_agent_id.
+		//
+		// The subquery's own "AND deleted_at IS NULL" (review round 1)
+		// matters even though the outer WHERE also filters deleted_at:
+		// without it, a soft-deleted topic would still resolve its
+		// conversation_id and change a conversation that the topic no
+		// longer represents.
+		_, err := tx.ExecContext(ctx,
+			`UPDATE conversations SET default_agent_id = ?
+			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL)
+			    AND deleted_at IS NULL`,
+			nullableString(*updates.DefaultAgentID), topicID)
+		if err != nil {
+			return fmt.Errorf("webchat store: update linked conversation default agent: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: commit update topic tx: %w", err)
 	}
 	return nil
 }
@@ -958,6 +1196,10 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM webchat_mention WHERE conversation_key = ?", topicID); err != nil {
+		return fmt.Errorf("webchat store: delete topic mentions: %w", err)
+	}
 
 	return tx.Commit()
 }
@@ -992,7 +1234,9 @@ func (s *sqliteWebChatStore) TouchTopicActivity(ctx context.Context, topicID, me
 func (s *sqliteWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error) {
 	newID := uuid.New().String()
 	convID := uuid.New().String()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// nowT is bound into the ent conversations table, now into webchat_topic.
+	nowT := time.Now().UTC()
+	now := nowT.Format(time.RFC3339Nano)
 
 	// DEF-156: derive the external_ref that will be written on the linked
 	// conversation row, using the same derivation as CreateTopic and Route 3.
@@ -1061,7 +1305,7 @@ ON CONFLICT DO NOTHING`
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
 			 VALUES (?, ?, 'group', 'native', ?, '', 'general', 'active', ?, ?)`,
-			convID, projectID, extRef, now, now)
+			convID, projectID, extRef, nowT, nowT)
 		if err != nil {
 			return "", false, fmt.Errorf("webchat store: create conversation for general topic: %w", err)
 		}
@@ -1220,20 +1464,6 @@ DO UPDATE SET muted = excluded.muted
 	return nil
 }
 
-// IsConversationMuted returns whether the user has muted the conversation.
-// Returns false (unmuted) when no read-state row exists.
-func (s *sqliteWebChatStore) IsConversationMuted(ctx context.Context, userID, conversationKey string) (bool, error) {
-	const query = `SELECT muted FROM webchat_read_state WHERE user_id = ? AND conversation_key = ?`
-	var muted int
-	if err := s.db.QueryRowContext(ctx, query, userID, conversationKey).Scan(&muted); err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
-		return false, fmt.Errorf("webchat store: is conversation muted: %w", err)
-	}
-	return muted != 0, nil
-}
-
 // ---------------------------------------------------------------------------
 // Wave-2 User-prefs methods (SQLite)
 // ---------------------------------------------------------------------------
@@ -1242,14 +1472,15 @@ func (s *sqliteWebChatStore) IsConversationMuted(ctx context.Context, userID, co
 func (s *sqliteWebChatStore) GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error) {
 	const query = `
 SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
-       COALESCE(thread_order, ''), COALESCE(thread_groups, '')
+       COALESCE(thread_order, ''), COALESCE(thread_groups, ''),
+       thread_groups_migrated_at IS NOT NULL
   FROM webchat_user_prefs
  WHERE user_id = ?
 `
 	var p WebChatUserPrefs
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(
 		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
-		&p.ThreadOrder, &p.ThreadGroups)
+		&p.ThreadOrder, &p.ThreadGroups, &p.ThreadGroupsMigrated)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return &WebChatUserPrefs{
@@ -1274,7 +1505,12 @@ DO UPDATE SET
     space_order = excluded.space_order,
     thread_sort_mode = excluded.thread_sort_mode,
     thread_order = excluded.thread_order,
-    thread_groups = excluded.thread_groups
+    thread_groups = excluded.thread_groups,
+    thread_groups_migrated_at = CASE
+        WHEN webchat_user_prefs.thread_groups IS excluded.thread_groups
+        THEN webchat_user_prefs.thread_groups_migrated_at
+        ELSE NULL
+    END
 `
 	_, err := s.db.ExecContext(ctx, query, userID, prefs.SpaceSortMode,
 		nullableString(prefs.SpaceOrder), prefs.ThreadSortMode,
@@ -1283,6 +1519,60 @@ DO UPDATE SET
 		return fmt.Errorf("webchat store: set user prefs: %w", err)
 	}
 	return nil
+}
+
+// ListUserPrefsPendingThreadGroupMigration returns the rows whose personal
+// thread groups are not migrated yet.
+func (s *sqliteWebChatStore) ListUserPrefsPendingThreadGroupMigration(ctx context.Context) ([]WebChatUserPrefs, error) {
+	const query = `
+SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
+       COALESCE(thread_order, ''), thread_groups
+  FROM webchat_user_prefs
+ WHERE thread_groups IS NOT NULL AND thread_groups <> ''
+   AND thread_groups_migrated_at IS NULL
+ ORDER BY user_id
+`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list user prefs pending thread group migration: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []WebChatUserPrefs
+	for rows.Next() {
+		var p WebChatUserPrefs
+		if err := rows.Scan(&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
+			&p.ThreadOrder, &p.ThreadGroups); err != nil {
+			return nil, fmt.Errorf("webchat store: scan user prefs: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list user prefs pending thread group migration: %w", err)
+	}
+	return out, nil
+}
+
+// MarkUserPrefsThreadGroupsMigrated marks a row migrated and writes its new
+// thread order if the row is unchanged since it was read.
+func (s *sqliteWebChatStore) MarkUserPrefsThreadGroupsMigrated(ctx context.Context, userID, threadGroups, oldThreadOrder, newThreadOrder string) (bool, error) {
+	const query = `
+UPDATE webchat_user_prefs
+   SET thread_order = ?, thread_groups_migrated_at = ?
+ WHERE user_id = ?
+   AND thread_groups_migrated_at IS NULL
+   AND COALESCE(thread_groups, '') = ?
+   AND COALESCE(thread_order, '') = ?
+`
+	res, err := s.db.ExecContext(ctx, query, nullableString(newThreadOrder),
+		time.Now().UTC().Format(time.RFC3339Nano), userID, threadGroups, oldThreadOrder)
+	if err != nil {
+		return false, fmt.Errorf("webchat store: mark thread groups migrated: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("webchat store: mark thread groups migrated: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1661,30 @@ func (s *sqliteWebChatStore) TouchDMActivity(ctx context.Context, conversationKe
 // Wave-2 Search methods (SQLite)
 // ---------------------------------------------------------------------------
 
+// escapeLikeTerm escapes a search term for a LIKE or ILIKE pattern written
+// with ESCAPE '\', so every character of the term matches literally. The
+// backslash is escaped FIRST: escaping % or _ first would add backslashes
+// that the backslash pass then doubles, turning "\%" back into a wildcard.
+// A term ending in a single backslash ("ab\") becomes "ab\\" and so cannot
+// escape the pattern's closing %.
+func escapeLikeTerm(term string) string {
+	term = strings.ReplaceAll(term, `\`, `\\`)
+	term = strings.ReplaceAll(term, `%`, `\%`)
+	term = strings.ReplaceAll(term, `_`, `\_`)
+	return term
+}
+
+// searchError wraps a search query error. When the search's context has
+// ended, the result also matches ctx.Err() (context.DeadlineExceeded or
+// context.Canceled) under errors.Is, whatever form the driver reported the
+// interrupt in, so the handler can map a timeout to 503 SEARCH_TIMEOUT.
+func searchError(ctx context.Context, step string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		return fmt.Errorf("webchat store: %s: %w", step, errors.Join(err, ctxErr))
+	}
+	return fmt.Errorf("webchat store: %s: %w", step, err)
+}
+
 // SearchChatMessages performs a case-insensitive substring search over the
 // messages table, scoped to channel='web'. SQLite LIKE is case-insensitive
 // for ASCII which covers most search queries.
@@ -1382,9 +1696,14 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 		filter.Limit = 200
 	}
 
-	// Check if the messages table exists.
-	var tableExists int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists); err != nil || tableExists == 0 {
+	// Check if the messages table exists, through the search handle, so a
+	// search never queues for the main handle's connection (round-2 R2-03).
+	var tables int
+	if err := s.searchHandle().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'messages'").Scan(&tables); err != nil {
+		return nil, "", searchError(ctx, "check table messages exists", err)
+	}
+	if tables == 0 {
 		return nil, "", nil
 	}
 
@@ -1392,9 +1711,15 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 	var conditions []string
 	var args []interface{}
 
-	conditions = append(conditions, "channel = 'web'")
-	conditions = append(conditions, "msg LIKE '%' || ? || '%'")
-	args = append(args, filter.Query)
+	conditions = append(conditions, "m.channel = 'web'")
+	// The term is matched literally: escapeLikeTerm escapes \, % and _, so
+	// user input can never widen the pattern (design v3 section 9 item 3).
+	conditions = append(conditions, `m.msg LIKE '%' || ? || '%' ESCAPE '\'`)
+	args = append(args, escapeLikeTerm(filter.Query))
+	// A soft-deleted message is never a result, even before (or without)
+	// the best-effort blanking of its text: the rule the history endpoint
+	// applies (design v3 section 9 item 4).
+	conditions = append(conditions, "x.deleted_at IS NULL")
 
 	if filter.ConversationKey != "" {
 		conditions = append(conditions, "thread_id = ?")
@@ -1413,27 +1738,54 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	// Keyset pagination cursor: "timestamp|id"
+	// DM threads are private to their participants. Unless the search is
+	// scoped to one (already authorized) conversation, include a DM only when
+	// the caller occupies one of its user slots. Exact prefix/suffix
+	// comparison, not LIKE, so IDs are never treated as patterns.
+	if filter.ConversationKey == "" {
+		if filter.DMParticipantUserID == "" {
+			conditions = append(conditions, "(thread_id IS NULL OR substr(thread_id, 1, 3) <> 'dm:')")
+		} else {
+			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
+			conditions = append(conditions, "(thread_id IS NULL OR substr(thread_id, 1, 3) <> 'dm:'"+
+				" OR substr(thread_id, 1, length(?)) = ? OR substr(thread_id, -length(?)) = ?)")
+			args = append(args, prefix, prefix, suffix, suffix)
+		}
+	}
+
+	// Keyset pagination cursor: "timestamp|id", the timestamp in RFC3339Nano.
+	// messages.created is an ent column, which stores time.Time.String() text,
+	// so the cursor is bound as a time.Time: compared as an RFC3339 string the
+	// "T" separator sorts after the stored " ", and the cursor never advances.
 	if filter.Cursor != "" {
 		cursorParts := strings.SplitN(filter.Cursor, "|", 2)
 		if len(cursorParts) == 2 {
+			cursorAt, err := time.Parse(time.RFC3339Nano, cursorParts[0])
+			if err != nil {
+				return nil, "", fmt.Errorf("webchat store: search messages: %w: timestamp: %w", ErrInvalidSearchCursor, err)
+			}
+			cursorAt = cursorAt.UTC()
 			conditions = append(conditions, "(created < ? OR (created = ? AND id < ?))")
-			args = append(args, cursorParts[0], cursorParts[0], cursorParts[1])
+			args = append(args, cursorAt, cursorAt, cursorParts[1])
 		}
 	}
 
 	query := fmt.Sprintf(`
-SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
-  FROM messages
+SELECT m.id, m.project_id, COALESCE(m.thread_id, ''), m.sender, m.msg, m.created
+  FROM messages m
+  LEFT JOIN webchat_message_ext x ON x.message_id = m.id
  WHERE %s
- ORDER BY created DESC, id DESC
+ ORDER BY m.created DESC, m.id DESC
  LIMIT ?
 `, strings.Join(conditions, " AND "))
 	args = append(args, filter.Limit+1) // fetch one extra to detect next page
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	// The read-only search handle (WithSearchDB) keeps a slow search off the
+	// main handle. The caller's context deadline interrupts the statement
+	// (modernc calls sqlite3_interrupt when the context ends).
+	rows, err := s.searchHandle().QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("webchat store: search messages: %w", err)
+		return nil, "", searchError(ctx, "search messages", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1449,7 +1801,7 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("webchat store: search rows: %w", err)
+		return nil, "", searchError(ctx, "search rows", err)
 	}
 
 	// Determine next cursor.
@@ -1479,6 +1831,37 @@ func (s *sqliteWebChatStore) GetTopicConversationID(ctx context.Context, topicID
 			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
 		}
 		return "", fmt.Errorf("webchat store: get topic conversation_id: %w", err)
+	}
+	return convID, nil
+}
+
+// GetTopicConversationIDInProject is GetTopicConversationID for a topic of
+// projectID only: a topic of another project answers store.ErrNotFound.
+func (s *sqliteWebChatStore) GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ? AND project_id = ? AND deleted_at IS NULL`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project: %w", err)
+	}
+	return convID, nil
+}
+
+// GetTopicConversationIDIncludingDeletedInProject is
+// GetTopicConversationIDIncludingDeleted for a topic of projectID only: a
+// topic of another project answers store.ErrNotFound.
+func (s *sqliteWebChatStore) GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ? AND project_id = ?`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project (including deleted): %w", err)
 	}
 	return convID, nil
 }
@@ -1522,6 +1905,9 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.addUserPrefsThreadColumns(); err != nil {
 		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
+	if err := s.addUserPrefsThreadGroupsMigratedAt(); err != nil {
+		return fmt.Errorf("user prefs thread_groups_migrated_at column: %w", err)
+	}
 	return nil
 }
 
@@ -1545,6 +1931,28 @@ func (s *sqliteWebChatStore) addUserPrefsThreadColumns() error {
 	}
 	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_groups TEXT")
 	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return s.markMigrationCompleted(migrationName)
+}
+
+// addUserPrefsThreadGroupsMigratedAt adds the thread_groups_migrated_at
+// column (ptone/scion#4424, design section 5a) to webchat_user_prefs for
+// existing databases that lack it.
+func (s *sqliteWebChatStore) addUserPrefsThreadGroupsMigratedAt() error {
+	migrationName := "add_user_prefs_thread_groups_migrated_at"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_groups_migrated_at TEXT")
+	if err != nil {
+		// The column exists if the table was created fresh with the new DDL.
 		if !strings.Contains(err.Error(), "duplicate column") {
 			return err
 		}
@@ -1648,7 +2056,8 @@ func (s *sqliteWebChatStore) backfillTopicConversations() error {
 			if needMint {
 				convID = uuid.New().String()
 			}
-			now := time.Now().UTC().Format(time.RFC3339Nano)
+			// Bound into the ent conversations table: a time.Time, not RFC3339 text.
+			now := time.Now().UTC()
 
 			tx, err := s.db.BeginTx(context.Background(), nil)
 			if err != nil {
@@ -1727,12 +2136,16 @@ func (s *sqliteWebChatStore) migrateThreadIDs(batchSize int) error {
 		return nil
 	}
 
-	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
-	var tableExists int
-	err = s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists)
-	if err != nil || tableExists == 0 {
-		// No messages table — nothing to backfill; mark as complete.
-		return s.markMigrationCompleted("thread_id_backfill")
+	// messages is Ent-managed and may not exist yet. With no table there is
+	// nothing to backfill, so leave the migration unrecorded: the next Init
+	// runs it once the table exists.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat thread_id backfill deferred: messages table does not exist yet")
+		return nil
 	}
 
 	for {
@@ -1870,7 +2283,7 @@ func (s *sqliteWebChatStore) CreateAttachment(ctx context.Context, meta Attachme
 INSERT INTO webchat_attachment (id, project_id, filename, mime_type, size, uploaded_by, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 `
-	_, err := s.db.ExecContext(ctx, query, meta.ID, meta.ProjectID, meta.Filename, meta.MimeType, meta.Size, meta.UploadedBy, meta.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, query, meta.ID, meta.ProjectID, meta.Filename, meta.MimeType, meta.Size, meta.UploadedBy, meta.CreatedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: create attachment: %w", err)
 	}
@@ -1917,6 +2330,34 @@ VALUES (?, ?)
 		return fmt.Errorf("webchat store: link attachment: %w", err)
 	}
 	return nil
+}
+
+// ListMessageIDsForAttachment returns up to limit IDs of messages the
+// attachment is linked to, in ID order.
+func (s *sqliteWebChatStore) ListMessageIDsForAttachment(ctx context.Context, attachmentID string, limit int) ([]string, error) {
+	const query = `
+SELECT message_id FROM webchat_message_attachment
+WHERE attachment_id = ?
+ORDER BY message_id
+LIMIT ?
+`
+	rows, err := s.db.QueryContext(ctx, query, attachmentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("webchat store: scan message for attachment: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	return ids, nil
 }
 
 // GetAttachmentsByMessage returns all attachments linked to a message.
@@ -1994,22 +2435,17 @@ WHERE ma.message_id IN (%s)
 // Helpers
 // ---------------------------------------------------------------------------
 
-// parseSQLiteTime parses a timestamp string stored by SQLite in multiple
-// possible formats (mirrors the wave-1 parsing in GetThreads).
+// parseSQLiteTime parses a timestamp read from a webchat_* TEXT column (or
+// scanned as text from an ent column) and returns it in UTC, or the zero time
+// when s is empty or unparseable. Current writers store RFC3339Nano in UTC;
+// storedtime.Parse covers the legacy layouts, including the Go time.Time.String()
+// text the driver wrote for a bound time.Time.
 func parseSQLiteTime(s string) time.Time {
-	if s == "" {
+	parsed, err := storedtime.Parse(s)
+	if err != nil {
 		return time.Time{}
 	}
-	if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return parsed
-	}
-	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", s); err == nil {
-		return parsed
-	}
-	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", s); err == nil {
-		return parsed
-	}
-	return time.Time{}
+	return parsed
 }
 
 // nullableString returns nil for empty strings, suitable for nullable TEXT columns.
@@ -2115,11 +2551,11 @@ func (s *sqliteWebChatStore) GetMessageExt(ctx context.Context, messageID string
 	}
 	ext.ReplyToID = replyToID.String
 	if editedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, editedAt.String)
+		t := parseSQLiteTime(editedAt.String)
 		ext.EditedAt = &t
 	}
 	if deletedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, deletedAt.String)
+		t := parseSQLiteTime(deletedAt.String)
 		ext.DeletedAt = &t
 	}
 	return &ext, nil
@@ -2152,11 +2588,11 @@ func (s *sqliteWebChatStore) GetMessageExts(ctx context.Context, messageIDs []st
 		}
 		ext.ReplyToID = replyToID.String
 		if editedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, editedAt.String)
+			t := parseSQLiteTime(editedAt.String)
 			ext.EditedAt = &t
 		}
 		if deletedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, deletedAt.String)
+			t := parseSQLiteTime(deletedAt.String)
 			ext.DeletedAt = &t
 		}
 		result[ext.MessageID] = &ext
@@ -2172,26 +2608,19 @@ VALUES (?, ?)
 ON CONFLICT (message_id)
 DO UPDATE SET edited_at = excluded.edited_at
 `
-	_, err := s.db.ExecContext(ctx, query, messageID, editedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, query, messageID, editedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: set message edited: %w", err)
 	}
 	return nil
 }
 
-// SetMessageDeleted marks a message as soft-deleted at the given time.
+// SetMessageDeleted marks a message as soft-deleted at the given time,
+// removing its mentions and stars in the same transaction
+// (markMessageDeletedTx).
 func (s *sqliteWebChatStore) SetMessageDeleted(ctx context.Context, messageID string, deletedAt time.Time) error {
-	const query = `
-INSERT INTO webchat_message_ext (message_id, deleted_at)
-VALUES (?, ?)
-ON CONFLICT (message_id)
-DO UPDATE SET deleted_at = excluded.deleted_at
-`
-	_, err := s.db.ExecContext(ctx, query, messageID, deletedAt.Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("webchat store: set message deleted: %w", err)
-	}
-	return nil
+	_, err := s.markMessageDeletedTx(ctx, messageID, deletedAt)
+	return err
 }
 
 // UpdateMessageContent updates the content (msg column) of a message in the
@@ -2225,11 +2654,19 @@ func (s *sqliteWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, ne
 	return int(n), nil
 }
 
-// DeleteDM removes all webchat_dm rows for the given conversation key.
+// DeleteDM removes all webchat_dm rows for the given conversation key,
+// and the scheduled messages and stars of that conversation.
 func (s *sqliteWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
 	const query = `DELETE FROM webchat_dm WHERE conversation_key = ?`
 	_, err := s.db.ExecContext(ctx, query, conversationKey)
 	if err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	// The conversation's scheduled messages and stars go with it.
+	if _, err := s.DeleteScheduledMessagesForConversation(ctx, conversationKey); err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	if _, err := s.DeleteMessageStarsForConversation(ctx, conversationKey); err != nil {
 		return fmt.Errorf("webchat store: delete DM: %w", err)
 	}
 	return nil
@@ -2300,11 +2737,18 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
-		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+		//
+		// Review round 1 finding #4: this INSERT must also seed
+		// default_agent_id from topic.DefaultAgentID (NULL when empty), the
+		// same as CreateTopic's mint branch — otherwise a promoted DM starts
+		// with its topic default set and its conversation default NULL,
+		// which is exactly the F1 drift this PR exists to eliminate.
+		// conversations is an ent table: bind a time.Time, not RFC3339 text.
+		createdAt := topic.CreatedAt.UTC()
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES (?, ?, 'group', 'native', ?, '', ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, now, now)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES (?, ?, 'group', 'native', ?, '', ?, ?, 'active', ?, ?)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), createdAt, createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
 		}
@@ -2343,6 +2787,17 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)
+	}
+
+	// Step 2b: Stars follow the messages actually moved (both arms above):
+	// the new topic is the only conversation with thread_id = topic.ID, so
+	// this join selects exactly the re-keyed rows. Owner, message and save
+	// time stay; access is checked again on every read.
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE webchat_message_star SET conversation_key = ?, project_id = ?
+		 WHERE message_id IN (SELECT id FROM messages WHERE thread_id = ?)`,
+		topic.ID, nullableString(topic.ProjectID), topic.ID); err != nil {
+		return nil, fmt.Errorf("webchat store: move stars in promote: %w", err)
 	}
 
 	// Step 3: Migrate read state
@@ -2396,6 +2851,19 @@ func (s *sqliteWebChatStore) CountMessages(ctx context.Context, threadID string)
 	return count, nil
 }
 
+// tableExists reports whether the named table exists. A failed check is
+// returned as an error, not reported as "absent", so callers that record
+// work as done when the table is absent do not do so on a query failure.
+func (s *sqliteWebChatStore) tableExists(ctx context.Context, table string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?", table).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("webchat store: check table %s exists: %w", table, err)
+	}
+	return count > 0, nil
+}
+
 // addThreadIDIndex creates an index on messages.thread_id for query performance.
 func (s *sqliteWebChatStore) addThreadIDIndex() error {
 	done, err := s.migrationCompleted("thread_id_index")
@@ -2406,11 +2874,15 @@ func (s *sqliteWebChatStore) addThreadIDIndex() error {
 		return nil
 	}
 
-	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
-	var tableExists int
-	err = s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists)
-	if err != nil || tableExists == 0 {
-		return s.markMigrationCompleted("thread_id_index")
+	// As in migrateThreadIDs: with no messages table there is nothing to
+	// index, so leave the migration unrecorded for the next Init.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat thread_id index deferred: messages table does not exist yet")
+		return nil
 	}
 
 	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages (thread_id)`)
@@ -2427,4 +2899,88 @@ func truncateSnippet(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
+}
+
+// RecordMentions stores one mention row per user for messageID.
+func (s *sqliteWebChatStore) RecordMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) error {
+	if conversationKey == "" || messageID == "" || len(userIDs) == 0 {
+		return nil
+	}
+	const query = `
+INSERT INTO webchat_mention (user_id, conversation_key, message_id)
+VALUES (?, ?, ?)
+ON CONFLICT (message_id, user_id) DO NOTHING
+`
+	// One transaction for the whole batch: a single commit instead of an
+	// implicit one per row, and the batch lands atomically.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: record mentions begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, userID := range userIDs {
+		if userID == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
+			return fmt.Errorf("webchat store: record mention: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: record mentions commit: %w", err)
+	}
+	return nil
+}
+
+// UnreadMentionKeys returns the conversations in conversationKeys where
+// userID has a recorded mention after its own read watermark, in one query.
+func (s *sqliteWebChatStore) UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if userID == "" || len(conversationKeys) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(conversationKeys))
+	args := make([]interface{}, 0, len(conversationKeys)+1)
+	args = append(args, userID)
+	for i, key := range conversationKeys {
+		placeholders[i] = "?"
+		args = append(args, key)
+	}
+	// The watermark row and message are joined on the caller's own user_id,
+	// so another user's read state can never satisfy the comparison.
+	query := fmt.Sprintf(`
+SELECT DISTINCT wm.conversation_key
+  FROM webchat_mention wm
+  JOIN messages m ON m.id = wm.message_id
+  LEFT JOIN webchat_read_state rs
+         ON rs.user_id = wm.user_id AND rs.conversation_key = wm.conversation_key
+  LEFT JOIN messages lr ON lr.id = rs.last_read_message_id
+ WHERE wm.user_id = ? AND wm.conversation_key IN (%s)
+   AND (lr.id IS NULL OR m.created > lr.created
+        OR (m.created = lr.created AND m.id > lr.id))
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: unread mentions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("webchat store: scan unread mention: %w", err)
+		}
+		out[key] = true
+	}
+	return out, rows.Err()
+}
+
+// AttachmentMeta holds metadata about a stored attachment.
+type AttachmentMeta struct {
+	ID         string    `json:"id"`
+	ProjectID  string    `json:"projectId"`
+	Filename   string    `json:"name"`
+	MimeType   string    `json:"mime"`
+	Size       int64     `json:"size"`
+	UploadedBy string    `json:"uploadedBy"`
+	CreatedAt  time.Time `json:"createdAt"`
 }

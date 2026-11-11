@@ -94,6 +94,39 @@ func TestCancelScheduledEvent(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+func TestCancelScheduledEventWithReason(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	pending := newTestScheduledEvent(projectID)
+	require.NoError(t, s.CreateScheduledEvent(ctx, pending))
+	require.NoError(t, s.CancelScheduledEventWithReason(ctx, pending.ID, "target agent deleted"))
+	got, err := s.GetScheduledEvent(ctx, pending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventCancelled, got.Status)
+	assert.Equal(t, "target agent deleted", got.Error)
+
+	// A fired event is no longer pending: ErrNotFound, and it keeps its
+	// status, fire time and (empty) error.
+	fired := newTestScheduledEvent(projectID)
+	require.NoError(t, s.CreateScheduledEvent(ctx, fired))
+	claimed, err := s.ClaimScheduledEvent(ctx, fired.ID, store.ScheduledEventFired)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	err = s.CancelScheduledEventWithReason(ctx, fired.ID, "target agent deleted")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	got, err = s.GetScheduledEvent(ctx, fired.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFired, got.Status)
+	assert.NotNil(t, got.FiredAt)
+	assert.Empty(t, got.Error)
+
+	// A missing event is ErrNotFound.
+	err = s.CancelScheduledEventWithReason(ctx, uuid.NewString(), "target agent deleted")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
 func TestListScheduledEventsFilter(t *testing.T) {
 	s := newTestScheduleStore(t)
 	ctx := context.Background()
@@ -139,6 +172,65 @@ func TestPurgeOldScheduledEvents(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetScheduledEvent(ctx, oldPending.ID)
 	require.NoError(t, err)
+}
+
+// TestPurgeOldScheduledEvents_CompletionTime checks that the purge keys on
+// fired_at, falling back to created only for a row with no fired_at (a
+// cancelled one): an event created before the cutoff that fired after it
+// is kept (ptone/scion#4517).
+func TestPurgeOldScheduledEvents_CompletionTime(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+	old := now.Add(-48 * time.Hour)
+	recent := now.Add(-time.Hour)
+	cutoff := now.Add(-24 * time.Hour)
+
+	newEvent := func(created time.Time) *store.ScheduledEvent {
+		ev := newTestScheduledEvent(projectID)
+		ev.CreatedAt = created
+		require.NoError(t, s.CreateScheduledEvent(ctx, ev))
+		return ev
+	}
+	withStatus := func(created time.Time, status string, firedAt *time.Time) string {
+		ev := newEvent(created)
+		require.NoError(t, s.UpdateScheduledEventStatus(ctx, ev.ID, status, firedAt, ""))
+		return ev.ID
+	}
+	cancelled := func(created time.Time) string {
+		ev := newEvent(created)
+		require.NoError(t, s.CancelScheduledEvent(ctx, ev.ID))
+		got, err := s.GetScheduledEvent(ctx, ev.ID)
+		require.NoError(t, err)
+		require.Nil(t, got.FiredAt, "cancel sets no fired_at")
+		return ev.ID
+	}
+
+	purged := map[string]string{}
+	purged["fired before cutoff"] = withStatus(old, store.ScheduledEventFired, &old)
+	purged["expired before cutoff"] = withStatus(old, store.ScheduledEventExpired, &old)
+	purged["cancelled, created before"] = cancelled(old)
+	purged["failed, no fired_at, created before"] = withStatus(old, store.ScheduledEventFailed, nil)
+	kept := map[string]string{}
+	kept["created before, fired after"] = withStatus(old, store.ScheduledEventFired, &recent)
+	kept["created before, failed after"] = withStatus(old, store.ScheduledEventFailed, &recent)
+	kept["created before, expired after"] = withStatus(old, store.ScheduledEventExpired, &recent)
+	kept["cancelled, created after"] = cancelled(recent)
+	kept["pending, created before"] = newEvent(old).ID
+
+	n, err := s.PurgeOldScheduledEvents(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, len(purged), n)
+
+	for name, id := range purged {
+		_, err := s.GetScheduledEvent(ctx, id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "%s: purged", name)
+	}
+	for name, id := range kept {
+		_, err := s.GetScheduledEvent(ctx, id)
+		assert.NoError(t, err, "%s: kept", name)
+	}
 }
 
 // TestListPendingScheduledEventsClaimPath verifies the scheduled-event job-claim

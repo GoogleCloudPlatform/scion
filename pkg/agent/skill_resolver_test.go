@@ -22,10 +22,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
@@ -149,7 +151,7 @@ func TestInstallResolvedSkills_Success(t *testing.T) {
 	defer srv.Close()
 
 	// Compute bundle hash
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -178,7 +180,7 @@ func TestInstallResolvedSkills_Success(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -237,7 +239,7 @@ func TestInstallResolvedSkills_HashMismatch(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for hash mismatch")
 	}
@@ -278,7 +280,7 @@ func TestInstallResolvedSkills_PathTraversal(t *testing.T) {
 		},
 	}
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for path traversal")
 	}
@@ -292,7 +294,7 @@ func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
 	// via scope-based precedence instead of producing a hard error.
 	content := []byte("# Winner Skill")
 	contentHash := transfer.HashBytes(content)
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -330,7 +332,7 @@ func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("expected success after collision resolution, got error: %v", err)
 	}
@@ -368,14 +370,14 @@ func TestDownloadSkillFile_HTTPSOnly(t *testing.T) {
 	// The httptest server uses HTTP, not HTTPS, and is not localhost from URL perspective
 	// but the URL will be http://127.0.0.1:PORT which is localhost
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "")
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, gitHubCredential{})
 	// 127.0.0.1 is localhost, so HTTP is allowed
 	if err != nil {
 		t.Errorf("expected HTTP to localhost to be allowed, got: %v", err)
 	}
 
 	// Non-localhost HTTP should fail
-	err = downloadSkillFile(context.Background(), "http://example.com/file", dest, defaultMaxFileSize, "")
+	err = downloadSkillFile(context.Background(), "http://example.com/file", dest, defaultMaxFileSize, gitHubCredential{})
 	if err == nil {
 		t.Fatal("expected error for non-HTTPS non-localhost URL")
 	}
@@ -397,7 +399,7 @@ func TestDownloadSkillFile_SizeLimit(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, 50, "") // 50 byte limit
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, 50, gitHubCredential{}) // 50 byte limit
 	if err == nil {
 		t.Fatal("expected error for oversized file")
 	}
@@ -423,7 +425,7 @@ func TestDownloadSkillFile_CrossHostRedirect(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "")
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, gitHubCredential{})
 	if err == nil {
 		t.Fatal("expected error for cross-host redirect")
 	}
@@ -476,37 +478,6 @@ func TestCollectRequiredSkillURIs(t *testing.T) {
 	}
 }
 
-func TestWriteResolutionRecord(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, ".scion", "resolved-skills.json")
-
-	record := &SkillResolutionRecord{
-		ResolvedAt: "2026-06-11T00:00:00Z",
-		Resolver:   "mock",
-		Skills: []SkillResolutionEntry{
-			{
-				URI:             "skill://scion/core/test@1.0",
-				Name:            "test",
-				ResolvedVersion: "1.0.0",
-				ContentHash:     "sha256:abc123",
-				Source:          "registry",
-			},
-		},
-	}
-
-	if err := writeResolutionRecord(path, record); err != nil {
-		t.Fatalf("writeResolutionRecord() error: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read record: %v", err)
-	}
-	if !strings.Contains(string(data), "test") {
-		t.Error("record should contain skill name")
-	}
-}
-
 func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	content := []byte("# Renamed Skill")
 	contentHash := transfer.HashBytes(content)
@@ -516,7 +487,7 @@ func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -544,7 +515,7 @@ func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -576,7 +547,7 @@ func TestInstallResolvedSkills_NestedFiles(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: hash1},
 		{Path: "scripts/run.sh", Hash: hash2},
 	})
@@ -601,7 +572,7 @@ func TestInstallResolvedSkills_NestedFiles(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -645,7 +616,7 @@ func TestInstallResolvedSkills_BundleHashMismatch(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for bundle hash mismatch")
 	}
@@ -654,7 +625,23 @@ func TestInstallResolvedSkills_BundleHashMismatch(t *testing.T) {
 	}
 }
 
-func TestEnumerateLocalSkills(t *testing.T) {
+// localSkillsForTest lists the local skills of skillsDir in agentHome with
+// homeLocalSkills.
+func localSkillsForTest(t *testing.T, agentHome, skillsDir string) []SkillResolutionEntry {
+	t.Helper()
+	home, err := agenthome.Open(agentHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = home.Close() }()
+	entries, err := homeLocalSkills(home, skillsDir, nil)
+	if err != nil {
+		t.Fatalf("homeLocalSkills: %v", err)
+	}
+	return entries
+}
+
+func TestHomeLocalSkills(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDir := ".claude/skills"
 	skillsPath := filepath.Join(agentHome, skillsDir)
@@ -667,7 +654,7 @@ func TestEnumerateLocalSkills(t *testing.T) {
 	// Files should be excluded
 	_ = os.WriteFile(filepath.Join(skillsPath, "README.md"), []byte("test"), 0644)
 
-	entries := enumerateLocalSkills(agentHome, skillsDir)
+	entries := localSkillsForTest(t, agentHome, skillsDir)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 local skills, got %d", len(entries))
 	}
@@ -684,8 +671,35 @@ func TestEnumerateLocalSkills(t *testing.T) {
 	}
 }
 
-func TestEnumerateLocalSkills_NonExistentDir(t *testing.T) {
-	entries := enumerateLocalSkills(t.TempDir(), ".claude/skills")
+func TestHomeLocalSkills_SkipsAgentPluginDirs(t *testing.T) {
+	agentHome := t.TempDir()
+	skillsDir := ".claude/skills"
+	skillsPath := filepath.Join(agentHome, skillsDir)
+
+	_ = os.MkdirAll(filepath.Join(skillsPath, "local-skill"), 0755)
+	// An Agent Plugins bundle installed by the claude harness.
+	_ = os.MkdirAll(filepath.Join(skillsPath, "scion-smoke", ".claude-plugin"), 0755)
+	_ = os.WriteFile(filepath.Join(skillsPath, "scion-smoke", "plugin.json"), []byte(`{}`), 0644)
+	// A symlinked or directory plugin.json does not mark a bundle.
+	_ = os.MkdirAll(filepath.Join(skillsPath, "linked"), 0755)
+	_ = os.WriteFile(filepath.Join(skillsPath, "linked", "SKILL.md"), []byte("x"), 0644)
+	if err := os.Symlink("SKILL.md", filepath.Join(skillsPath, "linked", "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(filepath.Join(skillsPath, "dirmark", "plugin.json"), 0755)
+
+	var names []string
+	for _, e := range localSkillsForTest(t, agentHome, skillsDir) {
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "dirmark,linked,local-skill" {
+		t.Fatalf("local skills = %v, want [dirmark linked local-skill]", names)
+	}
+}
+
+func TestHomeLocalSkills_NonExistentDir(t *testing.T) {
+	entries := localSkillsForTest(t, t.TempDir(), ".claude/skills")
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries for non-existent dir, got %d", len(entries))
 	}
@@ -694,7 +708,7 @@ func TestEnumerateLocalSkills_NonExistentDir(t *testing.T) {
 func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
 	content := []byte("# Updated Skill")
 	contentHash := transfer.HashBytes(content)
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -726,7 +740,7 @@ func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -745,7 +759,7 @@ func TestInstallResolvedSkills_EmptySkillsList(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	record, err := installResolvedSkills(context.Background(), nil, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), nil, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills(nil) error: %v", err)
 	}
@@ -766,7 +780,7 @@ func TestInstallOneSkill_GitBlobHashes(t *testing.T) {
 	defer srv.Close()
 
 	blobHash := transfer.GitBlobHashBytes([]byte(body))
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: blobHash},
 	})
 
@@ -927,7 +941,7 @@ func TestDownloadSkillFile_TokenNotSentToNonGitHubHost(t *testing.T) {
 	defer srv.Close()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	if err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "secret-token"); err != nil {
+	if err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, gitHubCredential{token: "secret-token", source: gitHubCredSourceDefault}); err != nil {
 		t.Fatalf("downloadSkillFile: %v", err)
 	}
 	if gotAuth != "" {
@@ -1023,7 +1037,7 @@ func TestDeduplicateByDestName_NoCollision(t *testing.T) {
 func TestDeduplicateByDestName_CollisionRecordedInRecord(t *testing.T) {
 	content := []byte("# Skill")
 	contentHash := transfer.HashBytes(content)
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -1054,7 +1068,7 @@ func TestDeduplicateByDestName_CollisionRecordedInRecord(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -1182,7 +1196,7 @@ func TestDeduplicateByDestName_DestNameErrorPassthrough(t *testing.T) {
 	// Verify installResolvedSkills surfaces the error for the invalid skill.
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for skill with invalid DestName")
 	}
@@ -1242,5 +1256,37 @@ func TestDeduplicateByDestName_AsAlias(t *testing.T) {
 	}
 	if len(collisions) != 0 {
 		t.Errorf("expected 0 collisions with alias, got %d", len(collisions))
+	}
+}
+
+// TestDownloadSkillFile_BodyReadErrorIsDownloadFailure checks that a failure
+// while reading the response body is reported as a download failure, not as
+// a local install failure (ptone/scion#5033).
+func TestDownloadSkillFile_BodyReadErrorIsDownloadFailure(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Promise more bytes than are sent: the client's body read ends
+		// with an unexpected EOF when the handler returns.
+		w.Header().Set("Content-Length", "100")
+		_, _ = w.Write([]byte("partial"))
+	}))
+	defer srv.Close()
+
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = origTransport }()
+
+	dest := filepath.Join(t.TempDir(), "SKILL.md")
+	err := downloadSkillFile(context.Background(), srv.URL+"/signed/file?sig=x", dest, defaultMaxFileSize, gitHubCredential{})
+	if err == nil {
+		t.Fatal("expected an error for a truncated response body")
+	}
+	if got, want := publicInstallReason(err), "download failed while reading the response"; got != want {
+		t.Errorf("public reason = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "failed to write") {
+		t.Errorf("body read error reported as a write failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "sig=x") || strings.Contains(err.Error(), "/signed/") {
+		t.Errorf("error quotes the download URL: %v", err)
 	}
 }

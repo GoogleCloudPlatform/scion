@@ -113,12 +113,9 @@ func init() {
 
 // resolveUserSkillsService returns an InjectedSkillsService for the current user.
 func resolveUserSkillsService() (hubclient.InjectedSkillsService, error) {
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("hub connection required: %w", err)
-	}
-	if hubCtx == nil {
-		return nil, fmt.Errorf("hub is not enabled; configure hub.endpoint to use user skills")
 	}
 	return hubCtx.Client.UserInjectedSkills(), nil
 }
@@ -153,23 +150,23 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 	if userSkillsFromDir != "" {
 		if userSkillsAs != "" || userSkillsOptional {
-			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
+			return newUsageError("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
 		}
 		if len(args) > 0 {
-			return fmt.Errorf("cannot combine a skill URI argument with --from-directory; choose one")
+			return newUsageError("cannot combine a skill URI argument with --from-directory; choose one")
 		}
 		return runUserSkillsFromDirectory(cmd, userSkillsFromDir)
 	}
 
 	if len(args) == 0 {
-		return fmt.Errorf("skill URI or --from-directory is required")
+		return newUsageError("skill URI or --from-directory is required")
 	}
 
 	skillURI := args[0]
 
 	normalized, err := api.NormalizeSkillURI(skillURI)
 	if err != nil {
-		return fmt.Errorf("invalid skill URI: %w", err)
+		return newUsageError("invalid skill URI: %w", err)
 	}
 	if normalized != skillURI {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Note: URI transformed → %s\n", normalized)
@@ -247,18 +244,14 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 
 	// Fix 2: Client-side URL validation.
 	if !looksLikeGitHubDirectoryURL(dirURL) {
-		return fmt.Errorf("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
+		return newUsageError("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
 	}
 
 	// Fix 4: Split nil-error check.
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub is not enabled; configure hub.endpoint to use user skills")
-	}
-
 	// Fix 3: Separate context for discover phase (30s).
 	parentCtx := cmd.Context()
 	if parentCtx == nil {
@@ -288,11 +281,11 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 	}
 
 	if isInteractiveTerminal() && !autoConfirm {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
 		var answer string
 		_, _ = fmt.Fscanln(cmd.InOrStdin(), &answer)
 		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Aborted.")
 			return nil
 		}
 	}

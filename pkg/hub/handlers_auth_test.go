@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,22 +27,29 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func httpJSONResponse(status int, body string) *http.Response {
-	return &http.Response{
-		StatusCode: status,
-		Status:     http.StatusText(status),
-		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader(body)),
+func TestTokenResponse_JSON(t *testing.T) {
+	tr := TokenResponse{
+		ID:        "t1",
+		Name:      "ci-token",
+		Prefix:    "scion_pat_abc1",
+		ProjectID: "p1",
+		Scopes:    []string{"agent:dispatch"},
+		Created:   time.Now(),
 	}
+
+	data, err := json.Marshal(tr)
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+
+	require.Equal(t, "p1", m["projectId"])
+	_, hasGroveID := m["groveId"]
+	require.False(t, hasGroveID, "legacy 'groveId' key present in marshal output, want absent")
 }
 
 func TestAuthLogin(t *testing.T) {
@@ -450,11 +456,11 @@ func TestAuthRefreshRoleReevaluation(t *testing.T) {
 		}
 	})
 
-	t.Run("store error degrades to config-only role", func(t *testing.T) {
+	t.Run("store error refuses the refresh", func(t *testing.T) {
 		// A transient store failure must not let the token's own role claim
-		// stand in for the stored role: the refresh chain rotates, so trusting
-		// claims.Role here would let a stale admin renew itself indefinitely.
-		// The handler falls back to config-only evaluation instead.
+		// stand in for the stored role, and without the users row the
+		// session generation cannot be compared: the handler refuses with
+		// 503 and mints nothing.
 		srv, s := testServer(t)
 		ctx := context.Background()
 
@@ -482,8 +488,13 @@ func TestAuthRefreshRoleReevaluation(t *testing.T) {
 		// rather than an offboarded user.
 		srv.store = &failingUserLookupStore{Store: s, err: errors.New("database is locked")}
 
-		if role := refresh(t, srv, refreshToken); role != "member" {
-			t.Errorf("expected refreshed token role 'member' (config-only fallback), got %q", role)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+			AuthRefreshRequest{RefreshToken: refreshToken})
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected status 503 on a user lookup fault, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "accessToken") {
+			t.Errorf("no token pair may be returned on a user lookup fault: %s", rec.Body.String())
 		}
 	})
 }
@@ -500,15 +511,28 @@ func (f *failingUserLookupStore) GetUserByEmail(context.Context, string) (*store
 }
 
 func TestAuthValidate(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
 
 	if srv.userTokenService == nil {
 		t.Fatal("userTokenService not initialized")
 	}
 
+	// The token's subject must have a user record to be reported valid.
+	userID := tid("auth-validate-user")
+	if err := s.CreateUser(context.Background(), &store.User{
+		ID:          userID,
+		Email:       "test@example.com",
+		DisplayName: "Test",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+		Created:     time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
 	// Generate a token
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(
-		"user_1", "test@example.com", "Test", "member", ClientTypeWeb,
+		userID, "test@example.com", "Test", "member", ClientTypeWeb,
 	)
 	if err != nil {
 		t.Fatalf("failed to generate token: %v", err)
@@ -548,6 +572,105 @@ func TestAuthValidate(t *testing.T) {
 	if resp2.Valid {
 		t.Error("expected token to be invalid")
 	}
+}
+
+// failingGetUserStore wraps a store and makes the by-ID user lookup return
+// no user and the given error (which may be nil).
+type failingGetUserStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingGetUserStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, f.err
+}
+
+// TestAuthValidate_UserRecordStatus verifies that /auth/validate applies the
+// same user-record check as hub JWT authentication: a live user's token is
+// valid, while a deleted or suspended user's token is reported invalid, and
+// a store failure is reported as 503 store_error.
+func TestAuthValidate_UserRecordStatus(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	newUserToken := func(t *testing.T, name string) (*store.User, string) {
+		t.Helper()
+		u := &store.User{
+			ID:          tid(name),
+			Email:       name + "@test.com",
+			DisplayName: name,
+			Role:        store.UserRoleMember,
+			Status:      store.UserStatusActive,
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, u))
+		token, _, _, err := srv.userTokenService.GenerateTokenPair(
+			u.ID, u.Email, u.DisplayName, u.Role, ClientTypeCLI)
+		require.NoError(t, err)
+		return u, token
+	}
+	validate := func(t *testing.T, token string) (int, AuthValidateResponse, string) {
+		t.Helper()
+		rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/auth/validate", AuthValidateRequest{Token: token})
+		var resp AuthValidateResponse
+		if rec.Code == http.StatusOK {
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+		}
+		return rec.Code, resp, rec.Body.String()
+	}
+
+	t.Run("live user", func(t *testing.T) {
+		u, token := newUserToken(t, "validate-live")
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.True(t, resp.Valid, body)
+		require.NotNil(t, resp.User)
+		assert.Equal(t, u.ID, resp.User.ID)
+	})
+
+	t.Run("deleted user", func(t *testing.T) {
+		u, token := newUserToken(t, "validate-deleted")
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		require.True(t, resp.Valid, "control: valid before delete: %s", body)
+
+		require.NoError(t, s.DeleteUser(ctx, u.ID))
+		code, resp, body = validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.False(t, resp.Valid, "deleted user's token must not be valid: %s", body)
+		assert.Nil(t, resp.User)
+	})
+
+	t.Run("suspended user", func(t *testing.T) {
+		u, token := newUserToken(t, "validate-suspended")
+		u.Status = store.UserStatusSuspended
+		require.NoError(t, s.UpdateUser(ctx, u))
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.False(t, resp.Valid, "suspended user's token must not be valid: %s", body)
+		assert.Nil(t, resp.User)
+	})
+
+	t.Run("store error", func(t *testing.T) {
+		_, token := newUserToken(t, "validate-store-error")
+		orig := srv.store
+		srv.store = &failingGetUserStore{Store: s, err: errors.New("database is locked")}
+		t.Cleanup(func() { srv.store = orig })
+		code, _, body := validate(t, token)
+		assert.Equal(t, http.StatusServiceUnavailable, code, body)
+		assert.Contains(t, body, "store_error")
+	})
+
+	t.Run("nil user without error", func(t *testing.T) {
+		_, token := newUserToken(t, "validate-nil-user")
+		orig := srv.store
+		srv.store = &failingGetUserStore{Store: s, err: nil}
+		t.Cleanup(func() { srv.store = orig })
+		code, resp, body := validate(t, token)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.False(t, resp.Valid, "a token with no user record must not be valid: %s", body)
+		assert.Nil(t, resp.User)
+	})
 }
 
 func TestAuthToken(t *testing.T) {
@@ -1126,15 +1249,12 @@ func TestProvisionUser(t *testing.T) {
 func TestColdStartSuperAdminBinding(t *testing.T) {
 	ctx := context.Background()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered")
 		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
@@ -1148,7 +1268,7 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 	// Configure the admin email BEFORE server creation. On a fresh start
 	// ReconcileSuperAdminBindings will find zero users and create nothing.
 	cfg.AdminEmails = []string{"first-admin@example.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1210,15 +1330,12 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	ctx := context.Background()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered")
 		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
@@ -1231,7 +1348,7 @@ func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	}
 	// AdminEmails does NOT include the user we will test.
 	cfg.AdminEmails = []string{"real-admin@test.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1471,9 +1588,10 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 	var resp AdminStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	// Custom role with permissions → isAdmin=true, isSuperAdmin=false.
-	if !resp.IsAdmin {
-		t.Error("expected isAdmin=true for user with custom role permissions")
+	// A custom role grants permissions but does not make the user a hub
+	// admin: isAdmin=false, isSuperAdmin=false, permissions listed.
+	if resp.IsAdmin {
+		t.Error("expected isAdmin=false for user with custom role permissions")
 	}
 	if resp.IsSuperAdmin {
 		t.Error("expected isSuperAdmin=false for user with custom role")
@@ -1488,6 +1606,83 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 		"template.delete",
 	}
 	require.ElementsMatch(t, expectedPerms, resp.Permissions)
+}
+
+// adminStatusForSystemRole creates a member user bound at system scope to the
+// given role definition and returns that user's admin-status response.
+func adminStatusForSystemRole(t *testing.T, srv *Server, s store.Store, name string, rd *store.RoleDefinition) AdminStatusResponse {
+	t.Helper()
+	ctx := context.Background()
+
+	userID := tid(name)
+	email := name + "@test.com"
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: email, DisplayName: name, Role: "member", Status: "active",
+	}))
+	// Only the system reconciler may create super-admin bindings.
+	createdBy := "test"
+	if rd.Name == store.SystemRoleSuperAdmin {
+		createdBy = store.SystemReconcileCreatedBy
+	}
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        createdBy,
+	})
+	require.NoError(t, err)
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, email, name, "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+	var resp AdminStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	return resp
+}
+
+// A member whose only system-scoped role grants a single permission is not a
+// hub admin: isAdmin is false and the permission is still listed, so the web
+// UI can show the one admin section that permission opens.
+func TestHandleAuthAdminStatus_MemberWithOneSystemPermissionIsNotAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	role, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		Name:        "quota-reader",
+		Description: "Can read quotas only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"quota.read"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	resp := adminStatusForSystemRole(t, srv, s, "one-perm-member", role)
+
+	require.False(t, resp.IsAdmin, "a single system-scoped permission must not set isAdmin")
+	require.False(t, resp.IsSuperAdmin)
+	require.Equal(t, []string{"quota.read"}, resp.Permissions)
+}
+
+// A member bound to the super-admin role at system scope is an admin.
+func TestHandleAuthAdminStatus_SuperAdminRoleBindingIsAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	rd, err := s.GetRoleDefinitionByName(context.Background(), store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "super-admin role definition must exist")
+
+	resp := adminStatusForSystemRole(t, srv, s, "super-admin-binding", rd)
+
+	require.True(t, resp.IsAdmin, "a super-admin role binding must set isAdmin")
+	require.NotEmpty(t, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_PermissionsSerializedAsEmptyArray(t *testing.T) {
@@ -1526,5 +1721,420 @@ func TestHandleAuthAdminStatus_WrongMethod(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/admin-status", nil)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405 for POST, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Login paths: hub role grants follow the role, and invites get the default
+// role at join time (design §5.C, §5.D; AC 1, 2, 4).
+// ---------------------------------------------------------------------------
+
+// assertViewerGrants checks the stored role, the grant state and the
+// immediate authz effect for a viewer.
+func assertViewerGrants(t *testing.T, srv *Server, s store.Store, email string) {
+	t.Helper()
+	u, err := s.GetUserByEmail(context.Background(), email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleViewer, u.Role)
+	grants := observeHubRoleGrants(t, s, u.ID)
+	assert.False(t, grants.InHubMembers, "viewer must not be in hub-members")
+	assert.Equal(t, 1, grants.HubViewerBindings, "viewer must have one hub-viewer binding")
+	assert.Equal(t, 0, grants.SuperAdminBinding, "viewer must not have a super-admin binding")
+	assertHubRoleAccess(t, srv, s, u.ID, false)
+}
+
+// assertMemberGrants is the member counterpart of assertViewerGrants.
+func assertMemberGrants(t *testing.T, srv *Server, s store.Store, email string) {
+	t.Helper()
+	u, err := s.GetUserByEmail(context.Background(), email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, u.Role)
+	grants := observeHubRoleGrants(t, s, u.ID)
+	assert.True(t, grants.InHubMembers, "member must be in hub-members")
+	assert.Equal(t, 0, grants.HubViewerBindings, "member must not have a hub-viewer binding")
+	assert.Equal(t, 0, grants.SuperAdminBinding, "member must not have a super-admin binding")
+	assertHubRoleAccess(t, srv, s, u.ID, true)
+}
+
+// assertAdminGrants checks the stored role and super-admin binding for an
+// admin, and that no hub-viewer binding is left behind.
+func assertAdminGrants(t *testing.T, s store.Store, email string) {
+	t.Helper()
+	u, err := s.GetUserByEmail(context.Background(), email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleAdmin, u.Role)
+	grants := observeHubRoleGrants(t, s, u.ID)
+	assert.Equal(t, 1, grants.SuperAdminBinding, "admin must have a super-admin binding")
+	assert.Equal(t, 0, grants.HubViewerBindings, "admin must not have a hub-viewer binding")
+}
+
+// --- provisionUser (hub OAuth / CLI login) ---
+
+func TestProvisionUser_ViewerHasHubReadImmediately(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"boss@example.com"})
+
+	_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "newviewer@example.com"})
+	require.NoError(t, err)
+
+	// No BackfillRoleBindings: the grant must exist from the first request.
+	assertViewerGrants(t, srv, s, "newviewer@example.com")
+}
+
+func TestProvisionUser_MemberDefaultHasProjectCreate(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleMember, []string{"boss@example.com"})
+
+	_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "newmember@example.com"})
+	require.NoError(t, err)
+
+	assertMemberGrants(t, srv, s, "newmember@example.com")
+}
+
+func TestProvisionUser_AdminDemotedToViewerLosesMemberPerms(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"boss@example.com"})
+	ctx := context.Background()
+
+	// A config-derived admin who is also in hub-members (for example a
+	// member who was later added to admin_emails).
+	u := createLoginGrantUser(t, s, "demoted-admin", "demoted@example.com", store.UserRoleAdmin, store.UserStatusActive)
+	createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+	require.NoError(t, ensureHubMembershipTx(ctx, s, u.ID))
+
+	_, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "demoted@example.com"})
+	require.NoError(t, err)
+
+	assertViewerGrants(t, srv, s, "demoted@example.com")
+}
+
+func TestProvisionUser_AdminDemotedToMemberGetsHubMembers(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleMember, []string{"boss@example.com"})
+
+	u := createLoginGrantUser(t, s, "demoted-admin-m", "demoted-m@example.com", store.UserRoleAdmin, store.UserStatusActive)
+	createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+
+	_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "demoted-m@example.com"})
+	require.NoError(t, err)
+
+	assertMemberGrants(t, srv, s, "demoted-m@example.com")
+}
+
+func TestProvisionUser_MemberLoginRemovesStaleHubViewerBinding(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"boss@example.com"})
+
+	u := createLoginGrantUser(t, s, "stale-member", "stale-member@example.com", store.UserRoleMember, store.UserStatusActive)
+	createSystemBinding(t, s, u.ID, store.SystemRoleHubViewer, store.SystemBackfillCreatedBy)
+
+	_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "stale-member@example.com"})
+	require.NoError(t, err)
+
+	// An existing member keeps their role when the default is viewer.
+	assertMemberGrants(t, srv, s, "stale-member@example.com")
+}
+
+// --- provisionUser invited → active (design §5.C) ---
+
+func TestProvisionUser_Invited_DefaultViewer_BecomesViewer(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"boss@example.com"})
+	createLoginGrantUser(t, s, "inv-viewer", "inv-viewer@example.com", store.UserRoleMember, store.UserStatusInvited)
+
+	user, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "inv-viewer@example.com"})
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusActive, user.Status)
+
+	assertViewerGrants(t, srv, s, "inv-viewer@example.com")
+}
+
+func TestProvisionUser_Invited_DefaultMember_BecomesMember(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleMember, []string{"boss@example.com"})
+	createLoginGrantUser(t, s, "inv-member", "inv-member@example.com", store.UserRoleMember, store.UserStatusInvited)
+
+	user, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "inv-member@example.com"})
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusActive, user.Status)
+
+	assertMemberGrants(t, srv, s, "inv-member@example.com")
+}
+
+func TestProvisionUser_Invited_InAdminEmails_BecomesAdmin(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"inv-admin@example.com"})
+	createLoginGrantUser(t, s, "inv-admin", "inv-admin@example.com", store.UserRoleMember, store.UserStatusInvited)
+
+	_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "inv-admin@example.com"})
+	require.NoError(t, err)
+
+	assertAdminGrants(t, s, "inv-admin@example.com")
+}
+
+func TestProvisionUser_Invited_UIPromotedAdmin_StaysAdmin(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"boss@example.com"})
+	// A pending invite that was promoted through the admin UI before this
+	// change: role admin plus an AdminAPICreatedBy super-admin binding.
+	u := createLoginGrantUser(t, s, "inv-ui-admin", "inv-ui-admin@example.com", store.UserRoleAdmin, store.UserStatusInvited)
+	createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.AdminAPICreatedBy)
+
+	_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "inv-ui-admin@example.com"})
+	require.NoError(t, err)
+
+	assertAdminGrants(t, s, "inv-ui-admin@example.com")
+}
+
+func TestProvisionUser_Invited_ConfigAdminPlaceholder_GetsDefault(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"boss@example.com"})
+	// Role admin on an invited row without a UI-promoted binding is a
+	// placeholder like any other: the user gets the current default.
+	u := createLoginGrantUser(t, s, "inv-cfg-admin", "inv-cfg-admin@example.com", store.UserRoleAdmin, store.UserStatusInvited)
+	createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+
+	_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "inv-cfg-admin@example.com"})
+	require.NoError(t, err)
+
+	assertViewerGrants(t, srv, s, "inv-cfg-admin@example.com")
+}
+
+func TestProvisionUser_Invited_DefaultFlippedBeforeFirstLogin(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleMember, []string{"boss@example.com"})
+
+	// The invite is created through the API while the default is member.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite",
+		map[string]string{"email": "flipped@example.com"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	pending, err := s.GetUserByEmail(context.Background(), "flipped@example.com")
+	require.NoError(t, err)
+	require.Equal(t, store.UserStatusInvited, pending.Status)
+
+	// The default is flipped before the invitee first signs in.
+	srv.config.DefaultUserRole = store.UserRoleViewer
+
+	_, err = srv.provisionUser(context.Background(), &ExternalUserInfo{Email: "flipped@example.com"})
+	require.NoError(t, err)
+
+	assertViewerGrants(t, srv, s, "flipped@example.com")
+}
+
+// --- token refresh ---
+
+// refreshAs mints a refresh token for the stored user and exchanges it.
+func refreshAs(t *testing.T, srv *Server, u *store.User, tokenRole string) {
+	t.Helper()
+	_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+		u.ID, u.Email, u.DisplayName, tokenRole, ClientTypeWeb,
+	)
+	require.NoError(t, err)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+		AuthRefreshRequest{RefreshToken: refreshToken})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestAuthRefresh_AdminDemotedToViewerLosesMemberPerms(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"boss@example.com"})
+	ctx := context.Background()
+
+	u := createLoginGrantUser(t, s, "refresh-demoted", "refresh-demoted@example.com", store.UserRoleAdmin, store.UserStatusActive)
+	createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+	require.NoError(t, ensureHubMembershipTx(ctx, s, u.ID))
+
+	refreshAs(t, srv, u, store.UserRoleAdmin)
+
+	assertViewerGrants(t, srv, s, "refresh-demoted@example.com")
+}
+
+func TestAuthRefresh_PromotedToAdminGetsSuperAdminBinding(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleViewer, []string{"refresh-promoted@example.com"})
+
+	u := createLoginGrantUser(t, s, "refresh-promoted", "refresh-promoted@example.com", store.UserRoleViewer, store.UserStatusActive)
+	createSystemBinding(t, s, u.ID, store.SystemRoleHubViewer, store.SystemReconcileCreatedBy)
+
+	refreshAs(t, srv, u, store.UserRoleViewer)
+
+	assertAdminGrants(t, s, "refresh-promoted@example.com")
+}
+
+func TestAuthRefresh_AdminDemotedToMemberGetsHubMembers(t *testing.T) {
+	// A config admin removed from admin_emails is demoted to the member
+	// default on refresh: super-admin binding removed, hub-members added.
+	srv, s := newLoginGrantServer(t, store.UserRoleMember, []string{"boss@example.com"})
+
+	u := createLoginGrantUser(t, s, "refresh-claim", "refresh-claim@example.com", store.UserRoleAdmin, store.UserStatusActive)
+	createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+
+	refreshAs(t, srv, u, store.UserRoleAdmin)
+
+	assertMemberGrants(t, srv, s, "refresh-claim@example.com")
+}
+
+// --- web proxy login and web OAuth callback (real store) ---
+
+func TestWebLogin_ViewerHasHubReadImmediately(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			srv, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			p.login(t, s, webLoginSettings(store.UserRoleViewer, "boss@example.com"), "web-viewer@example.com")
+			assertViewerGrants(t, srv, s, "web-viewer@example.com")
+		})
+	}
+}
+
+func TestWebLogin_MemberDefaultHasProjectCreate(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			srv, s := newLoginGrantServer(t, store.UserRoleMember, nil)
+			p.login(t, s, webLoginSettings(store.UserRoleMember, "boss@example.com"), "web-member@example.com")
+			assertMemberGrants(t, srv, s, "web-member@example.com")
+		})
+	}
+}
+
+func TestWebLogin_AdminDemotedToViewerLosesMemberPerms(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			srv, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			u := createLoginGrantUser(t, s, "web-demoted", "web-demoted@example.com", store.UserRoleAdmin, store.UserStatusActive)
+			createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+			require.NoError(t, ensureHubMembershipTx(context.Background(), s, u.ID))
+
+			p.login(t, s, webLoginSettings(store.UserRoleViewer, "boss@example.com"), "web-demoted@example.com")
+
+			assertViewerGrants(t, srv, s, "web-demoted@example.com")
+		})
+	}
+}
+
+func TestWebLogin_Invited_DefaultViewer_BecomesViewer(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			srv, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			createLoginGrantUser(t, s, "web-inv-viewer", "web-inv-viewer@example.com", store.UserRoleMember, store.UserStatusInvited)
+
+			p.login(t, s, webLoginSettings(store.UserRoleViewer, "boss@example.com"), "web-inv-viewer@example.com")
+
+			u, err := s.GetUserByEmail(context.Background(), "web-inv-viewer@example.com")
+			require.NoError(t, err)
+			assert.Equal(t, store.UserStatusActive, u.Status)
+			assertViewerGrants(t, srv, s, "web-inv-viewer@example.com")
+		})
+	}
+}
+
+func TestWebLogin_Invited_DefaultMember_BecomesMember(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			srv, s := newLoginGrantServer(t, store.UserRoleMember, nil)
+			createLoginGrantUser(t, s, "web-inv-member", "web-inv-member@example.com", store.UserRoleMember, store.UserStatusInvited)
+
+			p.login(t, s, webLoginSettings(store.UserRoleMember, "boss@example.com"), "web-inv-member@example.com")
+
+			assertMemberGrants(t, srv, s, "web-inv-member@example.com")
+		})
+	}
+}
+
+func TestWebLogin_Invited_InAdminEmails_BecomesAdmin(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			_, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			createLoginGrantUser(t, s, "web-inv-admin", "web-inv-admin@example.com", store.UserRoleMember, store.UserStatusInvited)
+
+			p.login(t, s, webLoginSettings(store.UserRoleViewer, "web-inv-admin@example.com"), "web-inv-admin@example.com")
+
+			assertAdminGrants(t, s, "web-inv-admin@example.com")
+		})
+	}
+}
+
+func TestWebLogin_Invited_UIPromotedAdmin_StaysAdmin(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			_, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			u := createLoginGrantUser(t, s, "web-inv-ui-admin", "web-inv-ui-admin@example.com", store.UserRoleAdmin, store.UserStatusInvited)
+			createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.AdminAPICreatedBy)
+
+			p.login(t, s, webLoginSettings(store.UserRoleViewer, "boss@example.com"), "web-inv-ui-admin@example.com")
+
+			assertAdminGrants(t, s, "web-inv-ui-admin@example.com")
+		})
+	}
+}
+
+func TestWebLogin_Invited_ConfigAdminPlaceholder_GetsDefault(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			srv, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			u := createLoginGrantUser(t, s, "web-inv-cfg-admin", "web-inv-cfg-admin@example.com", store.UserRoleAdmin, store.UserStatusInvited)
+			createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+
+			p.login(t, s, webLoginSettings(store.UserRoleViewer, "boss@example.com"), "web-inv-cfg-admin@example.com")
+
+			assertViewerGrants(t, srv, s, "web-inv-cfg-admin@example.com")
+		})
+	}
+}
+
+// --- dev test-login endpoint (real store) ---
+
+// webTestLogin calls the dev-only test-login endpoint for email with role
+// against a WebServer backed by s.
+func webTestLogin(t *testing.T, s store.Store, email, role string) {
+	t.Helper()
+	ws := NewWebServer(WebServerConfig{EnableTestLogin: true})
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	ws.SetStore(s)
+
+	body := `{"email":"` + email + `","role":"` + role + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
+	rec := httptest.NewRecorder()
+	ws.handleTestLogin(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestHandleTestLogin_GrantsFollowRole(t *testing.T) {
+	srv, s := newLoginGrantServer(t, store.UserRoleMember, nil)
+	const email = "testlogin@example.com"
+
+	webTestLogin(t, s, email, store.UserRoleViewer)
+	assertViewerGrants(t, srv, s, email)
+
+	webTestLogin(t, s, email, store.UserRoleMember)
+	assertMemberGrants(t, srv, s, email)
+
+	webTestLogin(t, s, email, store.UserRoleViewer)
+	assertViewerGrants(t, srv, s, email)
+}
+
+// failingUpdateUserStore wraps a real store and fails every UpdateUser call,
+// so tests can exercise the login paths' "UpdateUser failed" branches.
+type failingUpdateUserStore struct {
+	store.Store
+}
+
+func (f *failingUpdateUserStore) UpdateUser(context.Context, *store.User) error {
+	return errors.New("injected UpdateUser failure")
+}
+
+// When UpdateUser fails, the web login paths must skip the grant sync (and
+// the super-admin change) so hub grants keep following the persisted role,
+// and the login itself must still complete.
+func TestWebLogin_UpdateUserFailure_SkipsGrantSync(t *testing.T) {
+	for _, p := range webLoginPaths {
+		t.Run(p.name, func(t *testing.T) {
+			_, s := newLoginGrantServer(t, store.UserRoleViewer, nil)
+			u := createLoginGrantUser(t, s, "web-upd-fail", "web-upd-fail@example.com", store.UserRoleAdmin, store.UserStatusActive)
+			createSystemBinding(t, s, u.ID, store.SystemRoleSuperAdmin, store.SystemReconcileCreatedBy)
+			require.NoError(t, ensureHubMembershipTx(context.Background(), s, u.ID))
+			before := observeHubRoleGrants(t, s, u.ID)
+			require.Equal(t, hubRoleGrantState{InHubMembers: true, SuperAdminBinding: 1}, before)
+
+			// Admin not in admin_emails with default viewer: the login computes a
+			// demotion to viewer, but persisting it fails.
+			p.login(t, &failingUpdateUserStore{Store: s}, webLoginSettings(store.UserRoleViewer, "boss@example.com"), "web-upd-fail@example.com")
+
+			stored, err := s.GetUser(context.Background(), u.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.UserRoleAdmin, stored.Role, "role update was injected to fail")
+			assert.Equal(t, before, observeHubRoleGrants(t, s, u.ID),
+				"grants must follow the persisted role when UpdateUser fails")
+		})
 	}
 }

@@ -26,8 +26,28 @@
  * Last-Event-ID resume support (handled natively by EventSource).
  *
  * Reconnection retries indefinitely; a tab that becomes visible reconnects
- * immediately.
+ * immediately. The first retry after a server-initiated close (`reconnect`,
+ * or `superseded` with reason max_age) or a drop of a live connection waits
+ * a full-jitter delay, random(0, 2 s), so the clients of a restarting hub
+ * instance do not all come back, and refetch their lists, in the same second.
+ *
+ * With the experiment web.sse_hidden_tab_close on, a tab hidden for 60 s
+ * closes its stream and does not reconnect until it is shown again; the
+ * reopen is reported as a drop and recovery, so listeners resync.
+ *
+ * A stream can also die without the browser noticing: after a mobile PWA
+ * returns from the background, EventSource may still report OPEN although
+ * nothing will ever arrive on it. The client therefore tracks when it last
+ * heard from the server and replaces a connection that has gone silent for
+ * longer than staleAfterMs (see onResume and isStale).
  */
+
+import { dispatchTeardown } from '../utils/auth.js';
+import { setPreferredTimeZone } from '../utils/time.js';
+import { isFeatureEnabled, SSE_HIDDEN_TAB_CLOSE_FLAG } from '../utils/feature-flags.js';
+import type { AuthMeResponse } from '../shared/types.js';
+import { apiFetch } from './api.js';
+import { loadPage } from './navigation.js';
 
 /** Data shape for SSE 'update' events from the server */
 export interface SSEUpdateEvent {
@@ -39,8 +59,30 @@ type SSEClientEventMap = {
   update: CustomEvent<SSEUpdateEvent>;
   connected: CustomEvent<{ connectionId: string; subjects: string[] }>;
   disconnected: CustomEvent<void>;
+  'handshake-failed': CustomEvent<void>;
   reconnecting: CustomEvent<{ attempt: number }>;
 };
+
+/** Injectable dependencies and timings, for tests. */
+export interface SSEClientOptions {
+  /** Random source in [0, 1) for reconnect jitter. Defaults to Math.random. */
+  random?: () => number;
+  /**
+   * Whether a hidden tab closes its stream after hiddenCloseMs. Read each
+   * time the tab is hidden. Defaults to the web.sse_hidden_tab_close
+   * experiment.
+   */
+  hiddenCloseEnabled?: () => boolean;
+  /** How long a tab stays hidden before its stream is closed. */
+  hiddenCloseMs?: number;
+  /** Upper bound of the full-jitter delay before the first reconnect. */
+  firstReconnectJitterMs?: number;
+}
+
+/** How long a hidden tab keeps its stream open (ptone/scion#5235). */
+export const SSE_HIDDEN_CLOSE_MS = 60_000;
+/** Upper bound of the first reconnect's full-jitter delay (ptone/scion#5236). */
+export const SSE_FIRST_RECONNECT_JITTER_MS = 2_000;
 
 export class SSEClient extends EventTarget {
   private eventSource: EventSource | null = null;
@@ -68,6 +110,83 @@ export class SSEClient extends EventTarget {
    */
   private connectionOpen = false;
   private onVisibilityChange: (() => void) | null = null;
+  private onPageShow: ((event: PageTransitionEvent) => void) | null = null;
+  private onOnline: (() => void) | null = null;
+  private onOffline: (() => void) | null = null;
+  private onPageHide: (() => void) | null = null;
+
+  /**
+   * How long a connection may stay silent before it is presumed dead. The
+   * hub writes a heartbeat every 30s, so this allows two missed heartbeats
+   * plus slack.
+   */
+  private staleAfterMs = 75_000;
+  /**
+   * The shortest absence after which a resume treats the stream as suspect.
+   * Quick app switches (glancing at a notification, copying a code) last a
+   * few seconds and the browser keeps the socket; past this, a mobile OS
+   * may already have suspended the page and silently lost the stream.
+   * Gating on the trip, not on when traffic last arrived, keeps a brief
+   * switch from ever reconnecting a healthy idle feed.
+   */
+  private minSuspendMs = 15_000;
+  /**
+   * How often a visible tab checks the current connection for staleness.
+   * The check only applies to a connection that has delivered a named
+   * 'heartbeat' event, so it is armed by the first one and does nothing
+   * (holds no timer) until the hub sends its heartbeat as an event rather
+   * than a comment.
+   */
+  private staleCheckIntervalMs = 15_000;
+  private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * One deferred check, armed on a resume that came too soon to judge: the
+   * connection was suspended but had not yet been silent for staleAfterMs.
+   * It fires when that much silence would have passed, and is cancelled by
+   * any new activity, by hiding again, and by disconnect().
+   */
+  private resumeCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When anything last arrived from the server (open, event or heartbeat). */
+  private lastActivityAt = 0;
+  /**
+   * Whether the current connection has delivered a 'heartbeat' event. The
+   * hub's heartbeat is an SSE comment, which EventSource does not expose, so
+   * silence on its own may just mean an idle stream. Only a server known to
+   * send heartbeat events lets silence alone, while visible, condemn it.
+   */
+  private heartbeatSeen = false;
+  /**
+   * When the tab was last hidden or the device went offline, cleared once a
+   * resume has been checked. An absence of minSuspendMs or more marks the
+   * stream as suspect on resume, to be replaced if silent past staleAfterMs
+   * (see onResume).
+   */
+  private suspendedAt: number | null = null;
+
+  private readonly random: () => number;
+  private readonly hiddenCloseEnabled: () => boolean;
+  private readonly hiddenCloseMs: number;
+  private readonly firstReconnectJitterMs: number;
+  /** Armed while the tab is hidden; closes the stream when it fires. */
+  private hiddenCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Whether the stream was closed because the tab stayed hidden. While set,
+   * no retry is scheduled; the next openConnection (on return to the tab, or
+   * connect()) clears it.
+   */
+  private hiddenClosed = false;
+
+  constructor(
+    private readonly endpoint = '/events',
+    options: SSEClientOptions = {}
+  ) {
+    super();
+    this.random = options.random ?? ((): number => Math.random());
+    this.hiddenCloseEnabled =
+      options.hiddenCloseEnabled ?? ((): boolean => isFeatureEnabled(SSE_HIDDEN_TAB_CLOSE_FLAG));
+    this.hiddenCloseMs = options.hiddenCloseMs ?? SSE_HIDDEN_CLOSE_MS;
+    this.firstReconnectJitterMs = options.firstReconnectJitterMs ?? SSE_FIRST_RECONNECT_JITTER_MS;
+  }
 
   /**
    * Build the SSE URL with subscription subjects as query parameters.
@@ -75,7 +194,7 @@ export class SSEClient extends EventTarget {
    */
   private buildUrl(subjects: string[]): string {
     const params = subjects.map((s) => `sub=${encodeURIComponent(s)}`).join('&');
-    return `/events?${params}`;
+    return `${this.endpoint}?${params}`;
   }
 
   /**
@@ -104,6 +223,14 @@ export class SSEClient extends EventTarget {
     }
 
     this.watchVisibility();
+    // Any reopen (shown again, a bfcache restore, connect()) ends a
+    // hidden-tab close.
+    this.hiddenClosed = false;
+    // A connection opened while the tab is already hidden (a scope change in
+    // a background tab) is subject to the same hidden-tab close.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      this.armHiddenClose();
+    }
 
     // Any connection still held here would be orphaned by the assignment
     // below: nothing else tracks it, so disconnect() could not close it and
@@ -114,6 +241,8 @@ export class SSEClient extends EventTarget {
     const url = this.buildUrl(this.subjects);
     const es = new EventSource(url);
     this.eventSource = es;
+    this.heartbeatSeen = false;
+    this.stopStaleCheck();
 
     // Each handler bails unless es is still the client's current connection,
     // so a superseded connection cannot mutate state it no longer owns.
@@ -121,6 +250,7 @@ export class SSEClient extends EventTarget {
       if (es !== this.eventSource) return;
       this.reconnectAttempts = 0;
       this.connectionOpen = true;
+      this.markActivity();
       console.info('[SSE] Connected');
       // The browser's own open signal. The server-sent "connected" event this
       // client also listens for is never emitted by the hub, so consumers that
@@ -152,17 +282,21 @@ export class SSEClient extends EventTarget {
       // spec a rejected handshake lands CLOSED and a mid-stream drop lands
       // CONNECTING, which is the opposite way round.
       if (!wasOpen) {
+        this.dispatchEvent(new CustomEvent('handshake-failed'));
         void this.checkAuthAndReconnect();
       } else {
-        this.scheduleReconnect();
+        // A live connection dropped: the hub instance may have gone away,
+        // taking every client with it, so spread the first retry.
+        this.scheduleReconnect(true);
       }
     };
 
     // Handle state update events from the server
     this.eventSource.addEventListener('update', (event) => {
       if (es !== this.eventSource) return;
+      this.markActivity();
       try {
-        const data = JSON.parse((event as MessageEvent).data) as SSEUpdateEvent;
+        const data = JSON.parse(event.data as string) as SSEUpdateEvent;
         this.dispatchEvent(new CustomEvent('update', { detail: data }));
       } catch (err) {
         console.error('[SSE] Failed to parse update event:', err);
@@ -170,21 +304,56 @@ export class SSEClient extends EventTarget {
     });
 
     // Handle server-initiated reconnect (e.g. before a clean shutdown).
-    // connectionOpen is left alone: the feed was live a moment ago, so if the
-    // replacement connection never lands, that still counts as a drop.
-    this.eventSource.addEventListener('reconnect', () => {
+    // Report the gap immediately so snapshot consumers invalidate in-flight
+    // work. Every client of the instance gets this at about the same time, so
+    // the reopen waits a full-jitter delay rather than happening at once.
+    const onServerClose = (): void => {
       if (es !== this.eventSource) return;
+      if (this.connectionOpen) {
+        this.connectionOpen = false;
+        this.dispatchEvent(new CustomEvent('disconnected'));
+      }
       this.reconnectAttempts = 0;
       es.close();
       this.eventSource = null;
-      this.openConnection();
+      this.scheduleReconnect(true);
+    };
+    this.eventSource.addEventListener('reconnect', onServerClose);
+
+    // The hub closes a stream that reached its maximum age with
+    // `event: superseded` and reason max_age (phase 1 of ptone/scion#5219).
+    // Every stream of an instance can reach it in the same window, so it
+    // takes the same jittered reopen as `reconnect`. Any other reason is not
+    // handled here: when the hub then ends the stream, onerror sees a live
+    // connection drop and reconnects through scheduleReconnect(true), within
+    // 0-2 s. Phase 1 must handle the same-tab supersede case itself (a
+    // reconnect with the same tab id would supersede the newer stream).
+    this.eventSource.addEventListener('superseded', (event) => {
+      if (es !== this.eventSource) return;
+      let reason: unknown;
+      try {
+        reason = (JSON.parse(event.data as string) as { reason?: unknown })?.reason;
+      } catch {
+        return;
+      }
+      if (reason === 'max_age') onServerClose();
+    });
+
+    // A heartbeat sent as a named event (not a comment) is visible here and
+    // proves the stream is alive while idle.
+    this.eventSource.addEventListener('heartbeat', () => {
+      if (es !== this.eventSource) return;
+      this.heartbeatSeen = true;
+      this.startStaleCheck();
+      this.markActivity();
     });
 
     // Handle initial connection acknowledgement
     this.eventSource.addEventListener('connected', (event) => {
       if (es !== this.eventSource) return;
+      this.markActivity();
       try {
-        const data = JSON.parse((event as MessageEvent).data) as {
+        const data = JSON.parse(event.data as string) as {
           connectionId: string;
           subjects: string[];
         };
@@ -204,12 +373,32 @@ export class SSEClient extends EventTarget {
   private async checkAuthAndReconnect(): Promise<void> {
     const generation = this.generation;
     try {
-      const resp = await fetch('/auth/me', { credentials: 'include' });
+      const authUrl = this.endpoint.startsWith('/')
+        ? '/auth/me'
+        : new URL('auth/me', this.endpoint).href;
+      const resp = await apiFetch(authUrl, { authErrors: 'caller' });
+      if (generation !== this.generation) return;
       if (resp.status === 401 || resp.redirected) {
         console.warn('[SSE] Session expired, redirecting to login');
+        // Dispose terminal sessions before navigating to login so no hidden
+        // active terminals survive the transition.
+        dispatchTeardown('auth-expired');
         const returnTo = encodeURIComponent(window.location.pathname);
-        window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
+        loadPage(`/login?error=session_expired&returnTo=${returnTo}`);
         return;
+      }
+      // Review R1-6: this reconnect check already fetches /auth/me live, so
+      // it is also the place a preference changed in another tab or on
+      // another device reaches a long-lived tab — refresh the effective-zone
+      // store from the same response instead of leaving it stale until some
+      // unrelated render.
+      if (resp.ok) {
+        try {
+          const data = (await resp.json()) as AuthMeResponse;
+          setPreferredTimeZone(data.preferences?.timezone);
+        } catch {
+          // Malformed/non-JSON body — not this check's concern.
+        }
       }
     } catch {
       // Network error — fall through to normal reconnect.
@@ -224,21 +413,22 @@ export class SSEClient extends EventTarget {
 
   /**
    * Queue the next connection attempt with exponential backoff.
+   *
+   * fullJitter marks the first attempt after a server-initiated close or a
+   * drop of a live connection: it waits random(0, firstReconnectJitterMs)
+   * instead (ptone/scion#5236). Later attempts keep the proportional jitter.
    */
-  private scheduleReconnect(): void {
-    // A retry already queued, or a deliberate disconnect, cancels this one.
-    if (this.reconnectTimer !== null || this.subjects.length === 0) {
+  private scheduleReconnect(fullJitter = false): void {
+    // A retry already queued, a deliberate disconnect, or a stream closed
+    // for a hidden tab cancels this one.
+    if (this.reconnectTimer !== null || this.subjects.length === 0 || this.hiddenClosed) {
       return;
     }
 
-    const cap =
-      this.reconnectAttempts < this.fastReconnectAttempts
-        ? this.fastReconnectCap
-        : this.slowReconnectCap;
-    const base = Math.min(cap, this.baseReconnectDelay * 2 ** this.reconnectAttempts);
-    // Proportional jitter (up to 10 percent either way), so open tabs spread
-    // out at every cap rather than clustering within a fixed 500ms window.
-    const delay = base + (Math.random() * 2 - 1) * base * 0.1;
+    const delay =
+      fullJitter && this.reconnectAttempts === 0
+        ? this.random() * this.firstReconnectJitterMs
+        : this.backoffDelay();
     this.reconnectAttempts++;
 
     console.info(
@@ -252,6 +442,20 @@ export class SSEClient extends EventTarget {
       this.reconnectTimer = null;
       this.openConnection();
     }, delay);
+  }
+
+  /**
+   * The exponential backoff for the current attempt, with proportional
+   * jitter (up to 10 percent either way), so open tabs spread out at every
+   * cap rather than clustering within a fixed 500ms window.
+   */
+  private backoffDelay(): number {
+    const cap =
+      this.reconnectAttempts < this.fastReconnectAttempts
+        ? this.fastReconnectCap
+        : this.slowReconnectCap;
+    const base = Math.min(cap, this.baseReconnectDelay * 2 ** this.reconnectAttempts);
+    return base + (this.random() * 2 - 1) * base * 0.1;
   }
 
   /**
@@ -279,31 +483,221 @@ export class SSEClient extends EventTarget {
     this.openConnection();
   }
 
+  private markActivity(): void {
+    this.lastActivityAt = Date.now();
+    this.clearResumeCheck();
+  }
+
+  private clearResumeCheck(): void {
+    if (this.resumeCheckTimer !== null) {
+      clearTimeout(this.resumeCheckTimer);
+      this.resumeCheckTimer = null;
+    }
+  }
+
+  /**
+   * Re-check a resumed connection once it has been silent for staleAfterMs.
+   * The suspension already makes it suspect, so silence alone then condemns
+   * it; any traffic before then clears this check (markActivity).
+   */
+  private scheduleResumeCheck(): void {
+    this.clearResumeCheck();
+    const delay = Math.max(0, this.lastActivityAt + this.staleAfterMs - Date.now()) + 1;
+    this.resumeCheckTimer = setTimeout(() => {
+      this.resumeCheckTimer = null;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (this.isSilent()) this.reconnectStale();
+    }, delay);
+  }
+
+  /** Whether nothing has arrived for longer than staleAfterMs. */
+  private isSilent(): boolean {
+    return Date.now() - this.lastActivityAt > this.staleAfterMs;
+  }
+
+  /**
+   * Whether silence alone condemns the open connection: only once it is
+   * known to send heartbeat events, so an idle stream in a tab that stayed
+   * in view is left alone.
+   */
+  private isStale(): boolean {
+    return this.heartbeatSeen && this.isSilent();
+  }
+
+  /**
+   * Replace a connection the browser still reports as open but that has
+   * gone silent. Reported as a drop so listeners resync once it reopens.
+   * The replacement starts CONNECTING, which every trigger here skips, so
+   * at most one reconnect is in flight; a failed handshake falls back to
+   * the normal auth probe and backoff.
+   */
+  private reconnectStale(): void {
+    if (!this.connected || this.reconnectTimer !== null) return;
+    console.info('[SSE] Connection silent, reconnecting');
+    if (this.connectionOpen) {
+      this.connectionOpen = false;
+      this.dispatchEvent(new CustomEvent('disconnected'));
+    }
+    this.clearResumeCheck();
+    this.closeEventSource();
+    this.openConnection();
+  }
+
+  /**
+   * Called when the tab is shown, the page is restored, or the network
+   * returns. A dead connection reconnects immediately, not after whatever
+   * backoff was pending. An open one is replaced if it has gone stale, or,
+   * after an absence long enough that the page may have been suspended, if
+   * it has been silent for staleAfterMs - now, or once that much silence
+   * has passed.
+   */
+  private onResume(): void {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    if (this.subjects.length === 0) return;
+    const tripMs = this.suspendedAt === null ? 0 : Date.now() - this.suspendedAt;
+    this.suspendedAt = null;
+    if (this.connected) {
+      if (this.isStale()) {
+        this.reconnectStale();
+      } else if (tripMs >= this.minSuspendMs) {
+        if (this.isSilent()) {
+          this.reconnectStale();
+        } else {
+          // Too soon to tell: traffic arrived shortly before or during the
+          // absence. Look again once the silence would count as stale.
+          this.scheduleResumeCheck();
+        }
+      }
+    } else {
+      // A stream the browser closed while the page was frozen (a bfcache
+      // restore) never fired an error, so the drop was never reported.
+      // Report it, as onerror would have, so listeners resync on reopen.
+      if (this.connectionOpen) {
+        this.connectionOpen = false;
+        this.dispatchEvent(new CustomEvent('disconnected'));
+      }
+      // Restart the backoff from the shortest delay.
+      this.reconnectAttempts = 0;
+      this.reconnectNow();
+    }
+  }
+
+  private markSuspended(): void {
+    this.clearResumeCheck();
+    if (this.suspendedAt === null) this.suspendedAt = Date.now();
+  }
+
+  /**
+   * Start the hidden-tab countdown (ptone/scion#5235) when the experiment is
+   * on. Hiding again while it runs does not restart it.
+   */
+  private armHiddenClose(): void {
+    if (this.hiddenCloseTimer !== null || this.hiddenClosed || this.subjects.length === 0) return;
+    if (!this.hiddenCloseEnabled()) return;
+    this.hiddenCloseTimer = setTimeout(() => {
+      this.hiddenCloseTimer = null;
+      this.closeForHiddenTab();
+    }, this.hiddenCloseMs);
+  }
+
+  private clearHiddenClose(): void {
+    if (this.hiddenCloseTimer !== null) {
+      clearTimeout(this.hiddenCloseTimer);
+      this.hiddenCloseTimer = null;
+    }
+  }
+
+  /**
+   * Close the stream of a tab that has stayed hidden, and stop every retry
+   * until it is shown again. Reported as a drop, so the reopen on return is
+   * a recovery and listeners resync (agents-resync, terminal metadata
+   * refetch). The resume listeners stay registered to notice the return.
+   */
+  private closeForHiddenTab(): void {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') return;
+    if (this.subjects.length === 0) return;
+    console.info('[SSE] Tab hidden, closing the stream until it is shown');
+    // Supersede an in-flight auth probe, which would otherwise reconnect.
+    this.generation++;
+    this.hiddenClosed = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.stopStaleCheck();
+    this.clearResumeCheck();
+    this.closeEventSource();
+    if (this.connectionOpen) {
+      this.connectionOpen = false;
+      this.dispatchEvent(new CustomEvent('disconnected'));
+    }
+  }
+
+  /**
+   * Check a visible tab's connection for staleness every so often. Armed by
+   * the connection's first heartbeat event; a new connection disarms it.
+   */
+  private startStaleCheck(): void {
+    if (this.staleCheckTimer !== null) return;
+    this.staleCheckTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (this.isStale()) this.reconnectStale();
+    }, this.staleCheckIntervalMs);
+  }
+
+  private stopStaleCheck(): void {
+    if (this.staleCheckTimer !== null) {
+      clearInterval(this.staleCheckTimer);
+      this.staleCheckTimer = null;
+    }
+  }
+
   /**
    * Reconnect as soon as the tab is shown, not after whatever backoff was
    * pending when it was hidden. Mobile browsers suspend a backgrounded tab and
-   * close its connections, so the feed is usually dead on return.
+   * close its connections, so the feed is usually dead on return - or, worse,
+   * still reports OPEN while nothing arrives, which onResume catches.
    */
   private watchVisibility(): void {
     if (this.onVisibilityChange || typeof document === 'undefined') {
       return;
     }
     this.onVisibilityChange = (): void => {
-      if (document.visibilityState !== 'visible') return;
-      if (this.connected || this.subjects.length === 0) return;
-      // Restart the backoff from the shortest delay.
-      this.reconnectAttempts = 0;
-      this.reconnectNow();
+      if (document.visibilityState === 'visible') {
+        this.clearHiddenClose();
+        // A stream closed for the hidden tab is not connected, so onResume
+        // reopens it at once with a fresh backoff.
+        this.onResume();
+      } else {
+        this.markSuspended();
+        this.armHiddenClose();
+      }
     };
+    // Every load fires pageshow; only a restore from the back/forward cache
+    // (persisted) is a return to a page that was frozen.
+    this.onPageShow = (event: PageTransitionEvent): void => {
+      if (event.persisted) this.onResume();
+    };
+    this.onOnline = (): void => this.onResume();
+    this.onOffline = (): void => this.markSuspended();
+    this.onPageHide = (): void => this.markSuspended();
     document.addEventListener('visibilitychange', this.onVisibilityChange);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pageshow', this.onPageShow);
+      window.addEventListener('pagehide', this.onPageHide);
+      window.addEventListener('online', this.onOnline);
+      window.addEventListener('offline', this.onOffline);
+    }
   }
 
   /**
    * Close the SSE connection and cancel any pending reconnection.
    *
-   * Also drops the visibility listener: it holds a reference to this client,
-   * and left behind it would reopen a connection the caller just tore down.
-   * connect() re-registers it, so a disconnected client stays reusable.
+   * Also drops the resume listeners (visibilitychange, pageshow, pagehide,
+   * online, offline) and the staleness timers: they hold a reference to this
+   * client, and left behind they would reopen a connection the caller just
+   * tore down. connect() re-registers them, so a disconnected client stays
+   * reusable.
    */
   disconnect(): void {
     // Supersede any in-flight auth probe, which would otherwise schedule a
@@ -319,6 +713,23 @@ export class SSEClient extends EventTarget {
       document.removeEventListener('visibilitychange', this.onVisibilityChange);
       this.onVisibilityChange = null;
     }
+    if (typeof window !== 'undefined') {
+      if (this.onPageShow) window.removeEventListener('pageshow', this.onPageShow);
+      if (this.onPageHide) window.removeEventListener('pagehide', this.onPageHide);
+      if (this.onOnline) window.removeEventListener('online', this.onOnline);
+      if (this.onOffline) window.removeEventListener('offline', this.onOffline);
+    }
+    this.onPageShow = null;
+    this.onPageHide = null;
+    this.onOnline = null;
+    this.onOffline = null;
+
+    this.stopStaleCheck();
+    this.clearResumeCheck();
+    this.clearHiddenClose();
+    this.hiddenClosed = false;
+    this.heartbeatSeen = false;
+    this.suspendedAt = null;
 
     this.closeEventSource();
 

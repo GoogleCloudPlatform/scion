@@ -1,0 +1,40 @@
+{
+  "profile_map": {
+    "full": "k8s-agents"
+  },
+  "findings": [
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "active_profile",
+      "profiles": [
+        "full"
+      ],
+      "message_contains": [
+        "active_profile selects profile full"
+      ]
+    },
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "profiles.full.default_template",
+      "profiles": [
+        "full"
+      ],
+      "message_contains": [
+        "profiles.full.default_template has no effect today"
+      ]
+    },
+    {
+      "code": "legacy_field_removed",
+      "severity": "notice",
+      "path": "profiles.full.env",
+      "profiles": [
+        "full"
+      ],
+      "message_contains": [
+        "profiles.full.env was removed"
+      ]
+    }
+  ]
+}

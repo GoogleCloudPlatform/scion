@@ -49,35 +49,10 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-// rs4Project creates a project, user, and role binding for RS4 tests.
-func rs4Project(t *testing.T, s store.Store, projectID, ownerID string) {
-	t.Helper()
-	createRS1Project(t, s, projectID, ownerID)
-}
-
 // rs4UserWithRole creates a user and assigns a project role with specific permissions.
 func rs4UserWithRole(t *testing.T, s store.Store, userID, projectID, roleName string) {
 	t.Helper()
 	createRS1UserWithRole(t, s, userID, userID+"@test.com", projectID, roleName)
-}
-
-// rs4AddProjectRole adds a project role binding for an already-existing user (e.g. DevUserID).
-func rs4AddProjectRole(t *testing.T, s store.Store, userID, projectID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create project role binding: %v", err)
-	}
 }
 
 // rs4MintViaAPI mints a token via the HTTP API (session credential).
@@ -92,16 +67,6 @@ func rs4MintViaAPI(t *testing.T, srv *Server, projectID string, scopes []string)
 	var resp map[string]interface{}
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	return rec.Code, resp
-}
-
-// rs4ExtractError extracts the error code from a JSON error response.
-func rs4ExtractError(resp map[string]interface{}) string {
-	if errObj, ok := resp["error"].(map[string]interface{}); ok {
-		if code, ok := errObj["code"].(string); ok {
-			return code
-		}
-	}
-	return ""
 }
 
 // doRequestWithCredential makes a direct handler call with a specific
@@ -187,6 +152,42 @@ func TestRS4_IssuerAuthority(t *testing.T) {
 		_, _, err := srv.uatService.CreateToken(ctx, memberID, "bad", projectID,
 			[]string{"agent:delete"}, nil)
 		assert.ErrorIs(t, err, ErrUATScopeViolation, "T-I2: scope not held must be denied")
+	})
+
+	t.Run("T-I11_dangling_role_definition_fails_closed", func(t *testing.T) {
+		// A role binding whose role definition is missing/unloadable must
+		// fail the mint closed (ErrUATProjectForbidden), not silently skip
+		// the dangling binding and resolve authority from whatever bindings
+		// remain. The store's own integrity checks refuse to delete a role
+		// definition that still has an active binding (by design), so this
+		// injects the failure at the exact point unionScopedRoleBindingPermissions
+		// reads it (store.GetRoleDefinition), rather than trying to force an
+		// inconsistent state the store is specifically built to prevent.
+		srv, s := testServer(t)
+		ctx := context.Background()
+		projectID := tid("rs4-i11-p")
+		ownerID := tid("rs4-i11-o")
+		userID := tid("rs4-i11-u")
+		rs4Project(t, s, projectID, ownerID)
+		require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "rs4i11@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+		rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			Name: "rs4-i11-role", ScopeType: store.RoleScopeProject, Permissions: []string{"agent.read"},
+		})
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+			ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+
+		fs := &r2FailingStore{failGetRoleDefinition: store.ErrNotFound}
+		restore := installFailStore(srv, fs)
+		defer restore()
+
+		mintCtx := rs4MintContext(userID)
+		_, _, err = srv.uatService.CreateToken(mintCtx, userID, "dangle", projectID, []string{"agent:read"}, nil)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden, "T-I11: a dangling role-definition binding must deny the mint, not skip silently")
 	})
 
 	t.Run("T-I3_mixed_held_and_unheld", func(t *testing.T) {
@@ -962,7 +963,13 @@ func TestRS4_AST_MutationCallSites(t *testing.T) {
 		"DeleteUserAccessToken",
 	}
 
-	entries, err := os.ReadDir(hubDir)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards user access token create/revoke/delete calls.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards user access token create/revoke/delete calls.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards user access token create/revoke/delete calls.
+	entries, err := readGuardScanDirs(hubDir)
 	require.NoError(t, err)
 
 	fset := token.NewFileSet()
@@ -1063,7 +1070,13 @@ func TestRS4_Regression_ValidateTokenStillWorks(t *testing.T) {
 	ownerID := tid("rs4-rv-o")
 	rs4Project(t, s, projectID, ownerID)
 
-	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read"})
+	// listProjectAgents now requires agent.list on the project (fix-1908 F1 --
+	// this route used to have no authorization check for a user identity at
+	// all, so any scope, including a token that only carried agent:read,
+	// used to reach it). The UAT's caveat can only narrow the owner's
+	// underlying authority, never grant beyond what it's scoped to, so the
+	// token needs agent:list explicitly to exercise this endpoint now.
+	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read", "agent:list"})
 
 	// The minted token should be usable for authorized operations.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet,
@@ -1172,45 +1185,6 @@ func TestRS4_A2_SystemPermDoesNotInflateCeiling(t *testing.T) {
 // ---------------------------------------------------------------------------
 // R2 Required: Failure injection (T-A4, T-A5, T-A6, commit failure)
 // ---------------------------------------------------------------------------
-
-// rs4FailingStore extends the RS1 failingStore pattern for UAT operations.
-type rs4FailingStore struct {
-	store.Store
-	createMutationAuditErr   error
-	createUserAccessTokenErr error
-	commitErr                error
-}
-
-func (f *rs4FailingStore) CreateMutationAudit(ctx context.Context, record *store.MutationAuditRecord) error {
-	if f.createMutationAuditErr != nil {
-		return f.createMutationAuditErr
-	}
-	return f.Store.CreateMutationAudit(ctx, record)
-}
-
-func (f *rs4FailingStore) CreateUserAccessToken(ctx context.Context, token *store.UserAccessToken) error {
-	if f.createUserAccessTokenErr != nil {
-		return f.createUserAccessTokenErr
-	}
-	return f.Store.CreateUserAccessToken(ctx, token)
-}
-
-func (f *rs4FailingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return f.Store.WithTx(ctx, func(tx store.Store) error {
-		wrappedTx := &rs4FailingStore{
-			Store:                    tx,
-			createMutationAuditErr:   f.createMutationAuditErr,
-			createUserAccessTokenErr: f.createUserAccessTokenErr,
-		}
-		if err := fn(wrappedTx); err != nil {
-			return err
-		}
-		if f.commitErr != nil {
-			return f.commitErr
-		}
-		return nil
-	})
-}
 
 func TestRS4_FailureInjection_AuditFailMintRollback(t *testing.T) {
 	// T-A4: When audit write fails during mint, no token must be created.
@@ -1533,10 +1507,11 @@ func TestRS4_CrossProjectMembershipDenied(t *testing.T) {
 // permissions could theoretically be revoked. This is acceptable because:
 //
 // 1. The TOCTOU window is microseconds on a single-node SQLite backend.
-// 2. Use-time enforcement (enforceUATConstraints → uatScopeRestriction) narrows
-//    every token request to the intersection of token scopes and the user's
-//    current effective permissions. A token minted during the TOCTOU window is
-//    immediately ineffective if the user's authority was truly revoked.
+// 2. Use-time enforcement (enforceUATConstraints and the ceilingRestriction
+//    built from the token's permission ceiling) narrows every token request
+//    to the intersection of token scopes and the user's current effective
+//    permissions. A token minted during the TOCTOU window is immediately
+//    ineffective if the user's authority was truly revoked.
 // 3. The RS1 pattern (authorization inside tx with LockProjectForMembership) is
 //    designed for mutual-exclusion of membership mutations, which can conflict
 //    structurally. Token minting does not mutate authority state — it only reads

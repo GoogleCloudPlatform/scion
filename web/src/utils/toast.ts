@@ -30,6 +30,11 @@ export interface ToastOptions {
   duration?: number;
   /** Show a close button. Default true. */
   closable?: boolean;
+  /**
+   * An action button shown after the message (for example Retry). Clicking
+   * it hides the toast, then runs `run`.
+   */
+  action?: { label: string; run: () => void };
 }
 
 /** Maps variant to a sensible default icon (Bootstrap Icons via Shoelace). */
@@ -83,16 +88,25 @@ export function showToast(
   span.textContent = message;
   alert.appendChild(span);
 
-  // Remove the alert element from the DOM after it hides to prevent
-  // accumulation — same pattern used in confirm-dialog.ts.
-  alert.addEventListener(
-    'sl-after-hide',
-    () => {
-      alert.remove();
-    },
-    { once: true }
-  );
+  if (options?.action) {
+    const { label, run } = options.action;
+    const button = document.createElement('sl-button');
+    button.setAttribute('size', 'small');
+    button.setAttribute('variant', 'text');
+    button.className = 'toast-action';
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      void (alert as HTMLElement & { hide?(): Promise<void> }).hide?.();
+      run();
+    });
+    alert.appendChild(document.createTextNode(' '));
+    alert.appendChild(button);
+  }
 
+  // Shoelace's .toast() appends the alert to its own toast stack and
+  // registers an sl-after-hide listener that calls toastStack.removeChild().
+  // Do NOT register a competing sl-after-hide → alert.remove() here —
+  // that causes a double-removal NotFoundError (#1733).
   document.body.appendChild(alert);
   void (alert as HTMLElement & { toast(): Promise<void> }).toast();
 }

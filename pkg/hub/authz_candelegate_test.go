@@ -29,85 +29,6 @@ import (
 
 // --- Test helpers ---
 
-// setupCanDelegateTest creates a test AuthzService with role definitions seeded.
-func setupCanDelegateTest(t *testing.T) (*AuthzService, store.Store) {
-	t.Helper()
-	authz, s := authzTestSetup(t)
-	return authz, s
-}
-
-// createTestUserWithRole creates a user and assigns them a system-scoped role binding.
-// For super-admin bindings, CreatedBy is set to the system reconciler sentinel
-// because the D10 store-level guard rejects non-reconciler callers.
-func createTestUserWithRole(t *testing.T, s store.Store, userID, email, role, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: userID, Email: email, DisplayName: email, Role: role, Status: "active",
-	}))
-
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
-	require.NoError(t, err, "role definition %q not found", roleName)
-
-	createdBy := "test"
-	if roleName == store.SystemRoleSuperAdmin {
-		createdBy = store.SystemReconcileCreatedBy
-	}
-
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        createdBy,
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create role binding: %v", err)
-	}
-}
-
-// createTestUserWithProjectRole creates a user and assigns them a project-scoped role binding.
-func createTestUserWithProjectRole(t *testing.T, s store.Store, userID, email, projectID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-
-	// Create user if not exists
-	if _, err := s.GetUser(ctx, userID); err != nil {
-		require.NoError(t, s.CreateUser(ctx, &store.User{
-			ID: userID, Email: email, DisplayName: email, Role: "member", Status: "active",
-		}))
-	}
-
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-	require.NoError(t, err, "role definition %q not found", roleName)
-
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create project role binding: %v", err)
-	}
-}
-
-// createDelegateTestProject creates a project in the store.
-func createDelegateTestProject(t *testing.T, s store.Store, projectID, slug, createdBy string) {
-	t.Helper()
-	ctx := context.Background()
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:        projectID,
-		Name:      slug,
-		Slug:      slug,
-		CreatedBy: createdBy,
-	}))
-}
-
 // --- Part D.1: Direct role binding tests ---
 
 func TestCanDelegate_RoleBinding_SuperAdminCanDelegateAnything(t *testing.T) {
@@ -563,15 +484,14 @@ func TestCanDelegate_ScheduledDispatch_FireTimeRecheck(t *testing.T) {
 
 	// Phase 1: verify that authorizeScheduledAgentCreate passes while the
 	// user still has project-admin permissions.
-	evt := store.ScheduledEvent{
+	evt := withSessionRevision(store.ScheduledEvent{
 		ID:        tid("dispatch-recheck-evt"),
 		ProjectID: projectID,
 		EventType: "dispatch_agent",
 		CreatedBy: userID,
-	}
-	allowed, err := srv.authorizeScheduledAgentCreate(ctx, evt)
+	}, userID)
+	_, err = srv.authorizeScheduledAgentCreate(ctx, evt)
 	require.NoError(t, err, "should succeed while user has project-admin role")
-	assert.True(t, allowed, "user with project-admin role should be authorized")
 
 	// Phase 2: revoke the user's project-admin role binding — simulating
 	// permission revocation between schedule creation and fire time.
@@ -678,7 +598,7 @@ func TestReconcileSuperAdminBindings_CreatesBindingForAdminUser(t *testing.T) {
 	}))
 
 	// Run reconciliation with an admin list containing this user (forward mode).
-	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"reconcile@test.com"})
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"reconcile@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify binding was created
@@ -708,9 +628,9 @@ func TestReconcileSuperAdminBindings_Idempotent(t *testing.T) {
 	}))
 
 	// Run twice with explicit admin emails list - should not error
-	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"})
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"}, "")
 	require.NoError(t, err)
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"idem@test.com"}, "")
 	require.NoError(t, err)
 }
 
@@ -969,7 +889,7 @@ func TestD11_RemovedFromAdminEmailsLosesRole(t *testing.T) {
 	}))
 
 	// Reconcile with adminEmails that do NOT include this user.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other-admin@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other-admin@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify role was demoted.
@@ -1008,7 +928,7 @@ func TestD11_RemovedFromAdminEmailsLosesBinding(t *testing.T) {
 	}))
 
 	// Reconcile with a list that does NOT include this user.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"other@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify binding was deleted.
@@ -1053,7 +973,7 @@ func TestD11_FunctionallyAdminUserKeepsOrdinaryGrants(t *testing.T) {
 	}))
 
 	// Run reconciliation with an admin list that does NOT include this user.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify the ordinary hub-member binding is still there.
@@ -1097,7 +1017,7 @@ func TestD11_EmptyAdminEmailsNoChange(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reconcile with an EMPTY admin emails list.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{}, "")
 	require.NoError(t, err)
 
 	// Verify user was NOT demoted (empty-list safety guard).
@@ -1140,7 +1060,7 @@ func TestD11Fix2_ForwardPassGatedOnAdminList(t *testing.T) {
 	}))
 
 	// Reconcile with an admin list that does NOT include this user.
-	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"})
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"real-admin@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify: no super-admin binding was created for the removed admin.
@@ -1185,7 +1105,7 @@ func TestD11Fix2_NilAndEmptyCollapse(t *testing.T) {
 	require.NoError(t, err)
 
 	// nil adminEmails — should not demote or delete binding.
-	_, err = ReconcileSuperAdminBindings(ctx, s, nil)
+	_, err = ReconcileSuperAdminBindings(ctx, s, nil, "")
 	require.NoError(t, err)
 
 	u, err := s.GetUser(ctx, userID)
@@ -1203,7 +1123,7 @@ func TestD11Fix2_NilAndEmptyCollapse(t *testing.T) {
 	assert.True(t, found, "nil AdminEmails must not delete super-admin binding")
 
 	// empty []string{} — same behavior as nil.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{}, "")
 	require.NoError(t, err)
 
 	u, err = s.GetUser(ctx, userID)
@@ -1214,22 +1134,22 @@ func TestD11Fix2_NilAndEmptyCollapse(t *testing.T) {
 // D11 AC5: determineUserRole demotes admin when email removed from adminEmails.
 func TestD11_DetermineUserRole_DemotesAdmin(t *testing.T) {
 	// User was admin, adminEmails non-empty but does not include user → demote.
-	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true, false)
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true, false, "member")
 	assert.Equal(t, "member", got, "admin not in adminEmails should be demoted to member")
 }
 
 // D11 AC5b: determineUserRole does NOT demote admin when adminEmails is empty.
 func TestD11_DetermineUserRole_EmptyListNoChange(t *testing.T) {
-	got := determineUserRole("admin@example.com", nil, "admin", true, false)
+	got := determineUserRole("admin@example.com", nil, "admin", true, false, "member")
 	assert.Equal(t, "admin", got, "admin should not be demoted when adminEmails is nil")
 
-	got = determineUserRole("admin@example.com", []string{}, "admin", true, false)
+	got = determineUserRole("admin@example.com", []string{}, "admin", true, false, "member")
 	assert.Equal(t, "admin", got, "admin should not be demoted when adminEmails is empty")
 }
 
 // D11 AC5c: determineUserRole preserves non-admin roles.
 func TestD11_DetermineUserRole_PreservesViewer(t *testing.T) {
-	got := determineUserRole("viewer@example.com", []string{"admin@example.com"}, "viewer", true, false)
+	got := determineUserRole("viewer@example.com", []string{"admin@example.com"}, "viewer", true, false, "member")
 	assert.Equal(t, "viewer", got, "viewer role must be preserved")
 }
 
@@ -1243,7 +1163,7 @@ func TestD11Fix3_WhitespaceAdminEmailsMatch(t *testing.T) {
 	// After SanitizeEmailList, "  admin@example.com  " becomes "admin@example.com".
 	// determineUserRole should match.
 	sanitized := config.SanitizeEmailList([]string{"  admin@example.com  "})
-	got := determineUserRole("admin@example.com", sanitized, "member", true, false)
+	got := determineUserRole("admin@example.com", sanitized, "member", true, false, "member")
 	assert.Equal(t, "admin", got, "sanitized whitespace-padded admin email should match")
 }
 
@@ -1287,7 +1207,7 @@ func TestD11Fix3_EffectGuardRefusesZeroAdmins(t *testing.T) {
 	}
 
 	// Reconcile with AdminEmails that match NO existing users (typos/non-existent).
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"nobody@test.com", "also-nobody@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"nobody@test.com", "also-nobody@test.com"}, "")
 	require.NoError(t, err)
 
 	// Verify: both admins still have their role (effect guard fired).
@@ -1328,7 +1248,7 @@ func TestD11Fix3_AdminRotationAliceToBob(t *testing.T) {
 	require.NoError(t, err)
 
 	// Rotate: replace alice with bob in AdminEmails.
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"bob@test.com"})
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{"bob@test.com"}, "")
 	require.NoError(t, err)
 
 	// Alice should be demoted.
@@ -1340,4 +1260,59 @@ func TestD11Fix3_AdminRotationAliceToBob(t *testing.T) {
 	bob, err := s.GetUser(ctx, bobID)
 	require.NoError(t, err)
 	assert.Equal(t, "admin", bob.Role, "bob should be promoted after rotation")
+}
+
+// TestCanDelegate_PortAccessCustomRole pins that project owners and admins,
+// who carry agent.port_access through their built-in role, can define and
+// bind a custom project role that grants it (the delegation ceiling no longer
+// blocks it), while a plain member still cannot.
+func TestCanDelegate_PortAccessCustomRole(t *testing.T) {
+	authz, s := setupCanDelegateTest(t)
+	ctx := context.Background()
+
+	projectID := tid("project-port-cr")
+	createDelegateTestProject(t, s, projectID, "test-project-port-cr", tid("owner"))
+
+	customRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "port-viewer",
+		Description: "Opens forwarded ports on project agents",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"agent.read", "agent.port_access"},
+	})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		role    string
+		allowed bool
+	}{
+		{store.ProjectRoleOwner, true},
+		{store.ProjectRoleAdmin, true},
+		{store.ProjectRoleMember, false},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			userID := tid("port-cr-" + tc.role)
+			email := tc.role + "-port-cr@test.com"
+			createTestUserWithProjectRole(t, s, userID, email, projectID, tc.role)
+			actor := NewAuthenticatedUser(userID, email, tc.role, "member", "api")
+
+			define := authz.CanDelegate(ctx, actor, GrantDescriptor{
+				Type:                  GrantTypeCustomRole,
+				CustomRolePermissions: customRole.Permissions,
+				ScopeType:             store.RoleScopeProject,
+				ScopeID:               projectID,
+			})
+			assert.Equal(t, tc.allowed, define.Allowed, "define custom role: %s", define.Reason)
+
+			bind := authz.CanDelegate(ctx, actor, GrantDescriptor{
+				Type:             GrantTypeRoleBinding,
+				RoleDefinitionID: customRole.ID,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          projectID,
+			})
+			assert.Equal(t, tc.allowed, bind.Allowed, "bind custom role: %s", bind.Reason)
+			if !tc.allowed {
+				assert.Contains(t, define.Reason, "agent.port_access")
+			}
+		})
+	}
 }

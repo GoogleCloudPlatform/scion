@@ -494,10 +494,14 @@ export const listPageStyles = css`
 
   /* ── Page header ─────────────────────────────────────────────────── */
 
+  /* The actions wrap below the title, and among themselves, once the row
+     is too narrow for them (a phone), rather than running off the side. */
   .header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: 0.75rem;
     margin-bottom: 1.5rem;
   }
 
@@ -510,6 +514,7 @@ export const listPageStyles = css`
 
   .header-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.75rem;
   }
@@ -518,7 +523,9 @@ export const listPageStyles = css`
 
   .resource-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    /* A column never wider than the page, which is under 320px on a
+       320px phone once padded. */
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
     gap: 1.5rem;
   }
 
@@ -550,10 +557,28 @@ export const listPageStyles = css`
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    /* A flex item defaults to min-width:auto, so it refuses to shrink below
+       its content and a long unbroken name pushes the card header wider than
+       the card. min-width:0 lets it shrink, so the wrapping rules below can
+       break the name onto another line instead of spilling. */
+    min-width: 0;
   }
 
+  /* The icon must keep its size while the text absorbs the shrinking. */
   .resource-name sl-icon {
     color: var(--scion-primary, #3b82f6);
+    flex-shrink: 0;
+  }
+
+  /* Show the whole name, wrapping onto more lines when it does not fit. The
+     defect was the name pushing past the card edge, not the name being long,
+     and an ellipsis hides the one piece of information that identifies the
+     card. overflow-wrap:anywhere handles the hard case — a long name with no
+     spaces or hyphens, which would otherwise overflow with nowhere to break. */
+  .resource-name > a,
+  .resource-name > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   /* ── Stats (label + value pairs) ─────────────────────────────────── */

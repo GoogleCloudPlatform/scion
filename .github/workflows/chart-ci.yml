@@ -38,10 +38,14 @@ on:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   helm-lint:
     name: Helm Lint
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -49,7 +53,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: 'v3.17.3'
 
@@ -59,8 +63,15 @@ jobs:
       - name: Helm lint (cluster RBAC values)
         run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-cluster-rbac.yaml
 
+      - name: Helm lint (Terraform hub-gke values)
+        run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml
+
+      - name: Helm lint (NFS workspace values)
+        run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-nfs-workspace.yaml
+
   helm-template:
     name: Helm Template (${{ matrix.name }})
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -72,6 +83,17 @@ jobs:
           - name: cluster-rbac
             values-file: ci/values-cluster-rbac.yaml
             release-name: ci-cluster-rbac
+          # The values deploy/terraform/modules/hub-gke generates (its
+          # chart_values), with placeholders. That module's terraform test
+          # keeps this file equal to chart_values.
+          - name: terraform-hub-gke
+            values-file: ci/values-terraform-hub-gke.yaml
+            release-name: tfha-gke-h3
+          # workspaceStorage.nfs enabled: settings.yaml workspace_storage and
+          # the hub pod's inline nfs volume, schema-checked by kubeconform.
+          - name: nfs-workspace
+            values-file: ci/values-nfs-workspace.yaml
+            release-name: ci-nfs
           - name: long-release-name
             values-file: ci/values-minimal.yaml
             # 53 characters (Helm max): fullname = 53 + "-" + "scion-hub" = 63,
@@ -84,7 +106,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: 'v3.17.3'
 
@@ -126,7 +148,9 @@ jobs:
 
   schema-validation:
     name: Schema Validation
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -134,7 +158,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: 'v3.17.3'
 
@@ -160,6 +184,7 @@ jobs:
 
   yamllint:
     name: YAML Lint
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

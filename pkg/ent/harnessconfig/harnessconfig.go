@@ -39,6 +39,8 @@ const (
 	FieldStorageBucket = "storage_bucket"
 	// FieldStoragePath holds the string denoting the storage_path field in the database.
 	FieldStoragePath = "storage_path"
+	// FieldLayout holds the string denoting the layout field in the database.
+	FieldLayout = "layout"
 	// FieldFiles holds the string denoting the files field in the database.
 	FieldFiles = "files"
 	// FieldStatus holds the string denoting the status field in the database.
@@ -47,6 +49,8 @@ const (
 	FieldImageStatus = "image_status"
 	// FieldImageStatusCheckedAt holds the string denoting the image_status_checked_at field in the database.
 	FieldImageStatusCheckedAt = "image_status_checked_at"
+	// FieldBuiltImage holds the string denoting the built_image field in the database.
+	FieldBuiltImage = "built_image"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
 	FieldOwnerID = "owner_id"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
@@ -55,8 +59,6 @@ const (
 	FieldUpdatedBy = "updated_by"
 	// FieldSourceURL holds the string denoting the source_url field in the database.
 	FieldSourceURL = "source_url"
-	// FieldVisibility holds the string denoting the visibility field in the database.
-	FieldVisibility = "visibility"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -80,15 +82,16 @@ var Columns = []string{
 	FieldStorageURI,
 	FieldStorageBucket,
 	FieldStoragePath,
+	FieldLayout,
 	FieldFiles,
 	FieldStatus,
 	FieldImageStatus,
 	FieldImageStatusCheckedAt,
+	FieldBuiltImage,
 	FieldOwnerID,
 	FieldCreatedBy,
 	FieldUpdatedBy,
 	FieldSourceURL,
-	FieldVisibility,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -112,8 +115,10 @@ var (
 	HarnessValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
-	// DefaultVisibility holds the default value on creation for the "visibility" field.
-	DefaultVisibility string
+	// DefaultLayout holds the default value on creation for the "layout" field.
+	DefaultLayout string
+	// DefaultBuiltImage holds the default value on creation for the "built_image" field.
+	DefaultBuiltImage string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -247,6 +252,11 @@ func ByStoragePath(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStoragePath, opts...).ToFunc()
 }
 
+// ByLayout orders the results by the layout field.
+func ByLayout(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLayout, opts...).ToFunc()
+}
+
 // ByFiles orders the results by the files field.
 func ByFiles(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldFiles, opts...).ToFunc()
@@ -267,6 +277,11 @@ func ByImageStatusCheckedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldImageStatusCheckedAt, opts...).ToFunc()
 }
 
+// ByBuiltImage orders the results by the built_image field.
+func ByBuiltImage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBuiltImage, opts...).ToFunc()
+}
+
 // ByOwnerID orders the results by the owner_id field.
 func ByOwnerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOwnerID, opts...).ToFunc()
@@ -285,11 +300,6 @@ func ByUpdatedBy(opts ...sql.OrderTermOption) OrderOption {
 // BySourceURL orders the results by the source_url field.
 func BySourceURL(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSourceURL, opts...).ToFunc()
-}
-
-// ByVisibility orders the results by the visibility field.
-func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

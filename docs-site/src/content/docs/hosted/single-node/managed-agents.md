@@ -119,8 +119,9 @@ agents and return a clear error:
 - **`scion attach`** — not supported (there is no tmux session). Use `scion message` and
   `scion look` instead.
 - **`scion suspend`** — not supported; use `scion stop` instead.
-- **`scion message --raw`** — not supported (raw tmux key delivery has no meaning without a
-  container).
+- **`scion keys`** — not supported (literal tmux key delivery has no meaning without a
+  container). The Hub's `/keys` operation, which `scion keys` calls, answers a managed target with `422 keys_unsupported` — never a silent
+  fallback to ordinary messaging.
 - **Workspace mounting** — no local workspace or file sync in v1; managed agents target
   repo-less tasks.
 

@@ -254,6 +254,74 @@ func TestTimestampToTime(t *testing.T) {
 	}
 }
 
+func TestExtractProjectInfo_ProjectIDLabel(t *testing.T) {
+	entries := []GCPLogEntry{
+		{
+			LogName: "projects/test/logs/scion-messages",
+			Labels: map[string]string{
+				"project_id": "proj-1",
+			},
+			JSONPayload: map[string]any{
+				"message": "message dispatched",
+			},
+		},
+	}
+	id, name := extractProjectInfo(entries)
+	if id != "proj-1" {
+		t.Errorf("expected project id %q, got %q", "proj-1", id)
+	}
+	if name != "proj-1" {
+		t.Errorf("expected project name %q, got %q", "proj-1", name)
+	}
+}
+
+func TestExtractProjectInfo_LegacyGroveIDLabel(t *testing.T) {
+	// Older logs only carry the grove_id label; it must still be picked up
+	// as a fallback when project_id is absent.
+	entries := []GCPLogEntry{
+		{
+			LogName: "projects/test/logs/scion-messages",
+			Labels: map[string]string{
+				"grove_id": "grove-1",
+			},
+			JSONPayload: map[string]any{
+				"message": "message dispatched",
+			},
+		},
+	}
+	id, name := extractProjectInfo(entries)
+	if id != "grove-1" {
+		t.Errorf("expected project id %q, got %q", "grove-1", id)
+	}
+	if name != "grove-1" {
+		t.Errorf("expected project name %q, got %q", "grove-1", name)
+	}
+}
+
+func TestExtractProjectInfo_PrefersProjectIDOverGroveID(t *testing.T) {
+	// An entry carrying both labels is realistic during migration (a mixed
+	// fleet of old and new logging). project_id must win.
+	entries := []GCPLogEntry{
+		{
+			LogName: "projects/test/logs/scion-messages",
+			Labels: map[string]string{
+				"project_id": "proj-1",
+				"grove_id":   "grove-1",
+			},
+			JSONPayload: map[string]any{
+				"message": "message dispatched",
+			},
+		},
+	}
+	id, name := extractProjectInfo(entries)
+	if id != "proj-1" {
+		t.Errorf("expected project_id to take precedence, got id %q", id)
+	}
+	if name != "proj-1" {
+		t.Errorf("expected project_id to take precedence, got name %q", name)
+	}
+}
+
 func TestExtractFilesEmpty(t *testing.T) {
 	// When no file tool calls, files list should be empty (no placeholders)
 	entries := []GCPLogEntry{

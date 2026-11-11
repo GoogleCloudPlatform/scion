@@ -82,8 +82,8 @@ Fire once, then done. Specify timing with `--in` (relative delay: `30m`,
 ### Recurring schedules
 
 Fire on a cron expression (5-field: minute hour day-of-month month
-day-of-week, **UTC**). Each recurring schedule has a name, can be paused
-and resumed, and maintains execution history.
+day-of-week), evaluated in **UTC only**. Each recurring schedule has a name,
+can be paused and resumed, and maintains execution history.
 
 ## Message-to-orchestrator pattern
 
@@ -108,8 +108,9 @@ owned by something that can reason about it.
 
 ## Gotchas
 
-- **Cron is UTC.** There is no timezone configuration — convert from local
-  time before writing the expression.
+- **Cron is UTC only.** An expression cannot carry a timezone, and there is
+  no timezone setting. Convert from local time before writing the expression.
+  A fixed UTC time shifts by an hour against local time across DST changes.
 - **`cancel` vs `pause` vs `delete`:** `cancel` is for one-shot events only.
   `pause` and `delete` are for recurring schedules only. Using the wrong command
   on the wrong type will result in an error.

@@ -16,9 +16,6 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG TZ
-ENV TZ="$TZ"
-
 ARG USERNAME=scion
 
 # Persist bash history.
@@ -62,12 +59,11 @@ RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/
 
 
 
-# Copy and set up firewall script
+# Copy the firewall script. sciontool init runs it as root at startup when
+# SCION_INIT_FIREWALL=1 is set; it is not run later from inside the agent.
 USER root
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
-RUN chmod +x /usr/local/bin/init-firewall.sh && \
-  echo "scion ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/scion-firewall && \
-  chmod 0440 /etc/sudoers.d/scion-firewall
+RUN chmod 0755 /usr/local/bin/init-firewall.sh
 
 # Install Claude - currently native installer is not working in container
 # RUN curl -fsSL https://claude.ai/install.sh | bash

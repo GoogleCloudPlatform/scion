@@ -1,3 +1,5 @@
+//go:build unix
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +18,6 @@ package runtime
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // -----------------------------------------------------------------------
@@ -178,7 +180,6 @@ func TestGetRuntime_CloudRunSandbox_DirectProfileName(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_GROVE", "")
 
 	globalDir := filepath.Join(tmpHome, ".scion")
 	if err := os.MkdirAll(globalDir, 0755); err != nil {
@@ -249,7 +250,6 @@ func TestGetRuntime_CloudRunInstance_Precedence_Over_Docker(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_GROVE", "")
 	t.Setenv("CLOUD_RUN_INSTANCE", "instance-1")
 	t.Setenv("K_SERVICE", "")
 
@@ -668,11 +668,11 @@ func TestEnvFor_BasicEnv(t *testing.T) {
 	if env["SCION_PROJECT_ID"] != "proj-123" {
 		t.Errorf("SCION_PROJECT_ID = %q, want %q", env["SCION_PROJECT_ID"], "proj-123")
 	}
-	if env["SCION_GROVE"] != "my-project" {
-		t.Errorf("SCION_GROVE = %q, want %q", env["SCION_GROVE"], "my-project")
+	if _, ok := env["SCION_GROVE"]; ok {
+		t.Errorf("SCION_GROVE should not be set, got %q", env["SCION_GROVE"])
 	}
-	if env["SCION_GROVE_ID"] != "proj-123" {
-		t.Errorf("SCION_GROVE_ID = %q, want %q", env["SCION_GROVE_ID"], "proj-123")
+	if _, ok := env["SCION_GROVE_ID"]; ok {
+		t.Errorf("SCION_GROVE_ID should not be set, got %q", env["SCION_GROVE_ID"])
 	}
 
 	// Check UID/GID are set to the scion user (non-root).
@@ -828,14 +828,7 @@ func TestCloudRunSandboxRuntime_Run_AppliesResolvedAuth(t *testing.T) {
 		rootDir:      rootDir,
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		for _, cancel := range rt.watchCancels {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, stateFile, rt)
 
 	cfg := RunConfig{
 		Name:      "auth-agent",
@@ -922,10 +915,9 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 		"SCION_TRANSPORT_TOKEN=FAKE-AUTH-SENTINEL-not-a-real-credential",
 		// Broker-side plain (B1-B22 plain subset)
 		"SCION_AGENT_ID=agent-001",
-		// Note: SCION_GROVE_ID and SCION_PROJECT_ID are set by envFor() from
-		// cfg.ProjectID, overwriting any broker-env value. They appear in
-		// envForOwnKeys below, not here.
-		//   "SCION_GROVE_ID" → cfg.ProjectID
+		// Note: SCION_PROJECT_ID is set by envFor() from cfg.ProjectID,
+		// overwriting any broker-env value. It appears in envForOwnKeys
+		// below, not here.
 		//   "SCION_PROJECT_ID" → cfg.ProjectID
 		"SCION_AGENT_SLUG=test-agent",
 		"SCION_HUB_ENDPOINT=https://hub.example.com",
@@ -936,7 +928,6 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 		"SCION_METADATA_PROJECT_ID=proj-001",
 		"SCION_BROKER_ID=broker-001",
 		"SCION_CREATOR=user@example.com",
-		"SCION_DEBUG=1",
 		// Broker-side secret-injected (B-auth, B-clone)
 		"SCION_AUTH_TOKEN=FAKE-AUTH-SENTINEL-not-a-real-credential",
 		"SCION_GIT_CLONE_URL=https://FAKE-KEY-SENTINEL-not-a-real-credential@github.com/org/repo.git",
@@ -966,14 +957,19 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 	// not by the broker, and must not disappear due to P3a).
 	envForOwnKeys := []string{
 		"PATH", "HOME", "USER", "LOGNAME",
-		"SCION_PROJECT", "SCION_GROVE",
-		"SCION_PROJECT_ID", "SCION_GROVE_ID",
+		"SCION_PROJECT",
+		"SCION_PROJECT_ID",
 		"SCION_HOST_UID", "SCION_HOST_GID",
 		"SCION_WORKSPACE_PATH",
 	}
 	for _, key := range envForOwnKeys {
 		if _, ok := env[key]; !ok {
 			t.Errorf("envFor() own key %q missing from output", key)
+		}
+	}
+	for _, key := range []string{"SCION_GROVE", "SCION_GROVE_ID"} {
+		if _, ok := env[key]; ok {
+			t.Errorf("envFor() output should not contain legacy key %q", key)
 		}
 	}
 
@@ -1014,33 +1010,6 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 // -----------------------------------------------------------------------
 // buildEntrypoint tests
 // -----------------------------------------------------------------------
-
-type mockHarness struct {
-	command []string
-	env     map[string]string
-}
-
-func (h *mockHarness) Name() string { return "mock" }
-func (h *mockHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
-	return api.HarnessAdvancedCapabilities{}
-}
-func (h *mockHarness) GetCommand(task string, resume bool, baseArgs []string) []string {
-	return h.command
-}
-func (h *mockHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {
-	return h.env
-}
-func (h *mockHarness) DefaultConfigDir() string                                        { return "" }
-func (h *mockHarness) SkillsDir() string                                               { return "" }
-func (h *mockHarness) HasSystemPrompt(agentHome string) bool                           { return false }
-func (h *mockHarness) Provision(ctx context.Context, name, dir, home, ws string) error { return nil }
-func (h *mockHarness) GetInterruptKey() string                                         { return "C-c" }
-func (h *mockHarness) GetInterruptSequence() []string                                  { return nil }
-func (h *mockHarness) GetHarnessEmbedsFS() (embed.FS, string)                          { return embed.FS{}, "" }
-func (h *mockHarness) InjectAgentInstructions(agentHome string, content []byte) error  { return nil }
-func (h *mockHarness) InjectSystemPrompt(agentHome string, content []byte) error       { return nil }
-func (h *mockHarness) GetTelemetryEnv() map[string]string                              { return nil }
-func (h *mockHarness) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)      { return nil, nil }
 
 func TestBuildEntrypoint_WithHarness(t *testing.T) {
 	cfg := RunConfig{
@@ -1143,7 +1112,7 @@ func TestPrepareScionLayout_CreatesDirectories(t *testing.T) {
 		},
 	}
 
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1177,7 +1146,7 @@ func TestPrepareScionLayout_CreatesInWorkspaceSharedDirs(t *testing.T) {
 		},
 	}
 
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1232,7 +1201,7 @@ func TestPrepareScionLayout_ChownsDirectories(t *testing.T) {
 	}
 
 	cfg := RunConfig{HomeDir: homeDir}
-	paths, err := prepareScionLayout(rootDir, "chown-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "chown-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1270,7 +1239,7 @@ func TestPrepareScionLayout_SkipsChownNonRoot(t *testing.T) {
 	}
 
 	rootDir := t.TempDir()
-	paths, err := prepareScionLayout(rootDir, "nonroot-agent", RunConfig{})
+	paths, err := prepareScionLayout(context.Background(), rootDir, "nonroot-agent", RunConfig{})
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1286,7 +1255,7 @@ func TestPrepareScionLayout_SkipsChownNonRoot(t *testing.T) {
 
 func TestPrepareScionLayout_PathStructure(t *testing.T) {
 	rootDir := t.TempDir()
-	paths, err := prepareScionLayout(rootDir, "my-agent", RunConfig{})
+	paths, err := prepareScionLayout(context.Background(), rootDir, "my-agent", RunConfig{})
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1312,7 +1281,7 @@ func TestPrepareScionLayout_RelocatesHomeDir(t *testing.T) {
 	}
 
 	cfg := RunConfig{HomeDir: homeDir}
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1333,6 +1302,301 @@ func TestPrepareScionLayout_RelocatesHomeDir(t *testing.T) {
 	}
 	if link != paths.agentHome {
 		t.Errorf("symlink target = %q, want %q", link, paths.agentHome)
+	}
+}
+
+// TestPrepareScionLayout_SecondLaunchPreservesHomeContent covers a second
+// launch of the same sandbox agent: by then, cfg.HomeDir (unchanged from
+// the caller's perspective) is the symlink the first launch's relocation
+// created, pointing at this agent's own /scion home. relocateToScion must
+// still receive that original, still-symlinked path, not its resolved
+// form, so its own already-a-symlink check recognizes the restart and
+// leaves the home directory alone. Relocating the resolved path instead
+// would operate on the agent's real /scion home as both source and
+// destination, losing its contents and leaving a self-referential symlink
+// in their place.
+func TestPrepareScionLayout_SecondLaunchPreservesHomeContent(t *testing.T) {
+	rootDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(homeDir, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{HomeDir: homeDir}
+
+	paths1, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("first prepareScionLayout() error = %v", err)
+	}
+
+	// Second launch of the same agent: cfg is unchanged, but homeDir (and
+	// so cfg.HomeDir) is now the symlink the first launch created.
+	paths2, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("second prepareScionLayout() error = %v", err)
+	}
+	if paths2.agentHome != paths1.agentHome {
+		t.Fatalf("agentHome changed between launches: %q vs %q", paths1.agentHome, paths2.agentHome)
+	}
+
+	data, err := os.ReadFile(filepath.Join(paths2.agentHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("agent-info.json missing after second launch (home content lost): %v", err)
+	}
+	if string(data) != `{"test": true}` {
+		t.Errorf("agent-info.json content = %q, want %q", string(data), `{"test": true}`)
+	}
+
+	link, err := os.Readlink(homeDir)
+	if err != nil {
+		t.Fatalf("homeDir is not a symlink after second launch: %v", err)
+	}
+	if link != paths2.agentHome {
+		t.Errorf("symlink target = %q, want %q", link, paths2.agentHome)
+	}
+
+	// A self-referential symlink at paths2.agentHome (the bug this guards
+	// against) makes any stat through homeDir fail with ELOOP.
+	if _, err := os.Stat(homeDir); err != nil {
+		t.Errorf("os.Stat(%q) failed, possible symlink loop at %q: %v", homeDir, paths2.agentHome, err)
+	}
+}
+
+// TestPrepareScionLayout_SkipsRelocationWhenHomeDirResolvesUnderRootDir
+// covers a HomeDir whose OWN Lstat is an ordinary real directory -- not a
+// symlink itself, so relocateToScion's own already-a-symlink check cannot
+// catch it on the original path alone -- but which resolves, through a
+// symlinked ANCESTOR directory, to this agent's own /scion home. Only the
+// resolved-path skip (comparing what ValidateAgentHomeSource resolved to,
+// not the original path's own Lstat) protects this case.
+func TestPrepareScionLayout_SkipsRelocationWhenHomeDirResolvesUnderRootDir(t *testing.T) {
+	rootDir := t.TempDir()
+
+	seedHomeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(seedHomeDir, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	paths1, err := prepareScionLayout(context.Background(), rootDir, "test-agent", RunConfig{HomeDir: seedHomeDir})
+	if err != nil {
+		t.Fatalf("first prepareScionLayout() error = %v", err)
+	}
+
+	// ancestorLink is a symlink to agentHome's own parent directory.
+	// Joining "home" onto it reaches the same real /scion home as
+	// paths1.agentHome, but os.Lstat on the joined path sees an ordinary
+	// directory: Lstat only leaves its own final path component
+	// unresolved, and that component (the ancestor symlink) is not it.
+	ancestorLink := filepath.Join(t.TempDir(), "ancestor-link")
+	if err := os.Symlink(filepath.Dir(paths1.agentHome), ancestorLink); err != nil {
+		t.Fatal(err)
+	}
+	homeDirThroughAncestor := filepath.Join(ancestorLink, filepath.Base(paths1.agentHome))
+
+	if info, err := os.Lstat(homeDirThroughAncestor); err != nil {
+		t.Fatalf("fixture check: homeDirThroughAncestor Lstat failed: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("fixture check: homeDirThroughAncestor must not itself be a symlink")
+	}
+
+	paths2, err := prepareScionLayout(context.Background(), rootDir, "test-agent", RunConfig{HomeDir: homeDirThroughAncestor})
+	if err != nil {
+		t.Fatalf("second prepareScionLayout() error = %v", err)
+	}
+	if paths2.agentHome != paths1.agentHome {
+		t.Fatalf("agentHome changed: %q vs %q", paths1.agentHome, paths2.agentHome)
+	}
+
+	data, err := os.ReadFile(filepath.Join(paths2.agentHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("agent-info.json missing (home content lost): %v", err)
+	}
+	if string(data) != `{"test": true}` {
+		t.Errorf("agent-info.json content = %q, want %q", string(data), `{"test": true}`)
+	}
+
+	info, err := os.Lstat(paths2.agentHome)
+	if err != nil {
+		t.Fatalf("agentHome missing: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("agentHome became a symlink (self-reference); expected a plain directory")
+	}
+}
+
+// TestPrepareScionLayout_LeavesPreExistingHomeSymlinkUntouched covers a
+// HomeDir that is already a symlink to some other real directory entirely
+// outside rootDir -- not one relocateToScion itself created, just an
+// ordinary symlinked home. relocateToScion's own Lstat check, given the
+// original HomeDir, recognizes the symlink and does nothing, leaving the
+// real directory it points to exactly as it was. Passing the validator's
+// resolved form instead would hand relocateToScion the real directory
+// itself (Lstat on it never reports a symlink), so it would relocate that
+// unrelated directory's content into this agent's /scion home and replace
+// it with a symlink -- neither skip condition catches this, since the
+// resolved path is neither this agent's own /scion home nor under rootDir.
+func TestPrepareScionLayout_LeavesPreExistingHomeSymlinkUntouched(t *testing.T) {
+	rootDir := t.TempDir()
+	realTarget := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realTarget, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(realTarget, homeDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := prepareScionLayout(context.Background(), rootDir, "test-agent", RunConfig{HomeDir: homeDir}); err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	info, err := os.Lstat(realTarget)
+	if err != nil {
+		t.Fatalf("realTarget missing: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("realTarget was replaced with a symlink; expected it to be left untouched")
+	}
+	if _, err := os.Stat(filepath.Join(realTarget, "agent-info.json")); err != nil {
+		t.Errorf("realTarget content missing: %v", err)
+	}
+
+	link, err := os.Readlink(homeDir)
+	if err != nil {
+		t.Fatalf("homeDir is no longer a symlink: %v", err)
+	}
+	if link != realTarget {
+		t.Errorf("homeDir symlink target changed: got %q, want %q", link, realTarget)
+	}
+}
+
+// TestPrepareScionLayout_RejectsUnsafeWorkspaceSource is the fail-closed
+// regression test for the workspace-copy site: cfg.Workspace already went
+// through pkg/agent Start()'s validation to reach this RunConfig, but this
+// call site should not depend on that alone. An unsafe value must be
+// refused before copyDirContents ever reads from it, not just logged.
+func TestPrepareScionLayout_RejectsUnsafeWorkspaceSource(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{Workspace: "/"}
+
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
+	if err == nil {
+		t.Fatal("expected prepareScionLayout to fail for a workspace source of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+	}
+
+	// The workspace directory itself is created unconditionally (mkdir, not
+	// copy), so "nothing was copied" means it exists but is empty -- proving
+	// the rejected source was never actually read from.
+	entries, readErr := os.ReadDir(paths.workspace)
+	if readErr != nil {
+		t.Fatalf("ReadDir(%q): %v", paths.workspace, readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no files copied into %q after rejection, found: %v", paths.workspace, entries)
+	}
+}
+
+// TestPrepareScionLayout_CopiesLegitimateScionHomeWorkspace is the positive
+// acceptance-set counterpart: this call site has no per-project root (same
+// reasoning as buildCommonRunArgs and the k8s runtime's Run()), so it
+// depends entirely on the validator's named ~/.scion allow list to still
+// admit and copy from a real workspace under ~/.scion.
+func TestPrepareScionLayout_CopiesLegitimateScionHomeWorkspace(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workspace := filepath.Join(tmpHome, ".scion", "projects", "my-project", "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "hello.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rootDir := t.TempDir()
+	cfg := RunConfig{Workspace: workspace}
+
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("expected %q to be accepted by workspace source validation, got error: %v", workspace, err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(paths.workspace, "hello.txt"))
+	if err != nil {
+		t.Fatalf("hello.txt not found at scion workspace path: %v", err)
+	}
+	if string(data) != "hi" {
+		t.Errorf("hello.txt content = %q, want %q", string(data), "hi")
+	}
+}
+
+// TestPrepareScionLayout_RejectsUnsafeHomeDir is
+// TestPrepareScionLayout_RejectsUnsafeWorkspaceSource's counterpart for
+// cfg.HomeDir: an unsafe value must be refused before relocateToScion ever
+// reads from it.
+func TestPrepareScionLayout_RejectsUnsafeHomeDir(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{HomeDir: "/"}
+
+	_, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
+	if err == nil {
+		t.Fatal("expected prepareScionLayout to fail for a home directory of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed agent home path") {
+		t.Errorf("expected the rejection to come from agent home source validation, got: %v", err)
+	}
+}
+
+// TestPrepareScionLayout_AcceptsRealAgentHomes covers the positive
+// acceptance set for cfg.HomeDir: the three real shapes
+// config.GetAgentHomePath produces under ~/.scion, each relocated to the
+// sandbox's own /scion path the same way
+// TestPrepareScionLayout_RelocatesHomeDir already proves for a plain
+// directory.
+func TestPrepareScionLayout_AcceptsRealAgentHomes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	tests := []struct {
+		name    string
+		relPath []string
+	}{
+		{name: "global project agent home", relPath: []string{".scion", "agents", "a", "home"}},
+		{name: "hub-managed project agent home", relPath: []string{".scion", "projects", "p", ".scion", "agents", "a", "home"}},
+		{name: "externalized git project agent home", relPath: []string{".scion", "project-configs", "d__1", ".scion", "agents", "a", "home"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parts := append([]string{tmpHome}, tt.relPath...)
+			homeDir := filepath.Join(parts...)
+			if err := os.MkdirAll(homeDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(homeDir, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			rootDir := t.TempDir()
+			cfg := RunConfig{HomeDir: homeDir}
+			paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
+			if err != nil {
+				t.Fatalf("expected %q to be accepted, got error: %v", homeDir, err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(paths.agentHome, "agent-info.json"))
+			if err != nil {
+				t.Fatalf("agent-info.json not found at scion path: %v", err)
+			}
+			if string(data) != `{"test": true}` {
+				t.Errorf("agent-info.json content = %q, want %q", string(data), `{"test": true}`)
+			}
+		})
 	}
 }
 
@@ -1407,6 +1671,38 @@ func TestCloudRunSandboxRuntime_List_ReturnsStateEntries(t *testing.T) {
 	// When #1260 merges, this test should be updated.
 }
 
+// TestCloudRunSandboxRuntime_List_NameIsAgentSlug: List reports the agent
+// slug (the scion.name label) as Name, as the Docker and substrate runtimes
+// do, not AgentID, which Run records as the project-prefixed container name;
+// an entry without the label falls back to AgentID (ptone/scion#5156).
+func TestCloudRunSandboxRuntime_List_NameIsAgentSlug(t *testing.T) {
+	rt := NewCloudRunSandboxRuntimeForTest("/nonexistent", filepath.Join(t.TempDir(), "state.json"), t.TempDir())
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "proj-b--dev",
+		AgentID:     "proj-b--dev",
+		Labels:      map[string]string{"scion.name": "dev"},
+	})
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "proj-b--old",
+		AgentID:     "proj-b--old",
+	})
+
+	agents, err := rt.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	names := make(map[string]string)
+	for _, a := range agents {
+		names[a.ContainerID] = a.Name
+	}
+	if got := names["proj-b--dev"]; got != "dev" {
+		t.Errorf("Name of labelled entry = %q, want the scion.name label %q", got, "dev")
+	}
+	if got := names["proj-b--old"]; got != "proj-b--old" {
+		t.Errorf("Name of entry without scion.name = %q, want AgentID %q", got, "proj-b--old")
+	}
+}
+
 func TestCloudRunSandboxRuntime_List_LabelFilter(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 	rt := &CloudRunSandboxRuntime{
@@ -1439,6 +1735,54 @@ func TestCloudRunSandboxRuntime_List_LabelFilter(t *testing.T) {
 	}
 	if agents[0].ContainerID != "sb-1" {
 		t.Errorf("filtered agent = %q, want %q", agents[0].ContainerID, "sb-1")
+	}
+}
+
+// TestCloudRunSandboxRuntime_List_ProjectPathResolved verifies that List
+// compares scion.project_path as a resolved path (as the Docker, Podman and
+// Apple runtimes do through LabelsMatchFilter), so a trailing slash or a
+// symlinked spelling of the same directory still matches (ptone/scion#3020).
+func TestCloudRunSandboxRuntime_List_ProjectPathResolved(t *testing.T) {
+	projectDir := t.TempDir()
+	otherDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "project-link")
+	if err := os.Symlink(projectDir, linkDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	rt := &CloudRunSandboxRuntime{
+		bin:          "/nonexistent",
+		state:        newSandboxStateStore(stateFile),
+		rootDir:      t.TempDir(),
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "sb-trailing",
+		AgentID:     "agent-trailing",
+		Labels:      map[string]string{projectkeys.LabelProjectPath: projectDir + "/"},
+	})
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "sb-link",
+		AgentID:     "agent-link",
+		Labels:      map[string]string{projectkeys.LabelProjectPath: linkDir},
+	})
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "sb-other",
+		AgentID:     "agent-other",
+		Labels:      map[string]string{projectkeys.LabelProjectPath: otherDir},
+	})
+
+	agents, err := rt.List(context.Background(), map[string]string{projectkeys.LabelProjectPath: projectDir})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	got := make(map[string]bool)
+	for _, a := range agents {
+		got[a.ContainerID] = true
+	}
+	if len(agents) != 2 || !got["sb-trailing"] || !got["sb-link"] {
+		t.Errorf("List() by project path = %v, want sb-trailing and sb-link", got)
 	}
 }
 
@@ -1515,17 +1859,7 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 		rootDir:      rootDir,
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-
-	// Cancel the background watchSandbox goroutine on test exit so it cannot
-	// write to the state file after t.TempDir() cleanup begins, which would
-	// cause a "directory not empty" failure.
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		for _, cancel := range rt.watchCancels {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, stateFile, rt)
 
 	cfg := RunConfig{
 		Name:      "test-agent",
@@ -1548,15 +1882,6 @@ func TestCloudRunSandboxRuntime_Run_BuildsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	// Cancel the watch/tailer goroutines so temp files are released.
-	t.Cleanup(func() {
-		rt.watchMu.Lock()
-		if cancel, ok := rt.watchCancels[id]; ok {
-			cancel()
-		}
-		rt.watchMu.Unlock()
-		time.Sleep(100 * time.Millisecond) // let goroutines exit
-	})
 	if id != "test-agent" {
 		t.Errorf("Run() returned id = %q, want %q", id, "test-agent")
 	}
@@ -1731,7 +2056,7 @@ func TestCloudRunSandboxRuntime_Delete(t *testing.T) {
 
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-del", AgentID: "agent-del"})
 
-	err := rt.Delete(context.Background(), "sb-del")
+	err := rt.Delete(context.Background(), RunRef{ID: "sb-del"})
 	if err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
@@ -1771,7 +2096,7 @@ func TestCloudRunSandboxRuntime_Stop(t *testing.T) {
 
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-stop", AgentID: "agent-stop"})
 
-	err := rt.Stop(context.Background(), "sb-stop")
+	err := rt.Stop(context.Background(), RunRef{ID: "sb-stop"})
 	if err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}

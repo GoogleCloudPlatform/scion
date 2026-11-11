@@ -1,0 +1,419 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package critic
+
+import (
+	"bytes"
+	"encoding/json"
+	"math/rand"
+	"os"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
+
+// corpusCase is one case of testdata/corpus.json, which the web twin of
+// this package (web/src/utils/critic.ts) is tested against too.
+type corpusCase struct {
+	Name   string `json:"name"`
+	In     string `json:"in"`
+	Clean  string `json:"clean"`
+	Accept string `json:"accept"`
+	// Code, when set, lists the text of each code range codeSpans finds.
+	Code *[]string `json:"code"`
+}
+
+func loadCorpus(t *testing.T) []corpusCase {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/corpus.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Cases []corpusCase `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Cases) < 40 {
+		t.Fatalf("corpus has %d cases", len(doc.Cases))
+	}
+	return doc.Cases
+}
+
+func TestProjections(t *testing.T) {
+	cases := loadCorpus(t)
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			if got := string(CleanText([]byte(c.In))); got != c.Clean {
+				t.Errorf("Clean(%q) = %q, want %q", c.In, got, c.Clean)
+			}
+			if got := string(AcceptText([]byte(c.In))); got != c.Accept {
+				t.Errorf("Accept(%q) = %q, want %q", c.In, got, c.Accept)
+			}
+			if got := string(Project([]byte(c.In), Raw)); got != c.In {
+				t.Errorf("Raw(%q) = %q", c.In, got)
+			}
+			assertCovers(t, []byte(c.In))
+			assertMarksOutsideCode(t, []byte(c.In))
+			if c.Code != nil {
+				var steps int
+				got := []string{}
+				for _, r := range codeSpans([]byte(c.In), &steps) {
+					got = append(got, c.In[r.start:r.end])
+				}
+				if strings.Join(got, "\x00") != strings.Join(*c.Code, "\x00") || len(got) != len(*c.Code) {
+					t.Errorf("code of %q = %q, want %q", c.In, got, *c.Code)
+				}
+			}
+		})
+	}
+}
+
+// TestCorpusCoversCode keeps the shared corpus exercising code: enough
+// cases pin code ranges, and some find none.
+func TestCorpusCoversCode(t *testing.T) {
+	with, none := 0, 0
+	for _, c := range loadCorpus(t) {
+		if c.Code != nil {
+			with++
+			if len(*c.Code) == 0 {
+				none++
+			}
+		}
+	}
+	if with < 40 || none < 10 {
+		t.Fatalf("corpus pins code for %d cases, %d with none", with, none)
+	}
+}
+
+// assertMarksOutsideCode checks that no mark token lies in code: each
+// mark's opening and closing tokens start outside every code range.
+func assertMarksOutsideCode(t *testing.T, src []byte) {
+	t.Helper()
+	var steps int
+	code := codeSpans(src, &steps)
+	in := func(p int) bool {
+		for _, r := range code {
+			if r.start <= p && p < r.end {
+				return true
+			}
+		}
+		return false
+	}
+	for _, s := range Parse(src) {
+		if s.Kind == Text {
+			continue
+		}
+		if in(s.Start) || in(s.End-3) {
+			t.Fatalf("mark %+v has a token in code %v of %q", s, code, src)
+		}
+		if s.Kind == Substitution && in(s.Start+3+len(s.Text)) {
+			t.Fatalf("substitution %+v has its separator in code of %q", s, src)
+		}
+	}
+}
+
+// assertCovers checks that segments tile src exactly, in order.
+func assertCovers(t *testing.T, src []byte) {
+	t.Helper()
+	pos := 0
+	for _, s := range Parse(src) {
+		if s.Start != pos || s.End <= s.Start || s.End > len(src) {
+			t.Fatalf("segment %+v does not continue at %d (len %d)", s, pos, len(src))
+		}
+		pos = s.End
+	}
+	if pos != len(src) {
+		t.Fatalf("segments end at %d, want %d", pos, len(src))
+	}
+}
+
+func TestParseSegments(t *testing.T) {
+	segs := Parse([]byte("a{~~x~>y~~}{>>c<<}"))
+	if len(segs) != 3 {
+		t.Fatalf("got %d segments: %+v", len(segs), segs)
+	}
+	if segs[0].Kind != Text || string(segs[0].Text) != "a" {
+		t.Errorf("seg0 = %+v", segs[0])
+	}
+	if segs[1].Kind != Substitution || string(segs[1].Text) != "x" || string(segs[1].New) != "y" || segs[1].Start != 1 || segs[1].End != 11 {
+		t.Errorf("seg1 = %+v", segs[1])
+	}
+	if segs[2].Kind != Comment || string(segs[2].Text) != "c" {
+		t.Errorf("seg2 = %+v", segs[2])
+	}
+}
+
+func TestParseMode(t *testing.T) {
+	for in, want := range map[string]Mode{"": Raw, "raw": Raw, "clean": Clean, "accept": Accept} {
+		if got, ok := ParseMode(in); !ok || got != want {
+			t.Errorf("ParseMode(%q) = %v, %v", in, got, ok)
+		}
+	}
+	if _, ok := ParseMode("Clean"); ok {
+		t.Error("ParseMode is case-sensitive")
+	}
+}
+
+// TestParseLinearWork defends the linear cost bound: inputs full of
+// unterminated or malformed marks must not make Parse rescan the tail once
+// per opener. A per-opener rescan examines O(n^2) bytes and fails here.
+func TestParseLinearWork(t *testing.T) {
+	const n = 1 << 14
+	inputs := map[string]string{
+		"unterminated insertions":  strings.Repeat("{++", n),
+		"unterminated each kind":   strings.Repeat("{++{--{~~{>>{==", n/5),
+		"substitutions no sep":     strings.Repeat("{~~a", n) + "~~}",
+		"sep only far away":        strings.Repeat("{~~a~~}", n) + "~>",
+		"many closers few openers": strings.Repeat("++}", n),
+		"openers then one closer":  strings.Repeat("{++a", n) + "++}",
+		"interleaved malformed":    strings.Repeat("{~~x~~}{++", n/2),
+		"long text":                strings.Repeat("abcdefgh", n),
+		"brace soup":               strings.Repeat("{{{{+-~>=", n),
+		"valid marks":              strings.Repeat("{++a++}{--b--}{~~c~>d~~}{>>e<<}{==f==}", n/16),
+		"rising backtick runs":     risingRuns(n),
+		"single backtick spans":    strings.Repeat("`x", n/2),
+		"closers hidden in code":   "{++" + strings.Repeat("`++}`", n/5),
+		"separators in code":       "{~~" + strings.Repeat("`~>`", n/4) + "~~}",
+		"openers hidden in code":   strings.Repeat("`{++`", n/5) + "++}",
+		"fence lines":              strings.Repeat("```\n{++\n", n/8),
+		"unterminated fence":       "```\n" + strings.Repeat("{++a++}\n", n/8),
+		"escaped runs":             strings.Repeat("\\\\\\`", n/7),
+	}
+	for name, in := range inputs {
+		t.Run(name, func(t *testing.T) {
+			src := []byte(in)
+			_, steps := parse(src)
+			// Each byte is examined by the code scan, the '{' scan and at
+			// most each of the six cursors, plus a token length of overlap
+			// per search; each code range is passed once per index.
+			if limit := 16 * (len(src) + 1); steps > limit {
+				t.Fatalf("parse examined %d bytes for input of %d (limit %d)", steps, len(src), limit)
+			}
+		})
+	}
+}
+
+// risingRuns is backtick runs of lengths 2, 3, 4, ... over a third of n
+// bytes, none with a partner, then pairs of single backticks: finding each
+// opener's partner by scanning the runs ahead would pass every single
+// backtick once per unmatched run, O(n^1.5) in all.
+func risingRuns(n int) string {
+	var b strings.Builder
+	for k := 2; b.Len() < n/3; k++ {
+		b.WriteString(strings.Repeat("`", k))
+		b.WriteByte('x')
+	}
+	return b.String() + strings.Repeat("`x", n/3)
+}
+
+// TestRandomComposition composes random fragments and checks invariants
+// that hold for every input: segments tile the input, projections never
+// grow it, Clean of Accept-free text is identity, and the projections agree
+// with a reference built from the segment list.
+func TestRandomComposition(t *testing.T) {
+	frags := []string{"{++", "++}", "{--", "--}", "{~~", "~>", "~~}", "{>>", "<<}", "{==", "==}",
+		"{", "}", "+", "-", "~", ">", "<", "=", "a", "é", "\n", "\r\n", " ", "x y",
+		"`", "``", "\\", "\n```\n", "\n~~~ x\n", "\n\n"}
+	r := rand.New(rand.NewSource(1))
+	for iter := 0; iter < 3000; iter++ {
+		var b strings.Builder
+		for k := r.Intn(40); k > 0; k-- {
+			b.WriteString(frags[r.Intn(len(frags))])
+		}
+		src := []byte(b.String())
+		assertCovers(t, src)
+		assertMarksOutsideCode(t, src)
+		c, a := CleanText(src), AcceptText(src)
+		if len(c) > len(src) || len(a) > len(src) {
+			t.Fatalf("projection grew %q", src)
+		}
+		var rc, ra []byte
+		for _, s := range Parse(src) {
+			whole := src[s.Start:s.End]
+			switch s.Kind {
+			case Text:
+				if !bytes.Equal(whole, s.Text) {
+					t.Fatalf("text segment content differs from source in %q", src)
+				}
+				rc, ra = append(rc, whole...), append(ra, whole...)
+			case Insertion:
+				ra = append(ra, s.Text...)
+			case Deletion:
+				rc = append(rc, s.Text...)
+			case Substitution:
+				rc, ra = append(rc, s.Text...), append(ra, s.New...)
+			case Highlight:
+				rc, ra = append(rc, s.Text...), append(ra, s.Text...)
+			}
+		}
+		if !bytes.Equal(c, rc) || !bytes.Equal(a, ra) {
+			t.Fatalf("projection mismatch for %q", src)
+		}
+		// Text with no '{' has no marks: every projection is identity.
+		if !bytes.ContainsRune(src, '{') && (!bytes.Equal(c, src) || !bytes.Equal(a, src)) {
+			t.Fatalf("mark-free text changed: %q", src)
+		}
+		// Re-projecting a clean text with no remaining marks is stable.
+		if cc := CleanText(c); len(Parse(c)) <= 1 && !bytes.Equal(cc, c) {
+			t.Fatalf("clean not stable for %q", src)
+		}
+	}
+}
+
+func TestNormalize(t *testing.T) {
+	cases := map[string]string{
+		"a\r\nb":     "a\nb",
+		"a\rb":       "a\nb",
+		"a\r\r\nb":   "a\n\nb",
+		"cafe\u0301": "café",
+		"café\r\n":   "café\n",
+		"":           "",
+		"plain\n":    "plain\n",
+		"\r":         "\n",
+	}
+	for in, want := range cases {
+		if got := string(Normalize([]byte(in))); got != want {
+			t.Errorf("Normalize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDiff(t *testing.T) {
+	if h := Diff([]byte("same\n"), []byte("same\n")); h != nil {
+		t.Fatalf("equal texts gave %+v", h)
+	}
+	h := Diff([]byte("a\nb\nc\nd\n"), []byte("a\nB\nc\nD\n"))
+	if len(h) != 2 || h[0].Line != 2 || h[0].Parent != "b\n" || h[0].Clean != "B\n" || h[1].Line != 4 {
+		t.Fatalf("in-place edits: %+v", h)
+	}
+	h = Diff([]byte("a\nb\nc\n"), []byte("a\nx\ny\nc\n"))
+	if len(h) != 1 || h[0].Line != 2 || h[0].ParentLines != 1 || h[0].CleanLines != 2 || h[0].Clean != "x\ny\n" {
+		t.Fatalf("insertion: %+v", h)
+	}
+	h = Diff([]byte("a\n"), []byte("a"))
+	if len(h) != 1 || h[0].Line != 1 {
+		t.Fatalf("missing final newline: %+v", h)
+	}
+	h = Diff(nil, []byte("new\n"))
+	if len(h) != 1 || h[0].ParentLines != 0 || h[0].Clean != "new\n" {
+		t.Fatalf("from empty: %+v", h)
+	}
+}
+
+// TestDiffWhitespaceAndFinalNewline: each hunk says whether its sides
+// differ only in whitespace, and the hunk holding the last line says when
+// only one text ends with a newline (ptone/scion#4578).
+func TestDiffWhitespaceAndFinalNewline(t *testing.T) {
+	type flags struct {
+		line int
+		ws   bool
+		fn   string
+	}
+	for _, c := range []struct {
+		name          string
+		parent, clean string
+		want          []flags
+	}{
+		{"trailing spaces", "a\nfoo\nb\n", "a\nfoo  \nb\n", []flags{{2, true, ""}}},
+		{"blank line added", "a\nb\n", "a\n\nb\n", []flags{{2, true, ""}}},
+		{"tab for spaces", "a\n  x\n", "a\n\tx\n", []flags{{2, true, ""}}},
+		{"word change", "a\nb\n", "a\nB\n", []flags{{2, false, ""}}},
+		{"word added at the end", "a\nb\n", "a\nb c\n", []flags{{2, false, ""}}},
+		{"final newline removed", "a\nend\n", "a\nend", []flags{{2, true, FinalNewlineRemoved}}},
+		{"final newline added", "a\nend", "a\nend\n", []flags{{2, true, FinalNewlineAdded}}},
+		{"final newline removed with an insertion", "a\nb\n", "a\nx\nb", []flags{{2, false, FinalNewlineRemoved}}},
+		{"newline only on the last hunk", "a\nb\nc\nd\n", "a\nB\nc\nd", []flags{{2, false, ""}, {4, true, FinalNewlineRemoved}}},
+	} {
+		h := Diff([]byte(c.parent), []byte(c.clean))
+		var got []flags
+		for _, x := range h {
+			got = append(got, flags{x.Line, x.WhitespaceOnly, x.FinalNewline})
+		}
+		if len(got) != len(c.want) || (len(got) > 0 && !equalFlags(got, c.want)) {
+			t.Errorf("%s: hunks %+v, want %+v", c.name, got, c.want)
+		}
+	}
+	// The flags reach the JSON of the 422 details, and are absent when unset.
+	b, err := json.Marshal(Diff([]byte("a\nb\n"), []byte("a\nb  ")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"whitespace_only":true`) || !strings.Contains(string(b), `"final_newline":"removed"`) {
+		t.Errorf("JSON %s", b)
+	}
+	b, _ = json.Marshal(Diff([]byte("a\n"), []byte("b\n")))
+	if strings.Contains(string(b), "whitespace_only") || strings.Contains(string(b), "final_newline") {
+		t.Errorf("unset flags in JSON %s", b)
+	}
+}
+
+func equalFlags[T comparable](a, b []T) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestDiffBounds defends MaxHunks and MaxExcerptBytes: removing either
+// check makes this fail.
+func TestDiffBounds(t *testing.T) {
+	var p, c strings.Builder
+	for i := 0; i < 3*MaxHunks; i++ {
+		p.WriteString("same\nold\n")
+		c.WriteString("same\nnew\n")
+	}
+	h := Diff([]byte(p.String()), []byte(c.String()))
+	if len(h) != MaxHunks || !h[len(h)-1].Truncated {
+		t.Fatalf("got %d hunks (truncated=%v), want %d truncated", len(h), len(h) > 0 && h[len(h)-1].Truncated, MaxHunks)
+	}
+	// A one-byte prefix puts every rune boundary on an odd offset, so the
+	// byte cap falls inside a two-byte rune and must back off by one.
+	long := "x" + strings.Repeat("é", MaxExcerptBytes)
+	h = Diff([]byte("y\n"), []byte(long+"\n"))
+	if len(h) != 1 || len(h[0].Clean) > MaxExcerptBytes || !h[0].Truncated {
+		t.Fatalf("excerpt %d bytes, truncated=%v", len(h[0].Clean), h[0].Truncated)
+	}
+	if !strings.HasPrefix(long, h[0].Clean) || !utf8.ValidString(h[0].Clean) || len(h[0].Clean) != MaxExcerptBytes-1 {
+		t.Fatalf("excerpt cut inside a rune: %d bytes", len(h[0].Clean))
+	}
+	many := strings.Repeat("line\n", 1000)
+	h = Diff(nil, []byte(many))
+	if len(h) != 1 || len(h[0].Clean) > MaxExcerptBytes || !h[0].Truncated {
+		t.Fatalf("multi-line excerpt %d bytes, truncated=%v", len(h[0].Clean), h[0].Truncated)
+	}
+}
+
+// TestReviewInvariant: for a text made only of marks added to a parent,
+// Clean reproduces the parent; an edit outside marks is detected.
+func TestReviewInvariant(t *testing.T) {
+	parent := "The plan ships in Q3.\nOwners: docs team.\n"
+	review := "The plan {~~ships~>launches~~} in Q3.{>>confirm date<<}\nOwners: {==docs team==}{>>which one?<<}.{++\nRisks: none.++}\n"
+	if got := Normalize(CleanText([]byte(review))); !bytes.Equal(got, Normalize([]byte(parent))) {
+		t.Fatalf("clean(review) = %q", got)
+	}
+	edited := strings.Replace(review, "Owners", "Owner", 1)
+	h := Diff(Normalize([]byte(parent)), Normalize(CleanText([]byte(edited))))
+	if len(h) != 1 || h[0].Line != 2 {
+		t.Fatalf("unmarked edit: %+v", h)
+	}
+	crlf := strings.ReplaceAll(review, "\n", "\r\n")
+	if got := Normalize(CleanText([]byte(crlf))); !bytes.Equal(got, Normalize([]byte(parent))) {
+		t.Fatalf("CRLF review not equal after normalisation: %q", got)
+	}
+}

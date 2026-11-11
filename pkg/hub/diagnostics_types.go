@@ -14,12 +14,16 @@
 
 package hub
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+)
 
 // DiagnosticLogEntry extends CloudLogEntry with source classification.
 type DiagnosticLogEntry struct {
 	CloudLogEntry
-	Source string `json:"source"` // "hub", "broker", "agent", "messages", "server"
+	Source string `json:"source"` // "hub", "broker", "agent", "messages", "artifacts", "server"
 }
 
 // DiagnosticsLogResponse is the batch query response.
@@ -32,19 +36,23 @@ type DiagnosticsLogResponse struct {
 // classifySource determines the source category of a log entry based on
 // its log name and structured metadata. The classification rules follow
 // this priority order:
-//  1. logName contains "scion-messages" -> "messages"
-//  2. logName contains "scion-agents"   -> "agent"
-//  3. jsonPayload.subsystem starts with "hub."    -> "hub"
-//  4. jsonPayload.subsystem starts with "broker." -> "broker"
-//  5. labels.component = "scion-hub"    -> "hub"
-//  6. labels.component = "scion-broker" -> "broker"
-//  7. Fallback -> "server"
+//  1. logName contains "scion-messages"  -> "messages"
+//  2. logName contains "scion-artifacts" -> "artifacts"
+//  3. logName contains "scion-agents"    -> "agent"
+//  4. jsonPayload.subsystem starts with "hub."    -> "hub"
+//  5. jsonPayload.subsystem starts with "broker." -> "broker"
+//  6. labels.component = "scion-hub"    -> "hub"
+//  7. labels.component = "scion-broker" -> "broker"
+//  8. Fallback -> "server"
 func classifySource(entry CloudLogEntry) string {
 	logName := entry.LogName
 
 	// Check log name first (highest priority)
 	if strings.Contains(logName, "scion-messages") {
 		return "messages"
+	}
+	if strings.Contains(logName, logging.ArtifactLogID) {
+		return "artifacts"
 	}
 	if strings.Contains(logName, "scion-agents") {
 		return "agent"

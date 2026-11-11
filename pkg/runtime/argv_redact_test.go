@@ -17,6 +17,8 @@ package runtime
 import (
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 func TestRedactEnvValues(t *testing.T) {
@@ -173,6 +175,41 @@ func TestExternalEnvValues(t *testing.T) {
 		env := map[string]string{"H_TOKEN": argvLeakSentinel}
 		if got := externalEnvValues(cfg, env); got["H_TOKEN"] != argvLeakSentinel {
 			t.Errorf("harness-supplied H_TOKEN not returned: %v", got)
+		}
+	})
+
+	t.Run("harness value that overrode cfg.Env on the same key is", func(t *testing.T) {
+		// Both sources supply K; the harness value is the one in argv.
+		// Every candidate per key must be checked, not only the first.
+		cfg := RunConfig{
+			Env:     []string{"PLAIN_SETTING=cfg-value-long"},
+			Harness: &mockHarness{env: map[string]string{"PLAIN_SETTING": "harness-value-long"}},
+		}
+		env := map[string]string{"PLAIN_SETTING": "harness-value-long"}
+		got := externalEnvValues(cfg, env)
+		if got["PLAIN_SETTING"] != "harness-value-long" {
+			t.Errorf("harness value that reached argv not returned: %v", got)
+		}
+		out := "sandbox create failed: --env PLAIN_SETTING=harness-value-long"
+		if red := redactEnvValues(out, got); strings.Contains(red, "harness-value-long") {
+			t.Errorf("harness value not redacted: %s", red)
+		}
+	})
+
+	t.Run("resolved-auth env values are", func(t *testing.T) {
+		const authPlaceholder = "FAKE-AUTH-PLACEHOLDER-value"
+		cfg := RunConfig{ResolvedAuth: &api.ResolvedAuth{
+			Method:  "api-key",
+			EnvVars: map[string]string{"AUTH_TOKEN": authPlaceholder},
+		}}
+		env := map[string]string{"AUTH_TOKEN": authPlaceholder, "HOME": sandboxAgentHome}
+		got := externalEnvValues(cfg, env)
+		if got["AUTH_TOKEN"] != authPlaceholder {
+			t.Errorf("resolved-auth AUTH_TOKEN not returned: %v", got)
+		}
+		out := "sandbox create failed: --env AUTH_TOKEN=" + authPlaceholder
+		if red := redactEnvValues(out, got); strings.Contains(red, authPlaceholder) {
+			t.Errorf("resolved-auth value not redacted: %s", red)
 		}
 	})
 

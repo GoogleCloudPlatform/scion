@@ -50,8 +50,13 @@ type HarnessConfigService interface {
 	// RequestUploadURLs requests signed URLs for uploading harness config files.
 	RequestUploadURLs(ctx context.Context, id string, files []FileUploadRequest) (*UploadResponse, error)
 
-	// Finalize finalizes a harness config after file upload.
-	Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest) (*HarnessConfig, error)
+	// Finalize finalizes a harness config after file upload. A non-empty
+	// sourceURL is recorded as the config's source URL; an empty one leaves
+	// the stored source URL unchanged. uploadID, when non-empty, is the
+	// UploadResponse.UploadID whose staged files the finalize commits; an
+	// empty one makes the Hub match staged files to the manifest by hash
+	// (ptone/scion#4219).
+	Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL, uploadID string) (*HarnessConfig, error)
 
 	// RequestDownloadURLs requests signed URLs for downloading harness config files.
 	RequestDownloadURLs(ctx context.Context, id string) (*DownloadResponse, error)
@@ -63,7 +68,10 @@ type HarnessConfigService interface {
 	DownloadFile(ctx context.Context, url string) ([]byte, error)
 
 	// UploadFilesMultipart uploads harness config files through the Hub API.
-	UploadFilesMultipart(ctx context.Context, id string, files []FileInfo) error
+	// files are entries collected from the directory root is opened at; the
+	// content sent for each is read with transfer.ReadCollectedFile, so only
+	// bytes matching the collected size and hash are uploaded.
+	UploadFilesMultipart(ctx context.Context, id string, root *os.Root, files []FileInfo) error
 
 	// ReadFile reads a harness config file through the Hub API.
 	ReadFile(ctx context.Context, id, filePath string) ([]byte, error)
@@ -108,7 +116,6 @@ type CreateHarnessConfigRequest struct {
 	Scope       string              `json:"scope"`
 	ScopeID     string              `json:"scopeId,omitempty"`
 	Config      *HarnessConfigData  `json:"config,omitempty"`
-	Visibility  string              `json:"visibility,omitempty"`
 	Files       []FileUploadRequest `json:"files,omitempty"`
 }
 
@@ -117,6 +124,9 @@ type CreateHarnessConfigResponse struct {
 	HarnessConfig *HarnessConfig  `json:"harnessConfig"`
 	UploadURLs    []UploadURLInfo `json:"uploadUrls,omitempty"`
 	ManifestURL   string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory the upload URLs write to; send
+	// it back in the finalize request (ptone/scion#4219).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // UpdateHarnessConfigRequest is the request for updating a harness config.
@@ -124,7 +134,6 @@ type UpdateHarnessConfigRequest struct {
 	Name        string `json:"name,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
 	Description string `json:"description,omitempty"`
-	Visibility  string `json:"visibility,omitempty"`
 }
 
 // HarnessConfigManifest is the manifest of uploaded harness config files.
@@ -137,6 +146,13 @@ type HarnessConfigManifest struct {
 // HarnessConfigFinalizeRequest is the request body for finalizing a harness config upload.
 type HarnessConfigFinalizeRequest struct {
 	Manifest *HarnessConfigManifest `json:"manifest"`
+	// SourceURL optionally records where the uploaded files came from. When
+	// empty, the Hub leaves the stored source URL unchanged.
+	SourceURL string `json:"sourceUrl,omitempty"`
+	// UploadID, when set, is the UploadResponse.UploadID whose staged files
+	// this finalize commits. Without it the Hub matches staged files to the
+	// manifest by hash (ptone/scion#4219).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // ReimportHarnessConfigRequest is the request body for reimporting a harness config.
@@ -191,7 +207,7 @@ func (s *harnessConfigService) List(ctx context.Context, opts *ListHarnessConfig
 		TotalCount     int             `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -207,11 +223,11 @@ func (s *harnessConfigService) List(ctx context.Context, opts *ListHarnessConfig
 
 // Get returns a single harness config by ID.
 func (s *harnessConfigService) Get(ctx context.Context, id string) (*HarnessConfig, error) {
-	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id, nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HarnessConfig](resp)
+	return apiclient.DecodeRequired[HarnessConfig](resp)
 }
 
 // Create creates a new harness config.
@@ -220,21 +236,21 @@ func (s *harnessConfigService) Create(ctx context.Context, req *CreateHarnessCon
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateHarnessConfigResponse](resp)
+	return apiclient.DecodeRequired[CreateHarnessConfigResponse](resp)
 }
 
 // Update updates a harness config.
 func (s *harnessConfigService) Update(ctx context.Context, id string, req *UpdateHarnessConfigRequest) (*HarnessConfig, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/harness-configs/"+id, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/harness-configs/"+url.PathEscape(id), req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HarnessConfig](resp)
+	return apiclient.DecodeRequired[HarnessConfig](resp)
 }
 
 // Delete removes a harness config.
 func (s *harnessConfigService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/harness-configs/"+id, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/harness-configs/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -248,32 +264,34 @@ func (s *harnessConfigService) RequestUploadURLs(ctx context.Context, id string,
 	}{
 		Files: files,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/upload", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/upload", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[UploadResponse](resp)
+	return apiclient.DecodeRequired[UploadResponse](resp)
 }
 
 // Finalize finalizes a harness config after file upload.
-func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest) (*HarnessConfig, error) {
+func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL, uploadID string) (*HarnessConfig, error) {
 	req := HarnessConfigFinalizeRequest{
-		Manifest: manifest,
+		Manifest:  manifest,
+		SourceURL: sourceURL,
+		UploadID:  uploadID,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HarnessConfig](resp)
+	return apiclient.DecodeRequired[HarnessConfig](resp)
 }
 
 // RequestDownloadURLs requests signed URLs for downloading harness config files.
 func (s *harnessConfigService) RequestDownloadURLs(ctx context.Context, id string) (*DownloadResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id+"/download", nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/download", nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[DownloadResponse](resp)
+	return apiclient.DecodeRequired[DownloadResponse](resp)
 }
 
 // UploadFile uploads a file to the given signed URL.
@@ -289,26 +307,20 @@ func (s *harnessConfigService) DownloadFile(ctx context.Context, signedURL strin
 }
 
 // UploadFilesMultipart uploads harness config files through the Hub API.
-func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id string, files []FileInfo) error {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	for _, file := range files {
-		if err := appendMultipartFile(writer, file); err != nil {
-			return err
-		}
-	}
-
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("finalize multipart body: %w", err)
+// Every file is read and verified before the request is sent, so a file
+// that changed after collection fails the upload with nothing sent.
+func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id string, root *os.Root, files []FileInfo) error {
+	body, contentType, err := buildMultipartBody(root, files)
+	if err != nil {
+		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.c.transport.BaseURL+"/api/v1/harness-configs/"+id+"/files", &body)
+		s.c.transport.BaseURL+"/api/v1/harness-configs/"+url.PathEscape(id)+"/files", body)
 	if err != nil {
 		return fmt.Errorf("create multipart upload request: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := s.c.transport.Do(ctx, req)
 	if err != nil {
@@ -319,13 +331,13 @@ func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id stri
 
 // ReadFile reads a harness config file through the Hub API.
 func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string) ([]byte, error) {
-	endpoint := "/api/v1/harness-configs/" + id + "/files/" + escapePathSegments(filePath)
+	endpoint := "/api/v1/harness-configs/" + url.PathEscape(id) + "/files/" + escapePathSegments(filePath)
 	resp, err := s.c.get(ctx, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := apiclient.DecodeResponse[harnessConfigFileContentResponse](resp)
+	result, err := apiclient.DecodeRequired[harnessConfigFileContentResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -335,20 +347,20 @@ func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string
 // Reimport re-imports a harness config from its stored source URL or an override.
 func (s *harnessConfigService) Reimport(ctx context.Context, id string, sourceURL string) (*ReimportHarnessConfigResponse, error) {
 	req := ReimportHarnessConfigRequest{SourceURL: sourceURL}
-	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/reimport", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/reimport", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ReimportHarnessConfigResponse](resp)
+	return apiclient.DecodeRequired[ReimportHarnessConfigResponse](resp)
 }
 
 // Validate checks storage consistency for a harness config.
 func (s *harnessConfigService) Validate(ctx context.Context, id string) (*ValidationReport, error) {
-	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id+"/validate", nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+url.PathEscape(id)+"/validate", nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ValidationReport](resp)
+	return apiclient.DecodeRequired[ValidationReport](resp)
 }
 
 func (s *harnessConfigService) getTransferClient() *transfer.Client {
@@ -358,23 +370,34 @@ func (s *harnessConfigService) getTransferClient() *transfer.Client {
 	return s.transferClient
 }
 
-func appendMultipartFile(writer *multipart.Writer, file FileInfo) (err error) {
-	src, err := os.Open(file.FullPath)
-	if err != nil {
-		return fmt.Errorf("open file for multipart upload: %w", err)
-	}
-	defer func() {
-		if closeErr := src.Close(); err == nil && closeErr != nil {
-			err = fmt.Errorf("close file for multipart upload: %w", closeErr)
+// buildMultipartBody returns a multipart body holding the verified content
+// of each collected file, read through root, and its content type.
+func buildMultipartBody(root *os.Root, files []FileInfo) (*bytes.Buffer, string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, file := range files {
+		if err := appendMultipartFile(writer, root, file); err != nil {
+			return nil, "", err
 		}
-	}()
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("finalize multipart body: %w", err)
+	}
+	return &body, writer.FormDataContentType(), nil
+}
+
+func appendMultipartFile(writer *multipart.Writer, root *os.Root, file FileInfo) error {
+	data, err := transfer.ReadCollectedFile(root, file)
+	if err != nil {
+		return fmt.Errorf("read file for multipart upload: %w", err)
+	}
 
 	part, err := writer.CreateFormFile(file.Path, path.Base(file.Path))
 	if err != nil {
 		return fmt.Errorf("create multipart form file: %w", err)
 	}
 
-	if _, err := io.Copy(part, src); err != nil {
+	if _, err := part.Write(data); err != nil {
 		return fmt.Errorf("copy file into multipart body: %w", err)
 	}
 

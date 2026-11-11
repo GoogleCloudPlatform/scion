@@ -5,18 +5,30 @@ Copyright 2025 The Scion Authors.
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
+
+// agentLimitsMaxBytes bounds readLimitsState's read. A legitimate
+// agent-limits.json is a handful of integer counters; 1 MiB is generous
+// headroom with no legitimate case anywhere near it.
+const agentLimitsMaxBytes = 1 << 20
 
 // ExitCodeLimitsExceeded is the exit code used when an agent is stopped due to
 // exceeding configured limits (max_turns, max_model_calls, or max_duration).
@@ -32,20 +44,27 @@ type LimitsState struct {
 }
 
 // LimitsHandler tracks turn and model call counts and enforces configured limits.
-// When a limit is exceeded, it updates the agent status, logs the event, reports
-// to the Hub, and sends SIGUSR1 to PID 1 (sciontool init) to initiate shutdown.
+// When a limit is exceeded, it updates the agent status, logs the event, and
+// signals sciontool init (trigger file, SIGUSR1 fallback) to initiate
+// shutdown. Init, not the hook, reports limits_exceeded to the Hub: init is
+// long-lived and not bound by the harness's hook timeout.
 type LimitsHandler struct {
 	maxTurns        int
 	maxModelCalls   int
 	limitsPath      string
 	triggerFilePath string
 	statusHandler   *StatusHandler
+	// hub reports the updated counts. nil means no Hub reporting.
+	hub *HubHandler
 }
 
 // NewLimitsHandler creates a new limits handler.
 // Reads SCION_MAX_TURNS and SCION_MAX_MODEL_CALLS from the environment.
+// Counts are reported through hubHandler, which may be nil (no Hub). Pass
+// the same HubHandler the hook dispatches to, so both share one client and
+// one budget.
 // Returns nil if no limits are configured.
-func NewLimitsHandler() *LimitsHandler {
+func NewLimitsHandler(hubHandler *HubHandler) *LimitsHandler {
 	maxTurns := ParseEnvInt("SCION_MAX_TURNS")
 	maxModelCalls := ParseEnvInt("SCION_MAX_MODEL_CALLS")
 
@@ -64,6 +83,7 @@ func NewLimitsHandler() *LimitsHandler {
 		limitsPath:      filepath.Join(home, "agent-limits.json"),
 		triggerFilePath: LimitsTriggerFile,
 		statusHandler:   NewStatusHandler(),
+		hub:             hubHandler,
 	}
 }
 
@@ -107,9 +127,15 @@ func (h *LimitsHandler) Handle(event *hooks.Event) error {
 	}
 }
 
-// InitLimitsFile creates or resets the agent-limits.json file.
-// Called during post-start to initialize counters (they reset on each start/resume).
-func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls int) error {
+// InitLimitsFile creates or resets the agent-limits.json file. Called
+// during post-start to initialize counters (they reset on each
+// start/resume). When uid > 0, the file is chowned to uid:gid (the scion
+// user hook processes run as) via an fchown on the temp file's open fd
+// before the rename, not a separate path-based chown afterwards — init
+// runs as root and calls this after sup.Run has already started the
+// workload, so a path-based chown at that point has a real race window
+// against a symlink swapped in at limitsPath.
+func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls, uid, gid int) error {
 	ls := LimitsState{
 		TurnCount:      0,
 		ModelCallCount: 0,
@@ -117,13 +143,13 @@ func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls int) error {
 		MaxModelCalls:  maxModelCalls,
 		StartedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	return writeLimitsState(limitsPath, &ls)
+	return writeLimitsState(limitsPath, &ls, uid, gid)
 }
 
 // incrementAndCheck reads the limits file, increments the given counter field,
 // checks if the limit is exceeded, and triggers shutdown if so.
 func (h *LimitsHandler) incrementAndCheck(counterField string, limit int, limitName string) error {
-	ls, err := h.readLimitsState()
+	ls, orig, err := h.readLimitsStateData()
 	if err != nil {
 		// If we can't read the file, log and continue - don't crash the hook pipeline
 		log.Error("Failed to read agent-limits.json: %v", err)
@@ -141,30 +167,41 @@ func (h *LimitsHandler) incrementAndCheck(counterField string, limit int, limitN
 		count = ls.ModelCallCount
 	}
 
-	// Write the updated state
-	if err := writeLimitsState(h.limitsPath, ls); err != nil {
+	// Write the updated state, keeping top-level keys of the file read
+	// above that LimitsState does not know (ptone/scion#4679). Skip chown
+	// (uid<=0): this runs from a hook process that already runs as the
+	// scion user, so the rewritten file keeps the ownership it's created
+	// with.
+	data, err := marshalLimitsStateKeepUnknown(orig, ls)
+	if err != nil {
+		log.Error("Failed to write agent-limits.json: %v", fmt.Errorf("marshaling limits state: %w", err))
+		return nil
+	}
+	if err := writeLimitsData(h.limitsPath, data, 0, 0); err != nil {
 		log.Error("Failed to write agent-limits.json: %v", err)
 		return nil
 	}
 
-	// Report updated counts to Hub
-	hubHandler := NewHubHandler()
-	if hubHandler != nil {
-		if err := hubHandler.ReportCounts(ls.TurnCount, ls.ModelCallCount); err != nil {
-			log.Error("Failed to report counts to Hub: %v", err)
-		}
-	}
-
-	// Check if the limit is exceeded
+	// Check if the limit is exceeded. The local actions come before any Hub
+	// call so that an unreachable Hub never delays the shutdown signal.
 	if count >= limit {
 		message := fmt.Sprintf("%s of %d exceeded (completed %d)", limitName, limit, count)
 		h.triggerLimitsExceeded(message)
 	}
 
+	// Report updated counts to Hub
+	if h.hub != nil {
+		if err := h.hub.ReportCounts(ls.TurnCount, ls.ModelCallCount); err != nil {
+			log.Error("Failed to report counts to Hub: %v", err)
+		}
+	}
+
 	return nil
 }
 
-// triggerLimitsExceeded updates status, logs the event, and signals PID 1.
+// triggerLimitsExceeded updates status, logs the event, and signals init.
+// It makes no Hub call: init reports limits_exceeded to the Hub when it sees
+// the signal (reportHookLimitsExceeded in cmd/sciontool/commands/init.go).
 func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 	// 1. Update agent-info.json to LIMITS_EXCEEDED (sticky)
 	if err := h.statusHandler.UpdateActivity(state.ActivityLimitsExceeded, ""); err != nil {
@@ -174,70 +211,228 @@ func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 	// 2. Log the event
 	log.TaggedInfo("LIMITS_EXCEEDED", "Agent stopped: %s", message)
 
-	// 3. Report to Hub if configured
-	hubHandler := NewHubHandler()
-	if hubHandler != nil {
-		if err := hubHandler.ReportLimitsExceeded(message); err != nil {
-			log.Error("Failed to report limits_exceeded to Hub: %v", err)
-		}
-	}
-
-	// 4. Signal init process to initiate shutdown (trigger file + SIGUSR1 fallback)
-	if err := h.signalLimitsExceeded(); err != nil {
+	// 3. Signal init process to initiate shutdown (trigger file + SIGUSR1 fallback)
+	if err := h.signalLimitsExceeded(message); err != nil {
 		log.Error("Failed to signal limits exceeded: %v", err)
 	}
 }
 
 // readLimitsState reads the agent-limits.json file.
+//
+// LimitsHandler is only ever constructed inside the dropped `sciontool
+// hook` subprocess today, so this read is not currently a privilege-
+// boundary crossing — but its sibling writeLimitsState is already
+// fd-based and no-follow, and a future caller that moves this into root's
+// own context should not silently inherit an unhardened read just because
+// this one predates that hardening. dirfd.ReadFileNoFollow gives it the
+// same symlink/FIFO/oversize refusals as every other root-context state
+// read in this codebase, at no behavioral cost to the current dropped
+// caller.
 func (h *LimitsHandler) readLimitsState() (*LimitsState, error) {
-	data, err := os.ReadFile(h.limitsPath)
+	ls, _, err := h.readLimitsStateData()
+	return ls, err
+}
+
+// readLimitsStateData is readLimitsState that also returns the raw bytes
+// read, for marshalLimitsStateKeepUnknown.
+func (h *LimitsHandler) readLimitsStateData() (*LimitsState, []byte, error) {
+	data, err := dirfd.ReadFileNoFollow(h.limitsPath, agentLimitsMaxBytes)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", h.limitsPath, err)
+		return nil, nil, fmt.Errorf("reading %s: %w", h.limitsPath, err)
 	}
 	var ls LimitsState
 	if err := json.Unmarshal(data, &ls); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", h.limitsPath, err)
+		return nil, nil, fmt.Errorf("parsing %s: %w", h.limitsPath, err)
 	}
-	return &ls, nil
+	return &ls, data, nil
 }
 
-// writeLimitsState writes the limits state to disk atomically.
-func writeLimitsState(path string, ls *LimitsState) error {
+// marshalLimitsStateKeepUnknown encodes ls for a read-modify-write of
+// agent-limits.json whose previous content was orig, keeping every
+// top-level key of orig that LimitsState does not know (ptone/scion#4679),
+// so a key another or newer writer added is not dropped on each update.
+//
+// The known keys are encoded exactly as json.MarshalIndent(ls, "", "  ")
+// encodes them. When orig has no unknown keys, or is not a JSON object
+// (missing, empty, null, corrupt), the result is byte-for-byte
+// json.MarshalIndent(ls, "", "  "). Otherwise the unknown keys follow the
+// known ones in sorted order. Only their values keep their original bytes
+// (re-indented, not re-escaped); their keys are re-encoded with
+// json.Marshal. A key that matches a known name case-insensitively counts as
+// known, since json.Unmarshal already read it into the struct. If the
+// re-indented result would exceed agentLimitsMaxBytes, which every later
+// read would refuse (and limits would stop being enforced), the unknown keys
+// are dropped with a log line and the plain encoding is returned instead.
+func marshalLimitsStateKeepUnknown(orig []byte, ls *LimitsState) ([]byte, error) {
+	plain, err := json.MarshalIndent(ls, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(orig, &raw); err != nil || len(raw) == 0 {
+		return plain, nil
+	}
+	var unknown []string
+	for k := range raw {
+		if !isKnownLimitsStateKey(k) {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return plain, nil
+	}
+	sort.Strings(unknown)
+
+	compact, err := json.Marshal(ls)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	buf.Write(compact[:len(compact)-1]) // drop the closing '}'
+	needComma := len(compact) > 2       // "{}" has no fields
+	for _, k := range unknown {
+		key, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		if needComma {
+			buf.WriteByte(',')
+		}
+		needComma = true
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(raw[k])
+	}
+	buf.WriteByte('}')
+
+	var out bytes.Buffer
+	if err := json.Indent(&out, buf.Bytes(), "", "  "); err != nil {
+		return nil, err
+	}
+	if out.Len() > agentLimitsMaxBytes {
+		log.Error("agent-limits.json with %d unknown keys would be %d bytes, over the %d byte read cap; dropping the unknown keys", len(unknown), out.Len(), agentLimitsMaxBytes)
+		return plain, nil
+	}
+	return out.Bytes(), nil
+}
+
+// limitsStateKnownKeys are the JSON keys of LimitsState's fields.
+var limitsStateKnownKeys = func() []string {
+	t := reflect.TypeOf(LimitsState{})
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "-" || !f.IsExported() {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		names = append(names, name)
+	}
+	return names
+}()
+
+// isKnownLimitsStateKey reports whether json.Unmarshal into LimitsState
+// would read key into a field (field names match case-insensitively).
+func isKnownLimitsStateKey(key string) bool {
+	for _, k := range limitsStateKnownKeys {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeLimitsState writes the limits state to disk atomically. When uid > 0,
+// the file is chowned to uid:gid by fchown on the temp file's open fd
+// before the rename, never by a separate path-based chown afterwards that a
+// symlink swapped in at path could redirect to an arbitrary file.
+// chownLimitsStateFn is writeLimitsState's own fd-based chown hook —
+// defaults to syscall.Fchown, overridable only by this package's own tests
+// (mirroring pkg/sciontool/hub's fchownFn) so a test can observe exactly
+// when the chown fires relative to the rename that publishes the new
+// content at path, without needing real root to chown to an arbitrary uid.
+var chownLimitsStateFn = syscall.Fchown
+
+// writeLimitsState marshals ls and installs it at path the same fd-based,
+// no-follow way every other atomic write into a workload-owned directory in
+// this codebase does: this can run as root (InitLimitsFile's own caller,
+// RunInit, calls it before privilege drop) against a path under agentHome,
+// which the workload owns outright and can replace any entry in — a plain
+// path-based os.Rename would follow a symlink planted at path to an
+// arbitrary target, so this instead goes through dirfd.
+// WriteFileNoFollowWithChown's fd-based temp-file-then-rename sequence,
+// whose fd-based Chown happens strictly before the rename that publishes
+// the new content at path, never after.
+func writeLimitsState(path string, ls *LimitsState, uid, gid int) error {
 	data, err := json.MarshalIndent(ls, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling limits state: %w", err)
 	}
+	return writeLimitsData(path, data, uid, gid)
+}
 
-	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, "agent-limits-*.json")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
+// writeLimitsData installs already-encoded limits state at path, as
+// writeLimitsState describes.
+func writeLimitsData(path string, data []byte, uid, gid int) error {
+	// ReplaceLeaf, not RefuseSymlink: path lives inside agentHome, which the
+	// workload owns outright, so whatever currently sits at the leaf is a
+	// stale entry this install means to overwrite, not tamper to refuse.
+	if err := dirfd.WriteFileNoFollowWithChown(path, data, 0600, uid, gid, dirfd.ReplaceLeaf, chownLimitsStateFn); err != nil {
+		return fmt.Errorf("writing limits state: %w", err)
 	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("writing temp file: %w", err)
-	}
-	_ = tmpFile.Close()
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("atomic rename: %w", err)
-	}
-
 	return nil
 }
 
 // LimitsTriggerFile is the well-known path for the limits-exceeded trigger file.
-// When a hook handler detects a limit is exceeded, it creates this file.
-// The init process watches for it to initiate shutdown.
+// When a hook handler detects a limit is exceeded, it creates this file with
+// the limit message as its content. The init process watches for it to
+// initiate shutdown and reports the message to the Hub (see
+// ReadLimitsTriggerMessage).
 const LimitsTriggerFile = "/tmp/scion-limits-exceeded"
 
+// limitsTriggerMaxBytes bounds ReadLimitsTriggerMessage's read. The hook
+// writes a one-line message well under this.
+const limitsTriggerMaxBytes = 1024
+
+// limitsTriggerMessageMaxLen bounds the message ReadLimitsTriggerMessage
+// returns, matching the Hub status message length the hook used to send.
+const limitsTriggerMessageMaxLen = 200
+
+// DefaultLimitsExceededMessage is the message used when the trigger file
+// carries no usable message (absent, empty, refused, or an older hook that
+// wrote a fixed marker).
+const DefaultLimitsExceededMessage = "limits exceeded"
+
+// ReadLimitsTriggerMessage returns the limit message a hook wrote to the
+// trigger file at path, for init to report to the Hub. Init runs as root and
+// the file lives in world-writable /tmp, so the read refuses symlinks, FIFOs
+// and oversize files, and the content is reduced to printable characters
+// and truncated. It never fails: anything unusable yields
+// DefaultLimitsExceededMessage.
+func ReadLimitsTriggerMessage(path string) string {
+	data, err := dirfd.ReadFileNoFollow(path, limitsTriggerMaxBytes)
+	if err != nil {
+		return DefaultLimitsExceededMessage
+	}
+	msg := strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			return -1
+		}
+		return r
+	}, string(data)))
+	if msg == "" || msg == "exceeded" {
+		return DefaultLimitsExceededMessage
+	}
+	return truncateMessage(msg, limitsTriggerMessageMaxLen)
+}
+
 // signalLimitsExceeded notifies PID 1 that a limit has been exceeded.
-// It writes a trigger file and also attempts SIGUSR1 as a fallback.
-func (h *LimitsHandler) signalLimitsExceeded() error {
+// It writes a trigger file holding message and also attempts SIGUSR1 as a
+// fallback.
+func (h *LimitsHandler) signalLimitsExceeded(message string) error {
 	triggerPath := h.triggerFilePath
 	if triggerPath == "" {
 		triggerPath = LimitsTriggerFile
@@ -245,23 +440,30 @@ func (h *LimitsHandler) signalLimitsExceeded() error {
 	// Primary mechanism: create a trigger file that init watches for.
 	// This works regardless of UID differences between the hook process
 	// and PID 1 (init runs as root, hooks run as the scion user).
-	if err := os.WriteFile(triggerPath, []byte("exceeded"), 0666); err != nil {
+	if err := os.WriteFile(triggerPath, []byte(message), 0666); err != nil {
 		log.Error("Failed to write limits trigger file: %v", err)
 	}
 
 	// Fallback: send SIGUSR1 to PID 1. This may fail with EPERM when the
 	// hook process runs as a non-root user and PID 1 runs as root.
-	p, err := os.FindProcess(1)
-	if err != nil {
-		return fmt.Errorf("finding PID 1: %w", err)
-	}
-	if err := p.Signal(syscall.SIGUSR1); err != nil {
+	if err := signalInitFn(syscall.SIGUSR1); err != nil {
 		// Expected to fail when running as non-root; the trigger file
 		// is the reliable mechanism.
 		log.Debug("SIGUSR1 to PID 1 failed (expected if non-root): %v", err)
 		return nil
 	}
 	return nil
+}
+
+// signalInitFn sends sig to PID 1 (sciontool init). Tests replace it so a
+// test run as root inside an agent container can never signal that
+// container's own init.
+var signalInitFn = func(sig syscall.Signal) error {
+	p, err := os.FindProcess(1)
+	if err != nil {
+		return fmt.Errorf("finding PID 1: %w", err)
+	}
+	return p.Signal(sig)
 }
 
 // ParseEnvInt reads an integer from an environment variable. Returns 0 if unset or invalid.

@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -43,17 +45,21 @@ type UserInviteResponse struct {
 	Created   time.Time `json:"created"`
 }
 
-// UserInviteBulkRequest is the JSON request body for bulk invite.
+// UserInviteBulkRequest is the JSON request body for bulk invite. The
+// handler decodes the body strictly (decodeInviteBatchJSON); this type is
+// the shape callers in Go build. A role-like top-level field (role, roles,
+// hubRole, hubRoles) is refused with 422, except that an explicit null is
+// read as absent.
 type UserInviteBulkRequest struct {
-	Emails []UserInviteRequest `json:"emails"`
+	Emails   []UserInviteRequest     `json:"emails"`
+	Projects []UserInviteBulkProject `json:"projects,omitempty"`
 }
 
-// UserInviteBulkResponse is the response body for POST /api/v1/admin/users/invite/bulk.
-type UserInviteBulkResponse struct {
-	Invited int      `json:"invited"`
-	Skipped int      `json:"skipped"`
-	Total   int      `json:"total"`
-	Errors  []string `json:"errors"`
+// UserInviteBulkProject is one projects[] entry of a bulk invite: the
+// project roles every created or already invited address receives.
+type UserInviteBulkProject struct {
+	ProjectID         string   `json:"projectId"`
+	RoleDefinitionIDs []string `json:"roleDefinitionIds"`
 }
 
 // --- Handlers ---
@@ -63,7 +69,7 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -73,21 +79,14 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := strings.TrimSpace(strings.ToLower(req.Email))
-	if _, err := mail.ParseAddress(email); err != nil || email == "" {
+	email, err := NormalizeInviteEmail(req.Email)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "valid email is required", nil)
 		return
 	}
-
-	// Check if user already exists
-	_, err := s.store.GetUserByEmail(r.Context(), email)
-	if err == nil {
-		writeError(w, http.StatusConflict, ErrCodeConflict, "user already exists", nil)
-		return
-	}
-	if err != store.ErrNotFound {
-		slog.Error("failed to check existing user", "email", email, "error", err)
-		InternalError(w)
+	if s.proxyDrivers.contains(email) {
+		logProxyDriverCreateRefusal("invite", user.ID(), email)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, proxyDriverPrincipalUserMessage, nil)
 		return
 	}
 
@@ -97,22 +96,24 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 		note = &req.Note
 	}
 
-	newUser := &store.User{
-		ID:         uuid.New().String(),
-		Email:      email,
-		Status:     store.UserStatusInvited,
-		Role:       store.UserRoleMember,
-		InvitedBy:  &invitedBy,
-		InviteNote: note,
-	}
-
-	if err := s.store.CreateUser(r.Context(), newUser); err != nil {
-		if err == store.ErrAlreadyExists {
+	newUser, outcome, err := createPendingUserTx(r.Context(), s.store, PendingUserSpec{
+		Email:     email,
+		Note:      note,
+		InvitedBy: invitedBy,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, "user already exists", nil)
 			return
 		}
 		slog.Error("failed to create invited user", "email", email, "error", err)
 		InternalError(w)
+		return
+	}
+	// Invite reports every existing record the same way, whatever its
+	// state (design §5.2): one undifferentiated 409.
+	if outcome != PendingCreated {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "user already exists", nil)
 		return
 	}
 
@@ -133,139 +134,269 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAdminUserInviteBulk handles POST /api/v1/admin/users/invite/bulk.
-// Accepts JSON or CSV (multipart/form-data) input.
+// handleAdminUserInviteBulk handles POST /api/v1/admin/users/invite/bulk
+// (batch invite, ptone/scion#4952). It accepts a strict
+// JSON body, or a CSV file (multipart/form-data) without projects, and
+// answers with one result per input entry. See admin_user_invite_batch.go.
 func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	actor := GetUserIdentityFromContext(r.Context())
+	if actor == nil {
+		Unauthorized(w)
 		return
 	}
 
-	contentType := r.Header.Get("Content-Type")
-
-	var emails []UserInviteRequest
-
-	if strings.HasPrefix(contentType, "multipart/form-data") {
-		// CSV file upload — reuse the parseCSVEmails helper from admin_allow_list.go
-		if err := r.ParseMultipartForm(2 << 20); err != nil { // 2MB max
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to parse multipart form", nil)
-			return
-		}
-
-		file, _, err := r.FormFile("file")
-		if err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "file field is required", nil)
-			return
-		}
-		defer func() { _ = file.Close() }()
-
-		parsed, err := parseCSVEmails(file)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
-			return
-		}
-		// Convert AllowListAddRequest to UserInviteRequest
-		for _, p := range parsed {
-			emails = append(emails, UserInviteRequest(p))
-		}
+	// Decode and request-level validation: no writes, no audit.
+	var req *inviteBatchRequest
+	var rerr *inviteBatchRequestError
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		req, rerr = decodeInviteBatchMultipart(w, r)
 	} else {
-		// JSON body
-		var req UserInviteBulkRequest
-		if err := readJSON(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		req, rerr = decodeInviteBatchJSON(r)
+	}
+	if rerr != nil {
+		rerr.write(w)
+		return
+	}
+
+	ctx := r.Context()
+	batchID := uuid.New().String()
+
+	// Detail authority (the provision rule): user.read at hub scope, once.
+	// It selects the view of existing rows, and below it decides whether
+	// project memberships may be requested at all.
+	detail := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(actor),
+		Credential: credentialContextForIdentity(actor),
+		Resource:   hubScopedResource("user", "hub"),
+		Action:     ActionRead,
+		Permission: "user.read",
+	}).Allowed
+
+	if len(req.projects) > 0 && !detail {
+		// Project memberships need user.read. Without it existing rows are
+		// shown as "exists", but their membership results (applied or
+		// already_member for an invited row, skipped for an active or
+		// suspended one) would still tell those states apart. So the
+		// whole request is refused before any write, in the shape of a
+		// preflight refusal, with its one audit record.
+		refusals := make([]InviteBatchProjectRefusal, len(req.projects))
+		for i, p := range req.projects {
+			refusals[i] = InviteBatchProjectRefusal{Index: i, ProjectID: p.ProjectID, Reason: inviteBatchReasonUserReadRequired}
+		}
+		s.refuseInviteBatch(ctx, w, actor, batchID, len(req.entries), refusals)
+		return
+	}
+
+	if len(req.projects) > 0 {
+		if s.membershipService == nil {
+			slog.ErrorContext(ctx, "bulk invite: membership service not configured", "batch_id", batchID)
+			InternalError(w)
 			return
 		}
-		emails = req.Emails
+		// Preflight: may only REFUSE the whole request before any write.
+		// A pass here is NOT permission. Every authoritative check, including
+		// the in-lock recheck, runs again inside SetMemberRoles for each
+		// address. Do not skip, cache or weaken any SetMemberRoles check
+		// because this preflight passed, and do not treat its result as a
+		// grant decision anywhere else.
+		refusals, err := s.inviteBatchPreflight(ctx, actor, req.projects)
+		if err != nil {
+			slog.ErrorContext(ctx, "bulk invite: project preflight failed", "batch_id", batchID, "error", err)
+			InternalError(w)
+			return
+		}
+		if len(refusals) > 0 {
+			s.refuseInviteBatch(ctx, w, actor, batchID, len(req.entries), refusals)
+			return
+		}
 	}
 
-	if len(emails) == 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "no emails provided", nil)
-		return
+	addrs := s.validateInviteBatchAddresses(actor.ID(), req.entries)
+
+	// The apply steps and their side effects are not cut short by a client
+	// disconnect, but are bounded by the run deadline.
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), inviteBulkRunTimeout)
+	defer cancel()
+	var members inviteBatchMemberSetter
+	if s.membershipService != nil {
+		members = s.membershipService
 	}
+	run := s.runInviteBatch(runCtx, actor, batchID, addrs, req.projects, members, detail)
 
-	if len(emails) > 1000 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "maximum 1000 emails per bulk invite", nil)
-		return
+	// Post-run side effects run on a context without the run deadline, so
+	// a run that used all of it still records its audit.
+	postCtx := context.WithoutCancel(ctx)
+	for _, projectID := range run.changedProjects {
+		s.publishConduitAuthzChanged(conduitAuthzMatch{ProjectID: projectID})
 	}
-
-	invitedBy := user.ID()
-	var invited, skipped int
-	var errMsgs []string
-
-	for _, e := range emails {
-		email := strings.TrimSpace(strings.ToLower(e.Email))
-		if _, err := mail.ParseAddress(email); err != nil || email == "" {
-			continue // skip invalid emails
-		}
-
-		// Check if user already exists
-		_, err := s.store.GetUserByEmail(r.Context(), email)
-		if err == nil {
-			skipped++
-			continue
-		}
-		if err != store.ErrNotFound {
-			slog.Error("bulk invite: failed to check existing user", "email", email, "error", err)
-			errMsgs = append(errMsgs, fmt.Sprintf("failed to process %s", email))
-			continue
-		}
-
-		var note *string
-		if e.Note != "" {
-			note = &e.Note
-		}
-
-		newUser := &store.User{
-			ID:         uuid.New().String(),
-			Email:      email,
-			Status:     store.UserStatusInvited,
-			Role:       store.UserRoleMember,
-			InvitedBy:  &invitedBy,
-			InviteNote: note,
-		}
-
-		if err := s.store.CreateUser(r.Context(), newUser); err != nil {
-			if err == store.ErrAlreadyExists {
-				skipped++
-				continue
-			}
-			slog.Error("bulk invite: failed to create user", "email", email, "error", err)
-			errMsgs = append(errMsgs, fmt.Sprintf("failed to process %s", email))
-			continue
-		}
-
-		invited++
-	}
-
-	slog.Info("bulk user invite",
-		"invited", invited,
-		"skipped", skipped,
-		"total", invited+skipped+len(errMsgs),
-		"errors", len(errMsgs),
-		"invited_by", user.Email(),
+	complete := run.counts.Failed == 0 && run.counts.MembershipFailed == 0
+	slog.InfoContext(postCtx, "bulk user invite",
+		"batch_id", batchID,
+		"created", run.counts.Created,
+		"failed", run.counts.Failed,
+		"membership_failed", run.counts.MembershipFailed,
+		"total", len(req.entries),
+		"invited_by", actor.Email(),
 	)
-
-	if logger := s.auditLogger; logger != nil {
-		event := &InviteAuditEvent{
-			EventType:  InviteAuditUserInvitedBulk,
-			ActorID:    user.ID(),
-			ActorEmail: user.Email(),
-			Success:    true,
-			Count:      invited,
-			Timestamp:  time.Now(),
-			Details:    map[string]string{"skipped": fmt.Sprintf("%d", skipped)},
-		}
-		_ = logger.LogInviteAuditEvent(r.Context(), event)
+	s.logInviteBatchRun(postCtx, actor, batchID, req.projects, run, complete)
+	if run.counts.Created > 0 && s.events != nil {
+		s.events.PublishAllowListChanged(postCtx, "bulk_invited", "")
 	}
 
-	s.events.PublishAllowListChanged(r.Context(), "bulk_invited", "")
-
+	c := run.counts
 	writeJSON(w, http.StatusOK, UserInviteBulkResponse{
-		Invited: invited,
-		Skipped: skipped,
-		Total:   invited + skipped + len(errMsgs),
-		Errors:  errMsgs,
+		BatchID:  batchID,
+		Invited:  c.Created,
+		Skipped:  c.AlreadyInvited + c.AlreadyActive + c.Suspended + c.Exists,
+		Total:    len(req.entries),
+		Complete: complete,
+		Counts:   c,
+		Results:  run.results,
 	})
+}
+
+// --- Shared pending-user creation core ---
+
+// errInvalidInviteEmail is returned by NormalizeInviteEmail for an email
+// the invite rule rejects.
+var errInvalidInviteEmail = errors.New("valid email is required")
+
+// NormalizeInviteEmail is the one email rule of every pending-user entry
+// point: single invite, bulk invite and POST /api/v1/users. It trims and
+// lowercases raw, and accepts the result when it is non-empty and
+// mail.ParseAddress accepts it.
+//
+// mail.ParseAddress also accepts RFC 5322 display-name forms such as
+// "Bob <bob@x.com>", and the whole lowercased string is then the stored
+// email. Every entry point keeps that behaviour, so they stay at parity;
+// tightening it would change all of them together.
+func NormalizeInviteEmail(raw string) (string, error) {
+	email := strings.TrimSpace(strings.ToLower(raw))
+	if email == "" {
+		return "", errInvalidInviteEmail
+	}
+	if _, err := mail.ParseAddress(email); err != nil {
+		return "", errInvalidInviteEmail
+	}
+	// The reserved test-identity domain is created only by the issuance
+	// endpoint, never through an invite.
+	if isReservedTestIdentityEmail(email) {
+		return "", errInvalidInviteEmail
+	}
+	return email, nil
+}
+
+// PendingUserSpec describes the pending (invited) user record a
+// pending-user entry point asks createPendingUserTx to create.
+type PendingUserSpec struct {
+	// Email is the requested email. It is normalized with
+	// NormalizeInviteEmail inside the core.
+	Email string
+	// DisplayName is the profile name to store; invite passes "".
+	DisplayName string
+	// Note is the admin note, stored as InviteNote. A nil Note and a Note
+	// pointing to "" both store NULL.
+	Note *string
+	// InvitedBy is the human user ID of the actor.
+	InvitedBy string
+}
+
+// PendingOutcome is the result of a pending-user creation attempt.
+type PendingOutcome int
+
+const (
+	// PendingCreated: a new invited record was inserted.
+	PendingCreated PendingOutcome = iota
+	// PendingExistingIdentical: an invited record exists whose display
+	// name and note equal the normalized request.
+	PendingExistingIdentical
+	// PendingExistingDifferent: an invited record exists with a different
+	// display name or note.
+	PendingExistingDifferent
+	// PendingExistingActive: an active user has the email.
+	PendingExistingActive
+	// PendingExistingSuspended: a suspended user has the email.
+	PendingExistingSuspended
+)
+
+// normalizedNote returns note with "" mapped to nil, the stored form.
+func normalizedNote(note *string) *string {
+	if note == nil || *note == "" {
+		return nil
+	}
+	return note
+}
+
+// classifyExistingPendingUser classifies an existing user record against
+// spec. It never writes.
+func classifyExistingPendingUser(existing *store.User, spec PendingUserSpec) PendingOutcome {
+	switch existing.Status {
+	case store.UserStatusSuspended:
+		return PendingExistingSuspended
+	case store.UserStatusInvited:
+		want := normalizedNote(spec.Note)
+		got := normalizedNote(existing.InviteNote)
+		sameNote := (want == nil && got == nil) || (want != nil && got != nil && *want == *got)
+		if sameNote && existing.DisplayName == spec.DisplayName {
+			return PendingExistingIdentical
+		}
+		return PendingExistingDifferent
+	default:
+		// active, and any status this core does not know, is never
+		// treated as pending.
+		return PendingExistingActive
+	}
+}
+
+// lookupPendingUser reads the user with spec's (normalized) email and
+// classifies it. It returns store.ErrNotFound when there is none.
+func lookupPendingUser(ctx context.Context, st store.Store, email string, spec PendingUserSpec) (*store.User, PendingOutcome, error) {
+	existing, err := st.GetUserByEmail(ctx, email)
+	if err != nil {
+		return nil, 0, err
+	}
+	return existing, classifyExistingPendingUser(existing, spec), nil
+}
+
+// createPendingUserTx looks up spec's normalized email in st and, when no
+// user has it, creates an invited record (placeholder role member; the
+// real role is assigned at first sign-in, see determineUserRole). st may
+// be a transaction. It never modifies an existing record: an existing
+// user is returned with its classification and a nil error.
+//
+// A concurrent insert that wins the unique-index race surfaces as
+// store.ErrAlreadyExists from CreateUser; the caller re-reads and
+// classifies (inside a transaction that error aborts the transaction).
+func createPendingUserTx(ctx context.Context, st store.Store, spec PendingUserSpec) (*store.User, PendingOutcome, error) {
+	email, err := NormalizeInviteEmail(spec.Email)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	existing, outcome, err := lookupPendingUser(ctx, st, email, spec)
+	if err == nil {
+		return existing, outcome, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, 0, fmt.Errorf("check existing user: %w", err)
+	}
+
+	invitedBy := spec.InvitedBy
+	newUser := &store.User{
+		ID:          uuid.New().String(),
+		Email:       email,
+		DisplayName: spec.DisplayName,
+		Status:      store.UserStatusInvited,
+		Role:        store.UserRoleMember, // placeholder; the real role is assigned at first sign-in (see determineUserRole)
+		InvitedBy:   &invitedBy,
+		InviteNote:  normalizedNote(spec.Note),
+	}
+	if err := st.CreateUser(ctx, newUser); err != nil {
+		return nil, 0, err
+	}
+	return newUser, PendingCreated, nil
 }

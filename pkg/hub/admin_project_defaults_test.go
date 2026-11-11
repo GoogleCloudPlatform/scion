@@ -41,11 +41,6 @@ func newAdminProjectDefaultsServer(t *testing.T, store *fakeHubSettingStore) *Se
 	return srv
 }
 
-func adminContext(r *http.Request) *http.Request {
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	return r.WithContext(contextWithIdentity(r.Context(), admin))
-}
-
 func nonAdminContext(r *http.Request) *http.Request {
 	user := NewAuthenticatedUser("u2", "user@example.com", "User", "member", "cli")
 	return r.WithContext(contextWithIdentity(r.Context(), user))

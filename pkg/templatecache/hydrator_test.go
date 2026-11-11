@@ -50,10 +50,6 @@ func (m *mockTemplateService) Create(ctx context.Context, req *hubclient.CreateT
 	return nil, nil
 }
 
-func (m *mockTemplateService) Update(ctx context.Context, templateID string, req *hubclient.UpdateTemplateRequest) (*hubclient.Template, error) {
-	return nil, nil
-}
-
 func (m *mockTemplateService) Delete(ctx context.Context, templateID string) error {
 	return nil
 }
@@ -62,11 +58,15 @@ func (m *mockTemplateService) Clone(ctx context.Context, templateID string, req 
 	return nil, nil
 }
 
+func (m *mockTemplateService) Reimport(ctx context.Context, templateID string, sourceURL string) (*hubclient.ReimportTemplateResponse, error) {
+	return nil, nil
+}
+
 func (m *mockTemplateService) RequestUploadURLs(ctx context.Context, templateID string, files []hubclient.FileUploadRequest) (*hubclient.UploadResponse, error) {
 	return nil, nil
 }
 
-func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest) (*hubclient.Template, error) {
+func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest, expectedContentHash, uploadID string) (*hubclient.Template, error) {
 	return nil, nil
 }
 
@@ -118,7 +118,9 @@ func (m *mockHubClient) Schedules(projectID string) hubclient.ScheduleService   
 func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService           { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService                               { return nil }
 func (m *mockHubClient) Messaging() hubclient.MessagingService                            { return nil }
+func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService                    { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                     { return nil }
+func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                       { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                            { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                                 { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                                   { return nil }
@@ -130,11 +132,23 @@ func (m *mockHubClient) UserInjectedSkills() hubclient.InjectedSkillsService { r
 func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
 	return nil
 }
+func (m *mockHubClient) ProjectVisitors(projectID string) hubclient.ProjectVisitorService {
+	return nil
+}
 func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
+func (m *mockHubClient) Artifacts() hubclient.ArtifactService               { return nil }
+func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
+func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
+	return nil
+}
+func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
+	return nil, nil
+}
+func (m *mockHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummary, error) {
 	return nil, nil
 }
 
@@ -205,12 +219,12 @@ func TestHydrateWithHash(t *testing.T) {
 	// Pre-populate cache
 	files := map[string][]byte{"test.txt": []byte("cached content")}
 	contentHash := "known-hash"
-	cachedPath, err := cache.Put(contentHash, files)
+	cachedPath, err := cache.Put(downloadedEntryKey(files, nil), files)
 	if err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
 
-	// Create hydrator with mock that returns the current hash —
+	// Create hydrator with mock that returns the current manifest —
 	// HydrateWithHash always verifies with the hub to prevent stale cache hits.
 	getCalled := false
 	templateSvc := &mockTemplateService{
@@ -218,7 +232,8 @@ func TestHydrateWithHash(t *testing.T) {
 			getCalled = true
 			return &hubclient.Template{
 				ID:          "tmpl-999",
-				ContentHash: contentHash, // Hub confirms hash is current.
+				ContentHash: contentHash, // Hub confirms the files are current.
+				Files:       []hubclient.TemplateFile{{Path: "test.txt", Hash: transfer.HashBytes(files["test.txt"])}},
 			}, nil
 		},
 	}
@@ -421,8 +436,8 @@ func TestPrefetchTemplate(t *testing.T) {
 		t.Errorf("Expected 1 Get call, got %d", callCount)
 	}
 
-	// Verify it's cached
-	path, ok := cache.Get("prefetch-hash")
+	// Verify it's cached, under the key of the downloaded files.
+	path, ok := cache.Get(downloadedEntryKey(map[string][]byte{"test.txt": []byte("prefetch content")}, nil))
 	if !ok {
 		t.Error("Template should be cached after prefetch")
 	}
@@ -463,5 +478,75 @@ func TestHydrateHashMismatch(t *testing.T) {
 	_, err = hydrator.Hydrate(context.Background(), "tmpl-hash-mismatch")
 	if err == nil {
 		t.Error("Hydrate() should error on hash mismatch")
+	}
+}
+
+// TestHydrate_CachesUnderDownloadContentHash covers the cache-key race of
+// ptone/scion#4221: the metadata read says version H1, but a commit lands
+// before the download URLs are signed, so the files are version H2. The
+// files must be cached under the key of the files downloaded, not H1, or a
+// later H1 lookup would serve H2's files. For a hub that records v2
+// (ptone/scion#5658) that key is H2, the hash the download response names.
+func TestHydrate_CachesUnderDownloadContentHash(t *testing.T) {
+	cache, err := New(t.TempDir(), DefaultMaxSize)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	v2 := []byte("harness: gemini\n")
+	h1 := transfer.HashBytes([]byte("version one"))
+	h2 := transfer.ComputeContentHashV2([]transfer.FileInfo{{Path: "scion-agent.yaml", Hash: transfer.HashBytes(v2)}})
+
+	templateSvc := &mockTemplateService{
+		getFunc: func(ctx context.Context, templateID string) (*hubclient.Template, error) {
+			return &hubclient.Template{ID: "tmpl-race", Name: "race", ContentHash: h1}, nil
+		},
+		requestDownloadURLs: func(ctx context.Context, templateID string) (*hubclient.DownloadResponse, error) {
+			return &hubclient.DownloadResponse{
+				Files:       []hubclient.DownloadURLInfo{{Path: "scion-agent.yaml", URL: "u2", Hash: transfer.HashBytes(v2)}},
+				ContentHash: h2,
+			}, nil
+		},
+		downloadFileFunc: func(ctx context.Context, url string) ([]byte, error) { return v2, nil },
+	}
+	hydrator := NewHydrator(cache, &mockHubClient{templates: templateSvc})
+	if _, err := hydrator.Hydrate(context.Background(), "race"); err != nil {
+		t.Fatalf("Hydrate() error = %v", err)
+	}
+	if _, ok := cache.Get(h1); ok {
+		t.Errorf("version-two files were cached under the metadata hash %s", h1)
+	}
+	if _, ok := cache.Get(h2); !ok {
+		t.Errorf("files not cached under the key of the downloaded files %s", h2)
+	}
+}
+
+// TestHydrate_IgnoresMalformedDownloadContentHash: a content hash the hub
+// sends is never used as a cache directory name; the files are cached under
+// the key the broker computes from them.
+func TestHydrate_IgnoresMalformedDownloadContentHash(t *testing.T) {
+	cache, err := New(t.TempDir(), DefaultMaxSize)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	data := []byte("x")
+	h1 := transfer.ComputeContentHashV2([]transfer.FileInfo{{Path: "a", Hash: transfer.HashBytes(data)}})
+	templateSvc := &mockTemplateService{
+		getFunc: func(ctx context.Context, templateID string) (*hubclient.Template, error) {
+			return &hubclient.Template{ID: "tmpl-bad", Name: "bad", ContentHash: h1}, nil
+		},
+		requestDownloadURLs: func(ctx context.Context, templateID string) (*hubclient.DownloadResponse, error) {
+			return &hubclient.DownloadResponse{
+				Files:       []hubclient.DownloadURLInfo{{Path: "a", URL: "u", Hash: transfer.HashBytes(data)}},
+				ContentHash: "../../escape",
+			}, nil
+		},
+		downloadFileFunc: func(ctx context.Context, url string) ([]byte, error) { return data, nil },
+	}
+	hydrator := NewHydrator(cache, &mockHubClient{templates: templateSvc})
+	if _, err := hydrator.Hydrate(context.Background(), "bad"); err != nil {
+		t.Fatalf("Hydrate() error = %v", err)
+	}
+	if _, ok := cache.Get(h1); !ok {
+		t.Errorf("files not cached under the key of the downloaded files %s", h1)
 	}
 }

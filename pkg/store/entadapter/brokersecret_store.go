@@ -16,11 +16,17 @@ package entadapter
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
+
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -186,11 +192,12 @@ func (s *BrokerSecretStore) DeleteBrokerSecret(ctx context.Context, brokerID str
 // entJoinTokenToStore converts an Ent BrokerJoinToken to a store model.
 func entJoinTokenToStore(t *ent.BrokerJoinToken) *store.BrokerJoinToken {
 	return &store.BrokerJoinToken{
-		BrokerID:  t.ID.String(),
-		TokenHash: t.TokenHash,
-		ExpiresAt: t.ExpiresAt,
-		CreatedAt: t.Created,
-		CreatedBy: t.CreatedBy,
+		BrokerID:   t.ID.String(),
+		TokenHash:  t.TokenHash,
+		ExpiresAt:  t.ExpiresAt,
+		CreatedAt:  t.Created,
+		CreatedBy:  t.CreatedBy,
+		IssuanceID: t.IssuanceID,
 	}
 }
 
@@ -207,16 +214,168 @@ func (s *BrokerSecretStore) CreateJoinToken(ctx context.Context, token *store.Br
 	if token.CreatedAt.IsZero() {
 		token.CreatedAt = time.Now()
 	}
+	if err := shapeJoinToken(ctx, s.client, token); err != nil {
+		return err
+	}
 
 	create := s.client.BrokerJoinToken.Create().
 		SetID(uid).
 		SetTokenHash(token.TokenHash).
 		SetExpiresAt(token.ExpiresAt).
 		SetCreatedBy(token.CreatedBy).
-		SetCreated(token.CreatedAt)
+		SetCreated(token.CreatedAt).
+		SetNillableIssuanceID(token.IssuanceID)
 
 	if _, err := create.Save(ctx); err != nil {
 		return mapError(err)
+	}
+	return nil
+}
+
+// UpsertJoinToken stores a join token for token.BrokerID, replacing any
+// existing token for that broker. The existence check and the upsert run in
+// one transaction (the caller's, when called inside store.WithTx). The
+// upsert itself is a single INSERT ... ON CONFLICT (broker_id) DO UPDATE, so
+// concurrent calls for the same broker never fail on the primary key.
+func (s *BrokerSecretStore) UpsertJoinToken(ctx context.Context, token *store.BrokerJoinToken) (bool, error) {
+	if token.BrokerID == "" || token.TokenHash == "" {
+		return false, store.ErrInvalidInput
+	}
+	uid, err := parseUUID(token.BrokerID)
+	if err != nil {
+		return false, err
+	}
+	if token.CreatedAt.IsZero() {
+		token.CreatedAt = time.Now()
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return false, err
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return upsertJoinToken(ctx, s.client, uid, token)
+	}
+	replaced, err := upsertJoinToken(ctx, tx.Client(), uid, token)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("broker secret store: commit UpsertJoinToken: %w", err)
+	}
+	return replaced, nil
+}
+
+// shapeJoinToken applies grant shaping (admin tier A3) to a join token
+// about to be stored: minted by an admin-kind test identity, it expires no
+// later than the identity and carries its issuance ID; any other token
+// carries no issuance ID.
+func shapeJoinToken(ctx context.Context, client *ent.Client, token *store.BrokerJoinToken) error {
+	shaping, err := grantShapingFor(ctx, client, token.CreatedBy)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		token.ExpiresAt = *shaping.ClampExpiry(&token.ExpiresAt)
+	}
+	token.IssuanceID = issuanceStamp(shaping)
+	return nil
+}
+
+func upsertJoinToken(ctx context.Context, client *ent.Client, uid uuid.UUID, token *store.BrokerJoinToken) (bool, error) {
+	if err := shapeJoinToken(ctx, client, token); err != nil {
+		return false, err
+	}
+	existing, err := client.BrokerJoinToken.Query().
+		Where(brokerjointoken.IDEQ(uid)).
+		Only(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return false, mapError(err)
+	}
+	replaced := existing != nil
+	// issuance_id is Immutable (admin tier A3): the upsert below never
+	// writes it. A re-mint whose stamp differs from the stored row's
+	// removes that row first, so the token inserted carries its own stamp.
+	if existing != nil && !sameIssuanceStamp(existing.IssuanceID, token.IssuanceID) {
+		if err := client.BrokerJoinToken.DeleteOneID(uid).Exec(ctx); err != nil && !ent.IsNotFound(err) {
+			return false, mapError(err)
+		}
+	}
+	// The conflict update replaces every column except issuance_id,
+	// including created and created_by, so a re-minted token records its
+	// own mint time and minter.
+	err = client.BrokerJoinToken.Create().
+		SetID(uid).
+		SetTokenHash(token.TokenHash).
+		SetExpiresAt(token.ExpiresAt).
+		SetCreatedBy(token.CreatedBy).
+		SetCreated(token.CreatedAt).
+		SetNillableIssuanceID(token.IssuanceID).
+		OnConflict(
+			entsql.ConflictColumns(brokerjointoken.FieldID),
+			entsql.ResolveWith(func(u *entsql.UpdateSet) {
+				u.SetExcluded(brokerjointoken.FieldTokenHash)
+				u.SetExcluded(brokerjointoken.FieldExpiresAt)
+				u.SetExcluded(brokerjointoken.FieldCreatedBy)
+				u.SetExcluded(brokerjointoken.FieldCreated)
+			}),
+		).
+		Exec(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return replaced, nil
+}
+
+// ConsumeJoinToken deletes the join token with tokenHash if it belongs to
+// brokerID and expires after now. The check and the delete are one DELETE
+// statement, so of several concurrent callers only one deletes the row: on
+// Postgres a second DELETE waits on the row lock and then matches nothing,
+// and SQLite serializes writers.
+func (s *BrokerSecretStore) ConsumeJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error {
+	if tokenHash == "" {
+		return store.ErrNotFound
+	}
+	uid, err := parseUUID(brokerID)
+	if err != nil {
+		// No token can belong to a broker ID that is not a UUID.
+		return store.ErrNotFound
+	}
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(
+			brokerjointoken.TokenHashEQ(tokenHash),
+			brokerjointoken.IDEQ(uid),
+			brokerjointoken.ExpiresAtGT(now),
+		).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// DeleteExpiredJoinToken deletes the join token with tokenHash if it has
+// expired at now, in one DELETE statement.
+func (s *BrokerSecretStore) DeleteExpiredJoinToken(ctx context.Context, tokenHash string, now time.Time) error {
+	if tokenHash == "" {
+		return store.ErrNotFound
+	}
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(
+			brokerjointoken.TokenHashEQ(tokenHash),
+			brokerjointoken.ExpiresAtLTE(now),
+		).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
 	}
 	return nil
 }
@@ -257,10 +416,77 @@ func (s *BrokerSecretStore) DeleteJoinToken(ctx context.Context, brokerID string
 	return nil
 }
 
-// CleanExpiredJoinTokens removes all expired join tokens.
-func (s *BrokerSecretStore) CleanExpiredJoinTokens(ctx context.Context) error {
-	_, err := s.client.BrokerJoinToken.Delete().
-		Where(brokerjointoken.ExpiresAtLT(time.Now())).
+// DeleteOrphanBrokerCredentials removes every broker_secrets and
+// broker_join_tokens row whose broker ID has no runtime_brokers row (neither
+// table has an FK to it), in one transaction (the caller's, when called
+// inside store.WithTx), and returns how many of each it removed.
+func (s *BrokerSecretStore) DeleteOrphanBrokerCredentials(ctx context.Context) (int, int, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return 0, 0, err
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return deleteOrphanBrokerCredentials(ctx, s.client)
+	}
+	// The transaction is rolled back on every path that does not commit,
+	// including a panic inside deleteOrphanBrokerCredentials.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	secrets, tokens, err := deleteOrphanBrokerCredentials(ctx, tx.Client())
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("broker secret store: commit DeleteOrphanBrokerCredentials: %w", err)
+	}
+	committed = true
+	return secrets, tokens, nil
+}
+
+// noRuntimeBrokerRow matches a row whose column col (the broker ID) is not
+// the ID of any runtime_brokers row. runtime_brokers.id is a non-null
+// primary key, so NOT IN has no NULL case.
+func noRuntimeBrokerRow(col string) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.NotIn(s.C(col),
+			entsql.Select(runtimebroker.FieldID).From(entsql.Table(runtimebroker.Table))))
+	}
+}
+
+func deleteOrphanBrokerCredentials(ctx context.Context, client *ent.Client) (int, int, error) {
+	secrets, err := client.BrokerSecret.Delete().Where(noRuntimeBrokerRow(brokersecret.FieldID)).Exec(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("delete orphan broker secrets: %w", mapError(err))
+	}
+	tokens, err := client.BrokerJoinToken.Delete().Where(noRuntimeBrokerRow(brokerjointoken.FieldID)).Exec(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("delete orphan broker join tokens: %w", mapError(err))
+	}
+	return secrets, tokens, nil
+}
+
+// CleanExpiredJoinTokens removes all expired join tokens and returns how
+// many were removed.
+func (s *BrokerSecretStore) CleanExpiredJoinTokens(ctx context.Context) (int, error) {
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(brokerjointoken.ExpiresAtLTE(time.Now())).
 		Exec(ctx)
-	return err
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// sameIssuanceStamp reports whether two issuance stamps are equal (both
+// nil, or the same ID).
+func sameIssuanceStamp(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }

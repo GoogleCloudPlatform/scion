@@ -1,0 +1,104 @@
+package agent
+
+import (
+	"fmt"
+	"log/slog"
+	"sort"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+)
+
+// Hub env authority for broker-mode starts.
+//
+// For an agent started through the broker API (opts.BrokerMode, which today
+// means hub-dispatched), some env keys may come only from the hub: the hub
+// sends them in opts.Env when it resolves a value, and the broker never fills
+// them from its own layers. Without this rule a broker-local layer could keep
+// supplying a value the hub no longer reports, such as a TZ persisted in
+// scion-agent.json after the hub was told to unpin it.
+//
+// The broker-local layers that are skipped:
+//   - the config layer (finalScionCfg.Env: the persisted scion-agent.json,
+//     broker-local templates and the harness-config directory env), in
+//     buildAgentEnv;
+//   - the broker settings' harness-config entry env, in resolveAuthEnvOverlay.
+//
+// Nothing on disk is modified: finalScionCfg is not mutated and
+// scion-agent.json is not scrubbed, so the rule is reversible and a local
+// (non-broker) start still sees the on-disk value. Solo mode is unaffected.
+
+// Layer names reported for a dropped broker-local value.
+const (
+	envLayerConfig             = "config"
+	envLayerHarnessConfigEntry = "harness-config entry"
+)
+
+// IsHubOnlyEnvKey reports whether key may be supplied only by the hub for a
+// hub-dispatched agent. The broker never treats such a key as a required
+// (gathered) env key.
+//
+// The key set lives in pkg/config (config.IsHubOnlyEnvKey), which also
+// classifies hub-only keys as reserved in templates (ptone/scion#4524).
+func IsHubOnlyEnvKey(key string) bool {
+	return config.IsHubOnlyEnvKey(key)
+}
+
+// skipBrokerLocalEnvKey reports whether key must be skipped from broker-local layers
+// for a start in the given mode.
+func skipBrokerLocalEnvKey(brokerMode bool, key string) bool {
+	return brokerMode && IsHubOnlyEnvKey(key)
+}
+
+// droppedBrokerEnv records a broker-local value that was skipped because only
+// the hub may supply its key.
+type droppedBrokerEnv struct {
+	Key   string
+	Value string
+	Layer string
+}
+
+func sortDroppedBrokerEnv(dropped []droppedBrokerEnv) {
+	sort.Slice(dropped, func(i, j int) bool {
+		if dropped[i].Layer != dropped[j].Layer {
+			return dropped[i].Layer < dropped[j].Layer
+		}
+		return dropped[i].Key < dropped[j].Key
+	})
+}
+
+// warnDroppedBrokerEnv logs each dropped non-empty value at warn level and
+// returns matching start warnings. An empty value is a "no value" marker, so
+// dropping it changes nothing worth reporting. A value equal to what the hub
+// supplied in hubEnv is not reported either: the container gets that value
+// anyway.
+func warnDroppedBrokerEnv(agentID string, hubEnv map[string]string, dropped []droppedBrokerEnv) []string {
+	var warnings []string
+	for _, d := range dropped {
+		if d.Value == "" {
+			continue
+		}
+		hubValue, hubSet := hubEnv[d.Key]
+		if hubSet && hubValue == d.Value {
+			continue
+		}
+		// The key name only, never the value: a dropped value can be a URL or
+		// another setting that must not be echoed into logs or warnings.
+		slog.Warn("agent start: ignoring broker-local env value; only the hub supplies this key for hub-dispatched agents",
+			"agent_id", agentID, "key", d.Key, "layer", d.Layer, "hub_supplied", hubSet && hubValue != "")
+		warnings = append(warnings, fmt.Sprintf(
+			"Warning: ignoring %s from the broker %s layer for agent %s: only the hub supplies %s for hub-dispatched agents (%s)",
+			d.Key, d.Layer, agentID, d.Key, hubOnlyKeyGuidance(d.Key)))
+	}
+	return warnings
+}
+
+// hubOnlyKeyGuidance names the supported hub-side setting for a hub-only key.
+func hubOnlyKeyGuidance(key string) string {
+	switch key {
+	case api.EnvGitTokenRemote, "SCION_GIT_CLONE_URL":
+		return "it comes from the project's git settings on the hub"
+	default:
+		return "set it as a hub environment variable instead"
+	}
+}

@@ -25,7 +25,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -595,27 +596,6 @@ export class ScionPageAdminRoles extends LitElement {
       .join(' ');
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) return rtf.format(-diffSeconds, 'second');
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Form management
   // ---------------------------------------------------------------------------
@@ -1004,7 +984,7 @@ export class ScionPageAdminRoles extends LitElement {
           </span>
         </td>
         <td class="hide-mobile">
-          <span class="perm-count">${this.formatRelativeTime(role.updatedAt)}</span>
+          <span class="perm-count">${formatRelative(role.updatedAt)}</span>
         </td>
         <td class="hide-mobile">
           ${role.system
@@ -1078,7 +1058,7 @@ export class ScionPageAdminRoles extends LitElement {
         <div class="form-group">
           <sl-input
             label="Name"
-            placeholder="e.g., project-viewer"
+            placeholder="e.g., project-agent-reader"
             .value=${this.formName}
             @sl-input=${(e: Event) => {
               this.formName = (e.target as HTMLInputElement).value;
@@ -1237,6 +1217,7 @@ export class ScionPageAdminRoles extends LitElement {
     const results = this.importResults!;
     const hasErrors = results.errors.filter((e) => e.status === 'error').length > 0;
 
+    // prettier-ignore
     return html`
       <div class="import-results">
         <sl-alert variant=${hasErrors ? 'warning' : 'success'} open>

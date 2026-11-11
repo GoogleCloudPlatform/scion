@@ -28,7 +28,12 @@ five modes:
 
 The default mode is **`project`**, which preserves pre-mode behavior: any
 project member with the `agent.message` permission can message any agent.
-No tightening occurs until someone explicitly sets a non-default mode.
+No tightening occurs until someone explicitly sets a non-default mode. A
+soft-deleted agent (`deletedAt` set) cannot receive messages in any mode and
+returns the same `404` as an unknown target. A suspended (held) agent also
+refuses every message send in any mode (`409 agent_not_running`) before any wake,
+store write, or Runtime Broker dispatch; see
+[Agent Suspension](/scion/reference/agent-suspension/#seeing-suspended-agents).
 
 ### Key principles
 
@@ -65,12 +70,14 @@ for delivery to succeed.
 | Agent outbound reach | Agent `messageMode` set to `hub` | `project` | Existing managers, subject to the [grant guard](#hub-mode-grant-guard) below |
 | Receiving project | `crossProjectInbound` on the destination project | `none` | Active direct project owner or local, unscoped Hub administrator |
 
+`cross_project_messaging_enabled` also decides whether artifacts can be shared with, or moved to, another project (see [Grants](/scion/reference/artifacts/#grants)). Turning it off stops new cross-project artifact grants and moves; it does not revoke grants that already exist, which have to be removed one by one.
+
 The **receiving project's inbound policy** is directional:
 
 | Policy | Meaning |
 |--------|---------|
 | `none` | Accept no agent messages from other projects. |
-| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project. |
+| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project (any active project role binding, built-in or custom). |
 | `any` | Accept an eligible agent from any project on this Hub. |
 
 All policies require the external **sender** to use `hub` mode. The
@@ -149,15 +156,38 @@ delivery. All gates must pass:
 
 | Gate | Check | Denial code |
 |------|-------|-------------|
-| Hub enabled | `cross_project_messaging_enabled` is `true` | `cross_project_disabled` |
+| Hub switch on | `cross_project_messaging_enabled` is `true` | `cross_project_disabled` |
 | Sender mode | Sender must be `hub` | `cross_project_sender_mode` |
 | Target mode | Target must be `project` or `hub` | `cross_project_target_mode` |
 | Inbound policy | Destination project's `crossProjectInbound` permits sender | `cross_project_inbound_none` |
 | Origin trust | Sender's Hub-attested ancestry is valid | `cross_project_untrusted_origin` |
-| Membership (if `members`) | Origin human is an active member of destination project | `cross_project_origin_not_member` |
+| Membership (if `members`) | Origin human holds active membership in destination project beyond `project-viewer` | `cross_project_origin_not_member` |
 
 A `project`-mode sender cannot send cross-project messages, even to reply
 in an existing cross-project DM.
+
+### Agents in Group Conversations
+
+A group conversation has no single recipient, so the sender's mode alone
+decides agent posts to it. `project` and `hub` agents may post to any group
+conversation in their project, and posting to a conversation by ID adds them
+as participants. `lineage` and `branch` agents may post only to a group
+conversation they already belong to, and only a human allowed to message
+them (an ancestry user, a project owner, or a super-admin) can add them.
+`none` agents never post to group conversations, and agents or other users
+cannot add them. A refused post or add returns 403 `message_denied`.
+
+Group conversations can hold agent participant rows written before these
+rules. The optional `group-participant-mode-cleanup` maintenance migration
+marks as left the active agent rows in group conversations whose agent is
+in `none`, `lineage` or `branch` mode (or an unrecognized mode), or is
+deleted or missing. Older rows do not record who added them, so `lineage`
+and `branch` rows a human added are removed as well. Only `lineage` and
+`branch` agents can be added back this way, by a human allowed to message
+them: `scion conversation join conv:<conversation-id> agent <agent-id>`; a
+`none` mode agent cannot. The migration only reports
+until it is run with `{"params":{"apply":"true"}}` (`apply` must be the
+string `"true"`; a boolean `true` is ignored).
 
 ### System to Agent
 
@@ -210,13 +240,29 @@ is evaluated on the **human principal at delivery time**.
   (U → owner's agent → restricted agent). Evaluated on the human principal,
   never on on-behalf-of markers.
 
+- **Active project access for ancestry.** The ancestry allow requires the
+  user's current access to the agent's project: a project role binding
+  (direct or through a group) or system authority that covers the agent.
+  A user whose last project binding was removed or has expired is not
+  allowed through ancestry, for full sessions and User Access Tokens alike.
+
 - **UAT caveat.** For User Access Tokens, piercing applies only when the
   token also carries the `agent:message` scope. A narrow-scoped token held
   by a project owner does not pierce.
 
 - **`none` is sealed.** Only super-admin can reach `none`-mode agents on the
-  message plane. Project owners and lineage users retain `attach`/PTY access
-  (mode governs only the message plane), but cannot deliver messages.
+  message plane. The agent's creator, users in its ancestry chain, and
+  anyone else holding `agent.attach` on it directly keep `attach`/PTY access
+  and the keys operation (`POST /:id/keys`; mode governs only the message
+  plane), but cannot deliver messages. **Project owners and admins do not
+  get this through their role** — `agent.attach` is explicitly excluded
+  from what those roles grant (see
+  [Permissions & Policy](/scion/hosted/ha/permissions/#access-control--authorization)) —
+  so a project owner who is not the agent's creator or in its ancestry
+  chain is sealed out of `none`-mode agents the same as anyone else without
+  a direct grant. The `scion keys` CLI uses the keys operation,
+  so the `none`-mode seal does not apply to it. Raw delivery through the
+  message API has been removed (see [Retired raw field](#retired-raw-field)).
 
 ---
 
@@ -250,8 +296,9 @@ This is a quarantine kill-switch independent of the agent's role.
 - Delivery to a newly-quarantined agent fails closed. The sender receives a
   system-plane notice about the delivery failure.
 - **Super-admin** can still reach quarantined agents.
-- **Attach/PTY** remains available to holders of `agent.attach`. Mode governs
-  only the message plane.
+- **Attach/PTY, and the keys operation (`POST /:id/keys`),** remain available
+  to holders of `agent.attach`. Mode governs only the message plane. This
+  includes the `scion keys` CLI, which uses the keys operation.
 - **System-plane** messages (scheduled events, lifecycle notifications)
   continue to be delivered.
 
@@ -330,7 +377,7 @@ This means a `project`-mode recipient can list and read its incoming
 cross-project DM even though it cannot reply. A hub-to-project downgrade
 alone does not close reads if the reverse hub-to-project edge still exists.
 
-**Hub disable** closes all cross-project agent history/list/resolve/stream
+**Turning the Hub switch off** (`cross_project_messaging_enabled: false`) closes all cross-project agent history/list/resolve/stream
 access. Stored messages and authorized human audit views are retained.
 
 **Project policy changes** govern new incoming content. Previously accepted
@@ -355,6 +402,36 @@ machine-readable denial code:
 
 Denial codes are returned in the `MessageDecision.Code` field and in API
 error responses. The UI maps these codes to user-visible explanations.
+
+---
+
+## Retired raw field
+
+Raw delivery (the former `raw` flag on the message API, which sent literal
+keystrokes to an agent's terminal) has been removed. Use `scion keys` or
+`POST /:id/keys` instead; that operation is authorized like `agent.attach`,
+not by message mode. The `scion message --raw` flag has also been removed: it
+fails before sending anything, with guidance naming `scion keys`.
+
+A request that still carries `raw` is rejected with `422 raw_input_removed`
+before any side effect: no authorization-dependent delivery, persistence,
+fan-out, wake, event, or sender resolution. Both spellings and every value
+(`true`, `false`, `null`, a wrong type, or a malformed value) are rejected.
+
+| Route | Field checked |
+|------|---------|
+| `POST /api/v1/agents/:id/message` and the project-scoped equivalent | `raw`, `structured_message.raw` |
+| `POST /api/v1/projects/:projectId/broadcast` | `raw`, `structured_message.raw` |
+| `POST /api/v1/broker/inbound`, `POST /api/v1/broker/inbound/routed` (Message Broker plugins) | `raw`, `message.raw` |
+| Scheduled events and recurring schedules (advanced `payload` JSON) | `raw` |
+
+The error message names `scion keys`; `details` carries `operation_id`,
+`ingress`, and `replacement`. The former bridge codes
+(`raw_combination_unsupported`) and `unsupported_capability` reasons
+(`raw_plain_conflict`, `raw_broadcast_unsupported`,
+`raw_scheduling_unsupported`, `raw_broker_ingress_unsupported`) are no longer
+returned. See [API Reference](/scion/reference/api/#agents-apiv1agents) and
+[Migrating from raw message delivery](/scion/reference/raw-message-removal/).
 
 ---
 
@@ -578,7 +655,7 @@ For more on the permission model, see the
 | Action | `set_message_mode` |
 | Capability Kind | Resource (per-agent) |
 | Description | Change agent message mode |
-| UAT Scope | _(none)_ |
+| UAT Scope | `agent:set_message_mode` |
 | Agent Scopes | `project:agent:set_message_mode` |
 | Default Role | Project owner only (explicitly excluded from project admin) |
 
@@ -587,12 +664,42 @@ This permission is intentionally restricted:
 - **Agent scope** (`project:agent:set_message_mode`) is granted to full-role
   agents only. Full-role agents can change message mode for any agent within
   the same project. Agents with lesser roles cannot hold this scope.
-- **No UAT scope** because bearer tokens cannot unseal agents.
+- **UAT scope** (`agent:set_message_mode`): a user access token changes message
+  mode only with this scope selected, only for an agent inside the token's
+  boundary, and only when its holder may change the mode with a session: the
+  project-admin exclusion and the lineage-owner rule apply to the token too.
+  Granting `hub` mode with a token, whether by setting it, by a cascade to
+  descendants, or when creating an agent, needs a hub-bound token. A
+  project-bound token is refused when it sets or creates `hub` mode, and in a
+  cascade a descendant that would newly receive `hub` keeps its mode. The
+  scope is not part of `agent:manage`.
 - **Excluded from project admin** because folding mode changes into the admin
   role would let admins unseal `none`-mode agents, breaking the quarantine
   boundary.
 - **Distinct from `agent.update`** because project admins hold `agent.update`;
   if mode changes were folded into update, admins could unseal agents.
+
+### project.chat_post
+
+| Field | Value |
+|-------|-------|
+| Permission ID | `project.chat_post` |
+| Resource | `project` |
+| Action | `chat_post` |
+| Capability Kind | Resource (per-project) |
+| Description | Post messages into the project's chat threads |
+| UAT Scope | `project:chat_post` |
+| Default Role | Project member, project admin, project owner, hub admin, super-admin |
+
+Posting in a project space's thread (`POST /api/v1/chat/conversations/{id}/messages` on a `space` conversation) and promoting an agent DM into a project space (`POST /api/v1/chat/conversations/{id}/promote`) require `project.chat_post` on the project, while reading project threads uses `project.read`:
+
+- **Default project roles** (`member`, `admin`, `owner`) and hub administrators hold `project.chat_post`. Custom project roles are not backfilled on upgrade, so a read-only custom role keeps read access (`canPost: false` on `GET /api/v1/chat/conversations/{id}/messages`) until an administrator adds `project.chat_post` to that role.
+- **Refused posts and promotions** return `403 chat_post_denied`.
+- `project.chat_post` is checked on thread posts, scheduled thread sends and DM promotion only. Thread create; thread rename, default-agent change and delete; project attachment upload; message edit and delete; and thread posts sent through the agent message endpoint (`POST /api/v1/agents/{id}/message` with a thread key) keep their own checks and do not require `project.chat_post`.
+- **User access tokens (UATs):** posting in a project thread with a UAT requires the `inbox:write` token scope, and the Hub checks `project.chat_post` on the token holder's account. The `project:chat_post` UAT scope keeps `project.chat_post` in the token's effective project permissions so a token with `project:manage` can grant roles that include it.
+- **Scheduled chat sends:** a scheduled send in a project thread (`/api/v1/chat/conversations/{id}/scheduled`) needs `project.chat_post` when it is created and is checked again when it fires: if its sender can no longer post, it is marked `failed` with `no_access`.
+
+See [Chat posting](/scion/hosted/ha/permissions/#chat-posting).
 
 ---
 
@@ -616,7 +723,7 @@ ratified by the project sponsor. Key decisions:
 | D11 | Hub mode: project cell + cross-project DMs; recipient may be project or hub mode |
 | D12 | Hub mode grant: agent caller must be full-role and already hub-mode (non-escalation) |
 | D13 | Cross-project DMs only in first release; group expansion must remain possible |
-| D14 | Hub disable blocks cross-project sends and agent history access; retains records |
+| D14 | Turning the Hub switch off blocks cross-project sends and agent history access; retains records |
 
 ---
 
@@ -628,7 +735,7 @@ For full CLI documentation, see the [CLI Reference](/scion/reference/cli/).
 
 Sets the initial message mode when creating an agent. Overrides template
 and parent inheritance. Valid modes: `none`, `lineage`, `branch`, `project`,
-`hub`. Hub-only (ignored in local mode).
+`hub`.
 
 ### `scion create --message-mode <mode>`
 
@@ -702,7 +809,7 @@ These administration commands are human-only and unavailable in agent mode.
    designated sender into `hub` mode. Demonstrate DM delivery and denied
    reply, then grant the recipient `hub` mode and demonstrate the allowed
    reverse edge.
-4. Verify membership removal and Hub disable against a queued message.
+4. Verify membership removal and turning the Hub switch off against a queued message.
 5. Keep default settings unchanged for all other projects/agents.
 
 ### Rollback

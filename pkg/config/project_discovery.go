@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // ProjectType indicates the kind of project.
@@ -36,21 +38,40 @@ type ProjectStatus string
 const (
 	ProjectStatusOK       ProjectStatus = "ok"
 	ProjectStatusOrphaned ProjectStatus = "orphaned"
+	// ProjectStatusUnverified marks a git project config with no agents and
+	// no recorded workspace path: nothing shows that it is still in use, and
+	// nothing shows that it is not. It is never pruned.
+	ProjectStatusUnverified ProjectStatus = "unverified"
 )
+
+// statusWithoutEvidence is the status shown for a git project config that
+// has no agents and no recorded workspace path. Such a config is never
+// pruned, whatever this status is (see ProjectInfo.unverified).
+const statusWithoutEvidence = ProjectStatusUnverified
 
 // ProjectInfo describes a discovered project.
 type ProjectInfo struct {
 	Name          string        `json:"name"`
 	ProjectID     string        `json:"project_id,omitempty"`
-	GroveID       string        `json:"grove_id,omitempty"`
 	Type          ProjectType   `json:"type"`
 	ConfigPath    string        `json:"config_path"`
 	WorkspacePath string        `json:"workspace_path,omitempty"`
 	Status        ProjectStatus `json:"status"`
 	AgentCount    int           `json:"agent_count"`
+	// HubProjectID is the hub project UUID of a project linked to a hub
+	// (hub.projectId in its settings), or "". It is not part of the JSON
+	// shape of the machine-local project list.
+	HubProjectID string `json:"-"`
+	// HubEndpoint is the normalised hub endpoint a linked project's
+	// settings resolve to (its own settings over the global ones), or "".
+	HubEndpoint string `json:"-"`
 	// agentsPath overrides the default agents directory derivation.
 	// Used for legacy git projects where agents are a sibling of .scion/.
 	agentsPath string
+	// unverified is set when there is no evidence either way about whether
+	// the project config is still in use. FindOrphanedProjectConfigs never
+	// returns such a project.
+	unverified bool
 }
 
 // AgentsDir returns the path to the agents directory for this project.
@@ -62,8 +83,8 @@ func (g ProjectInfo) AgentsDir() string {
 }
 
 // DiscoverProjects scans for all known projects on this machine.
-// It checks the global project, then scans ~/.scion/project-configs/ and
-// the legacy ~/.scion/grove-configs/ for external and git project configs.
+// It checks the global project, then scans ~/.scion/project-configs/ for
+// external and git project configs.
 func DiscoverProjects() ([]ProjectInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -72,6 +93,7 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 
 	var projects []ProjectInfo
 	seenSlugs := make(map[string]bool)
+	globalHubProjectID := ""
 
 	// 1. Global project
 	globalDir := filepath.Join(home, GlobalDir)
@@ -85,21 +107,43 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 		pi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
 			pi.ProjectID = settings.ProjectID
-			pi.GroveID = settings.ProjectID
+			pi.setHubLink(settings)
+			globalHubProjectID = pi.HubProjectID
 		}
 		projects = append(projects, pi)
 		seenSlugs["global"] = true
 	}
 
-	// 2. Scan project-configs directory (preferred)
+	// 2. Scan project-configs directory
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
 	projects = scanConfigDir(projects, projectConfigsDir, seenSlugs)
 
-	// 3. Scan legacy grove-configs directory
-	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
-	projects = scanConfigDir(projects, legacyConfigsDir, seenSlugs)
+	// A project's merged settings carry the global hub.projectId when the
+	// project sets none of its own; that is the global project's link, not
+	// this project's.
+	if globalHubProjectID != "" {
+		for i := range projects {
+			if projects[i].Type != ProjectTypeGlobal && projects[i].HubProjectID == globalHubProjectID {
+				projects[i].HubProjectID, projects[i].HubEndpoint = "", ""
+			}
+		}
+	}
 
 	return projects, nil
+}
+
+// setHubLink records the hub project a project's settings link it to. A
+// project with no hub.projectId, or with hub.linked explicitly false, is not
+// linked.
+func (g *ProjectInfo) setHubLink(s *Settings) {
+	if s == nil || s.Hub == nil || s.Hub.ProjectID == "" {
+		return
+	}
+	if s.Hub.Linked != nil && !*s.Hub.Linked {
+		return
+	}
+	g.HubProjectID = s.Hub.ProjectID
+	g.HubEndpoint = NormalizeEndpoint(s.Hub.Endpoint)
 }
 
 // scanConfigDir is a helper for DiscoverProjects to scan a directory for project configs.
@@ -138,7 +182,7 @@ func scanConfigDir(projects []ProjectInfo, configDir string, seenSlugs map[strin
 			if vs, vsErr := LoadVersionedSettings(configPath); vsErr == nil && vs != nil && vs.ProjectType == string(ProjectTypeShadow) {
 				agentsDir := filepath.Join(configPath, "agents")
 				pi = projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug)
-			} else if settings, err := LoadSettings(configPath); err == nil && settings.WorkspacePath != "" {
+			} else if settings, err := LoadSettings(configPath); err == nil && settings.WorkspacePath != "" && !isGitProjectConfig(configPath, settings.WorkspacePath) {
 				pi = projectInfoFromExternal(configPath, dirName, slug)
 			} else {
 				agentsDir := filepath.Join(configPath, "agents")
@@ -176,15 +220,15 @@ func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
 	settings, err := LoadSettings(configPath)
 	if err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
 		pi.WorkspacePath = settings.WorkspacePath
+		pi.setHubLink(settings)
 	}
 
 	pi.AgentCount = countAgents(filepath.Join(configPath, "agents"))
 
 	// Check if workspace still exists and has a valid marker pointing back here
 	if pi.WorkspacePath != "" {
-		if !isValidWorkspace(pi.WorkspacePath, pi.ProjectID, configPath) {
+		if !isValidWorkspace(pi.WorkspacePath, pi.ProjectID, configPath) || isScionDirWorkspace(pi.WorkspacePath) {
 			pi.Status = ProjectStatusOrphaned
 		}
 	} else {
@@ -211,7 +255,10 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		if vs.ProjectType == string(ProjectTypeShadow) {
 			if vs.Hub != nil && vs.Hub.ProjectID != "" {
 				pi.ProjectID = vs.Hub.ProjectID
-				pi.GroveID = vs.Hub.ProjectID
+				if vs.Hub.Linked == nil || *vs.Hub.Linked {
+					pi.HubProjectID = vs.Hub.ProjectID
+					pi.HubEndpoint = NormalizeEndpoint(vs.Hub.Endpoint)
+				}
 			}
 			pi.Type = ProjectTypeShadow
 			pi.WorkspacePath = vs.WorkspacePath
@@ -223,21 +270,86 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		}
 	}
 
+	recorded := ""
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
+		pi.setHubLink(settings)
+		recorded = settings.WorkspacePath
 	}
 	pi.AgentCount = countAgents(agentsDir)
-	if pi.ProjectID == "" {
+	pi.WorkspacePath = recorded
+	if recorded == "" && pi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {
 			pi.ProjectID = marker.ProjectID
 			pi.WorkspacePath = workspacePath
 		}
 	}
-	if pi.AgentCount == 0 {
-		pi.Status = ProjectStatusOrphaned
+
+	// A git project config is orphaned only on positive evidence: a
+	// recorded workspace (an absolute path) that is gone or no longer
+	// resolves to this config.
+	// A config with agents is never orphaned (its repo may have moved). A
+	// workspace found by slug alone (readWorkspaceMarkerForSlug) can show
+	// that the config is in use, but never that it is not: another repo
+	// with the same slug may own that workspace.
+	switch {
+	case pi.AgentCount > 0:
+	case filepath.IsAbs(recorded):
+		if !gitWorkspaceResolvesTo(recorded, configPath) {
+			pi.Status = ProjectStatusOrphaned
+		}
+	case pi.WorkspacePath != "" && gitWorkspaceResolvesTo(pi.WorkspacePath, configPath):
+	default:
+		pi.Status = statusWithoutEvidence
+		pi.unverified = true
 	}
 	return pi
+}
+
+// isGitProjectConfig reports whether the project config at configPath, whose
+// settings record workspacePath, belongs to a git project. Settings written
+// by init, hub link or the lazy heal say so with project_type: git. A config
+// with a workspace path but no project_type (written before project_type
+// was recorded) is a git one when the workspace, an absolute path, holds a
+// .scion directory; the CLI records project_type for it when it next
+// resolves the project there (RecordGitWorkspace). When the workspace is
+// gone it is treated as an external project, as before.
+func isGitProjectConfig(configPath, workspacePath string) bool {
+	if vs, err := LoadVersionedSettings(configPath); err == nil && vs != nil && vs.ProjectType != "" {
+		return vs.ProjectType == string(ProjectTypeGit)
+	}
+	if !filepath.IsAbs(workspacePath) {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(workspacePath, DotScion))
+	return err == nil && info.IsDir()
+}
+
+// gitWorkspaceResolvesTo reports whether the git workspace at workspacePath
+// still exists and its .scion resolves to the project config at configPath:
+// a .scion directory through its project-id file and the workspace's slug
+// (GetGitProjectExternalConfigDir), a .scion marker file as in
+// isValidWorkspace. The settings project_id is not compared: hub link can
+// record one that differs from the repo's project-id file. A relative
+// workspacePath (only a hand edit writes one) is no evidence either way and
+// reports false.
+func gitWorkspaceResolvesTo(workspacePath, configPath string) bool {
+	if !filepath.IsAbs(workspacePath) {
+		return false
+	}
+	markerPath := filepath.Join(workspacePath, DotScion)
+	info, err := os.Stat(markerPath)
+	if err != nil {
+		return false
+	}
+	if !info.IsDir() {
+		return isValidWorkspace(workspacePath, "", configPath)
+	}
+	extDir, err := GetGitProjectExternalConfigDir(markerPath)
+	if err != nil || extDir == "" {
+		return false
+	}
+	return resolvePathForComparison(extDir) == resolvePathForComparison(configPath)
 }
 
 func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
@@ -246,16 +358,8 @@ func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
 		return nil, "", err
 	}
 
-	// 1. Try projects/
 	workspacePath := filepath.Join(home, GlobalDir, ProjectsDir, slug)
 	markerPath := filepath.Join(workspacePath, DotScion)
-	if marker, err := ReadProjectMarker(markerPath); err == nil {
-		return marker, workspacePath, nil
-	}
-
-	// 2. Fallback to legacy groves/
-	workspacePath = filepath.Join(home, GlobalDir, GrovesDir, slug)
-	markerPath = filepath.Join(workspacePath, DotScion)
 	if marker, err := ReadProjectMarker(markerPath); err == nil {
 		return marker, workspacePath, nil
 	}
@@ -333,6 +437,34 @@ func isValidWorkspace(workspacePath, expectedProjectID string, configPath ...str
 	return true
 }
 
+// isScionDirWorkspace reports whether workspacePath is itself a scion
+// directory: a directory named .scion that holds a project-id file or a
+// settings file, or that is the global directory. An external project
+// recorded with such a workspace path is a stray config, not a live project.
+// Before the hub used a provider path ending in .scion as the project's
+// .scion directory, it initialized "<dir>/.scion/.scion" for such a path,
+// which created an external config with workspace path "<dir>/.scion" and a
+// marker file inside that directory pointing back at it. A project created
+// with 'scion init' in an ordinary directory that happens to be named .scion
+// does not match, because that directory holds only the project's marker.
+func isScionDirWorkspace(workspacePath string) bool {
+	dir := filepath.Clean(workspacePath)
+	if filepath.Base(dir) != DotScion {
+		return false
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, projectkeys.ProjectIDFile)); err == nil {
+		return true
+	}
+	if GetSettingsPath(dir) != "" {
+		return true
+	}
+	return IsGlobalProjectDir(dir)
+}
+
 // countAgents counts agent subdirectories in an agents directory.
 func countAgents(agentsDir string) int {
 	return len(ListAgentNames(agentsDir))
@@ -354,7 +486,9 @@ func ListAgentNames(agentsDir string) []string {
 }
 
 // FindOrphanedProjectConfigs returns project configs that are orphaned
-// (their workspace no longer exists or no longer points back to them).
+// (their workspace no longer exists or no longer points back to them). A
+// config with no evidence either way (ProjectInfo.unverified) is never
+// returned.
 func FindOrphanedProjectConfigs() ([]ProjectInfo, error) {
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -363,7 +497,7 @@ func FindOrphanedProjectConfigs() ([]ProjectInfo, error) {
 
 	var orphaned []ProjectInfo
 	for _, g := range projects {
-		if g.Status == ProjectStatusOrphaned {
+		if g.Status == ProjectStatusOrphaned && !g.unverified {
 			orphaned = append(orphaned, g)
 		}
 	}
@@ -373,25 +507,88 @@ func FindOrphanedProjectConfigs() ([]ProjectInfo, error) {
 // RemoveProjectConfig removes an external project config directory.
 func RemoveProjectConfig(configPath string) error {
 	// The configPath points to the .scion subdirectory or the project-configs/<slug__uuid> directory.
-	// We want to remove the project-configs/<slug__uuid> directory.
-	parent := configPath
+	// We want to remove the project-configs/<slug__uuid> directory. Cleaned
+	// first, so that a raw, uncleaned path (e.g. containing "..") is judged
+	// and acted on consistently: filepath.Dir below is a lexical operation,
+	// while the os calls that follow resolve the path physically, and an
+	// uncleaned "a/../b" would let those two disagree.
+	parent := filepath.Clean(configPath)
 	if filepath.Base(parent) == DotScion {
 		parent = filepath.Dir(parent)
 	}
 
-	// Safety: only remove if it's under project-configs/ or legacy grove-configs/
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
-	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
 
-	if !strings.HasPrefix(parent, projectConfigsDir) && !strings.HasPrefix(parent, legacyConfigsDir) {
-		return os.ErrPermission
+	// A missing entry is nothing to remove, matching os.RemoveAll's own
+	// contract, not an error. Lstat, not Stat, so this doesn't itself follow
+	// a symlink: a dangling link still goes through the safety checks below
+	// rather than being reported as already gone.
+	parentInfo, err := os.Lstat(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 
-	return os.RemoveAll(parent)
+	root := projectkeys.ResolvePathForCompare(projectConfigsDir)
+	isSymlink := parentInfo.Mode()&os.ModeSymlink != 0
+
+	if !isSymlink {
+		// A real directory: safe only when it is itself a direct child of
+		// the canonical root — never root itself, and never anything a
+		// literal prefix match alone would have let through.
+		resolved := projectkeys.ResolvePathForCompare(parent)
+		if filepath.Dir(resolved) != root {
+			return os.ErrPermission
+		}
+		return os.RemoveAll(resolved)
+	}
+
+	// parent is a symlink. What is safe to do with it is governed by where
+	// the link itself LIVES, not just where it points: an entry that lives
+	// in the resolved root is always at least unlinked, because nothing
+	// about a stray, dangling or out-of-root target changes the fact that
+	// the link itself is this project's own leftover entry to clean up. A
+	// recursive delete of the link's target only ever happens for a link
+	// living in exactly the one directory MigrateLegacyGlobalLayout's own
+	// per-entry legacy links live in, and only when that link additionally
+	// has the exact shape the migrator produces. Anywhere else under
+	// ~/.scion — not just outside it — is refused rather than guessed at.
+	linkDir := projectkeys.ResolvePathForCompare(filepath.Dir(parent))
+	switch {
+	case linkDir == root:
+		// The migrator never creates a link directly inside project-configs/
+		// itself, so any link found there is unlinked outright, regardless
+		// of its target: missing, outside ~/.scion, a sibling entry, or "."
+		// meaning root itself. Only the link goes; nothing it points at is
+		// ever touched.
+		return os.Remove(parent)
+	case filepath.Dir(linkDir) == filepath.Dir(root) && filepath.Base(linkDir) == legacyProjectConfigsDirName:
+		resolved := projectkeys.ResolvePathForCompare(parent)
+		if filepath.Dir(resolved) == root && filepath.Base(resolved) == filepath.Base(parent) {
+			if err := os.RemoveAll(resolved); err != nil {
+				return err
+			}
+			if err := os.Remove(parent); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		return os.Remove(parent)
+	default:
+		// The link itself doesn't live anywhere scion's own layout would
+		// ever put it (inside project-configs/, or in the legacy directory
+		// beside it). Refuse rather than guess — this also covers
+		// configPath naming project-configs/ itself when that path happens
+		// to be a symlink: never touched, exactly like the real-directory
+		// case above.
+		return os.ErrPermission
+	}
 }
 
 // ReconnectProject updates the workspace_path in an external project's settings

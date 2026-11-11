@@ -7,16 +7,20 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -97,8 +101,68 @@ type containerOutputs struct {
 	Status       string `json:"status,omitempty"`
 }
 
-// runHarnessProvision implements the sciontool harness provision flow.
+// provisionStatusRecorder records the outcome of one runHarnessProvision in
+// the bundle's status file (see hooks.WriteHarnessProvisionStatus), so a
+// pre-start failure can be surfaced with its reason. Recording is
+// best-effort: a status write failure is logged and never changes the
+// provision result.
+type provisionStatusRecorder struct {
+	path     string
+	manifest *containerProvisionManifest
+}
+
+func (r *provisionStatusRecorder) write(state, msg string) {
+	if r.path == "" {
+		return
+	}
+	if err := hooks.WriteHarnessProvisionStatus(r.path, state, msg); err != nil {
+		if errors.Is(err, hooks.ErrProvisionStatusDirUnsafe) {
+			log.Warn("provision status not recorded: %v", err)
+			return
+		}
+		log.TaggedInfo("provision", "could not record provision status: %v", err)
+	}
+}
+
+// finish records err's outcome. The message is scrubbed of staged secret
+// values whenever the manifest was loaded; errors returned before that point
+// carry no secret material (paths and parse errors only). The provisioner
+// script's own stderr reaches err only already scrubbed and truncated (see
+// runHarnessProvisionSteps).
+func (r *provisionStatusRecorder) finish(err error) {
+	if err == nil {
+		r.write(hooks.ProvisionStatusOK, "")
+		return
+	}
+	msg := err.Error()
+	if r.manifest != nil {
+		msg = scrubSecrets(msg, r.manifest)
+	}
+	r.write(hooks.ProvisionStatusFailed, msg)
+}
+
+// runHarnessProvision implements the sciontool harness provision flow and
+// records its outcome in the bundle's status file.
 func runHarnessProvision(ctx context.Context, manifestPath string) error {
+	rec := &provisionStatusRecorder{}
+	err := runHarnessProvisionSteps(ctx, manifestPath, rec)
+	rec.finish(err)
+	return err
+}
+
+func runHarnessProvisionSteps(ctx context.Context, manifestPath string, rec *provisionStatusRecorder) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve $HOME: %w", err)
+	}
+	bundleRoot := filepath.Join(home, ".scion", "harness")
+	if p, perr := hooks.HarnessProvisionStatusPath(bundleRoot); perr == nil {
+		rec.path = p
+		// Replace any status left by an earlier run before doing anything
+		// that can fail, so a stale error is never surfaced for this one.
+		rec.write(hooks.ProvisionStatusRunning, "")
+	}
+
 	if manifestPath == "" {
 		return fmt.Errorf("--manifest is required")
 	}
@@ -111,18 +175,23 @@ func runHarnessProvision(ctx context.Context, manifestPath string) error {
 		return err
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve $HOME: %w", err)
-	}
-	bundleRoot := filepath.Join(home, ".scion", "harness")
-
 	// Resolve $HOME prefixes in manifest paths. The host-side Provision()
 	// encodes paths with literal "$HOME/" for container portability; expand
 	// them now so validation and file-existence checks use absolute paths.
 	resolveManifestHomePaths(manifest, home)
+	rec.manifest = manifest
 
-	if err := validateManifestPaths(manifest, bundleRoot, home); err != nil {
+	// SCION_HARNESS_OUTPUTS_DIR / SCION_HARNESS_SECRETS_DIR move the
+	// bundle's outputs/ and secrets/ out of the home; unset, nothing changes.
+	dirs, err := hooks.ResolveHarnessDirs(bundleRoot)
+	if err != nil {
+		return err
+	}
+	manifest.Outputs.Env = dirs.OutputPath(manifest.Outputs.Env)
+	manifest.Outputs.ResolvedAuth = dirs.OutputPath(manifest.Outputs.ResolvedAuth)
+	manifest.Outputs.Status = dirs.OutputPath(manifest.Outputs.Status)
+
+	if err := validateManifestPaths(manifest, bundleRoot, home, dirs.ExtraRoots()...); err != nil {
 		return err
 	}
 
@@ -251,15 +320,19 @@ func resolveManifestHomePaths(m *containerProvisionManifest, home string) {
 // validateManifestPaths refuses to run if any path in the manifest escapes the
 // allowed roots (the harness bundle dir or the agent home). Path traversal in
 // a manifest could let a malicious harness-config write outside its sandbox.
-func validateManifestPaths(m *containerProvisionManifest, bundleRoot, home string) error {
-	allowed := []string{bundleRoot, home}
+func validateManifestPaths(m *containerProvisionManifest, bundleRoot, home string, extraRoots ...string) error {
+	allowed := append([]string{bundleRoot, home}, extraRoots...)
 	check := func(label, path string) error {
 		if path == "" {
 			return nil
 		}
 		clean := filepath.Clean(path)
 		for _, root := range allowed {
-			if strings.HasPrefix(clean, root) {
+			if root == "" {
+				continue
+			}
+			rel, err := filepath.Rel(root, clean)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil
 			}
 		}
@@ -382,38 +455,99 @@ func (c *capturedStderr) Write(p []byte) (int, error) {
 
 func (c *capturedStderr) String() string { return string(c.buf) }
 
+// minMaskLen is the shortest value scrubSecrets masks in place. Shorter
+// values would also match common, unrelated substrings of the output.
+const minMaskLen = 8
+
+// provisionerOutputOmitted replaces the whole output when a staged secret
+// value too short to mask in place occurs in it.
+const provisionerOutputOmitted = "provisioner output omitted: it contains a staged value too short to mask"
+
 // scrubSecrets replaces obvious secret values in stderr output. It looks for
 // values mentioned in inputs/outputs/auth_candidates files and the contents of
 // staged secret files (written by ContainerScriptHarness.ApplyAuthSettings),
-// then removes their occurrences. This is best-effort — scripts should not
-// echo credentials.
+// then removes their occurrences. A multi-line staged file is masked as a
+// whole and line by line (see stagedMaskValues). If a staged value or line
+// shorter than minMaskLen occurs in s, the whole of s is replaced by
+// provisionerOutputOmitted. The provisioner output logged to agent.log goes
+// through the same scrub. This is best-effort — scripts should not echo
+// credentials.
 func scrubSecrets(s string, m *containerProvisionManifest) string {
-	out := s
-	for _, val := range loadAuthCandidatesValues(m) {
-		if val != "" && len(val) >= 8 {
-			out = strings.ReplaceAll(out, val, "[REDACTED]")
-		}
-	}
 	// auth-candidates.json holds *names* (and now file paths) but not the raw
 	// secret values; the actual values live as 0600 files under
 	// .scion/harness/secrets/. Read those too so a script that accidentally
 	// echoes its API key still gets redacted.
-	for _, val := range loadStagedSecretValues(m) {
-		if val != "" && len(val) >= 8 {
+	staged := stagedMaskValues(loadStagedSecretValues(m))
+	for _, val := range staged {
+		if len(val) < minMaskLen && strings.Contains(s, val) {
+			return provisionerOutputOmitted
+		}
+	}
+	out := s
+	for _, val := range loadAuthCandidatesValues(m) {
+		if val != "" && len(val) >= minMaskLen {
+			out = strings.ReplaceAll(out, val, "[REDACTED]")
+		}
+	}
+	for _, val := range staged {
+		if len(val) >= minMaskLen {
 			out = strings.ReplaceAll(out, val, "[REDACTED]")
 		}
 	}
 	return out
 }
 
+// stagedMaskValues returns the values to mask for the staged secret values
+// vals: each trimmed, non-empty value, plus each trimmed line of a
+// multi-line value that has a letter or digit, longest first so a whole
+// value is masked before its lines. Lines of punctuation only (the braces
+// and brackets of a pretty-printed JSON file) carry no secret and are
+// skipped, so they don't force the output to be omitted.
+func stagedMaskValues(vals []string) []string {
+	var out []string
+	for _, val := range vals {
+		val = strings.TrimSpace(val)
+		if val == "" {
+			continue
+		}
+		out = append(out, val)
+		if !strings.ContainsAny(val, "\r\n") {
+			continue
+		}
+		// Split on CRLF, lone CR and LF alike.
+		lines := strings.ReplaceAll(strings.ReplaceAll(val, "\r\n", "\n"), "\r", "\n")
+		for _, line := range strings.Split(lines, "\n") {
+			if line = strings.TrimSpace(line); hasLetterOrDigit(line) {
+				out = append(out, line)
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
+}
+
 // loadStagedSecretValues reads the per-secret files written by the host-side
-// ApplyAuthSettings into agent_home/.scion/harness/secrets/. The directory is
-// optional; missing dir means "no env-secret values were staged" and is fine.
+// ApplyAuthSettings into agent_home/.scion/harness/secrets/, and also those
+// in SCION_HARNESS_SECRETS_DIR when it is set. The directories are optional;
+// a missing dir means "no env-secret values were staged" and is fine.
 func loadStagedSecretValues(m *containerProvisionManifest) []string {
 	if m.HarnessBundleDir == "" {
 		return nil
 	}
-	dir := filepath.Join(expandHomePrefix(m.HarnessBundleDir), "secrets")
+	bundle := expandHomePrefix(m.HarnessBundleDir)
+	dirs := []string{filepath.Join(bundle, "secrets")}
+	if d, err := hooks.ResolveHarnessDirs(bundle); err == nil && d.Secrets != dirs[0] {
+		dirs = append(dirs, d.Secrets)
+	}
+	var out []string
+	for _, dir := range dirs {
+		out = append(out, readStagedSecretDir(dir)...)
+	}
+	return out
+}
+
+// readStagedSecretDir returns the non-empty values of the files in dir.
+func readStagedSecretDir(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -434,6 +568,11 @@ func loadStagedSecretValues(m *containerProvisionManifest) []string {
 		}
 	}
 	return out
+}
+
+// hasLetterOrDigit reports whether s contains a Unicode letter or digit.
+func hasLetterOrDigit(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0
 }
 
 // expandHomePrefix resolves a leading "$HOME/" prefix to the current user's

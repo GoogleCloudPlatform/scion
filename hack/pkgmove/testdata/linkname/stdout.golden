@@ -1,0 +1,39 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (1):
+  field  rec.name -> Name  (hub/move.go:5)
+
+Alias entries (2):
+  var   Bump = sub.Bump
+  var   NewRec = sub.NewRec
+
+Alias files (1):
+  hub/zz_alias_sub.go (14 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (2) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 3. Errors: 2.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/move.go:5: field rec.name is used across the boundary and would have to be exported as Name; exporting a field changes reflection and encoding (encoding/json, yaml, gob, cmp) visibility - restructure first, or pass -allow-field-export and review the HIGH finding
+  - peek/peek.go:7: //go:linkname counter example.com/fx/hub.counter targets example.com/fx/hub.counter, which moves (its linker name becomes example.com/fx/hub/sub.counter) - update the directive first
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:10: example.com/fx/hub.Bump is now example.com/fx/hub/sub.Bump for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/move.go:12: example.com/fx/hub.NewRec is now example.com/fx/hub/sub.NewRec for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:3: hub.rec becomes sub.rec for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

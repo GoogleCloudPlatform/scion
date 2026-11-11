@@ -1,0 +1,299 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package artifacts
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+)
+
+// Retiring artifacts and noticing deleted owners (ptone/scion#4529, the
+// first phase of ptone/scion#4465).
+
+// retireForbiddenMessage is the text of every 403 of the delete route: a
+// caller that may read the artifact but not delete it. It states the rule,
+// the same for every artifact and every reason, and never why this caller
+// was refused.
+const retireForbiddenMessage = "only the artifact's owner, a user with an admin grant on it, " +
+	"an admin of its home project, or, on an artifact owned by an agent, the agent's delegating user " +
+	"while they hold a role in its home project, may delete it"
+
+func writeRetireForbidden(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, "forbidden", retireForbiddenMessage)
+}
+
+// retireAuthority reports the authority by which the caller may delete a,
+// an artifact it can read: AuthorityOwner, AuthorityAdminGrant or a
+// steward authority (the administration rule, adminAuthorityWith), or
+// AuthorityCustodianProjectAdmin
+// when it administers a's current home project (ScopeAdministrator). Every
+// authority needs a user whose credential permits artifact.manage in the
+// home project. "" means it may not.
+func (s *Service) retireAuthority(ctx context.Context, b backend, a *Artifact) (string, error) {
+	authority, err := s.adminAuthorityWith(ctx, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
+	if err != nil {
+		return "", err
+	}
+	return s.retireAuthorityFrom(ctx, a, authority), nil
+}
+
+// retireAuthorityFrom completes retireAuthority from admin, the caller's
+// adminAuthorityWith on a: admin itself when set, else
+// AuthorityCustodianProjectAdmin when the caller administers a's home
+// project, else "". The delete route and the canRetire capability both
+// decide through it, so they cannot disagree.
+func (s *Service) retireAuthorityFrom(ctx context.Context, a *Artifact, admin string) string {
+	if admin != "" {
+		return admin
+	}
+	kind, _, _, ok := s.host.Principal(ctx)
+	if !ok || kind != PrincipalKindUser || !s.host.Permits(ctx, a.ScopeRef, PermissionManage) {
+		return ""
+	}
+	if sa, ok := s.host.(ScopeAdministrator); ok && sa.AdministersScope(ctx, a.ScopeRef) {
+		return AuthorityCustodianProjectAdmin
+	}
+	return ""
+}
+
+// handleDeleteArtifact implements DELETE /{id}: a soft delete through
+// Store.DeleteArtifact, which removes the artifact's grants and share
+// links with it. The read check runs first, so a caller that cannot read
+// the artifact gets the same 404 as for a missing one; a reader without
+// authority (retireAuthority) gets 403 with one fixed body.
+func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, id string) {
+	b, a, ok := s.readableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	authority, err := s.retireAuthority(ctx, b, a)
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return
+	}
+	if authority == "" {
+		s.logRetireRefusal(r, a)
+		writeRetireForbidden(w)
+		return
+	}
+	// The delete applies only while the artifact is still homed where the
+	// authority was decided; after a concurrent move it answers 404.
+	switch _, err := b.store.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: s.callerActor(ctx, a, authority), ScopeRef: a.ScopeRef}); {
+	case errors.Is(err, ErrNotFound):
+		s.logStewardPrecondition(r, logActionDelete, a, err)
+		writeNotFound(w)
+	case err != nil:
+		slog.ErrorContext(ctx, "artifacts: delete artifact failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not delete the artifact")
+	default:
+		s.logAllowed(r, logEntry{action: logActionDeleted, artifact: a, authority: authority})
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// ownerPageSize is how many distinct owners the reconciler asks the host
+// about at once.
+const ownerPageSize = 100
+
+// orphanMarkBatch is how many artifacts of one owner one store call marks
+// or clears.
+const orphanMarkBatch = 500
+
+// ReconcileResult reports one owner liveness pass.
+type ReconcileResult struct {
+	// Owners is how many distinct owners were checked.
+	Owners int
+	// Orphaned and Unorphaned count the artifacts marked and cleared.
+	Orphaned   int
+	Unorphaned int
+}
+
+// CheckerError is ReconcileOwners' error when the host's PrincipalChecker
+// failed. The pass stopped at that page: the page and every owner after it
+// were left unchanged, and Unprocessed counts them (-1 when counting
+// failed too). Pages before it were applied.
+type CheckerError struct {
+	Unprocessed int
+	Err         error
+}
+
+func (e *CheckerError) Error() string {
+	return fmt.Sprintf("artifacts: principal check failed, %d owners left unprocessed: %v", e.Unprocessed, e.Err)
+}
+
+func (e *CheckerError) Unwrap() error { return e.Err }
+
+// ReconcileOwners runs one owner liveness pass (design section 3.1): it
+// pages through the distinct owners of live artifacts, asks checker about
+// each page in one call, sets orphaned_at on the artifacts of owners that
+// are gone and clears it on those of owners that are live again (a
+// restored agent). It relies on no lifecycle hook, so it covers every way
+// an agent or user stops existing, including the store-level purge and the
+// project cascade, and it is idempotent. A nil checker does nothing.
+//
+// A checker error leaves the failing page and everything after it
+// unchanged and returns a *CheckerError. A ref the checker does not answer
+// counts as live.
+//
+// It writes one decision log entry to log per artifact it marks or clears,
+// and a summary of the pass when it changed a mark or failed; a nil log
+// discards them.
+func ReconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, now time.Time, log *slog.Logger) (ReconcileResult, error) {
+	if log == nil {
+		log = discardLogger
+	}
+	res, err := reconcileOwners(ctx, st, checker, now, log)
+	if st != nil && checker != nil && (res.Orphaned+res.Unorphaned > 0 || err != nil) {
+		logOwnerPass(ctx, log, res, err)
+	}
+	return res, err
+}
+
+func reconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, now time.Time, log *slog.Logger) (ReconcileResult, error) {
+	var res ReconcileResult
+	if st == nil || checker == nil {
+		return res, nil
+	}
+	var after *Owner
+	for {
+		page, err := st.ListLiveOwners(ctx, after, ownerPageSize)
+		if err != nil {
+			return res, err
+		}
+		if len(page) == 0 {
+			return res, nil
+		}
+		refs := make([]string, len(page))
+		for i, o := range page {
+			refs[i] = PrincipalRef(o.Kind, o.Ref)
+		}
+		live, err := checker.PrincipalsExist(ctx, refs)
+		if err != nil {
+			unprocessed, cerr := st.CountLiveOwners(ctx, after)
+			if cerr != nil {
+				unprocessed = -1
+			}
+			return res, &CheckerError{Unprocessed: unprocessed, Err: err}
+		}
+		for i, o := range page {
+			alive, answered := live[refs[i]]
+			gone := answered && !alive
+			switch {
+			case gone && o.Unmarked > 0:
+				n, err := markOwner(ctx, st, o, true, now, log)
+				res.Orphaned += n
+				if err != nil {
+					return res, err
+				}
+			case !gone && o.Marked > 0:
+				n, err := markOwner(ctx, st, o, false, now, log)
+				res.Unorphaned += n
+				if err != nil {
+					return res, err
+				}
+			}
+		}
+		res.Owners += len(page)
+		if len(page) < ownerPageSize {
+			return res, nil
+		}
+		last := page[len(page)-1]
+		after = &Owner{Kind: last.Kind, Ref: last.Ref}
+	}
+}
+
+// markOwner sets or clears the orphan mark on every live artifact of o, a
+// batch at a time.
+func markOwner(ctx context.Context, st Store, o Owner, orphaned bool, now time.Time, log *slog.Logger) (int, error) {
+	total := 0
+	for {
+		refs, err := st.SetOwnerOrphaned(ctx, o, orphaned, now, orphanMarkBatch)
+		logOwnerMarks(ctx, log, o, orphaned, now, refs)
+		n := len(refs)
+		total += n
+		if err != nil || n < orphanMarkBatch {
+			return total, err
+		}
+	}
+}
+
+// logOwnerMarks writes one entry per artifact of owner o whose orphan mark
+// a pass set (orphaned) or cleared, with its home project.
+func logOwnerMarks(ctx context.Context, log *slog.Logger, o Owner, orphaned bool, now time.Time, refs []ArtifactRef) {
+	action := logActionUnorphaned
+	var at *time.Time
+	if orphaned {
+		action, at = logActionOrphaned, &now
+	}
+	for _, ref := range refs {
+		writeSystemDecision(ctx, log, reconcilerActor, logEntry{action: action,
+			artifact: &Artifact{ID: ref.ID, ScopeRef: ref.ScopeRef, OwnerKind: o.Kind, OrphanedAt: at}})
+	}
+}
+
+// logOwnerPass writes the summary of one owner liveness pass.
+func logOwnerPass(ctx context.Context, log *slog.Logger, res ReconcileResult, err error) {
+	outcome, reason, level := logOutcomeAllowed, "", slog.LevelInfo
+	var cerr *CheckerError
+	switch {
+	case errors.As(err, &cerr):
+		outcome, reason, level = logOutcomeError, logReasonCheckerError, slog.LevelWarn
+	case err != nil:
+		outcome, reason, level = logOutcomeError, logReasonStoreError, slog.LevelWarn
+	}
+	attrs := []slog.Attr{
+		slog.String(logKeyAction, logActionOwnerPass), slog.String(logKeyOutcome, outcome),
+		slog.String(logKeyPrincipalKind, reconcilerActor.Kind), slog.String(logKeyPrincipalID, reconcilerActor.Ref),
+		slog.String(logKeyAuthority, reconcilerActor.Authority),
+		slog.Int(logKeyOwnersChecked, res.Owners), slog.Int(logKeyOrphanedCount, res.Orphaned),
+		slog.Int(logKeyUnorphanedCount, res.Unorphaned),
+	}
+	if reason != "" {
+		attrs = append(attrs, slog.String(logKeyReason, reason))
+	}
+	log.LogAttrs(ctx, level, "artifacts: "+logActionOwnerPass, attrs...)
+}
+
+// SweepExpired runs one expiry sweep (Store.SweepExpired) and writes one
+// decision log entry per artifact it deleted, and a summary when it deleted
+// any or failed. A nil log discards them. It returns how many it deleted.
+func SweepExpired(ctx context.Context, st Store, now time.Time, limit int, log *slog.Logger) (int, error) {
+	if log == nil {
+		log = discardLogger
+	}
+	swept, err := st.SweepExpired(ctx, now, limit)
+	for _, ref := range swept {
+		writeSystemDecision(ctx, log, retentionActor, logEntry{action: logActionDeleted, artifact: &Artifact{ID: ref.ID, ScopeRef: ref.ScopeRef}})
+	}
+	if len(swept) > 0 || err != nil {
+		outcome, level := logOutcomeAllowed, slog.LevelInfo
+		attrs := []slog.Attr{}
+		if err != nil {
+			outcome, level = logOutcomeError, slog.LevelWarn
+			attrs = append(attrs, slog.String(logKeyReason, logReasonStoreError))
+		}
+		attrs = append(attrs, slog.String(logKeyAction, logActionRetentionPass), slog.String(logKeyOutcome, outcome),
+			slog.String(logKeyPrincipalKind, retentionActor.Kind), slog.String(logKeyPrincipalID, retentionActor.Ref),
+			slog.String(logKeyAuthority, retentionActor.Authority), slog.Int(logKeyCount, len(swept)))
+		log.LogAttrs(ctx, level, "artifacts: "+logActionRetentionPass, attrs...)
+	}
+	return len(swept), err
+}

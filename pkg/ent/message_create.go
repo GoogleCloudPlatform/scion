@@ -244,6 +244,62 @@ func (_c *MessageCreate) SetNillableConversationID(v *uuid.UUID) *MessageCreate 
 	return _c
 }
 
+// SetSenderProjectID sets the "sender_project_id" field.
+func (_c *MessageCreate) SetSenderProjectID(v uuid.UUID) *MessageCreate {
+	_c.mutation.SetSenderProjectID(v)
+	return _c
+}
+
+// SetNillableSenderProjectID sets the "sender_project_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableSenderProjectID(v *uuid.UUID) *MessageCreate {
+	if v != nil {
+		_c.SetSenderProjectID(*v)
+	}
+	return _c
+}
+
+// SetRecipientProjectID sets the "recipient_project_id" field.
+func (_c *MessageCreate) SetRecipientProjectID(v uuid.UUID) *MessageCreate {
+	_c.mutation.SetRecipientProjectID(v)
+	return _c
+}
+
+// SetNillableRecipientProjectID sets the "recipient_project_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableRecipientProjectID(v *uuid.UUID) *MessageCreate {
+	if v != nil {
+		_c.SetRecipientProjectID(*v)
+	}
+	return _c
+}
+
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (_c *MessageCreate) SetAuthorizingUserID(v string) *MessageCreate {
+	_c.mutation.SetAuthorizingUserID(v)
+	return _c
+}
+
+// SetNillableAuthorizingUserID sets the "authorizing_user_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableAuthorizingUserID(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetAuthorizingUserID(*v)
+	}
+	return _c
+}
+
+// SetDelegationGrantID sets the "delegation_grant_id" field.
+func (_c *MessageCreate) SetDelegationGrantID(v string) *MessageCreate {
+	_c.mutation.SetDelegationGrantID(v)
+	return _c
+}
+
+// SetNillableDelegationGrantID sets the "delegation_grant_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableDelegationGrantID(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetDelegationGrantID(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *MessageCreate) SetCreated(v time.Time) *MessageCreate {
 	_c.mutation.SetCreated(v)
@@ -360,11 +416,6 @@ func (_c *MessageCreate) check() error {
 	}
 	if _, ok := _c.mutation.Msg(); !ok {
 		return &ValidationError{Name: "msg", err: errors.New(`ent: missing required field "Message.msg"`)}
-	}
-	if v, ok := _c.mutation.Msg(); ok {
-		if err := message.MsgValidator(v); err != nil {
-			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
-		}
 	}
 	if _, ok := _c.mutation.GetType(); !ok {
 		return &ValidationError{Name: "type", err: errors.New(`ent: missing required field "Message.type"`)}
@@ -501,6 +552,22 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ConversationID(); ok {
 		_spec.SetField(message.FieldConversationID, field.TypeUUID, value)
 		_node.ConversationID = &value
+	}
+	if value, ok := _c.mutation.SenderProjectID(); ok {
+		_spec.SetField(message.FieldSenderProjectID, field.TypeUUID, value)
+		_node.SenderProjectID = &value
+	}
+	if value, ok := _c.mutation.RecipientProjectID(); ok {
+		_spec.SetField(message.FieldRecipientProjectID, field.TypeUUID, value)
+		_node.RecipientProjectID = &value
+	}
+	if value, ok := _c.mutation.AuthorizingUserID(); ok {
+		_spec.SetField(message.FieldAuthorizingUserID, field.TypeString, value)
+		_node.AuthorizingUserID = &value
+	}
+	if value, ok := _c.mutation.DelegationGrantID(); ok {
+		_spec.SetField(message.FieldDelegationGrantID, field.TypeString, value)
+		_node.DelegationGrantID = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(message.FieldCreated, field.TypeTime, value)
@@ -844,6 +911,18 @@ func (u *MessageUpsertOne) UpdateNewValues() *MessageUpsertOne {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(message.FieldID)
+		}
+		if _, exists := u.create.mutation.SenderProjectID(); exists {
+			s.SetIgnore(message.FieldSenderProjectID)
+		}
+		if _, exists := u.create.mutation.RecipientProjectID(); exists {
+			s.SetIgnore(message.FieldRecipientProjectID)
+		}
+		if _, exists := u.create.mutation.AuthorizingUserID(); exists {
+			s.SetIgnore(message.FieldAuthorizingUserID)
+		}
+		if _, exists := u.create.mutation.DelegationGrantID(); exists {
+			s.SetIgnore(message.FieldDelegationGrantID)
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(message.FieldCreated)
@@ -1376,6 +1455,18 @@ func (u *MessageUpsertBulk) UpdateNewValues() *MessageUpsertBulk {
 		for _, b := range u.create.builders {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(message.FieldID)
+			}
+			if _, exists := b.mutation.SenderProjectID(); exists {
+				s.SetIgnore(message.FieldSenderProjectID)
+			}
+			if _, exists := b.mutation.RecipientProjectID(); exists {
+				s.SetIgnore(message.FieldRecipientProjectID)
+			}
+			if _, exists := b.mutation.AuthorizingUserID(); exists {
+				s.SetIgnore(message.FieldAuthorizingUserID)
+			}
+			if _, exists := b.mutation.DelegationGrantID(); exists {
+				s.SetIgnore(message.FieldDelegationGrantID)
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(message.FieldCreated)

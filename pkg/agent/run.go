@@ -19,24 +19,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
+	"github.com/google/uuid"
 )
 
 var ErrTmuxBinaryNotFound = errors.New("tmux binary not found")
@@ -73,7 +85,38 @@ func isTmuxShellNotFoundError(err error) bool {
 		strings.Contains(msg, "tmux: not found")
 }
 
+// sortedEnvVarKeys returns the sorted key names of an env var map, for
+// diagnostic logging that must not print the values themselves.
+func sortedEnvVarKeys(envVars map[string]string) []string {
+	keys := make([]string, 0, len(envVars))
+	for k := range envVars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	ctx = m.withWorkspaceLock(ctx)
+	startEntry := time.Now()
+	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
+	// caller passed it in — captured before anything below ever writes to
+	// opts.Env, so it can never reflect the agent-level Hub config or
+	// template env overrides applied further down, both of which a creator
+	// controls (inline req.Config.Hub, template hub.endpoint via
+	// MergeScionConfig). Outside broker mode this (falling back to project
+	// settings) is the one source Substrate's egress allowlist trusts; see
+	// the trustedHubEndpoint computation below. In BrokerMode, egress trust
+	// comes from opts.TrustedHubEndpoint instead — the runtime broker's own
+	// operator-derived resolution, set separately from opts.Env so a
+	// creator-controlled ResolvedEnv/Config.Env value can never reach it —
+	// not from this variable, which in BrokerMode still only feeds the
+	// agent's own delivered hub endpoint, never egress trust.
+	var callerHubEndpoint string
+	if opts.Env != nil {
+		callerHubEndpoint = opts.Env["SCION_HUB_ENDPOINT"]
+	}
+
 	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
 	if err != nil {
@@ -90,18 +133,92 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			agentID = opts.Env["SCION_AGENT_ID"]
 		}
 		projectID = opts.Env["SCION_PROJECT_ID"]
-		if projectID == "" {
-			projectID = opts.Env["SCION_GROVE_ID"]
+	}
+	// Snapshot the dispatch-provided project ID now, before any
+	// settings-driven env merging (resolveAuthEnvOverlay copying
+	// harness-config env into opts.Env for absent keys, telemetry env, etc.)
+	// can inject a project-controlled SCION_PROJECT_ID.
+	// Used only by the nfs shared_dir_storage branch below (round 3 review
+	// finding C1/S-L1): a project's harness_configs.<name>.env can set
+	// these keys, and since resolveAuthEnvOverlay only fills in *absent*
+	// keys, capturing the value here — before that overlay ever runs — is
+	// what keeps it equal to the dispatch-provided value. The general `projectID`
+	// below is unaffected and keeps its existing settings.Hub.ProjectID
+	// fallback for labels, RunConfig.ProjectID, etc.
+	hubDispatchedProjectID := projectID
+	// The hub agent ID, snapshotted for the same reason: an NFS agent home
+	// is named after it (resolveHomeStorage), and it must come from the
+	// dispatch, never from settings or the agent name.
+	hubDispatchedAgentID := ""
+	if opts.Env != nil {
+		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
+	}
+
+	// A plain project's explicit path must hold its .scion entry: create,
+	// start and restart are refused before any side effect
+	// (checkExplicitProjectPath).
+	if err := checkExplicitProjectPath(opts.ProjectPath, projectDir, opts.Workspace,
+		opts.GitClone != nil || isEmptyPerAgentStart(opts) || opts.SharedWorkspace); err != nil {
+		return nil, err
+	}
+	// A create over a legacy agent directory no agent owns is refused
+	// before any side effect.
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
+	}
+	// Fail on an unusable image provenance record before any side effect
+	// (the container cleanup below, prompt.md), reading the same agent dir
+	// GetAgent will use (AgentStateDir, including its effective
+	// shared-workspace detection). The record is read again, from that same
+	// dir, where image selection uses it.
+	preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != "")
+	if dirErr != nil {
+		preDir = ""
+	}
+	var preProvenance *imageProvenance
+	if preDir != "" {
+		prov, provErr := readImageProvenance(preDir)
+		if provErr != nil {
+			logImageProvenanceError(opts.Name, provErr)
+			return nil, provErr
 		}
+		preProvenance = prov
+	}
+	// Refuse, before any side effect, a start whose storage would be
+	// placed differently than configured before server.project_storage: a
+	// removed storage override on the start's profile chain, or a
+	// per-agent record pinning shared dirs to nfs while the layout is not
+	// shared (ptone/scion#6371). The profile is chosen as startProfile is
+	// below.
+	refusalProfile := opts.Profile
+	if refusalProfile == "" && preProvenance != nil {
+		refusalProfile = preProvenance.Profile
+	}
+	if err := checkStartStorageRefusals(ctx, preDir, refusalProfile); err != nil {
+		return nil, err
+	}
+
+	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
+	// mints one per create/start dispatch; local/CLI mode and older hubs
+	// send none, so mint it here instead. It is fixed this early so
+	// provisioning can record it as the run that owns the agent's files
+	// (ptone/scion#2675), before the container exists.
+	if opts.RunID == "" {
+		opts.RunID = uuid.NewString()
 	}
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
-	if err == nil {
+	// Owner-filtered on a flat instance (listRuntime): a pre-clean never sees, or removes, another instance's object.
+	agents, listErr := m.listRuntime(ctx, map[string]string{"scion.name": slug})
+	if listErr == nil {
+		// projectName is never empty here, so the match is always scoped:
+		// without a project ID it accepts no entry.
+		matchID := scopeProjectID(projectID, projectDir)
 		for _, a := range agents {
-			// Skip agents from a different project
-			if !matchAgentProject(a, projectName, projectID) {
+			// Skip entries that are not this project's (matchAgentProject):
+			// the pre-clean deletes or adopts what it keeps.
+			if !matchAgentProject(a, projectName, matchID) {
 				continue
 			}
 			isRunning := a.Phase == string(state.PhaseRunning)
@@ -114,14 +231,59 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 						a.Detached = *opts.Detached
 					}
 					a.Phase = "running"
+					// This start resolved no configuration, so it reports
+					// none: the effective fields stay unset and
+					// ConfigResolved stays false (WP1 slice 3 addendum v14
+					// section 5), so the broker sends no brokerBuild and
+					// the hub records nothing, as for an older broker.
+					a.Harness, a.Model, a.TemplateHash = "", "", ""
+					a.ConfigResolved = false
 					return &a, nil
 				}
 			}
-			// If it exists but not running (or we have a new task), we delete it so we can recreate it
-			if err := m.Runtime.Delete(ctx, a.ContainerID); err != nil {
+			// If it exists but not running (or we have a new task), we delete it so we can recreate it.
+			// The delete is by name/ID found by name, so an async launch
+			// checkpoints first: a launch the hub has already ended must
+			// not remove a newer launch's agent.
+			if opts.Checkpoint != nil {
+				if err := opts.Checkpoint(ctx, runtime.CheckpointStepPreClean); err != nil {
+					return nil, err
+				}
+			}
+			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: runtime.AgentOperationID(a), RunID: a.RunID}); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
+	}
+
+	// List OK: every entry of the name in this project is gone, so record
+	// this run as the owner of the agent's files now (ptone/scion#2675). The
+	// hub keeps this run even if the start fails, so the files must name it
+	// too, or a delete for this run would leave them behind. A fresh
+	// provision records the run carried by ctx itself.
+	//
+	// List failed: no pre-clean ran and a previous run's container may hold
+	// the name (ptone/scion#3242). If the create then collides, the hub may
+	// settle on that previous run, so keep the recorded owner (and record
+	// none on a fresh provision) and record this run only after a
+	// successful create, which proves the name was free.
+	//
+	// The run is recorded in the host-owned HostStateFile in the agent's
+	// directory (RecordRunOwner, ptone/scion#4771), never in the agent
+	// home. A failed record (including a project with no trusted root) is
+	// logged and the start carries on, as the agent-info.json record did:
+	// the broker then finds the previous owner, none, or an unknown one,
+	// and keeps the files when it is unknown.
+	recordAfterCreate := listErr != nil
+	if listErr == nil {
+		ctx = api.ContextWithRunID(ctx, opts.RunID)
+		if err := RecordRunOwner(RunOwnerTargetFor(opts), opts.RunID); err != nil {
+			slog.Warn("Start: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", opts.RunID, "error", err)
+		}
+	} else {
+		slog.Warn("Start: could not list existing runtime entries; leaving the recorded owner of the agent's files unchanged until the create succeeds",
+			"agent", opts.Name, "run_id", opts.RunID, "error", listErr)
 	}
 
 	// If resuming, verify the agent exists before proceeding. Probe both
@@ -138,13 +300,32 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ctx = api.ContextWithBrokerMode(ctx)
 	}
 	if opts.GitClone != nil {
+		// Presence only: clone_depth is applied to opts.GitClone below, so
+		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
+	}
+	ctx = contextWithClonePerAgentWorkspace(ctx, opts)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
+	if opts.RecordedOriginURL != "" {
+		// Linked-checkout route: GitClone was cleared, so the recorded origin is
+		// carried separately for the git-lfs endpoint pin.
+		ctx = api.ContextWithRecordedOrigin(ctx, opts.RecordedOriginURL)
+	}
+	if opts.FreshProvision {
+		ctx = api.ContextWithFreshProvision(ctx)
 	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	ctx = api.ContextWithHubProjectID(ctx, opts.HubProjectID)
+	if isEmptyPerAgentStart(opts) {
+		ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
+	}
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
+	}
+	if opts.TemplateName != "" {
+		ctx = api.ContextWithTemplateName(ctx, opts.TemplateName)
 	}
 
 	// Build inline config for GetAgent by merging the dispatch InlineConfig
@@ -164,10 +345,39 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q projectPath=%q profile=%q",
 		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile)
+	// Collect the warnings for template environment keys GetAgent ignores
+	// (ptone/scion#4524); they join the start warnings below.
+	ctx, templateEnvWarns := withTemplateEnvWarnings(ctx)
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
 	}
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
+		recordCloudRunAgentWorkspace(agentDir, opts.Name)
+	}
+	// Empty-per-agent (design #2703): the request's mode, or the mode
+	// persisted at provision, so a start that lost it (e.g. a dropped or
+	// undecodable request body) still gets the private workspace, no repo
+	// root and the right container env rather than legacy resolution.
+	emptyPerAgent := isEmptyPerAgentStart(opts) || (finalScionCfg != nil && finalScionCfg.EmptyPerAgentWorkspace)
+	if emptyPerAgent {
+		env := make(map[string]string, len(opts.Env)+1)
+		for k, v := range opts.Env {
+			env[k] = v
+		}
+		env["SCION_WORKSPACE_MODE"] = string(store.SharingModeEmptyPerAgent)
+		delete(env, "SCION_WORKSPACE_GIT")
+		opts.Env = env
+	}
+	// SCION_WORKSPACE_GIT as the caller (the runtime broker's start context)
+	// computed it, snapshotted before any settings-driven env merging can
+	// fill the absent key: the harness-config env overlay
+	// (resolveAuthEnvOverlay), the config env layer and the hub default env
+	// (buildAgentEnv). The final env carries exactly this value
+	// (enforceWorkspaceGitEnv), because the Kubernetes runtime's
+	// shared-repository guard trusts it.
+	dispatchWorkspaceGit, dispatchWorkspaceGitSet := opts.Env["SCION_WORKSPACE_GIT"]
 	if finalScionCfg != nil {
 		util.Debugf("Start: GetAgent returned config: harness=%q harnessConfig=%q defaultHarnessConfig=%q image=%q",
 			finalScionCfg.Harness, finalScionCfg.HarnessConfig, finalScionCfg.DefaultHarnessConfig, finalScionCfg.Image)
@@ -195,7 +405,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// Load settings for registry resolution
-	settings, settingsWarnings, err := config.LoadEffectiveSettings(projectDir)
+	settings, settingsWarnings, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		util.Debugf("Start: LoadEffectiveSettings(%s) error: %v", projectDir, err)
 	}
@@ -225,11 +435,88 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// Default values
-	resolvedImage := ""
 	unixUsername := "root"
 	profileName := opts.Profile
 
 	util.Debugf("image resolution: starting, harnessConfigName=%s", harnessConfigName)
+
+	// Resolve the template chain unconditionally: it drives both the
+	// harness-config-dir search below and the explicit-image detection
+	// further down. Prefer opts.Template when it is an absolute path (e.g.
+	// hydrated template cache path from the broker). The display name stored
+	// in finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in the
+	// project, but the original opts.Template path points to the actual
+	// template directory containing harness-configs/.
+	//
+	// Image provenance (including the provisioned profile and template) is
+	// recorded broker-side, in the agent dir; see image_provenance.go. For
+	// an agent that has it, the recorded template stands in for
+	// finalScionCfg.Info.Template (read from agent-info.json in the agent
+	// home): this chain selects the harness-config dir searched for the
+	// file tier, and whether the template is still resolvable.
+	provenance, err := readImageProvenance(agentDir)
+	if err != nil {
+		logImageProvenanceError(opts.Name, err)
+		return nil, err
+	}
+	// startProfile is the settings profile this start resolves the agent's
+	// settings with when the request names none: opts.Profile (a broker
+	// start or restart fills it from the provisioned profile, else the
+	// Hub-sent one), else the profile recorded in broker-side image
+	// provenance. The profile in agent-info.json (finalScionCfg.Info, read
+	// from the agent home) is never used for it.
+	startProfile := opts.Profile
+	if startProfile == "" && provenance != nil {
+		startProfile = provenance.Profile
+	}
+	// A template recorded as loaded from a content-addressed cache is not
+	// available by name here: the recorded name is then a display name
+	// only, so it is never looked up, and the template counts as
+	// unresolvable, as it did when the stored name was the cache
+	// directory's hash. For an agent with image provenance this is read
+	// from the provenance record only; otherwise from agent info
+	// (Info.TemplateHash).
+	hydrated := templateHydrated(provenance, finalScionCfg)
+	// templateUnresolvable is true only when a named template could not be
+	// found at all (renamed or deleted since the agent was created) — not
+	// when there is simply no template name to resolve. It gates the legacy
+	// recorded template snapshot tier below (the template image and pull
+	// policy recorded for an agent provisioned before ptone/scion#4524), so
+	// a restart of such an agent whose template disappeared keeps that
+	// recorded value instead of dropping to Hub settings or the file
+	// default, as an agent with no template name does.
+	templateUnresolvable := false
+	templateName := ""
+	if opts.Template != "" && filepath.IsAbs(opts.Template) {
+		templateName = opts.Template
+	}
+	if templateName == "" && hydrated {
+		templateUnresolvable = true
+		util.Debugf("image resolution: template was loaded from a content-addressed cache, not resolved by name")
+	}
+	if templateName == "" && !hydrated {
+		if provenance != nil {
+			templateName = provenance.Template
+		} else if finalScionCfg != nil && finalScionCfg.Info != nil {
+			templateName = finalScionCfg.Info.Template
+		}
+	}
+	if templateName == "" && !hydrated {
+		templateName = opts.Template
+	}
+	var templatePaths []string
+	var templateChain []*config.Template
+	if templateName != "" {
+		if chain, err := config.GetTemplateChainInProject(ctx, templateName, opts.ProjectPath); err == nil {
+			templateChain = chain
+			for _, tpl := range chain {
+				templatePaths = append(templatePaths, tpl.Path)
+			}
+		} else {
+			templateUnresolvable = true
+			util.Debugf("image resolution: template %q could not be resolved: %v", templateName, err)
+		}
+	}
 
 	// Load on-disk harness-config for the container user and image (base layer).
 	// The settings map may not define harness_configs, but the on-disk
@@ -239,37 +526,29 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// resolvedHarnessConfigAuth captures the auth metadata from the resolved
 	// on-disk harness config for use by the auth pipeline later.
 	var resolvedHarnessConfigAuth *config.HarnessAuthMetadata
+	// The image and Kubernetes-only image pull policy tiers are collected
+	// separately here and resolved by pickImage / pickPullPolicy further
+	// down, once every tier is known; see settings-precedence.md's
+	// "Container image and Kubernetes image pull policy" section for the
+	// order (ptone/scion#1799).
+	var fileImage, settingsImage, profileOverrideImage string
+	var filePullPolicy, settingsPullPolicy, profileOverridePullPolicy string
+	// The harness-config file's and settings harness_configs volumes are
+	// environment values applied here on every start, never persisted
+	// (ptone/scion#4561).
+	var fileVolumes, settingsVolumes []api.VolumeMount
+	// The on-disk harness-config's model_aliases, for resolving a size alias
+	// in the effective model (resolveEffectiveModel).
+	var hcModelAliases map[string]string
 	if harnessConfigName != "" {
-		var templatePaths []string
-		// Prefer opts.Template when it is an absolute path (e.g. hydrated
-		// template cache path from the broker). The display name stored in
-		// finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in
-		// the project, but the original opts.Template path points to the
-		// actual template directory containing harness-configs/.
-		templateName := ""
-		if opts.Template != "" && filepath.IsAbs(opts.Template) {
-			templateName = opts.Template
-		}
-		if templateName == "" {
-			if finalScionCfg != nil && finalScionCfg.Info != nil {
-				templateName = finalScionCfg.Info.Template
-			}
-		}
-		if templateName == "" {
-			templateName = opts.Template
-		}
-		if templateName != "" {
-			if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
-				for _, tpl := range chain {
-					templatePaths = append(templatePaths, tpl.Path)
-				}
-			}
-		}
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
+			hcModelAliases = hcDir.Config.ModelAliases
 			if hcDir.Config.Image != "" {
-				resolvedImage = hcDir.Config.Image
-				util.Debugf("image resolution: from on-disk harness-config image=%s path=%s", resolvedImage, hcDir.Path)
+				fileImage = hcDir.Config.Image
+				util.Debugf("image resolution: on-disk harness-config image=%s path=%s", fileImage, hcDir.Path)
 			}
+			filePullPolicy = hcDir.Config.ImagePullPolicy
+			fileVolumes = hcDir.Config.Volumes
 			if hcDir.Config.User != "" {
 				unixUsername = hcDir.Config.User
 			}
@@ -282,12 +561,46 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	if settings != nil && harnessConfigName != "" {
-		hConfig, err := settings.ResolveHarnessConfig(opts.Profile, harnessConfigName)
+		// Settings are resolved against startProfile (see above).
+		settingsProfile := startProfile
+		// The image and pull-policy lookups use the profile recorded in
+		// broker-side image provenance when it exists. An agent
+		// provisioned before provenance was recorded keeps the
+		// settingsProfile lookup.
+		imageProfile := settingsProfile
+		if provenance != nil {
+			imageProfile = provenance.Profile
+		}
+		hConfig, err := settings.ResolveHarnessConfig(settingsProfile, harnessConfigName)
 		if err == nil {
-			if hConfig.Image != "" {
-				resolvedImage = hConfig.Image
-				util.Debugf("image resolution: from settings harness-config image=%s", resolvedImage)
+			imageHConfig := hConfig
+			if imageProfile != settingsProfile {
+				if c, imgErr := settings.ResolveHarnessConfig(imageProfile, harnessConfigName); imgErr == nil {
+					imageHConfig = c
+				}
 			}
+			// ResolveHarnessConfig folds an explicit profile
+			// harness_overrides.<hc>.image / .image_pull_policy into its
+			// result. That explicit override outranks the template and
+			// inline tiers, while the plain harness_configs.<hc> default
+			// does not, so the two are split apart here.
+			profileOverrideImage = settings.ProfileHarnessOverrideImage(imageProfile, harnessConfigName)
+			settingsImage = imageHConfig.Image
+			if profileOverrideImage != "" {
+				settingsImage = settings.HarnessConfigs[harnessConfigName].Image
+			}
+			// The profile's image_pull_policy rises with the profile image
+			// only: it takes the profile tier when that same override also
+			// sets an image, and otherwise stays in the settings tier, where
+			// ResolveHarnessConfig already placed it.
+			settingsPullPolicy = imageHConfig.ImagePullPolicy
+			if profileOverrideImage != "" {
+				profileOverridePullPolicy = settings.ProfileHarnessOverrideImagePullPolicy(imageProfile, harnessConfigName)
+				if profileOverridePullPolicy != "" {
+					settingsPullPolicy = settings.HarnessConfigs[harnessConfigName].ImagePullPolicy
+				}
+			}
+			settingsVolumes = hConfig.Volumes
 			if hConfig.User != "" {
 				unixUsername = hConfig.User
 			}
@@ -296,14 +609,79 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
+	// Environment values (ptone/scion#4561): image, kubernetes, resources
+	// and volumes come from settings, not from the persisted agent config,
+	// which holds only the requester's own values (inline config) and the
+	// provisioned workspace mount. They are read from scion-agent.json on
+	// disk rather than from finalScionCfg, which on a first start is the
+	// config ProvisionAgent returned with every tier already merged in, so
+	// a first start and a restart see the same agent values. ownEnv is also
+	// what the scion-agent.json rewrites below persist. The image and pull
+	// policy are resolved separately (pickImage / pickPullPolicy below);
+	// volumes and resources are applied here.
+	ownEnv := environmentOf(finalScionCfg)
+	if persisted, ok := readPersistedAgentEnvironment(agentDir); ok {
+		ownEnv = persisted
+	}
+	if finalScionCfg != nil {
+		envProfile := startProfile
+		finalScionCfg = withEnvironment(finalScionCfg, ownEnv.clone())
+		finalScionCfg.Volumes = mergeEnvironmentVolumes(settingsVolumes, fileVolumes, ownEnv.Volumes)
+		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
+		// No configured volume (settings, profile, template, harness
+		// config, the requester's own) may reach a Runtime Broker control
+		// path: refuse before anything below persists or runs.
+		if err := runtime.CheckVolumeSources(finalScionCfg.Volumes); err != nil {
+			return nil, err
+		}
+	}
+
+	// Limits (ptone/scion#623): the agent's own max_turns, max_model_calls
+	// and max_duration (template or requester values) are read from
+	// scion-agent.json on disk, for the same reason as ownEnv above, with
+	// any set by this start's inline config on top. The hub agent_defaults
+	// on ctx and the current settings defaults then fill what the agent
+	// leaves unset, so a changed default reaches the agent on this start.
+	// ownLimits is what the scion-agent.json rewrites below persist.
+	ownLimits := limitsOf(finalScionCfg)
+	if persisted, ok := readPersistedAgentLimits(agentDir); ok {
+		ownLimits = persisted.overlay(limitsOf(startInlineConfig))
+	}
+	if finalScionCfg != nil {
+		finalScionCfg = withLimits(finalScionCfg, ownLimits)
+		applyDefaultLimits(ctx, finalScionCfg, settings)
+	}
+
+	// Telemetry tiers applied per start: broker settings telemetry < hub
+	// default (ptone/scion#4218) < the agent's own config telemetry
+	// (requester inline telemetry from older hubs, and the stored config).
+	// Templates contribute no telemetry (ptone/scion#4524). Both lower
+	// tiers are merged here in base position, the hub default first so the
+	// settings merge below lands underneath it. The hub context value is
+	// deep-copied so it is never aliased into the agent config.
+	// agentOwnTelemetry is the agent's
+	// telemetry before either merge; the scion-agent.json rewrites below
+	// persist it instead of the merged result (ptone/scion#4241): a baked-in
+	// settings or hub value would rank as agent config on the next start,
+	// and later settings or hub changes would never reach the agent.
+	var agentOwnTelemetry *api.TelemetryConfig
+	if finalScionCfg != nil {
+		agentOwnTelemetry = cloneTelemetryConfig(finalScionCfg.Telemetry)
+	}
+	if hubTelemetry := cloneTelemetryConfig(api.HubAgentDefaultsFromContext(ctx).TelemetryDefault()); hubTelemetry != nil {
+		util.Debugf("Start: merging hub default telemetry config in base position")
+		finalScionCfg = config.MergeScionConfig(&api.ScionConfig{Telemetry: hubTelemetry}, finalScionCfg)
+	}
+
 	if settings != nil {
 		if profileName == "" {
 			profileName = settings.ActiveProfile
 		}
 		// Merge settings-level telemetry config into finalScionCfg so that
 		// cloud export configuration (endpoint, protocol, batch, etc.) and
-		// the TelemetryEnabled flag are available at start time. This mirrors
-		// the merge in ProvisionAgent.
+		// the TelemetryEnabled flag are available at start time. This is the
+		// only place settings telemetry is applied: ProvisionAgent does not
+		// bake it into scion-agent.json (ptone/scion#4241).
 		if settings.Telemetry != nil {
 			util.Debugf("Start: merging settings telemetry config (cloud=%v, endpoint=%q)",
 				settings.Telemetry.Cloud != nil, func() string {
@@ -327,18 +705,197 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		util.Debugf("user resolution: from ScionConfig user=%s", unixUsername)
 	}
 
-	var warnings []string
-
-	if finalScionCfg != nil && finalScionCfg.Image != "" {
-		resolvedImage = finalScionCfg.Image
-		util.Debugf("image resolution: from agent/template config image=%s", resolvedImage)
+	// clone_depth for a clone-per-agent start: the template/agent value,
+	// else the profile's (the one named for this start, else the one the
+	// agent was created with, else the active profile). Unset keeps the
+	// depth sent with the request.
+	if opts.GitClone != nil {
+		cdProfile := startProfile
+		var cdIn cloneDepthInput
+		if finalScionCfg != nil {
+			cdIn.Template = finalScionCfg.CloneDepth
+		}
+		cdIn.Profile, cdIn.ProfileSource = settings.ResolveCloneDepthWithSource(cdProfile)
+		if opts.Env == nil {
+			opts.Env = make(map[string]string)
+		}
+		gc, err := applyCloneDepth(opts.GitClone, opts.Env, cdIn)
+		if err != nil {
+			return nil, err
+		}
+		if gc != opts.GitClone && gc.Depth != nil {
+			slog.Debug("Start: resolved clone_depth", "agent", opts.Name, "depth", *gc.Depth)
+		}
+		opts.GitClone = gc
 	}
 
-	// Apply CLI/dispatch image override before registry rewrite so the
-	// rewrite applies last regardless of the image source.
-	if opts.Image != "" {
-		resolvedImage = opts.Image
-		util.Debugf("image resolution: from CLI/dispatch --image flag image=%s", resolvedImage)
+	warnings := templateEnvWarns.Warnings()
+	// Templates left at a hub-managed project's workspace root are no
+	// longer read; say so instead of silently resolving another template.
+	if w := config.LegacyProjectTemplatesWarning(opts.ProjectPath); w != "" {
+		slog.Warn("Project templates found at the old location", "agent", opts.Name, "warning", w)
+		warnings = append(warnings, w)
+	}
+
+	// The template env layer (ptone/scion#4524): recomputed from the live
+	// template chain on every start, never read from scion-agent.json, and
+	// handed to the runtime as RunConfig.FallbackEnv below. An unresolvable
+	// template has no template env.
+	//
+	// For an agent with a Hub template, a start or restart leaves
+	// opts.Template unset (so image and harness-config resolution are
+	// unchanged); the broker hydrates the template and passes its path in
+	// opts.TemplateEnvSource for the template env only.
+	envChain := templateChain
+	if envChain == nil && opts.TemplateEnvSource != "" {
+		if chain, err := config.GetTemplateChainInProject(ctx, opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+			envChain = chain
+		} else {
+			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
+		}
+	}
+	templateEnv := templateChainEnv(envChain)
+	if envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "") {
+		if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
+			warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
+		}
+	}
+
+	// There is no live template tier: image and kubernetes are environment
+	// keys, which a template may not set (ptone/scion#4524).
+	//
+	// The recorded template snapshot is a legacy tier for an agent
+	// provisioned before that change whose template can no longer be
+	// resolved (renamed or deleted since provision, or a hub agent restarted
+	// on a broker with no local copy). It replays the template chain's OWN
+	// image / pull policy recorded in broker-side image provenance
+	// (image-provenance.json in the agent dir, not agent-info.json in the
+	// agent home), never the merged scion-agent.json value, which also folds
+	// in that moment's inline, profile, settings and file values, so a
+	// profile or settings pin removed since then cannot linger disguised as
+	// the template's (ptone/scion#1799). New agents record no template image,
+	// so for them the tier is empty. An agent provisioned before image
+	// provenance was recorded still falls back to the merged value.
+	var snapshotImage, snapshotPullPolicy string
+	if templateUnresolvable {
+		switch {
+		case provenance != nil:
+			snapshotImage = provenance.TemplateImage
+			snapshotPullPolicy = provenance.TemplateImagePullPolicy
+		case finalScionCfg != nil:
+			snapshotImage = finalScionCfg.Image
+			if finalScionCfg.Kubernetes != nil {
+				snapshotPullPolicy = finalScionCfg.Kubernetes.ImagePullPolicy
+			}
+		}
+	}
+
+	// The user's explicit choices. For the image, the request tier is the
+	// current request's opts.Image (CLI --image, a local --config image the
+	// CLI promotes to it, or the hub's explicit image), else the request
+	// image recorded at provision, so a first start and a plain restart rank
+	// it identically, locally and via the hub. For an agent provisioned
+	// before image provenance was recorded, the create-time inline image
+	// (Info.ExplicitImage — a request-level choice there, since the CLI and
+	// the hub both promote it to the request image) stands in, which keeps
+	// such an agent's image where it was before this change. The inline
+	// tier is the CURRENT request's own inline image (opts.InlineConfig —
+	// not startInlineConfig, which a bare --harness-auth also makes
+	// non-nil), else, for a provenance-recording agent, the create-time
+	// inline image recorded in broker-side provenance; an inline-only caller
+	// (no request image) therefore ranks the same on a first start and a
+	// restart.
+	//
+	// There is no per-request pull-policy flag, so the user's explicit pull
+	// policy is the current inline value, else the one recorded from the
+	// create-time inline config (broker-side provenance, or agent-info.json
+	// for a pre-provenance agent); it ranks just above the profile override,
+	// the same position the request image holds over the profile image.
+	// The recorded request image depends on broker-side provenance alone,
+	// never on agent-info.json being present or intact.
+	requestImage, requestImageSource := opts.Image, imageTierRequest
+	if requestImage == "" {
+		switch {
+		case provenance != nil:
+			requestImageSource = imageTierRecordedRequest
+			requestImage = provenance.RequestImage
+		case finalScionCfg != nil && finalScionCfg.Info != nil:
+			requestImageSource = imageTierRecordedRequest
+			requestImage = finalScionCfg.Info.ExplicitImage
+		}
+	}
+	// The create-time inline values come from broker-side provenance when
+	// it exists; agent-info.json's ExplicitImage* copies (container-
+	// writable) are read only for an agent provisioned before provenance
+	// was recorded.
+	inlineImage := ""
+	if opts.InlineConfig != nil && opts.InlineConfig.Image != "" {
+		inlineImage = opts.InlineConfig.Image
+	} else if provenance != nil {
+		inlineImage = provenance.InlineImage
+	}
+	explicitPullPolicy := ""
+	switch {
+	case opts.InlineConfig != nil && opts.InlineConfig.Kubernetes != nil && opts.InlineConfig.Kubernetes.ImagePullPolicy != "":
+		explicitPullPolicy = opts.InlineConfig.Kubernetes.ImagePullPolicy
+	case provenance != nil:
+		explicitPullPolicy = provenance.InlineImagePullPolicy
+	case finalScionCfg != nil && finalScionCfg.Info != nil:
+		explicitPullPolicy = finalScionCfg.Info.ExplicitImagePullPolicy
+	}
+
+	// Resolve, lowest tier first: harness-config file < settings
+	// harness_configs < (legacy template snapshot) < inline < profile
+	// harness_overrides < request. An EXPLICIT profile override image
+	// outranks the inline tier; only the user's explicit request image
+	// ranks above it (ptone/scion#1799). For the pull policy, the user's
+	// explicit inline policy ranks above the profile override (there is no
+	// per-request pull-policy flag). This runs before the registry rewrite
+	// so the rewrite applies last regardless of source.
+	resolvedImage, imageSource := pickImage(slog.Default(), opts.Name, []imageCandidate{
+		{source: imageTierHarnessConfigFile, image: fileImage},
+		{source: imageTierSettings, image: settingsImage},
+		{source: imageTierTemplateSnapshot, image: snapshotImage},
+		{source: imageTierInline, image: inlineImage},
+		{source: imageTierProfileOverride, image: profileOverrideImage},
+		{source: requestImageSource, image: requestImage},
+	})
+	resolvedPullPolicy, pullPolicySource := pickPullPolicy(slog.Default(), opts.Name, []imageCandidate{
+		{source: imageTierHarnessConfigFile, image: filePullPolicy},
+		{source: imageTierSettings, image: settingsPullPolicy},
+		{source: imageTierTemplateSnapshot, image: snapshotPullPolicy},
+		{source: imageTierProfileOverride, image: profileOverridePullPolicy},
+		{source: imageTierInline, image: explicitPullPolicy},
+	})
+	imageFromSnapshot := imageSource == imageTierTemplateSnapshot
+	pullPolicyFromSnapshot := pullPolicySource == imageTierTemplateSnapshot
+
+	if imageFromSnapshot || pullPolicyFromSnapshot {
+		var fields []string
+		if imageFromSnapshot {
+			fields = append(fields, "image")
+		}
+		if pullPolicyFromSnapshot {
+			fields = append(fields, "pull policy")
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"template %q could not be found; using the template's %s recorded at an earlier provision instead of the current template",
+			templateName, strings.Join(fields, " and ")))
+	}
+
+	// image_tag (ptone/scion#6625): the hub sends the resolved tag only
+	// when one applies (a set value while hub.image_tag_setting is on, or
+	// the version default of a release build). It is applied to the short form
+	// first, so the local-image check below looks for the tagged image and
+	// the registry rewrite qualifies the tagged name; RewriteImageRef then
+	// also retags the registry rewrite's own output form. With no tag both
+	// rewrites are byte-identical to the image_registry rewrite alone.
+	imageTag := api.HubAgentDefaultsFromContext(ctx).ResolvedImageTag()
+	if imageTag != "" && resolvedImage != "" {
+		if tagged := config.RewriteImageTag(resolvedImage, imageTag); tagged != resolvedImage {
+			util.Debugf("image resolution: image_tag rewrite %s -> %s", resolvedImage, tagged)
+			resolvedImage = tagged
+		}
 	}
 
 	// Two-phase image resolution: for short-form (bare) images, prefer a
@@ -349,7 +906,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// always return true from ImageExists (images are pulled on demand by the
 	// node), so we must skip the local check to ensure registry rewrite applies.
 	if settings != nil && resolvedImage != "" {
-		imageRegistry := settings.ResolveImageRegistry(opts.Profile)
+		// The profile-level image_registry is looked up with the
+		// provisioned profile recorded in broker-side provenance; legacy
+		// agents keep opts.Profile (the Hub-sent profile on a broker start).
+		registryProfile := opts.Profile
+		if provenance != nil {
+			registryProfile = provenance.Profile
+		}
+		// The node env (this broker's SCION_IMAGE_REGISTRY) beats every
+		// settings layer (ptone/scion#3916).
+		imageRegistry := config.ResolveImageRegistryLayers(
+			settings.ImageRegistryLayers(registryProfile, config.ImageRegistryFromEnv())).Value
 		if imageRegistry != "" && imagecheck.IsBareImageName(resolvedImage) {
 			runtimeName := ""
 			if m.Runtime != nil {
@@ -368,16 +935,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if localExists {
 				util.Debugf("image resolution: using local short-form image %s", resolvedImage)
 			} else {
-				rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
+				rewritten := config.RewriteImageRef(resolvedImage, imageRegistry, imageTag)
 				if rewritten != resolvedImage {
-					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, rewritten)
+					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 					resolvedImage = rewritten
 				}
 			}
 		} else if imageRegistry != "" {
-			rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
+			rewritten := config.RewriteImageRef(resolvedImage, imageRegistry, imageTag)
 			if rewritten != resolvedImage {
-				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, rewritten)
+				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 				resolvedImage = rewritten
 			}
 		}
@@ -391,21 +958,62 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("image resolution: final image=%s", resolvedImage)
 
+	// Start-time writes into an existing agent's home (writeAgentHome)
+	// repair the home's ownership through the runtime, from this image, on
+	// a permission error (ptone/scion#4330).
+	homeOwner := advertisedAgentHomeOwner(settings)
+	warnAgentHomeOwnerMismatch(opts.Name, agentHome, homeOwner)
+	ctx = contextWithAgentHomeRepair(ctx, m.Runtime, agentHome, resolvedImage, homeOwner)
+
 	// Resolve the harness implementation. When we have a harness-config name,
 	// route through harness.Resolve so container-script provisioners (and
 	// future declarative-only harnesses) are honored. Otherwise fall back to
 	// the legacy New() shim using the bare harness type.
 	var h api.Harness
-	var harnessConfigRevision string
+	var harnessConfigRevision, harnessConfigSource string
+	// resolveFailed records a harness.Resolve error for a named
+	// harness-config (see harnessAfterResolveError).
+	var resolveFailed bool
+	// resolvedHCDir is the harness-config directory harness.Resolve used,
+	// if any (for restaging capture-auth assets after a bundle clear).
+	var resolvedHCDir *config.HarnessConfigDir
 	var noAuthConfig *config.HarnessNoAuthConfig
+	// aliasHarness keys the built-in model-alias fallback
+	// (resolveEffectiveModel): the declared harness of the harness-config
+	// this launch resolved, or the stored name when none was resolved (the
+	// harness.New paths, where h is built from that same name).
+	aliasHarness := harnessName
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
-		if opts.Template != "" {
+		if opts.Template != "" && (filepath.IsAbs(opts.Template) || !hydrated) {
 			tplName := opts.Template
-			if !filepath.IsAbs(tplName) && finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "" {
-				tplName = finalScionCfg.Info.Template
+			if !filepath.IsAbs(tplName) {
+				// For an agent with broker-side image provenance, the
+				// template recorded there (provisioning's own record) stands
+				// in for agent-info.json's template when choosing the template
+				// whose bundled harness-config this resolves, so the choice is
+				// resolved from broker-side agent state (ptone/scion#1799).
+				// provenance was read above, failing the start if the record
+				// is unusable. A legacy agent keeps agent-info.json's value.
+				switch {
+				case provenance != nil:
+					if provenance.Template != "" {
+						tplName = provenance.Template
+					}
+				case finalScionCfg != nil && finalScionCfg.Info != nil && config.IsTemplateSlug(finalScionCfg.Info.Template):
+					// agent-info.json's template (agent-writable) is used
+					// only when it is a template slug: a live, fail-closed
+					// check for the harness-config choice. GetAgent
+					// (provision.go) is the primary control for the
+					// template chain and already replaces a non-slug
+					// agent-info template before finalScionCfg reaches
+					// here; this check keeps a Start path that builds its
+					// config without GetAgent from choosing an
+					// agent-written path.
+					tplName = finalScionCfg.Info.Template
+				}
 			}
-			if chain, err := config.GetTemplateChainInProject(tplName, opts.ProjectPath); err == nil {
+			if chain, err := config.GetTemplateChainInProject(ctx, tplName, opts.ProjectPath); err == nil {
 				for _, tpl := range chain {
 					resolveTemplatePaths = append(resolveTemplatePaths, tpl.Path)
 				}
@@ -419,24 +1027,219 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			Settings:      settings,
 			ConfigDirPath: opts.HarnessConfigPath,
 		})
+		// Unresolved unless a directory resolves below. Start always reports
+		// a source (unresolved also when no name resolved, below), so an
+		// empty value on the wire means an older broker.
+		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+		if err == nil {
+			// Policy is evaluated where launch resolves the harness-config,
+			// before the harness is provisioned or the container runs. On
+			// restart the broker has already stopped the previous container
+			// by this point, as for any other start failure.
+			if policyErr := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); policyErr != nil {
+				return nil, policyErr
+			}
+		}
 		if err != nil {
-			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
-			h = harness.New(harnessName)
+			// The entry could not be evaluated. harness.New never constructs
+			// a container-script harness; with a policy attached and a
+			// provisioner wrapper staged, the start is refused instead
+			// (harnessAfterResolveError); see
+			// TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper. The one
+			// Resolve failure reachable today for a non-empty name, an
+			// unusable provisioner, fails the launch below without the
+			// fallback.
+			util.Debugf("harness.Resolve failed for %q: %v", harnessConfigName, err)
+			// A harness-config whose provisioner cannot run is a
+			// correctness error, with or without a policy: the harness.New
+			// fallback would boot an agent without the provisioner's output
+			// (auth, harness-native config). Fail the launch before any
+			// container is created (ptone/scion#611).
+			if errors.Is(err, harness.ErrUnusableProvisioner) {
+				return nil, err
+			}
+			resolveFailed = true
+			fallback, fbErr := harnessAfterResolveError(ctx, agentHome, harnessConfigName, harnessName, err)
+			if fbErr != nil {
+				return nil, fbErr
+			}
+			h = fallback
 		} else {
 			h = resolved.Harness
+			aliasHarness = resolved.Config.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
+			resolvedHCDir = resolved.ConfigDir
 			if resolved.ConfigDir != nil {
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
+				harnessConfigSource = string(resolved.ConfigDir.Source)
 			}
 			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
+
+			// A --harness-config switch can select a harness whose skills
+			// directory differs from the one ProvisionAgent installed the
+			// skills into (the stored harness-config's). Carry the skills
+			// over so the agent keeps them (ptone/scion#3129).
+			if prevHC := storedHarnessConfigName(finalScionCfg); prevHC != "" && prevHC != harnessConfigName {
+				prevSkillsDir := previousHarnessSkillsDir(prevHC, projectDir, resolveTemplatePaths, settings, profileName)
+				if prevSkillsDir == "" {
+					// The stored harness-config may have been Hub-supplied
+					// and is not on disk at this Start; nothing is copied.
+					slog.DebugContext(ctx, "Start: previous harness-config not found; skills carry-over skipped")
+				}
+				// The carry-over is logged in summary form: the number of
+				// skills copied, or a fixed warning with the failed step
+				// and the error class.
+				// An invalid skills_dir was refused by harness.Resolve;
+				// harnessSkillsDir checks it again, and "" copies nothing.
+				newSkillsDir, _ := harnessSkillsDir(h)
+				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, newSkillsDir); cpErr != nil {
+					stage, class := carryOverFailureSummary(cpErr)
+					slog.WarnContext(ctx, "Start: skills carry-over after the harness-config switch failed")
+					slog.DebugContext(ctx, "Start: skills carry-over failure", "stage", stage, "class", class)
+				} else if len(copied) > 0 {
+					slog.DebugContext(ctx, "Start: skills carried over after the harness-config switch", "count", len(copied))
+				}
+			}
 		}
 	} else {
 		h = harness.New(harnessName)
+		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+	}
+	// launchedHarness is the name of the harness implementation this start
+	// resolved and launches with (harness.Resolve's, the error fallback's,
+	// or harness.New's Generic), captured once here. It is the effective
+	// harness the hub records (WP1 slice 3 addendum v14 section 5), not the
+	// stored harnessName, which a harness-config switch or a legacy config
+	// can leave stale or empty.
+	launchedHarness := ""
+	if h != nil {
+		launchedHarness = h.Name()
+	}
+
+	// Clear the staged provisioning state (wrapper and whole bundle) before
+	// staging, for every harness and with or without a policy
+	// (resetStagedProvisioning), as WriteProjectPreStartHook clears a stale
+	// project hook below. A provisioner wrapper then runs only if this
+	// launch's container-script Provision writes it, after the control plane
+	// restages its inputs and secrets. After a Resolve error, the harness.New
+	// fallback (never a container-script harness) also starts from cleared
+	// staged provisioning, with or without a policy
+	// (harnessAfterResolveError), so a provisioner staged by an earlier
+	// launch never runs for this one.
+	//
+	// The identity of the harness-config this launch resolved, from the
+	// control plane's own resolution; recorded secrets are restored only for
+	// the harness-config revision that staged them.
+	var hcIdentity *harnessConfigIdentity
+	if !resolveFailed {
+		hcIdentity = currentHarnessConfigIdentity(harnessConfigName, resolvedHCDir, opts.HarnessConfigID)
+	} else if len(opts.RerenderKeys) > 0 {
+		// The re-render below needs the resolved harness: say that the
+		// keys the hub reported applied at this start were not rendered.
+		if msg := rerenderSkippedWarning(opts.RerenderKeys); !slices.Contains(warnings, msg) {
+			slog.Warn(msg, "agent", opts.Name)
+			warnings = append(warnings, msg)
+		}
+	}
+	if !resolveFailed {
+		// An agent provisioned before the control plane recorded its inputs
+		// has its record seeded once, before the bundle is cleared: from the
+		// existing inputs/ (three known files) for a container-script
+		// harness, empty otherwise. Either way the record exists afterwards,
+		// so the seed never runs again for this agent.
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			if _, err := seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID); err != nil {
+				return nil, fmt.Errorf("seed harness inputs: %w", err)
+			}
+		} else if err := ensureControlPlaneInputsRecord(agentDir); err != nil {
+			return nil, fmt.Errorf("record harness inputs: %w", err)
+		}
+		// Re-render the provision-rendered files of the keys the hub
+		// changed or cleared since provisioning (ptone/scion#3982), with
+		// the provisioning steps themselves, into the agent home and the
+		// inputs record restaged below. A key whose rendered result is
+		// unchanged since its last render is left alone.
+		if len(opts.RerenderKeys) > 0 {
+			rerenderWarns, err := rerenderProvisionedFiles(ctx, rerenderInputs{
+				Keys:       opts.RerenderKeys,
+				AgentName:  opts.Name,
+				AgentDir:   agentDir,
+				AgentHome:  agentHome,
+				ProjectDir: projectDir,
+				Harness:    h,
+				Chain:      envChain,
+				Config:     finalScionCfg,
+				Inline:     opts.InlineConfig,
+				WriteHome:  func(f func() error) error { return writeAgentHome(ctx, f) },
+			})
+			if err != nil {
+				return nil, fmt.Errorf("re-render provision-time files: %w", err)
+			}
+			for _, msg := range rerenderWarns {
+				if !slices.Contains(warnings, msg) {
+					slog.Warn(msg, "agent", opts.Name)
+					warnings = append(warnings, msg)
+				}
+			}
+		}
+		// Never skipped: on a permission error the home's ownership is
+		// repaired and the clear retried, or the start fails.
+		if err := writeAgentHome(ctx, func() error { return resetStagedProvisioning(agentHome) }); err != nil {
+			return nil, err
+		}
+		// Restage the control-plane inputs (instructions, system prompt,
+		// resolved skills) recorded at provisioning, so inputs/ holds only
+		// control-plane content.
+		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			// hub.agent_plugins is re-checked at every start: while it is off
+			// no plugins are restored, so the provisioner removes the ones
+			// Scion installed earlier.
+			includePlugins := agentPluginsEnabled(ctx, settings)
+			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome, includePlugins) }); err != nil {
+				return nil, fmt.Errorf("restage harness inputs: %w", err)
+			}
+			if msg := startAgentPluginsWarning(recordHasAgentPlugins(agentDir), includePlugins, harnessConfigName, h); msg != "" {
+				if !slices.Contains(warnings, msg) {
+					slog.Warn(msg, "agent", opts.Name)
+					warnings = append(warnings, msg)
+				}
+			}
+			// Restore exactly the secret files the control plane recorded;
+			// ApplyAuthSettings considers only these besides the secrets
+			// staged from this start's resolution.
+			var restored []string
+			err := writeAgentHome(ctx, func() error {
+				var restoreErr error
+				restored, restoreErr = restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity)
+				return restoreErr
+			})
+			if err != nil {
+				return nil, fmt.Errorf("restage harness secrets: %w", err)
+			}
+			cs.SetRecordedSecrets(restored)
+		}
+		// Restage the capture-auth assets a non-container-script harness
+		// keeps in the bundle, as ProvisionAgent stages them.
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && resolvedHCDir != nil && resolvedHCDir.Path != "" {
+			if err := writeAgentHome(ctx, func() error {
+				return harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
+			}
+		}
 	}
 
 	// Reconcile the harness bundle for existing agents. Provision() is
-	// idempotent and stages any missing files.
-	if err := h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace); err != nil {
+	// idempotent and stages any missing files. A container-script harness
+	// starts from a cleared bundle (resetStagedProvisioning), so a staging
+	// failure fails the launch: no provisioner wrapper or bundle from an
+	// earlier launch remains to run instead.
+	// Like every start-time write into the agent home, a permission error
+	// repairs the home's ownership and retries once (writeAgentHome).
+	if err := writeAgentHome(ctx, func() error { return h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace) }); err != nil {
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			return nil, fmt.Errorf("stage harness bundle: %w", err)
+		}
 		util.Debugf("Start: harness reconciliation failed: %v", err)
 	}
 
@@ -447,7 +1250,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// will not fire, so the hook would silently not run — worse than aborting.
 	// Called unconditionally: with an empty script the helper clears any file
 	// staged by an earlier occupant of this agent home.
-	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript) }); err != nil {
 		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 	}
 
@@ -468,7 +1271,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Inject settings-declared env into opts.Env and build the auth overlay.
 	// Extracted so the injection-then-overlay sequence is testable without
 	// standing up a full agent; see resolveAuthEnvOverlay.
-	authEnvOverlay := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
+	authEnvOverlay, droppedBrokerEnvVars := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
+
+	// Agents created in no-auth mode persist auth_selectedType "none". The
+	// start, restart, resume and wake paths may reach here without NoAuth
+	// set, so treat "none" as a request for no-auth mode instead of an auth
+	// type. An explicit opts.HarnessAuth other than "none" still wins over
+	// the persisted value.
+	if isNoAuthSelection(opts.HarnessAuth, finalScionCfg) {
+		opts.NoAuth = true
+	}
 
 	canFallbackToNoAuth := func() bool {
 		return opts.HarnessAuth == "" && noAuthConfig != nil &&
@@ -480,6 +1292,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if !opts.NoAuth {
 		auth = harness.GatherAuthWithEnv(authEnvOverlay, !opts.BrokerMode, authMeta)
 		if opts.BrokerMode {
+			home, _ := os.UserHomeDir()
+			if injected := injectHostCredentialFiles(&opts, authMeta, home); len(injected) > 0 {
+				slog.Info("Injected host credential files as file secrets", "agent", opts.Name, "secrets", injected)
+			}
 			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets, authMeta)
 		}
 		util.Debugf("auth: gathered credentials — selectedType=%q, hasADC=%t, cloudProject=%q, gcpMetadataMode=%q, envVarCount=%d, fileCount=%d, brokerMode=%t",
@@ -497,6 +1313,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if opts.HarnessAuth != "" && !harness.IsHarnessImplementationName(opts.HarnessAuth) {
 			auth.SelectedType = opts.HarnessAuth
 		}
+		// Auto-detect an auth type when nothing explicit selected one yet.
+		autoDetectAuthSelectedType(&auth, authMeta, &opts)
 		util.Debugf("auth: after overlay — selectedType=%q", auth.SelectedType)
 		resolved, err := h.ResolveAuth(auth)
 		if err != nil {
@@ -534,7 +1352,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				resolved.Files[i].SourcePath = ""
 			}
 		}
-		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
+		util.Debugf("auth: resolved — method=%q, envVarKeys=%v, files=%d", resolved.Method, sortedEnvVarKeys(resolved.EnvVars), len(resolved.Files))
 		if err := harness.ValidateAuth(resolved, opts.BrokerMode); err != nil {
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
@@ -548,6 +1366,24 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if applier, ok := h.(api.AuthSettingsApplier); ok {
 			if err := applier.ApplyAuthSettings(agentHome, resolved); err != nil {
 				return nil, fmt.Errorf("failed to apply auth settings: %w", err)
+			}
+			// Record the staged secret files auth-candidates.json references,
+			// so later starts restore exactly these.
+			if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames(), hcIdentity); err != nil {
+					return nil, fmt.Errorf("record harness secrets: %w", err)
+				}
+				// On the broker, fail the start here, before any container
+				// is created, when no auth method can be satisfied; otherwise
+				// the in-container provisioner exits 1 in the pre-start hook
+				// with a far less useful error. Only env-only auth types can
+				// be rejected; see harness.CheckStagedAuth.
+				if opts.BrokerMode {
+					in := harness.AuthCheckInputs{AgentHome: agentHome, Env: opts.Env}
+					if err := cs.CheckStagedAuth(in); err != nil {
+						return nil, err
+					}
+				}
 			}
 			util.Debugf("auth: applied harness-specific settings for %q", harnessName)
 		}
@@ -610,8 +1446,7 @@ authDone:
 	if opts.NoAuth {
 		// Clean up stale auth-candidates from a prior run so the
 		// provisioner sees no candidates and runs in no-auth mode.
-		authCandidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
-		if err := os.Remove(authCandidatesPath); err != nil && !os.IsNotExist(err) {
+		if err := removeStaleAuthCandidates(agentHome); err != nil {
 			util.Debugf("Start: failed to remove stale auth-candidates: %v", err)
 		}
 	}
@@ -641,20 +1476,12 @@ authDone:
 		}
 	}
 
-	template := ""
-	if finalScionCfg != nil && finalScionCfg.Info != nil {
-		template = finalScionCfg.Info.Template
-	}
-	// Prefer human-friendly template slug over cache path or UUID
-	if opts.TemplateName != "" {
-		template = opts.TemplateName
-	}
+	template := agentTemplateDisplayName(opts.TemplateName, finalScionCfg)
 
 	if opts.Env == nil {
 		opts.Env = make(map[string]string)
 	}
 	opts.Env["SCION_AGENT_NAME"] = opts.Name
-	opts.Env["SCION_GROVE"] = projectName
 	opts.Env["SCION_PROJECT"] = projectName
 	if template != "" {
 		opts.Env["SCION_TEMPLATE_NAME"] = template
@@ -669,19 +1496,31 @@ authDone:
 		opts.Env["SCION_BROKER_NAME"] = "local"
 	}
 	// Inject harness and model identifiers for telemetry labeling.
-	if _, ok := opts.Env["SCION_HARNESS"]; !ok && harnessName != "" {
-		opts.Env["SCION_HARNESS"] = harnessName
+	// SCION_HARNESS is the harness this launch resolved (ptone/scion#5946),
+	// not the stored name read before resolution; an explicit SCION_HARNESS
+	// already in opts.Env wins (containerHarnessEnv).
+	if v, set := containerHarnessEnv(ctx, opts.Env, launchedHarnessName(h)); set {
+		opts.Env["SCION_HARNESS"] = v
 	}
-	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
-		opts.Env["SCION_MODEL"] = finalScionCfg.Model
+	// The resolved ready spec for sciontool init, which records it in the
+	// init-run file for the host's readiness wait. Always written: the
+	// resolved harness config is the source of truth, and a template value
+	// must not override it.
+	if h != nil {
+		opts.Env[state.HarnessReadyEnv] = state.FormatReadySpecEnv(h.ReadySpec())
 	}
-	// Re-resolve SCION_MODEL if it contains an unresolved size alias.
-	// The hub may inject a raw alias (e.g. "large") when its store lacks
-	// the harness config's model_aliases map; the broker has the on-disk
-	// config and can resolve it here.
-	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg); ok {
-		util.Debugf("RunAgent: re-resolved leaked model alias %q → %q", opts.Env["SCION_MODEL"], resolved)
-		opts.Env["SCION_MODEL"] = resolved
+	// One model channel (ptone/scion#3914): the agent's model is resolved
+	// once, here, and both SCION_MODEL and the harness argv --model
+	// (CommandArgs below) carry this same value. SCION_MODEL already in the
+	// env (the hub-resolved model, or an explicit --env) wins over the
+	// broker's own config, so a broker template or harness-config default
+	// cannot override the hub's request > project > template > hub order.
+	effectiveModel := resolveEffectiveModel(opts.Env["SCION_MODEL"], finalScionCfg, hcModelAliases, aliasHarness)
+	if effectiveModel != "" {
+		if prev := opts.Env["SCION_MODEL"]; prev != "" && prev != effectiveModel {
+			util.Debugf("RunAgent: resolved model alias %q → %q", prev, effectiveModel)
+		}
+		opts.Env["SCION_MODEL"] = effectiveModel
 	}
 	if _, ok := opts.Env["SCION_THINKING_LEVEL"]; !ok && finalScionCfg != nil && finalScionCfg.ThinkingLevel != nil {
 		opts.Env["SCION_THINKING_LEVEL"] = strconv.Itoa(*finalScionCfg.ThinkingLevel)
@@ -701,11 +1540,13 @@ authDone:
 
 	// Inject agent limit env vars from scion config
 	if finalScionCfg != nil {
-		if finalScionCfg.MaxTurns > 0 {
-			opts.Env["SCION_MAX_TURNS"] = strconv.Itoa(finalScionCfg.MaxTurns)
+		// An unset count limit was filled from the defaults above; an
+		// explicit 0 ("no limit", ptone/scion#5605) sets no env var.
+		if n, ok := finalScionCfg.TurnLimit(); ok {
+			opts.Env["SCION_MAX_TURNS"] = strconv.Itoa(n)
 		}
-		if finalScionCfg.MaxModelCalls > 0 {
-			opts.Env["SCION_MAX_MODEL_CALLS"] = strconv.Itoa(finalScionCfg.MaxModelCalls)
+		if n, ok := finalScionCfg.ModelCallLimit(); ok {
+			opts.Env["SCION_MAX_MODEL_CALLS"] = strconv.Itoa(n)
 		}
 		if finalScionCfg.MaxDuration != "" {
 			opts.Env["SCION_MAX_DURATION"] = finalScionCfg.MaxDuration
@@ -720,24 +1561,48 @@ authDone:
 
 	// If hub endpoint not yet set from agent config or caller's opts.Env,
 	// check project settings so locally-started agents in hub-connected
-	// projects also get hub connectivity.
+	// projects also get hub connectivity. projectSettingsHubEndpoint
+	// records this specific source's own resolved value (see
+	// trustedHubEndpoint below): this branch only ever runs when neither
+	// callerHubEndpoint nor the agent-level Hub config above set it, so
+	// project settings — an operator-controlled file, not a creator input —
+	// is the only source that can land here.
+	var projectSettingsHubEndpoint string
 	if _, hubSet := opts.Env["SCION_HUB_ENDPOINT"]; !hubSet {
 		if projectSettings, err := config.LoadSettings(projectDir); err == nil {
 			if projectSettings.IsHubEnabled() {
 				if ep := projectSettings.GetHubEndpoint(); ep != "" {
 					opts.Env["SCION_HUB_ENDPOINT"] = ep
 					opts.Env["SCION_HUB_URL"] = ep
+					projectSettingsHubEndpoint = ep
 				}
 			}
 		}
 	}
-	// If hub endpoint is now set but no auth token, resolve dev auth token
-	// from the host filesystem (env vars or ~/.scion/dev-token file).
-	if _, ok := opts.Env["SCION_HUB_ENDPOINT"]; ok {
-		if _, tokenSet := opts.Env["SCION_AUTH_TOKEN"]; !tokenSet {
-			if token := apiclient.ResolveDevToken(); token != "" {
-				opts.Env["SCION_AUTH_TOKEN"] = token
-			}
+	// trustedHubEndpoint is Substrate's egress allowlist's one trusted hub
+	// source (RunConfig.TrustedHubEndpoint, see its own doc comment): in
+	// broker mode, opts.TrustedHubEndpoint ONLY — the runtime broker's own
+	// operator-derived resolution (request HubEndpoint, hub connection
+	// endpoint, or broker config HubEndpoint; never ResolvedEnv/Config.Env,
+	// which a creator can set — see
+	// api.StartOptions.TrustedHubEndpoint's own doc comment), a field set
+	// separately from opts.Env so a creator-controlled env value can never
+	// reach it even when every operator tier is empty; if empty, no hub host
+	// is trusted at all (fail closed; see substrateEgressHostnames). Outside
+	// broker mode, callerHubEndpoint (opts.Env, captured at the top of Start
+	// before any override could touch it), falling back to
+	// projectSettingsHubEndpoint (an operator-controlled file). The
+	// agent-level Hub config and template env overrides — both
+	// creator-controlled, applied above and below — never feed this value:
+	// they can still redirect the agent's own hub calls, but must never
+	// widen what the actor's egress allowlist may reach.
+	var trustedHubEndpoint string
+	if opts.BrokerMode {
+		trustedHubEndpoint = opts.TrustedHubEndpoint
+	} else {
+		trustedHubEndpoint = callerHubEndpoint
+		if trustedHubEndpoint == "" {
+			trustedHubEndpoint = projectSettingsHubEndpoint
 		}
 	}
 
@@ -745,13 +1610,10 @@ authDone:
 	// final priority. This allows templates to specify a container-
 	// accessible endpoint (e.g. http://host.docker.internal:8080)
 	// that differs from the host-level hub endpoint.
-	if !hubDisabled && finalScionCfg != nil && finalScionCfg.Env != nil {
-		if ep, ok := finalScionCfg.Env["SCION_HUB_ENDPOINT"]; ok && ep != "" {
-			expandedEp, _ := util.ExpandEnv(ep)
-			if expandedEp != "" {
-				opts.Env["SCION_HUB_ENDPOINT"] = expandedEp
-				opts.Env["SCION_HUB_URL"] = expandedEp
-			}
+	if !hubDisabled && finalScionCfg != nil {
+		if expandedEp := expandConfigHubEndpoint(opts.Name, finalScionCfg.Env); expandedEp != "" {
+			opts.Env["SCION_HUB_ENDPOINT"] = expandedEp
+			opts.Env["SCION_HUB_URL"] = expandedEp
 		}
 	}
 
@@ -769,6 +1631,29 @@ authDone:
 			delete(finalScionCfg.Env, "SCION_HUB_URL")
 		}
 	}
+
+	// The only hub credential an agent ever gets is the token the hub issued
+	// for it, written to the token file below. No other token is substituted,
+	// this process's own included. In broker mode that token is
+	// opts.HubIssuedToken, which only the runtime broker sets: a
+	// SCION_AUTH_TOKEN in opts.Env (from the request's config env or the
+	// broker's harness-config env) is not hub-issued, so it is dropped here
+	// and buildAgentEnv drops one from the agent config env. A hub-dispatched
+	// agent without a hub-issued token could neither report to the hub nor
+	// call it, so its start fails (below, after any earlier token file is
+	// removed) with ErrNoHubToken.
+	if opts.BrokerMode {
+		if _, ok := opts.Env["SCION_AUTH_TOKEN"]; ok {
+			delete(opts.Env, "SCION_AUTH_TOKEN")
+			slog.Warn("agent start: a SCION_AUTH_TOKEN the hub did not issue is ignored",
+				"agent_id", agentID, "name", opts.Name)
+			warnings = append(warnings, ignoredAuthTokenWarning)
+		}
+		if opts.HubIssuedToken != "" {
+			opts.Env["SCION_AUTH_TOKEN"] = opts.HubIssuedToken
+		}
+	}
+	missingHubToken := hubDispatchedWithoutToken(opts)
 
 	// Write the agent token to the canonical token file in the agent home
 	// directory so that all processes inside the container read from the file
@@ -803,6 +1688,17 @@ authDone:
 		if err := writeAgentTokenFile(agentHome, token); err != nil {
 			return nil, fmt.Errorf("cannot start agent %q without a hub credential: %w", opts.Name, err)
 		}
+	} else if err := writeAgentHome(ctx, func() error { return removeAgentTokenFile(agentHome) }); err != nil {
+		// No hub-issued token for this start: a token file left in a
+		// persisted agent home by an earlier start must not outlive it, since
+		// the container reads that file first. Refusing to start when it
+		// cannot be removed is the same choice as for a failed write above.
+		return nil, fmt.Errorf("cannot start agent %q: remove the previous hub credential: %w", opts.Name, err)
+	}
+	if missingHubToken {
+		slog.Error("agent start refused: the hub issued no agent token",
+			"agent_id", agentID, "name", opts.Name)
+		return nil, fmt.Errorf("cannot start agent %q: %w", opts.Name, ErrNoHubToken)
 	}
 
 	// Resolve host networking: when the hub endpoint is localhost or was
@@ -825,23 +1721,23 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(finalScionCfg, "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(finalScionCfg, "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	}
@@ -899,7 +1795,22 @@ authDone:
 		}
 	}
 
-	agentEnv, envWarnings, missingEnvKeys := buildAgentEnv(finalScionCfg, opts.Env)
+	// A stored Env key whose value equals the live template env value was
+	// merged in from the template by an older version: it applies only
+	// through the template fill (demoted on a per-start copy; scion-agent.json
+	// is not rewritten).
+	//
+	// Every env key the harness-config's auth metadata lists, for any auth
+	// type, is suppressed for the template env fallback
+	// (RunConfig.SuppressedFallbackKeys), so a template never takes part in
+	// auth; a demoted key among them is reported, never dropped silently.
+	suppressedFallbackKeys := sortedKeys(templateFallbackSuppressedKeys(authMeta))
+	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
+	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
+	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
+	warnings = append(warnings, hubOnlyEnvWarnings...)
 	if len(missingEnvKeys) > 0 {
 		sort.Strings(missingEnvKeys)
 		if opts.BrokerMode {
@@ -915,6 +1826,47 @@ authDone:
 	}
 	warnings = append(warnings, envWarnings...)
 
+	// The --add-host entries the container gets. Only the broker
+	// (opts.ExtraHosts, colocatedExtraHosts) and the runtime bridge mapping
+	// build them, so the hub transport check below may read them; RunConfig
+	// uses this same list.
+	runExtraHosts := mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv))
+
+	// Hub endpoint transport policy, on the final env (after the agent-level
+	// hub config, the config env layer and host networking's rewrite), before
+	// any container work: an agent is never started with a hub endpoint that
+	// would carry its hub credential unencrypted off the container's host.
+	if err := checkAgentHubTransport(opts.Name, m.Runtime.Name(), runExtraHosts, agentEnv); err != nil {
+		slog.Warn("Start: refusing agent start: unencrypted hub endpoint that is not host-local",
+			"agent", opts.Name, "runtime", m.Runtime.Name())
+		return nil, err
+	}
+
+	// Host networking and the GCP metadata mode: refuse assign, warn the
+	// user for block. Decided on the merged env, before any container work.
+	var relayedWarnings []string
+	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
+	if hostNetErr != nil {
+		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
+			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode,
+			"reason", hostNetworkRefusalReason(hostNetErr))
+		return nil, hostNetErr
+	}
+	if hostNetWarning != "" {
+		slog.Warn("Start: GCP metadata block mode is not enforced at the network level under host networking",
+			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode)
+		warnings = append(warnings, hostNetWarning)
+		relayedWarnings = append(relayedWarnings, hostNetWarning)
+	}
+
+	// Check the OTLP TLS settings in the final env, after every merge. Only
+	// a warning: in the container sciontool logs a failed telemetry start
+	// and runs the agent anyway (cmd/sciontool/commands/init.go), so a
+	// start that worked without telemetry must not fail here.
+	if err := config.ValidateTelemetryEnv(agentEnv); err != nil {
+		warnings = append(warnings, fmt.Sprintf("Warning: %v; with cloud telemetry export configured, the agent starts without telemetry", err))
+	}
+
 	// Determine the effective workspace path. If agentWorkspace is empty but we have
 	// a volume mounted to /workspace (e.g., shared worktree case), use that source path.
 	effectiveWorkspace := agentWorkspace
@@ -922,20 +1874,151 @@ authDone:
 		effectiveWorkspace = extractWorkspaceFromVolumes(finalScionCfg.Volumes)
 	}
 
-	// Validate that the workspace directory exists before attempting to mount it.
-	// This is a safety net — GetAgent should have created/recreated it, but if
-	// the directory is still missing we fail early with a clear error rather than
-	// letting the container runtime produce a cryptic mount error.
-	if effectiveWorkspace != "" {
-		if _, err := os.Stat(effectiveWorkspace); os.IsNotExist(err) {
-			return nil, fmt.Errorf("workspace directory does not exist: %s (try deleting and recreating the agent)", effectiveWorkspace)
-		}
-	}
-
 	// On resume/restart opts.Workspace is empty, so re-derive the explicit intent
 	// from the persisted config to keep the explicit workspace plain-mounted.
+	// The persisted ExplicitWorkspace flag lives in agentDir's scion-agent.json;
+	// it selects the plain-mount path and is re-derived on every entry so the
+	// guarantee holds on resume.
 	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
-	repoRoot := detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+
+	// The repository root is the derived root — validatedWorktreeRepoRoot(broker
+	// candidate, workspace) falling back to detectRepoRoot — reconciled with the
+	// on-disk record and failing closed (resolveStartRepoRoot). The root is
+	// taken only from broker-known paths; git is used only to check them.
+	//
+	// This first pass uses the pre-workspace-backend effectiveWorkspace, only
+	// because containerWorkspace (computed below) needs a repoRoot to feed the
+	// NFS/cloudrun/gke backend resolution that can still replace
+	// effectiveWorkspace. If that happens, the block after that resolution
+	// recomposes against the value RunConfig will actually use.
+	// persistProvisionedWorktreeRepoRootIfValid, below, runs its own, separate
+	// comparison against the workspace value as it stood before
+	// runtime.ValidateWorkspaceSource resolved it — see that function's own doc
+	// comment for why.
+	var startVolumes []api.VolumeMount
+	if finalScionCfg != nil {
+		startVolumes = finalScionCfg.Volumes
+	}
+	ctxRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
+	preValidationWorkspace := effectiveWorkspace
+	// The refusal is returned after the workspace source check below, which
+	// reports the more specific errors for the shapes it rejects; nothing
+	// between here and there sets up a mount. repoRootRec and candidateRepoRoot
+	// are reused by the backend recompose below.
+	repoRoot, repoRootRec, candidateRepoRoot, detectErr := resolveStartRepoRoot(startRepoRootInput{
+		agentName:   opts.Name,
+		agentDir:    agentDir,
+		projectDir:  projectDir,
+		workspace:   effectiveWorkspace,
+		ctxRepoRoot: ctxRepoRoot,
+		explicit:    explicitWorkspace,
+		volumes:     startVolumes,
+		settings:    settings,
+	})
+	// Empty-per-agent (design #2703): the workspace is exactly the private
+	// agents/<slug>/workspace directory, never a git checkout, so no repo
+	// root is mounted even when projectDir sits in a git repository, and any
+	// other source (e.g. a persisted /workspace volume) is refused.
+	emptyPerAgentWorkspace := ""
+	if emptyPerAgent {
+		emptyPerAgentWorkspace = filepath.Join(agentDir, "workspace")
+		// On a shared Layout it is the agent's directory on the share
+		// (sharedLayoutAgentWorkspace), as GetAgent resolved it.
+		sharedWS, sharedErr := sharedLayoutAgentWorkspace(ctx, settings, projectDir, opts.Name, agentDir)
+		if sharedErr != nil {
+			return nil, sharedErr
+		}
+		if sharedWS != "" {
+			emptyPerAgentWorkspace = sharedWS
+		}
+		if explicitWorkspace || filepath.Clean(effectiveWorkspace) != emptyPerAgentWorkspace {
+			return nil, fmt.Errorf("empty-per-agent agent %q must use its private workspace %s, not %q", opts.Name, emptyPerAgentWorkspace, effectiveWorkspace)
+		}
+		repoRoot = ""
+		detectErr = nil
+	}
+
+	// Reject a workspace source that is not an allowed workspace path before
+	// anything derived from it is used to set up a mount. This also catches
+	// a value that was resolved and persisted by an older version of the
+	// resolution logic above — it runs on every start, not just the ones
+	// that just computed effectiveWorkspace fresh. Everything between here
+	// and the workspace-storage-backend block below (if any) uses the
+	// resolved, symlink-free path the validator returns, not the original
+	// value, narrowing the window between "the path we checked" and "the
+	// path we mount" to components that change after this call returns (see
+	// ValidateWorkspaceSource's doc comment for what that does and does not
+	// cover). A workspace-storage backend's own Realize call, below, can
+	// still replace effectiveWorkspace with its own mount.HostPath
+	// afterward -- a value this validator never sees, computed by that
+	// backend's own resolver rather than read back from persisted or
+	// request-supplied state.
+	var roots []string
+	if emptyPerAgentWorkspace != "" {
+		// Contained in itself: settings.WorkspacePath or the project's repo
+		// root, which workspaceSourceRoots derives, need not contain it, so
+		// skip deriving them (and any error doing so) entirely.
+		roots = []string{emptyPerAgentWorkspace}
+	} else if cloudRunClonePerAgentStart(m.Runtime.Name(), opts, explicitWorkspace) {
+		// Contained in itself too: the cloudrun runtime mounts a Cloud Run
+		// clone-per-agent agent's own workspace on the share
+		// (agents/<slug>/workspace), so this broker-local workspace is
+		// never mounted. On a shared Layout it lies outside the project's
+		// root on the share (sharedLayoutAgentWorkspace).
+		roots = []string{effectiveWorkspace}
+	} else {
+		var rootsErr error
+		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
+		if rootsErr != nil {
+			return nil, rootsErr
+		}
+		if legacy := legacyAgentWorkspaceRoot(projectDir, opts.Name, agentDir, explicitWorkspace || opts.SharedWorkspace); legacy != "" {
+			roots = append(roots, legacy)
+		}
+	}
+	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
+	if err != nil {
+		// A global agent provisioned before <projectDir>/workspace existed
+		// (or one whose persisted workspace was otherwise never brought
+		// under it) is intentionally refused here on resume, now that the
+		// global project's root is <projectDir>/workspace itself. The same
+		// applies to a hub-dispatched, non-git project-configs project
+		// whose persisted workspace is its own bare externalized directory
+		// rather than a per-agent subdirectory under it (isAllowedProjectConfigsSubtree
+		// never admits the bare directory itself). Name the two ways to
+		// recover, since neither is obvious from the base error.
+		if !explicitWorkspace && (config.IsGlobalProjectDir(projectDir) || isProjectConfigsPath(projectDir)) {
+			return nil, fmt.Errorf("%w (delete and recreate this agent, or restart it with an explicit --workspace, to use a workspace under the project's own directory)", err)
+		}
+		return nil, err
+	}
+	if detectErr != nil {
+		return nil, detectErr
+	}
+	effectiveWorkspace = resolvedWorkspace
+
+	// Resolve repoRoot through any symlinks so the mount layout below
+	// (ResolveContainerWorkspace and RunConfig.RepoRoot) is computed from the
+	// same real, symlink-free spelling as effectiveWorkspace — otherwise a
+	// symlinked repo path changes the container-side layout depending on
+	// which of the two happens to still contain the symlink. A harmless
+	// no-op when repoRoot was already resolved just above.
+	if repoRoot != "" {
+		resolvedRepoRoot, err := filepath.EvalSymlinks(repoRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
+		}
+		repoRoot = resolvedRepoRoot
+	}
+
+	// Validate that the workspace directory exists before attempting to mount
+	// it (checkStartWorkspaceExists; skipped for a Kubernetes start through
+	// the nfs workspace backend, and for an agent-scoped workspace on the
+	// share of a local container runtime start, which the NFS leaf helpers
+	// create below).
+	if err := checkStartWorkspaceExists(m.Runtime.Name(), projectDir, effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
+		return nil, err
+	}
 
 	// Telemetry defaults to enabled when not explicitly set to false.
 	telemetryEnabled := finalScionCfg != nil && finalScionCfg.Telemetry != nil &&
@@ -950,41 +2033,203 @@ authDone:
 	containerWorkspace := runtime.ResolveContainerWorkspace(repoRoot, effectiveWorkspace, opts.GitClone)
 
 	// Inject shared directory volumes from project settings or opts (hub-dispatched)
-	var effectiveSharedDirs []api.SharedDir
-	if settings != nil && len(settings.SharedDirs) > 0 {
-		effectiveSharedDirs = settings.SharedDirs
-	} else if len(opts.SharedDirs) > 0 {
-		effectiveSharedDirs = opts.SharedDirs
-	}
-	var sharedDirVolumes []api.VolumeMount
+	effectiveSharedDirs := agentSharedDirs(settings, opts)
+	// Shared-dir placement is global-only (design §3.2.1, AC5): the broker's
+	// shared-dir Layout comes from server.project_storage (or the block
+	// synthesized from the deprecated workspace_storage/shared_dir_storage
+	// blocks) read via config.LoadGlobalSettingsWithOverlayFor (the global
+	// file plus the co-located hub's DB overlay, which never carries
+	// storage blocks), never from the project-merged `settings` above and
+	// never via LoadEffectiveSettings("") — an empty path is NOT
+	// global-only, since it resolves a project from the process's current
+	// working directory and merges that project's settings.yaml on top of
+	// global (round 2 review findings C1/T1/S-F2). A project's settings,
+	// including in-repo content from a cloned repository, must not be able
+	// to redirect Docker bind-mount sources or override the operator's
+	// share. There is one backend for workspaces and shared dirs (design
+	// OQ1): no per-profile, per-runtime, per-dir or per-agent rung.
+	sdLayout := projectfs.Layout{Backend: projectfs.BackendLocal}
+	sdSplit := false
+	// startGlobalSettings is the global settings snapshot the shared-dir
+	// Layout was built from, when it was loaded; the home storage below is
+	// resolved from the same snapshot.
+	var startGlobalSettings *config.VersionedSettings
 	if len(effectiveSharedDirs) > 0 {
-		if err := config.EnsureSharedDirs(projectDir, effectiveSharedDirs); err != nil {
-			util.Debugf("Start: failed to ensure shared dirs: %v", err)
+		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlayFor(ctx)
+		if gErr != nil {
+			// A broken global settings file must fail closed (design G5)
+			// ONLY when the operator plausibly configured shared-dir
+			// placement — round 3 review disposition 6' (amended): failing
+			// closed on every malformed global settings file, including
+			// deployments that never touched storage, would regress
+			// essentially every agent start, since every project has a
+			// default scratchpad shared dir. We can't parse the broken file
+			// to check the real value, so fall back to a raw substring
+			// check on its bytes (project_storage, workspace_storage or
+			// shared_dir_storage).
+			if key := config.MentionedSharedDirPlacementKey(config.GlobalSettingsMentions); key != "" {
+				return nil, fmt.Errorf("loading global settings for server.%s: %w", key, gErr)
+			}
+			slog.Warn("Start: failed to load global settings; no shared-dir storage key was found in the raw file, proceeding with the local shared-dir layout",
+				"error", gErr)
+		} else if key := config.GlobalSettingsStorageKey(config.SharedDirPlacementKeys); globalSettings != nil &&
+			!globalSettings.Server.HasSharedDirPlacementBlock() && config.GlobalSettingsIsLegacyFormat() && key != "" {
+			// Round 4 review finding S-L1: a legacy-format global
+			// settings.yaml (no schema_version) is converted with its
+			// server block kept (ptone/scion#3919), so a real block loads.
+			// This still fails closed when such a file mentions a storage
+			// key but no block loads (a misplaced or commented-out block):
+			// the operator plausibly intended to configure it (G5). Round 5
+			// finding C1=T1=S-L2: for a file that LOADED successfully as
+			// v1, the loader is authoritative (a commented-out block is
+			// the documented rollback path), so the substring check is
+			// restricted to legacy-format files.
+			return nil, fmt.Errorf(
+				"global settings mention server.%s but it was not loaded (missing schema_version: \"1\"?)", key)
+		} else if globalSettings != nil {
+			startGlobalSettings = globalSettings
+			l, split, err := config.SharedDirStorageLayout(globalSettings.Server)
+			if err != nil {
+				return nil, fmt.Errorf("shared-dir storage: %w", err)
+			}
+			sdLayout, sdSplit = l, split
 		}
-		sdVolumes, err := config.SharedDirsToVolumeMounts(projectDir, effectiveSharedDirs, containerWorkspace)
-		if err != nil {
-			util.Debugf("Start: failed to resolve shared dir volumes: %v", err)
-		} else {
-			sharedDirVolumes = sdVolumes
-			// Add SCION_VOLUMES env var for discoverability
-			opts.Env["SCION_VOLUMES"] = "/scion-volumes"
-		}
+	}
+	// On the local layout, a shared-dir name that fails
+	// api.ValidateSharedDirs is skipped (logged, no directory) here, before
+	// resolveSharedDirs, so RunConfig.SharedDirs carries only valid names
+	// too: a runtime that creates directories from those names (the Cloud
+	// Run sandbox's /scion/shared/<name>) never sees an invalid one. On a
+	// shared backend, resolveSharedDirs refuses the start instead (design G5).
+	if usesLocalSharedDirLayout(sdLayout, sdSplit, m.Runtime.Name()) {
+		effectiveSharedDirs = validLocalSharedDirs(effectiveSharedDirs)
+	}
+	// A shared-backend Layout keys its tree on hubDispatchedProjectID,
+	// snapshotted above at Start entry — NOT the general projectID variable
+	// (which falls back to settings.Hub.ProjectID / the project-id file)
+	// and NOT a fresh read of opts.Env here. By this point opts.Env may
+	// already have been filled in from project-level harness-config env by
+	// resolveAuthEnvOverlay (it only fills *absent* keys, but that includes
+	// SCION_PROJECT_ID when the hub didn't dispatch this
+	// start), so re-reading opts.Env at this line would reopen exactly the
+	// hole this snapshot closes (round 3 review finding C1/S-L1). The hub
+	// sets SCION_PROJECT_ID unconditionally after merging any
+	// user-supplied env for hub-dispatched starts
+	// (pkg/hub/httpdispatcher.go DispatchAgentStart/DispatchAgentRestart,
+	// "Identity vars at highest precedence"), so hubDispatchedProjectID is
+	// authoritative whenever the hub dispatched this agent, and correctly
+	// empty otherwise — project settings cannot choose which project's
+	// shared tree a shared-backend agent mounts (round 2 review finding
+	// S-F4).
+	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
+		sdLayout, sdSplit, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
+	if err != nil {
+		return nil, err
+	}
+	if w := sharedDirsNotSharedWarning(sdLayout, sdSplit, m.Runtime.Name(), effectiveSharedDirs); w != "" {
+		warnings = append(warnings, w)
+	}
+	if w := retireSharedDirRecord(agentDir, sdLayout, effectiveSharedDirs); w != "" {
+		warnings = append(warnings, w)
+	}
+	// Home storage: local, or (Kubernetes only) an NFS home on the export of
+	// server.shared_dir_storage. Chosen at the agent's first start
+	// and recorded, before any pod exists; later starts use the record.
+	homeStorageProfile := startProfile
+	homePlan, err := resolveHomeStorage(homeStorageInput{
+		AgentDir:     agentDir,
+		AgentName:    opts.Name,
+		Slug:         slug,
+		RuntimeName:  m.Runtime.Name(),
+		Profile:      homeStorageProfile,
+		AgentID:      hubDispatchedAgentID,
+		ProjectID:    hubDispatchedProjectID,
+		ExperimentOn: api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.K8sNFSHome),
+		LoadSettings: func() (*config.VersionedSettings, error) {
+			if startGlobalSettings != nil {
+				return checkHomeStorageLoaded(startGlobalSettings)
+			}
+			return loadHomeStorageSettings(ctx)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	homeStorage, err := prepareHomeStorage(homePlan, hubDispatchedProjectID, slug)
+	if err != nil {
+		return nil, err
+	}
+	homeStorageBackend := ""
+	if homeStorage != nil {
+		homeStorageBackend = runtime.HomeStorageNFS
+	}
+
+	if len(sharedDirVolumes) > 0 {
+		// Add SCION_VOLUMES env var for discoverability
+		opts.Env["SCION_VOLUMES"] = "/scion-volumes"
 	}
 
 	workspaceBackendName := ""
 	nfsUID := 0
 	nfsGID := 0
 	nfsPVClaimName := ""
+	var nfsPodShare runtime.NFSPodShare
 	nfsSubPath := ""
+	nfsSubPathRoot := ""
+	nfsShareServer := ""
+	nfsShareExport := ""
 	nfsStorageClass := ""
+	nfsWorkspacePreCreated := false
+	nfsWorktreeName := ""
+	nfsWorktreeBranch := ""
+	nfsAgentDirName := ""
+	nfsAgentBranch := ""
+	nfsAgentDirEmpty := false
 
-	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
-		sharingMode := store.SharingModeWorktreePerAgent
-		if opts.SharedWorkspace || opts.GitClone != nil {
-			sharingMode = store.SharingModeSharedPlain
+	preBackendWorkspace := effectiveWorkspace
+	if settings != nil && settings.Server != nil && settings.Server.EffectiveWorkspaceStorage() != nil {
+		sharingMode := startWorkspaceSharingMode(opts, emptyPerAgent)
+		// The agent's own directory on the export, if it gets one
+		// (nfsOwnAgentDirSelection): empty-per-agent, or a git project
+		// dispatched in clone-per-agent mode on Kubernetes, with a
+		// workspace the agent container clones into. Paths are still
+		// resolved from the project's workspace path (shared-plain).
+		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), projectDir, settings.Server.EffectiveWorkspaceStorage(), emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+		if selErr != nil {
+			return nil, selErr
 		}
-		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
+		// On Kubernetes, a git project dispatched in worktree-per-agent mode
+		// gets its own worktree under the shared checkout. Shared-plain and
+		// every other runtime keep the layout above.
+		var worktreeName, worktreeBranch string
+		if isKubernetesRuntime(m.Runtime.Name()) && !emptyPerAgent {
+			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
+		}
+		if worktreeName != "" {
+			sharingMode = store.SharingModeWorktreePerAgent
+		}
+		backend := runtime.SelectWorkspaceBackend(settings.Server.EffectiveWorkspaceStorage(), sharingMode)
+		// Only nfs is applied below; say once if a Kubernetes agent's
+		// gke-shared-volume workspace falls back to emptyDir (ptone/scion#1075).
+		// Read from the effective workspace storage, so a hub configured
+		// with server.project_storage gets the warning too.
+		warnK8sWorkspaceBackendDropped(m.Runtime.Name(), settings.Server.EffectiveWorkspaceStorage(), nil)
 		if backend.Name() == "nfs" {
+			// A broker only warns about invalid workspace_storage at
+			// startup, so check the ids here, before any leaf directory
+			// is created on the export and before the runtime uses them
+			// for ownership. 0 still means "use the default 1000".
+			if nfsCfg := settings.Server.EffectiveWorkspaceStorage().NFS; nfsCfg != nil {
+				if err := fsutil.ValidateOwnerID(config.NFSUIDKey, nfsCfg.UID); err != nil {
+					return nil, err
+				}
+				if err := fsutil.ValidateOwnerID(config.NFSGIDKey, nfsCfg.GID); err != nil {
+					return nil, err
+				}
+				// Kubernetes pods always run as uid 1000; say so once
+				// if nfs.uid asks for another uid (#2608).
+				warnK8sNFSUIDIgnored(m.Runtime.Name(), nfsCfg, nil)
+			}
 			sharedDirNames := make([]string, 0, len(effectiveSharedDirs))
 			for _, dir := range effectiveSharedDirs {
 				sharedDirNames = append(sharedDirNames, dir.Name)
@@ -1007,44 +2252,419 @@ authDone:
 			if err != nil {
 				return nil, fmt.Errorf("realize workspace backend %q: %w", backend.Name(), err)
 			}
+			// The share the pod mounts the workspace from: its claim, or
+			// inline by server and export when it has no pv_name.
+			podShare := runtime.NFSPodShare{ClaimName: mount.PVClaimName, Server: mount.NFSServer, Export: mount.NFSExportPath}
+			// Create the workspace subPath directory before the pod exists,
+			// so the kubelet does not have to (ptone/scion#2530). Shared
+			// dirs are created by resolveSharedDirs above, on the shared-dir
+			// Layout, never here, so no shared-dir names are passed to the
+			// workspace leaf helpers.
+			// Kubernetes only: this keeps the pre-#3998 Kubernetes layout.
+			// A local container runtime's agent whose workspace is not its
+			// directory on the share is refused below instead
+			// (checkLocalRuntimeAgentWorkspace), whichever tree its work is
+			// in.
+			if isKubernetesRuntime(m.Runtime.Name()) && agentDirName != "" && podShare.Mountable() {
+				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
+					// The agent keeps the layout and mode it had before
+					// ptone/scion#3998, so its work stays where it is.
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					agentDirName, agentBranch = "", ""
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				}
+			}
+			// A Cloud Run clone-per-agent agent mounts its own workspace
+			// on the share (the runtime creates it), except an existing
+			// agent that worked in the shared checkout before
+			// (cloudRunKeepSharedCheckout), which keeps that checkout and
+			// mode so its work stays where it is.
+			if isCloudRunRuntime(m.Runtime.Name()) && isClonePerAgentStart(opts) {
+				if keep, reason := cloudRunKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, api.Slugify(opts.Name)); keep {
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				} else {
+					recordCloudRunAgentWorkspace(agentDir, opts.Name)
+				}
+			}
+			// ownDirCreated reports whether this start created the agent's
+			// own directory on the export (an atomic claim in the leaf
+			// helper): a forced move's start marks it as the move's only
+			// then (markMoveExportAgentDir).
+			ownDirName, ownDirCreated := "", false
+			// A local container runtime bind-mounts the agent's own
+			// directory from the broker's mount of the share, with no pod
+			// share; before anything is created there, the workspace Start
+			// validated must be that directory's workspace, and an agent
+			// whose work is still in its broker-local workspace is refused
+			// (checkLocalRuntimeAgentWorkspace).
+			localOwnDir := isLocalContainerRuntime(m.Runtime.Name()) && (emptyAgentDirName != "" || agentDirName != "")
+			if localOwnDir {
+				name := agentDirName
+				if emptyAgentDirName != "" {
+					name = emptyAgentDirName
+				}
+				if err := checkLocalRuntimeAgentWorkspace(opts.Name, effectiveWorkspace, agentDir, resolvedWorkspace, name); err != nil {
+					return nil, err
+				}
+			}
+			if emptyAgentDirName != "" {
+				// Empty-per-agent: only the agent's own directory is ever
+				// mounted, never the project's workspace path resolved
+				// above. When the pod cannot mount the share (no claim and
+				// no inline server and export), stop instead of falling
+				// back to the project's path.
+				if !localOwnDir && !podShare.Mountable() {
+					return nil, errEmptyPerAgentNFSNoClaim
+				}
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, emptyAgentDirName)
+				ownDirName = emptyAgentDirName
+				nfsAgentDirName = emptyAgentDirName
+				nfsAgentDirEmpty = true
+			} else if agentDirName != "" && (localOwnDir || podShare.Mountable()) {
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, agentDirName)
+				ownDirName = agentDirName
+				nfsAgentDirName = agentDirName
+				nfsAgentBranch = agentBranch
+			} else {
+				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil)
+			}
+			// A directory this start created is marked even when the leaf
+			// helper then failed on a later directory, before that failure
+			// is returned, so a forced move's rollback can still remove it.
+			if ownDirCreated {
+				ownDirPath, perr := nfsOwnAgentDirPath(resolvedWorkspace, ownDirName)
+				if perr == nil {
+					perr = markMoveExportAgentDir(agentDir, ownDirPath)
+				}
+				if perr != nil {
+					return nil, errors.Join(err, perr)
+				}
+			}
+			if err != nil {
+				return nil, err
+			}
+			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
+				recordNFSAgentDir(agentDir, opts.Name)
+			}
+			if worktreeName != "" && podShare.Mountable() {
+				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, podShare, worktreeName)
+				if err != nil {
+					return nil, err
+				}
+				nfsWorkspacePreCreated = nfsWorkspacePreCreated && worktreePreCreated
+				nfsWorktreeName = worktreeName
+				nfsWorktreeBranch = worktreeBranch
+			}
 
 			workspaceBackendName = backend.Name()
-			if mount.HostPath != "" {
+			// Empty-per-agent keeps its own workspace as the workspace
+			// source (on a shared Layout, its directory on the share,
+			// sharedLayoutAgentWorkspace; otherwise its private node-local
+			// path): mount.HostPath is the project's shared workspace,
+			// which this agent must never see. A clone-per-agent agent of a
+			// local container runtime keeps its own workspace too: the
+			// runtime bind-mounts it (the agent's directory on the share,
+			// checked by checkLocalRuntimeAgentWorkspace), where Kubernetes
+			// derives the agent's mounts from the project's path and
+			// NFSAgentDirName.
+			if mount.HostPath != "" && !nfsAgentDirEmpty && !localOwnDir {
 				effectiveWorkspace = mount.HostPath
 			}
 			if mount.Target != "" {
 				containerWorkspace = mount.Target
 			}
+			if nfsWorktreeName != "" {
+				// The agent works in its worktree, mounted next to the
+				// shared .git the same way as on the local runtimes. The
+				// pod mounts both by subPath (see buildPod).
+				containerWorkspace = runtime.NFSWorktreeContainerPath(nfsWorktreeName)
+			}
 			nfsPVClaimName = mount.PVClaimName
+			nfsPodShare = podShare
+			// The runtime's share server and export come from the same
+			// descriptor as the pod share, so both sides read one value.
+			nfsShareServer, nfsShareExport = podShare.Server, podShare.Export
 			nfsSubPath = mount.SubPath
-			if settings.Server.WorkspaceStorage.NFS != nil {
-				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
-				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
-				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
+			if settings.Server.EffectiveWorkspaceStorage().NFS != nil {
+				nfsSubPathRoot = settings.Server.EffectiveWorkspaceStorage().NFS.SubPathRoot
+				nfsUID = settings.Server.EffectiveWorkspaceStorage().NFS.UID
+				nfsGID = settings.Server.EffectiveWorkspaceStorage().NFS.GID
+				nfsStorageClass = settings.Server.EffectiveWorkspaceStorage().NFS.StorageClass
+			}
+		}
+	}
+
+	// The workspace backend above (NFS/cloudrun/gke) can replace
+	// effectiveWorkspace with a backend-managed path — real for
+	// worktree-per-agent when server.workspace_storage.backend is
+	// explicitly configured to something other than local. Only the nfs
+	// backend sets a host path at all, and that host path (ResolvedWorkspace
+	// .HostPath / nfsBackend.Resolve's workspaceRelPath) is always
+	// <subpath_root>/<project ID>/workspace — the shared base, never
+	// worktree-shaped — regardless of sharing mode; it takes worktree shape
+	// (base/worktrees/<name>) only when the configured subpath_root and
+	// project ID happen to coincide with one. On Kubernetes, a worktree-
+	// per-agent git project additionally selects a per-agent worktree
+	// (nfsWorktreeName/nfsWorktreeBranch, above) and mounts it in-container
+	// at /repo-root/worktrees/<name> alongside /repo-root/.git — entirely
+	// through containerWorkspace and the NFS* RunConfig fields below, not
+	// through effectiveWorkspace or repoRoot.
+	//
+	// The root was composed against the PRE-backend workspace. The derivation
+	// depends on the workspace, so when the backend actually changed it,
+	// recompose against the value RunConfig will use: validatedWorktreeRepoRoot(
+	// candidate, ws) falling back to the shared layout's workspace
+	// (composeSharedRepoRoot), with the record intersection re-applied
+	// (failing closed).
+	// On Kubernetes the runtime builds its workspace mounts from
+	// containerWorkspace and the NFS* fields above, not from repoRoot, and reads
+	// RepoRoot only to decide whether the shared workspace's in-project agents
+	// dir is kept out of the pod (see k8sWorkspaceAgentsExcluded).
+	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
+		// The backend placed the workspace on the shared tree: the candidate
+		// root is the shared layout's workspace, and the backend's path must
+		// be that one (ptone/scion#5826; composeSharedRepoRoot).
+		var reErr error
+		repoRoot, reErr = composeSharedRepoRoot(opts.Name, candidateRepoRoot, repoRootRec, effectiveWorkspace, projectDir, projectID, explicitWorkspace, settings)
+		if reErr != nil {
+			return nil, reErr
+		}
+	}
+
+	// A fresh ctx signal replaces a persisted record that is missing or agrees
+	// with it; a readable record outside the agent's mounts that names a
+	// different root refuses the start before this point (reconcileRepoRoot), so
+	// the record is not overwritten in that case. Otherwise the signal is
+	// persisted here, because
+	// GetAgent skips ProvisionAgent (and so never gets a chance to persist)
+	// when the agent directory already exists on disk — e.g. a leftover from
+	// a deleted hub agent recreated under the same name. In that case this
+	// dispatch's signal would never be persisted anywhere else, and a later
+	// resume/restart (which has no fresh ctx signal of its own) would have
+	// no broker record and lose RepoRoot again. ProvisionAgent shares
+	// this same gate for the flow Start never reaches on its own — the hub's
+	// provision-only dispatch, which provisions without starting — so there
+	// is exactly one persistence gate even though there is more than one
+	// caller.
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, preValidationWorkspace, startVolumes)
+
+	// The agent's workspace placement, reported to the hub on every start
+	// that gets here (so a re-provision refreshes it). See
+	// workspacePlacementFor for when the workspace is on the export.
+	workspacePlacement := workspacePlacementFor(workspacePlacementInput{
+		Backend:       workspaceBackendName,
+		Runtime:       m.Runtime.Name(),
+		Share:         nfsPodShare,
+		ClonePerAgent: opts.GitClone != nil && store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent,
+		AgentDirName:  nfsAgentDirName,
+	})
+
+	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
+	// else its runtime entry's (applied below under the template/agent
+	// kubernetes block). The profile is the one named for this start, else
+	// the one the agent was created with. When shared-dir PVCs will be
+	// needed, check the effective size here so a bad value fails with the
+	// place it is set rather than a bare parse error from the runtime.
+	//
+	// safe_to_evict follows the same order: template/agent
+	// kubernetes.safeToEvict, then the profile, then its runtime entry. On
+	// other runtimes it is accepted and ignored, with a warning.
+	var sdClass, sdSize string
+	var settingsSafeToEvict *bool
+	sdProfile := startProfile
+	var tmplSafeToEvict *bool
+	if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
+		tmplSafeToEvict = finalScionCfg.Kubernetes.SafeToEvict
+	}
+	var safeToEvictSource string
+	if settings != nil {
+		settingsSafeToEvict, safeToEvictSource = settings.ResolveSafeToEvictWithSource(sdProfile)
+	}
+	effectiveSafeToEvict, safeToEvictFrom := settingsSafeToEvict, "settings "+safeToEvictSource
+	if tmplSafeToEvict != nil {
+		effectiveSafeToEvict, safeToEvictFrom = tmplSafeToEvict, "kubernetes.safeToEvict in the agent config"
+	}
+	if effectiveSafeToEvict != nil {
+		if m.Runtime.Name() == "kubernetes" {
+			slog.Debug("Start: resolved safe_to_evict", "agent", opts.Name, "value", *effectiveSafeToEvict, "source", safeToEvictFrom)
+		} else {
+			slog.Warn("Start: safe_to_evict applies only to the Kubernetes runtime; ignoring it", "agent", opts.Name, "runtime", m.Runtime.Name(), "source", safeToEvictFrom)
+			settingsSafeToEvict = nil
+		}
+	}
+	if settings != nil && m.Runtime.Name() == "kubernetes" {
+		var sdSizeKey string
+		sdClass, sdSize, sdSizeKey = settings.ResolveSharedDirDefaultsWithSource(sdProfile)
+		if len(effectiveSharedDirs) > 0 {
+			size, source := sdSize, "settings "+sdSizeKey
+			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.SharedDirSize != "" {
+				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent config"
+			}
+			if err := config.ValidateSharedDirSize(size); err != nil {
+				return nil, fmt.Errorf("%s: %w", source, err)
+			}
+		}
+	}
+
+	// Kubernetes placement defaults resolved by the agent runtime server,
+	// applied over a copy of the agent's kubernetes block: the only place
+	// placement is applied (run_placement.go).
+	var agentK8s *api.KubernetesConfig
+	if finalScionCfg != nil {
+		agentK8s = finalScionCfg.Kubernetes
+	}
+	placedK8s, placementWarnings, err := m.applyStartPlacement(ctx, opts, agentK8s)
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, placementWarnings...)
+
+	// The run ID was fixed (minted if absent) at the top of Start.
+	runID := opts.RunID
+	// SCION_LAUNCH_ID carries the same value as the run label, so the
+	// container's env and label cannot disagree. Any value from the
+	// request or template env is replaced.
+	agentEnv = withLaunchIDEnv(agentEnv, runID)
+	// Only the caller's SCION_WORKSPACE_GIT reaches the container env; a
+	// value any merged layer added is removed (see dispatchWorkspaceGit).
+	agentEnv = enforceWorkspaceGitEnv(agentEnv, dispatchWorkspaceGit, dispatchWorkspaceGitSet)
+
+	// In no-auth mode the harness-config's no-auth env (its bundle's
+	// no-auth-env.yaml) joins the container env; api-key and auth-file
+	// starts never carry it.
+	noAuthActive := noAuthModeActive(opts.NoAuth, noAuthConfig)
+	var noAuthEnvWarnings []string
+	agentEnv, noAuthEnvWarnings = applyNoAuthEnv(agentEnv, noAuthConfig, noAuthActive, opts.Name)
+	warnings = append(warnings, noAuthEnvWarnings...)
+
+	// The template env layer is never part of agentEnv: it travels as
+	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
+	// of its own env assembly, after auth env, harness env, telemetry env
+	// and env-type secrets too; suppressedFallbackKeys (above) keeps it
+	// out of auth.
+	templateFallbackEnv, templateEnvFallbackWarnings := templateEnvFallback(templateEnv, opts.BrokerMode, opts.Name)
+	warnings = append(warnings, templateEnvFallbackWarnings...)
+
+	// Write the full task to the agent home, and pass a short pointer to
+	// it instead when the task is too large to pass inline.
+	task, err = deliverTaskFile(agentHome, task)
+	if err != nil {
+		return nil, err
+	}
+
+	// The container-script provisioner reads the manifest inside the
+	// container, where the workspace is mounted at containerWorkspace, not at
+	// the host path Provision staged it with above. Claude's provisioner, for
+	// one, pre-trusts agent_workspace; a host path there leaves the agent
+	// blocked on Claude Code's folder-trust dialog.
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+		if err := writeAgentHome(ctx, func() error { return harness.SetManifestAgentWorkspace(agentHome, containerWorkspace) }); err != nil {
+			return nil, fmt.Errorf("stage harness manifest workspace: %w", err)
+		}
+	}
+
+	// For git-backed worktree / shared-plain / fallback
+	// layouts on the bind-mount runtimes (docker/podman/apple), seed a per-agent
+	// private copy of the repository's .git/config in the agent's state dir. On
+	// docker/podman the runtime binds it read-only over the container's .git/config
+	// so in-container git reads a credential-stripped config without writes reaching
+	// the host or siblings; on Apple the copy is seeded but not bound (Apple reads
+	// the repository config directly). Fail closed: a seeding error refuses the start
+	// (the runtime also refuses if the source is missing or unsafe). Kubernetes has
+	// no per-agent private config yet; its shared-repo shapes are refused at start
+	// (k8sSharedRepoShapeRefusal). clone-per-agent and empty-per-agent have no
+	// shared .git to protect.
+	privateGitConfigSource := ""
+	startNotice := ""
+	switch m.Runtime.Name() {
+	case "docker", "podman", "container", "apple-container":
+		if repoRoot != "" {
+			if fi, statErr := os.Stat(filepath.Join(repoRoot, ".git")); statErr == nil && fi.IsDir() {
+				// The agent's own branch (worktree-per-agent uses the slugified
+				// agent name when no explicit branch) is pre-seeded as the upstream
+				// so a bare `git push` finds the upstream already set and exits 0
+				// without a config write; `git push -u` also exits 0 but cannot
+				// persist the upstream and prints an error.
+				seedBranch := opts.Branch
+				if seedBranch == "" {
+					seedBranch = api.Slugify(opts.Name)
+				}
+				// Keys that name a command or a hook location are left out of
+				// the private copy only where the runtime binds that copy over
+				// .git/config (docker, podman); the Apple runtime reads the
+				// repository config directly, so there they are refused.
+				stripNeverCarry := bindsPrivateGitConfig(m.Runtime.Name())
+				src, neverCarried, seedErr := seedCheckedPrivateGitConfigStrip(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch, stripNeverCarry)
+				if seedErr != nil {
+					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)
+				}
+				privateGitConfigSource = src
+				if notice := util.NeverCarriedNotice(neverCarried); notice != "" {
+					startNotice = notice
+					warnings = append(warnings, notice)
+					relayedWarnings = append(relayedWarnings, notice)
+				}
 			}
 		}
 	}
 
 	runCfg := runtime.RunConfig{
-		Name:                 containerName(projectName, opts.Name),
-		Template:             template,
-		UnixUsername:         unixUsername,
-		Image:                resolvedImage,
-		HomeDir:              agentHome,
-		Workspace:            effectiveWorkspace,
-		RepoRoot:             repoRoot,
-		ContainerWorkspace:   containerWorkspace,
-		ResolvedAuth:         resolvedAuth,
-		Harness:              h,
-		Project:              projectName,
-		ProjectID:            projectID,
-		WorkspaceBackendName: workspaceBackendName,
-		NFSUID:               nfsUID,
-		NFSGID:               nfsGID,
-		NFSPVClaimName:       nfsPVClaimName,
-		NFSSubPath:           nfsSubPath,
-		NFSStorageClass:      nfsStorageClass,
-		TelemetryEnabled:     telemetryEnabled,
+		Name:                   containerName(projectName, opts.Name),
+		PrivateGitConfigSource: privateGitConfigSource,
+		Template:               template,
+		UnixUsername:           unixUsername,
+		Image:                  resolvedImage,
+		HomeDir:                agentHome,
+		Workspace:              effectiveWorkspace,
+		RepoRoot:               repoRoot,
+		ContainerWorkspace:     containerWorkspace,
+		AgentOwnWorkspace:      isAgentOwnWorkspace(agentDir, projectDir, effectiveWorkspace),
+		ProjectConfigPath:      projectConfigPath(opts.ProjectPath, projectDir),
+		ResolvedAuth:           resolvedAuth,
+		Harness:                h,
+		Project:                projectName,
+		ProjectID:              projectID,
+		WorkspaceBackendName:   workspaceBackendName,
+		NFSUID:                 nfsUID,
+		NFSGID:                 nfsGID,
+		NFSPVClaimName:         nfsPVClaimName,
+		NFSSubPath:             nfsSubPath,
+		NFSSubPathRoot:         nfsSubPathRoot,
+		NFSShareServer:         nfsShareServer,
+		NFSShareExport:         nfsShareExport,
+		NFSStorageClass:        nfsStorageClass,
+		// Lets the provisioning init container treat a failed chown as a
+		// warning for a workspace directory the broker created.
+		NFSWorkspacePreCreated: nfsWorkspacePreCreated,
+		// Set only for worktree-per-agent git projects on the NFS backend:
+		// the agent mounts worktrees/<agentID> and the shared .git instead
+		// of the shared checkout.
+		NFSWorktreeName:   nfsWorktreeName,
+		NFSWorktreeBranch: nfsWorktreeBranch,
+		// Set only for clone-per-agent git projects on the NFS backend: the
+		// agent mounts agents/<agent name>/workspace and clones into it.
+		NFSAgentDirName: nfsAgentDirName,
+		NFSAgentBranch:  nfsAgentBranch,
+		// Set only for empty-per-agent projects on the NFS backend: the
+		// agent directory's workspace stays empty (no branch, no clone).
+		NFSAgentDirEmpty: nfsAgentDirEmpty,
+		// F-111 (design §9): drives the k8s runtime's NFS init container's
+		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
+		// provisioning happens at all — the init container is now gated
+		// solely on WorkspaceBackendName=="nfs" && the share being mountable (a claim or an inline share)
+		// (k8s_runtime.go's nfsInitContainerInjected), so a nil GitClone here
+		// (a non-git, shared-plain project) still gets mkdir+chown, just no
+		// clone. Mirrors the existing GitClone field above/below, which this
+		// package already sets from the same opts.GitClone for other
+		// purposes; previously nothing set GitCloneForInit at all, so the
+		// k8s init container never ran for ANY project, git or not.
+		// A shared-plain git project has no GitClone; its workspace clone
+		// settings are used instead (nfsInitGitClone).
+		GitCloneForInit:  nfsInitGitClone(opts),
+		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
 			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {
@@ -1056,10 +2676,11 @@ authDone:
 			var args []string
 			if finalScionCfg != nil {
 				args = finalScionCfg.CommandArgs
-				if finalScionCfg.Model != "" {
-					// Prepend model flag so it appears before user args but is passed in baseArgs
-					args = append([]string{"--model", finalScionCfg.Model}, args...)
-				}
+			}
+			// The model flag comes before user args, from the same
+			// effective model as SCION_MODEL.
+			args = modelCommandArgs(effectiveModel, args)
+			if finalScionCfg != nil {
 				// If task_flag is configured, append task as a flag value
 				if finalScionCfg.TaskFlag != "" && task != "" {
 					args = append(args, finalScionCfg.TaskFlag, task)
@@ -1069,14 +2690,29 @@ authDone:
 		}(),
 		Env:             agentEnv,
 		ResolvedSecrets: opts.ResolvedSecrets,
+
+		FallbackEnv:            templateFallbackEnv,
+		SuppressedFallbackKeys: suppressedFallbackKeys,
 		Volumes: func() []api.VolumeMount {
 			var volumes []api.VolumeMount
 			if finalScionCfg != nil {
-				// If we extracted effectiveWorkspace from a /workspace volume mount,
-				// filter it out to avoid a duplicate mount (the buildCommonRunArgs
-				// will handle the workspace mount properly with worktree support).
-				if effectiveWorkspace != "" && effectiveWorkspace != agentWorkspace {
+				// Whenever there is an effective workspace at all, buildCommonRunArgs's
+				// own workspace-mount logic already handles it -- at /workspace in most
+				// cases, but at /repo-root/<rel> for the worktree-subdirectory case,
+				// which leaves the /workspace target slot free for a raw volume to
+				// claim. Filter any /workspace-target volume out of the generic list in
+				// every such case, rather than comparing effectiveWorkspace against
+				// agentWorkspace by value: effectiveWorkspace is the resolved,
+				// symlink-free path (see the validation call above), so that comparison
+				// would silently start filtering (or stop filtering) purely because
+				// agentWorkspace is not canonical, with no actual change in what is
+				// being mounted.
+				if effectiveWorkspace != "" {
+					before := len(finalScionCfg.Volumes)
 					volumes = filterWorkspaceVolume(finalScionCfg.Volumes)
+					if len(volumes) < before {
+						warnings = append(warnings, "ignoring volume targeting /workspace: the agent workspace is mounted by the runtime")
+					}
 				} else {
 					volumes = finalScionCfg.Volumes
 				}
@@ -1091,17 +2727,78 @@ authDone:
 			}
 			return nil
 		}(),
+		KubernetesBlockIdentity: opts.KubernetesBlockIdentity != nil,
+		CloudRunIdentity:        opts.CloudRunIdentity,
 		Kubernetes: func() *api.KubernetesConfig {
-			if finalScionCfg != nil {
-				return finalScionCfg.Kubernetes
+			// Start from the template/agent config's Kubernetes settings
+			// (namespace, resources, node selector, etc.), then ALWAYS
+			// assign the separately-resolved ImagePullPolicy on top — never
+			// only when it's non-empty. resolvedPullPolicy already covers
+			// every legitimate tier (live template, current inline,
+			// recorded inline, settings, file default), so it is
+			// authoritative the same way resolvedImage is: a guarded
+			// assignment would let finalScionCfg.Kubernetes.ImagePullPolicy
+			// (a value ProvisionAgent persisted at an earlier provision)
+			// survive as a stale fallback when every current tier resolves
+			// to empty — e.g. after an operator removes a settings or
+			// template pull-policy pin — exactly the staleness this
+			// package's Image handling was written to avoid.
+			//
+			// Shared-dir PVC defaults from settings (profile, then the
+			// profile's runtime entry) are filled in only where the
+			// template/agent kubernetes block leaves them empty, and only
+			// on the Kubernetes runtime. They are resolved here at start
+			// time rather than persisted by ProvisionAgent, so a settings
+			// change applies on the next start, matching ImagePullPolicy.
+			// placedK8s is a fresh copy of the template/agent block with
+			// the resolved placement applied (nil when there is neither).
+			k8sCfg := placedK8s
+			if resolvedPullPolicy != "" || k8sCfg != nil {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ImagePullPolicy = resolvedPullPolicy
 			}
-			return nil
+			if sdClass != "" || sdSize != "" {
+				k8sCfg = config.ApplySharedDirDefaults(k8sCfg, sdClass, sdSize)
+			}
+			// safe_to_evict from settings (profile, then runtime entry),
+			// only where the template/agent leaves it unset. Nil off
+			// Kubernetes (cleared above).
+			k8sCfg = config.ApplySafeToEvictDefault(k8sCfg, settingsSafeToEvict)
+			// The broker-resolved Workload Identity ServiceAccount (GCP
+			// identity mode "assign") is applied over the template and
+			// persisted value, but only when non-empty: empty means no
+			// mapping applies to this dispatch, not "clear the value". It is
+			// not part of finalScionCfg, so it also applies when starting or
+			// restarting an existing agent.
+			if opts.ResolvedKubernetesServiceAccountName != "" {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ServiceAccountName = opts.ResolvedKubernetesServiceAccountName
+			}
+			// GCP identity "block" (ptone/scion#4034): the pod runs as the
+			// block ServiceAccount, or as the namespace's default when none
+			// is configured. Either way it replaces any template or
+			// persisted serviceAccountName, which could name a KSA bound to
+			// a GCP service account.
+			if opts.KubernetesBlockIdentity != nil {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ServiceAccountName = opts.KubernetesBlockIdentity.ServiceAccountName
+			}
+			return k8sCfg
 		}(),
-		GitClone:   opts.GitClone,
-		SharedDirs: effectiveSharedDirs,
-		BrokerMode: opts.BrokerMode,
-		NoAuth: opts.NoAuth && noAuthConfig != nil &&
-			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
+		GitClone:           opts.GitClone,
+		TrustedHubEndpoint: trustedHubEndpoint,
+		SharedDirs:         effectiveSharedDirs,
+		SharedDirStorage:   sharedDirStorage,
+		HomeStorageBackend: homeStorageBackend,
+		HomeStorage:        homeStorage,
+		BrokerMode:         opts.BrokerMode,
+		NoAuth:             noAuthActive,
 		NoAuthMessage: func() string {
 			if opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell" {
 				return noAuthConfig.Message
@@ -1116,8 +2813,8 @@ authDone:
 		}(),
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
-		MetadataInterception: hasMetadataInterception(agentEnv),
-		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),
+		MetadataInterception: metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv),
+		ExtraHosts:           runExtraHosts,
 		NetworkMode:          networkMode,
 		Labels: func() map[string]string {
 			l := map[string]string{
@@ -1127,59 +2824,198 @@ authDone:
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
+				api.LabelRunID:         runID,
 			}
-			for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+			for k, v := range projectkeys.ProjectNameLabels(projectName) {
 				l[k] = v
 			}
 			// Add project_id label for project-scoped agent isolation.
 			if projectID != "" {
-				for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+				for k, v := range projectkeys.ProjectIDLabels(projectID) {
 					l[k] = v
 				}
 			}
+			// The reserved owner label is set last, by the manager only,
+			// so nothing above can set or replace it.
+			for k, v := range m.ownerLabels() {
+				l[k] = v
+			}
 			return l
 		}(),
-		Annotations: projectcompat.ProjectPathLabels(projectDir, true),
+		Annotations: projectkeys.ProjectPathLabels(projectDir),
+		// Async-launch hooks (design t1-async-create-v11.md §3.8.3,
+		// §3.8.4); nil on the synchronous path.
+		Checkpoint:        opts.Checkpoint,
+		OnResourceCreated: opts.OnResourceCreated,
+		Progress:          opts.Progress,
+		// Observes every created resource (flat instance ownership
+		// records) without changing cleanup ownership.
+		ObserveResourceCreated: opts.ObserveResourceCreated,
+	}
+	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
+		"elapsed_ms", time.Since(startEntry).Milliseconds())
+	// Record the phase, runtime and profile before the container starts
+	// rather than after it: some runtimes do not let the host write files in
+	// the container (ptone/scion#4766). Once up, the container reports its
+	// own phase (sciontool init writes "running"). A failed launch is
+	// recorded in the host-owned host state file (ptone/scion#4815, see
+	// setStartFailedRunID); the record is cleared here, before Run, and set
+	// below when Run fails. (The run ID record after the create, when the
+	// pre-start List failed, goes to the same file, ptone/scion#4771.)
+	//
+	// The phase written here is "running" for both a fresh start and a
+	// resume: state.Phase has no "resumed" value, and a non-standard phase
+	// string confuses readers that only understand the canonical lifecycle
+	// phases (e.g. the hub's post-wake readiness wait). Resume-specific
+	// display text is derived independently at the CLI layer (see
+	// displayStatus in cmd/common.go), so it does not need to be encoded in
+	// Phase.
+	//
+	// A runtime whose agent home is a one-way copy made during Run, and
+	// whose harness cannot start before Run returns
+	// (runtime.CopiesAgentHome, e.g. Kubernetes), gets "starting" here
+	// instead, and "running" once Run has returned successfully: Run can
+	// take minutes (scheduling, home and workspace sync), and the list and
+	// the broker heartbeat must not report the agent running before the
+	// harness can start (ptone/scion#5368). The host may write
+	// agent-info.json after Run only on such a runtime, because there the
+	// file is not shared with the container.
+	successPhase := string(state.PhaseRunning)
+	preRunPhase := successPhase
+	copiedHome := runtime.CopiesAgentHome(m.Runtime)
+	if copiedHome {
+		preRunPhase = string(state.PhaseStarting)
+	}
+	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, preRunPhase, m.Runtime.Name(), profileName); updateErr != nil {
+		slog.Warn("Start: failed to record the agent phase before the runtime launch; list may show a stale phase",
+			"agent", opts.Name, "phase", preRunPhase, "error", updateErr)
+	}
+	if err := setStartFailedRunID(RunOwnerTargetFor(opts), ""); err != nil {
+		slog.Warn("Start: failed to clear the failed-start record in the host state file; list may show this agent as errored",
+			"agent", opts.Name, "run_id", runID, "error", err)
+	}
+	// A shared dir now on the shared volume whose previous per-dir claim
+	// still exists: the claim's contents are not on the volume. Warn on
+	// every dispatch until the claim is gone; the claim is never touched.
+	if checker, ok := m.Runtime.(runtime.LegacySharedDirClaimChecker); ok {
+		claimWarnings, claimErr := checker.LegacySharedDirClaimWarnings(ctx, runCfg)
+		if claimErr != nil {
+			slog.Warn("Start: could not check for previous shared-dir claims", "agent", opts.Name, "error", claimErr)
+		}
+		warnings = append(warnings, claimWarnings...)
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
-		// Provisioning writes agent-info.json in "created" state before the
+		// agent-info.json was set to the pre-run phase above, before the
 		// runtime launch. If the launch itself fails, keep the provisioned
-		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom created agent forever.
+		// workspace but record the error so list/status do not report a
+		// phantom agent forever. Some runtimes do not let the host write
+		// files in the container, so the failed start is also recorded in
+		// the host-owned host state file, which list reads and which does
+		// not depend on the agent home being writable (ptone/scion#4815).
+		// The agent-info.json write is kept, best effort, for readers of
+		// that file; it may fail on such runtimes.
+		if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+			slog.Warn("Start: failed to record the failed start in the host state file",
+				"agent", opts.Name, "run_id", runID, "error", recErr)
+		}
 		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
 			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
 		}
 		return nil, classifyLaunchRuntimeError(err, resolvedImage)
 	}
-
-	status := "running"
-	if opts.Resume {
-		status = "resumed"
+	// Before anything else happens with the new container, re-check its
+	// actual binds against the Runtime Broker control paths; a refused or
+	// unverifiable bind stops it and fails the start (verifyCreatedMounts).
+	if err := m.verifyCreatedMounts(ctx, runtime.RunRef{ID: id, RunID: runID}, opts.Name); err != nil {
+		if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+			slog.Warn("Start: failed to record the failed start in the host state file",
+				"agent", opts.Name, "run_id", runID, "error", recErr)
+		}
+		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
+			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+		}
+		return nil, err
 	}
-	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
-		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
+	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
+		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	if copiedHome {
+		// Run has returned, so the harness may now start. On this runtime
+		// the host's agent-info.json is a host-only copy, not shared with
+		// the container (runtime.CopiesAgentHome), so writing it now keeps
+		// the ptone/scion#4766 invariant (no host write while the container
+		// may read the file). Compare-and-set: a stop or delete mark
+		// written while Run was in progress wins.
+		advanceAgentPhase(opts.Name, opts.ProjectPath, preRunPhase, successPhase)
+	}
+	// The run is recorded after the create when the pre-start List failed
+	// (see recordAfterCreate). It goes to the host-owned HostStateFile, so
+	// it does not matter that the container may be up; a failure is logged
+	// and the start carries on.
+	if recordAfterCreate {
+		if err := RecordRunOwner(RunOwnerTargetFor(opts), runID); err != nil {
+			slog.Warn("Start: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", runID, "error", err)
+		}
 	}
 
 	// Fetch fresh info and verify the container is actually running
-	allAgents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
-			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
+			// An entry of another run is never this start's container, so
+			// it is neither reported, failed nor deleted here
+			// (ptone/scion#7289): a runtime with a deterministic instance
+			// name (Cloud Run) can still list the previous run's stopped
+			// or soft-deleted entry under the same name and ID.
+			if !postRunEntryOfRun(a, runID) {
+				continue
+			}
+			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
+			// An owned (flat instance) manager matches by name only within
+			// the agent's project, never another project's same-named agent.
+			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, scopeProjectID(projectID, projectDir)) {
+				matched = false
+			}
+			if matched {
 				// Check if the container has already exited
-				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
+				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
-					_ = m.Runtime.Delete(ctx, id)
+					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
+					// Record the failed start as the Run error path does, so
+					// list shows error rather than the pre-run phase. The
+					// container is gone, so the host write keeps the
+					// ptone/scion#4766 invariant (no host write while the
+					// container may read the file).
+					if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+						slog.Warn("Start: failed to record the failed start in the host state file",
+							"agent", opts.Name, "run_id", runID, "error", recErr)
+					}
+					if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, string(state.PhaseError), m.Runtime.Name(), profileName); updateErr != nil {
+						util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+					}
 					return nil, fmt.Errorf("container started but exited immediately (status: %s). Container logs:\n%s", a.ContainerStatus, logs)
 				}
 				a.Detached = detached
 				a.Warnings = warnings
-				a.Phase = status
+				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
+				a.RelayedWarnings = relayedWarnings
+				a.StartNotice = startNotice
+				a.Phase = successPhase
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
+				a.HarnessConfigSource = harnessConfigSource
+				// The effective configuration the hub records (WP1 slice 3).
+				a.Harness = launchedHarness
+				a.Model = effectiveModel
+				a.ConfigResolved = true
+				if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
+					a.TemplateHash = th
+				}
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
+				a.WorkspacePlacement = workspacePlacement
 				return &a, nil
 			}
 		}
@@ -1189,15 +3025,88 @@ authDone:
 	warnings = append(warnings, "Container started but could not be verified as running")
 	return &api.AgentInfo{
 		ID:                    id,
+		RunID:                 runID,
 		Name:                  opts.Name,
-		Phase:                 status,
+		Phase:                 successPhase,
 		Detached:              detached,
 		Warnings:              warnings,
+		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
+		RelayedWarnings:       relayedWarnings,
+		StartNotice:           startNotice,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
+		HarnessConfigSource:   harnessConfigSource,
+		Harness:               launchedHarness,
+		Model:                 effectiveModel,
+		TemplateHash:          startedTemplateHash(provenance, finalScionCfg),
+		ConfigResolved:        true,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
+		WorkspacePlacement:    workspacePlacement,
 	}, nil
+}
+
+// workspacePlacementInput is what a start resolved about its workspace.
+type workspacePlacementInput struct {
+	// Backend is the workspace backend that served the workspace ("" for
+	// the local backend).
+	Backend string
+	// Runtime is the runtime's name (runtime.Runtime.Name()).
+	Runtime string
+	// Share is the NFS share the pod mounts the workspace from: by claim,
+	// or inline by server and export when the share has no pv_name.
+	Share runtime.NFSPodShare
+	// ClonePerAgent is true when the agent was dispatched as a git
+	// clone-per-agent workspace.
+	ClonePerAgent bool
+	// AgentDirName is the agent's own directory on the export, when one
+	// was chosen (clone-per-agent and empty-per-agent on Kubernetes).
+	AgentDirName string
+}
+
+// exportMountingRuntimes are the non-Kubernetes runtimes that mount the nfs
+// workspace backend's resolved path itself as the agent's workspace:
+//   - docker, podman, container: buildCommonRunArgs bind-mounts
+//     RunConfig.Workspace (the nfs host path) at the container workspace
+//     (pkg/runtime/common.go); rootless podman refuses nfs (podman.go).
+//   - cloudrun: mounts the export's <subPathRoot>/<projectID>/workspace as
+//     an NFS volume at the container workspace (cloudrun_runtime.go
+//     provisionCloudRunNFS and the "workspace" volume in Run).
+//
+// Any other runtime is not known to work on the export: cloudrun-sandbox
+// copies the workspace to broker-local disk, substrate never mounts it, and
+// a new runtime must be added here deliberately.
+var exportMountingRuntimes = map[string]bool{
+	"docker":    true,
+	"podman":    true,
+	"container": true,
+	"cloudrun":  true,
+}
+
+// workspacePlacementFor returns the placement reported to the hub. It fails
+// closed: export only when the workspace is known to be mounted from the
+// shared NFS export, local otherwise. On Kubernetes the pod mounts the export
+// only through a PV claim or inline volumes of the share (without either it
+// gets an EmptyDir), and a clone-per-agent workspace is on the export only
+// in its own agent directory, which also needs the share. Other runtimes count only when
+// listed in exportMountingRuntimes.
+func workspacePlacementFor(in workspacePlacementInput) string {
+	if in.Backend != "nfs" {
+		return api.WorkspacePlacementLocal
+	}
+	if isKubernetesRuntime(in.Runtime) {
+		if !in.Share.Mountable() {
+			return api.WorkspacePlacementLocal
+		}
+		if in.ClonePerAgent && in.AgentDirName == "" {
+			return api.WorkspacePlacementLocal
+		}
+		return api.WorkspacePlacementExport
+	}
+	if exportMountingRuntimes[in.Runtime] {
+		return api.WorkspacePlacementExport
+	}
+	return api.WorkspacePlacementLocal
 }
 
 // writeAgentTokenFile writes the agent's hub credential to the canonical token
@@ -1214,27 +3123,146 @@ authDone:
 // §5. util.Debugf is deliberately not used for the failures: per #1339, debug
 // output from this subsystem may not emit at all, so a Debugf here is a failure
 // report that can vanish.
+//
+// The writes are confined to the agent home (pkg/agenthome), through one
+// handle opened on the home: a link at the token file or its temp file is
+// replaced, never written through, and a linked .scion is refused.
 func writeAgentTokenFile(agentHome, token string) error {
 	scionDir := filepath.Join(agentHome, ".scion")
-	if err := os.MkdirAll(scionDir, 0700); err != nil {
+	home, err := agenthome.OpenCreate(agentHome, 0700)
+	if err != nil {
+		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
+	}
+	defer func() { _ = home.Close() }()
+	if err := home.MkdirAll(".scion", 0700); err != nil {
 		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
 	}
 
+	const tokenRel, tmpRel = ".scion/scion-token", ".scion/scion-token.tmp"
 	tokenPath := filepath.Join(scionDir, "scion-token")
 	tmp := tokenPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-		_ = os.Remove(tmp)
+	if err := home.WriteFile(tmpRel, []byte(token), 0600); err != nil {
+		_ = home.Remove(tmpRel)
 		return fmt.Errorf("write agent token file %s: %w", tmp, err)
 	}
-	if err := os.Rename(tmp, tokenPath); err != nil {
+	if err := home.Rename(tmpRel, tokenRel); err != nil {
 		// Best effort: the temp file holds the credential, so leaving it behind
 		// on a path we are about to abort on is worse than a lost error here.
-		_ = os.Remove(tmp)
+		_ = home.Remove(tmpRel)
 		return fmt.Errorf("install agent token file %s from %s: %w", tokenPath, tmp, err)
 	}
 
 	util.Debugf("Start: wrote agent token to %s", tokenPath)
 	return nil
+}
+
+// isAgentOwnWorkspace reports whether workspace is the agent's own checkout:
+// <agentDir>/workspace, or the existing worktree provisioning attached the
+// agent to, as recorded in agentDir (writeAgentOwnWorkspace). It compares
+// broker-owned paths only, after resolving symlinks, and never looks at the
+// workspace's contents, which the agent can write. With no record, only
+// <agentDir>/workspace counts, so any other workspace's .scion is treated as
+// project configuration (read-only).
+//
+// The recorded path is accepted only when it is not the project root or
+// the repository root and contains neither, and git (run hardened) lists
+// it as a linked worktree of the project's repository.
+func isAgentOwnWorkspace(agentDir, projectDir, workspace string) bool {
+	if agentDir == "" || workspace == "" {
+		return false
+	}
+	ws := resolvedClean(workspace)
+	if ws == resolvedClean(filepath.Join(agentDir, "workspace")) {
+		return true
+	}
+	recorded := readAgentOwnWorkspace(agentDir)
+	if recorded == "" || ws != resolvedClean(recorded) {
+		return false
+	}
+	return validAttachedWorktree(projectDir, ws)
+}
+
+// validAttachedWorktree reports whether ws (resolved) may be an attached
+// worktree of the project at projectDir: neither the project root nor the
+// repository root, containing neither, and a registered linked worktree of
+// the repository.
+func validAttachedWorktree(projectDir, ws string) bool {
+	if projectDir == "" {
+		return false
+	}
+	projectRoot := projectDir
+	if filepath.Base(projectRoot) == config.DotScion {
+		projectRoot = filepath.Dir(projectRoot)
+	}
+	projectRoot = resolvedClean(projectRoot)
+	if ws == projectRoot || pathWithin(projectRoot, ws) {
+		return false
+	}
+	repoRoot, err := util.HardenedRepoRootDir(projectRoot)
+	if err != nil {
+		return false
+	}
+	repoRoot = resolvedClean(repoRoot)
+	if ws == repoRoot || pathWithin(repoRoot, ws) {
+		return false
+	}
+	ok, err := util.IsRegisteredLinkedWorktree(repoRoot, ws)
+	return err == nil && ok
+}
+
+// projectConfigPath is the broker-side path of the project's .scion entry
+// as the request named it (projectPath, a project root or its .scion), else
+// the resolved project dir.
+func projectConfigPath(projectPath, projectDir string) string {
+	if projectPath != "" {
+		return projectPath
+	}
+	return projectDir
+}
+
+// resolvedClean returns p with symlinks resolved where it exists, cleaned.
+func resolvedClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
+}
+
+// removeAgentTokenFile removes the agent token file (and its temp file) from
+// the agent home, confined to the home (pkg/agenthome): a link there is
+// removed itself, never followed, and a linked directory component is
+// refused. A missing home or file is not an error.
+func removeAgentTokenFile(agentHome string) error {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	for _, rel := range []string{".scion/scion-token.tmp", ".scion/scion-token"} {
+		if err := home.Remove(rel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeStaleAuthCandidates removes the staged auth-candidates.json from the
+// agent home, confined to the home (pkg/agenthome): a link there is removed
+// itself and a linked directory component is refused. A missing home or file
+// is not an error.
+func removeStaleAuthCandidates(agentHome string) error {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	return home.Remove(agentplugin.InputsRel + "/auth-candidates.json")
 }
 
 // detectRepoRoot resolves the git repo root to bind-mount for an agent, or ""
@@ -1244,22 +3272,639 @@ func writeAgentTokenFile(agentHome, token string) error {
 // inside a repo" (provision.go). explicit is set on first start (opts.Workspace)
 // and re-derived on resume from the persisted ExplicitWorkspace flag, so the
 // guarantee holds on every entry path.
-func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string {
+//
+// The returned root picks the container mount layout (pkg/runtime's
+// buildCommonRunArgs), so it is taken only from paths the broker itself
+// knows: the workspace path and the project's own root
+// (brokerProjectRoot). Git metadata inside the workspace is writable from
+// the container, so git's answer is used only to check those paths, never
+// as the root itself:
+//   - workspace at the project root (a shared workspace): the root is the
+//     workspace when it has a .git entry of its own (a .git directory must
+//     be one git accepts), otherwise "" (a plain mount). It is never an
+//     enclosing repository: a workspace whose .git is missing is
+//     indistinguishable from one whose .git was removed;
+//   - workspace that is a plain checkout elsewhere (for example a workspace
+//     storage backend's host path): the root is the workspace;
+//   - workspace that is a worktree or a subdirectory of a repository: the
+//     root is the directory holding the project's own common git dir
+//     (projectCommonDir), which is the main repository when the project is
+//     itself checked out in a linked worktree. The project's repository is
+//     the nearest one enclosing the project root, so this bound is "the
+//     project's enclosing repository", not the project root itself.
+//
+// Every git probe here is bounded with GIT_CEILING_DIRECTORIES, so git never
+// searches above the directory the answer has to match. When git reports a
+// common dir (or top level) that does not belong to these paths, the start
+// is refused with an error instead of mounting anything.
+func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settings *config.VersionedSettings) (string, error) {
 	if explicit {
-		return ""
+		return "", nil
 	}
-	if effectiveWorkspace != "" && util.IsGitRepoDir(effectiveWorkspace) {
-		commonDir, err := util.GetCommonGitDir(effectiveWorkspace)
-		if err == nil {
-			return filepath.Dir(commonDir)
+	return detectRepoRootFrom(effectiveWorkspace, projectDir, brokerProjectRoot(settings, projectDir))
+}
+
+// detectRepoRootFrom is detectRepoRoot for a non-explicit workspace with the
+// candidate project root already taken from the layout authority: the local
+// layout's (brokerProjectRoot), or, for a workspace a shared backend placed
+// on this host, the shared layout's (sharedLayoutWorkspaceRoot). Git only
+// verifies the candidate.
+func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (string, error) {
+	if effectiveWorkspace != "" {
+		ownGitDir := filepath.Join(effectiveWorkspace, ".git")
+		ownGitInfo, ownGitErr := os.Lstat(ownGitDir)
+		hasOwnGitDir := ownGitErr == nil && ownGitInfo.IsDir()
+		if samePath(effectiveWorkspace, projectRoot) {
+			if ownGitErr != nil {
+				// A project root inside an enclosing repository (a
+				// subdirectory project) has no .git of its own. The broker
+				// keeps no record of that layout, so it is mounted plain
+				// (ptone/scion#5758 tracks recording it at link time).
+				if enclosing := projectRepoRoot(filepath.Dir(effectiveWorkspace)); enclosing != "" {
+					slog.Warn("Project root is a subdirectory of a repository; mounting the workspace only; in-container git is unavailable for this layout",
+						"workspace", effectiveWorkspace, "repository", enclosing)
+				}
+				return "", nil
+			}
+			if hasOwnGitDir {
+				isRepo, err := checkOwnCommonDir(effectiveWorkspace)
+				if err != nil {
+					return "", err
+				}
+				if !isRepo {
+					return "", nil
+				}
+			}
+			return effectiveWorkspace, nil
 		}
+		if hasOwnGitDir {
+			// A .git directory git rejects gives a plain mount (a probe
+			// that does not finish, or that the door refuses, refuses): it
+			// never falls through to a wider root.
+			isRepo, err := checkOwnCommonDir(effectiveWorkspace)
+			if err != nil {
+				return "", err
+			}
+			if !isRepo {
+				return "", nil
+			}
+			return effectiveWorkspace, nil
+		}
+		// A workspace that does not exist yet (created later in Start, for
+		// example by the NFS leaf helpers), or whose .git file is in git's
+		// exact pointer format and names a gitdir that, resolved as git
+		// resolves it, does not exist (a leftover from a removed worktree), is
+		// not probed: it falls through as git's "not a repository" does, so it
+		// is never refused here and never mounts wider than the fallback
+		// allows.
+		_, lstatErr := os.Lstat(effectiveWorkspace)
+		skipProbe := errors.Is(lstatErr, fs.ErrNotExist) || danglingGitfile(effectiveWorkspace)
+		if !skipProbe {
+			projectRepo := projectRepoRoot(projectRoot)
+			ceiling := filepath.Dir(effectiveWorkspace)
+			if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
+				ceiling = filepath.Dir(projectRepo)
+			}
+			commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling)
+			// A timeout or a door refusal (for example a workspace with no
+			// .git but a HEAD entry) refuses the start: it never falls through
+			// to the project-dir fallback, which could mount the whole
+			// repository.
+			if refusal := gitProbeRefusal(effectiveWorkspace, err); refusal != nil {
+				return "", refusal
+			}
+			if err == nil {
+				if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
+					return filepath.Dir(projectCommon), nil
+				}
+				return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
+			}
+		}
+	}
+	// The project-dir fallback names a root only for a workspace inside the
+	// project's repository (or no workspace at all), so it never widens a
+	// workspace elsewhere to the whole repository.
+	projectRepo := projectRepoRoot(projectRoot)
+	if projectRepo == "" || !resolvedPathWithin(projectDir, projectRepo) {
+		return "", nil
+	}
+	if effectiveWorkspace != "" && !resolvedPathWithin(effectiveWorkspace, projectRepo) {
+		slog.Warn("Workspace is outside the project's repository; mounting the workspace only, without the repository",
+			"workspace", effectiveWorkspace, "repository", projectRepo)
+		return "", nil
+	}
+	// Any failure here, a timeout or a door refusal included, gives a plain
+	// mount, never the project's repository, except a repository config
+	// policy refusal, which is returned so the user sees its remedy.
+	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")
+	if err != nil {
+		var refused *util.RepoConfigRefusedError
+		if errors.As(err, &refused) {
+			return "", fmt.Errorf("project %s: %w", projectDir, err)
+		}
+		return "", nil
+	}
+	if samePath(top, projectRepo) {
+		return projectRepo, nil
+	}
+	return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", top, projectDir)
+}
+
+// danglingGitfile reports whether ws/.git is a regular file in git's exact
+// pointer format whose target, resolved as git resolves it, does not exist.
+// The file must be at most 4096 bytes and start with "gitdir: "; the rest,
+// with trailing CR and LF stripped (as git strips them), must be a non-empty
+// path with no CR, LF or NUL and no leading or trailing whitespace. A
+// relative path is joined to the workspace's physical path without any
+// lexical cleaning, so the kernel resolves ".." and symlinks as it does for
+// git. Only a target that does not exist reports true; anything else (a
+// different format, a .git symlink, a read error, or a target that exists or
+// cannot be checked) reports false, so the workspace is still probed.
+func danglingGitfile(ws string) bool {
+	gitPath := filepath.Join(ws, ".git")
+	info, err := os.Lstat(gitPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(gitPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, 4096+1))
+	if err != nil || len(data) > 4096 {
+		return false
+	}
+	rest, ok := strings.CutPrefix(string(data), "gitdir: ")
+	if !ok {
+		return false
+	}
+	path := strings.TrimRight(rest, "\r\n")
+	if path == "" || strings.ContainsAny(path, "\r\n\x00") || path != strings.TrimSpace(path) {
+		return false
+	}
+	if !filepath.IsAbs(path) {
+		wsReal, err := filepath.EvalSymlinks(ws)
+		if err != nil {
+			return false
+		}
+		path = wsReal + string(filepath.Separator) + path
+	}
+	_, err = os.Lstat(path)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// checkOwnCommonDir checks a workspace with its own .git directory. It
+// reports false when git does not treat the workspace as a repository at all
+// (for example an empty .git directory), and refuses with an error when git
+// does, but with a common dir other than that .git directory, when the probe
+// does not finish in time, or when the host-side git door refuses it. For a
+// .git directory, the door refuses a root-level commondir or gitdir file
+// first, so the common-dir mismatch below is a defence-in-depth check.
+func checkOwnCommonDir(workspace string) (bool, error) {
+	ownGitDir := filepath.Join(workspace, ".git")
+	commonDir, err := boundedCommonGitDir(workspace, filepath.Dir(workspace))
+	if refusal := gitProbeRefusal(workspace, err); refusal != nil {
+		return false, refusal
+	}
+	if err != nil {
+		return false, nil
+	}
+	if !samePath(commonDir, ownGitDir) {
+		return false, workspaceCommonDirError(workspace, commonDir)
+	}
+	return true, nil
+}
+
+// workspaceCommonDirError is detectRepoRoot's refusal for a workspace whose
+// git common dir does not belong to the project.
+func workspaceCommonDirError(workspace, commonDir string) error {
+	return fmt.Errorf("git common dir %s of workspace %s is outside the project's own repository; refusing to start: check the workspace's .git metadata", commonDir, workspace)
+}
+
+// boundedRevParse runs git rev-parse with args in dir through util.RunHostGit
+// with the linked-checkout policy, with ceiling as GIT_CEILING_DIRECTORIES:
+// git checks dir and its ancestors below ceiling for a repository, never
+// ceiling itself or anything above it. The environment is worktreeGitEnv's
+// with HostGitEnv applied, so an inherited GIT_DIR or similar cannot override
+// the search. Like the package's other git calls in agent-writable
+// directories, git itself is bounded by worktreeGitTimeout; the door's
+// after-run check runs under its own bound. A refusal by the door wraps
+// errGitProbeRefused and a probe that does not finish in time wraps
+// errGitProbeTimeout; any other error is git's own non-zero exit, or git
+// missing.
+func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
+	defer cancel()
+	// The probe runs in the user's checkout, a Scion worktree of it, or a
+	// workspace whose layout is not known here, so it uses the linked list,
+	// the wider one, which accepts every config the managed list accepts.
+	// The environment starts from HostGitEnv over worktreeGitEnv (of the
+	// GIT_* variables only GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL are
+	// kept), and the ceiling is appended last, so an inherited
+	// GIT_CEILING_DIRECTORIES cannot replace it. The callers need a bound
+	// wider than CeilingOn, which stops at dir's parent: a probe may have to
+	// find the project's repository several levels up and no further. Under
+	// CeilingOff the door leaves GIT_CEILING_DIRECTORIES as the caller set
+	// it, so this bound is the one git applies; with a .git at dir it also
+	// bounds the door's own config listings. HostGitArgs pins
+	// core.fsmonitor=false.
+	res := util.RunHostGit(ctx, dir, util.HostGitOptions{
+		Policy:  util.RepoPolicyLinked,
+		Ceiling: util.CeilingOff,
+		Env:     append(util.HostGitEnv(worktreeGitEnv()), "GIT_CEILING_DIRECTORIES="+ceiling),
+	}, append([]string{"rev-parse"}, args...)...)
+	joined := strings.Join(args, " ")
+	switch {
+	case res.Err == nil && res.ExitCode == 0:
+		return strings.TrimSpace(string(res.Stdout)), nil
+	case ctx.Err() != nil:
+		return "", fmt.Errorf("git rev-parse %s in %s: %w after %s", joined, dir, errGitProbeTimeout, worktreeGitTimeout)
+	case errors.Is(res.Err, exec.ErrNotFound):
+		// Without git there is no repository to widen to: read as git's own
+		// failure ("not a repository"), not as a refusal.
+		return "", fmt.Errorf("git rev-parse %s in %s: %w", joined, dir, res.Err)
+	case res.Err != nil:
+		return "", fmt.Errorf("git rev-parse %s in %s: %w: %w", joined, dir, errGitProbeRefused, res.Err)
+	}
+	if stderr := strings.TrimSpace(string(res.Stderr)); stderr != "" {
+		return "", fmt.Errorf("git rev-parse %s in %s: git exited with code %d: %s", joined, dir, res.ExitCode, stderr)
+	}
+	return "", fmt.Errorf("git rev-parse %s in %s: git exited with code %d", joined, dir, res.ExitCode)
+}
+
+// errGitProbeTimeout marks a boundedRevParse call that did not finish in
+// time. A probe in the workspace that times out refuses the start: it is
+// never read as "not a repository", which could otherwise pick a different
+// layout than the workspace's own git metadata allows.
+var errGitProbeTimeout = errors.New("git probe timed out")
+
+// errGitProbeRefused marks a boundedRevParse call the host-side git door
+// refused, before or after git ran (for example a repository config the
+// policy refuses, a directory that may itself be a git directory, a config
+// change while git ran), or that failed to wait for git (exec.ErrWaitDelay).
+// A missing git binary is not one. It is never read as "not a repository".
+var errGitProbeRefused = errors.New("git probe refused")
+
+// gitProbeTimeoutError is detectRepoRoot's refusal for a git probe in the
+// workspace that did not finish in time.
+func gitProbeTimeoutError(workspace string, err error) error {
+	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and the filesystem", workspace, err)
+}
+
+// gitProbeRefusedError is detectRepoRoot's refusal for a git probe in the
+// workspace that the host-side git door refused.
+func gitProbeRefusedError(workspace string, err error) error {
+	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and its git config", workspace, err)
+}
+
+// gitProbeRefusal returns the start refusal for a workspace probe error that
+// must not be read as "not a repository" (a timeout or a door refusal), or
+// nil otherwise (no error, git's own non-zero exit, or git missing).
+func gitProbeRefusal(workspace string, err error) error {
+	switch {
+	case errors.Is(err, errGitProbeTimeout):
+		return gitProbeTimeoutError(workspace, err)
+	case errors.Is(err, errGitProbeRefused):
+		return gitProbeRefusedError(workspace, err)
+	}
+	return nil
+}
+
+// boundedCommonGitDir returns dir's git common dir as an absolute path, with
+// the repository search bounded by ceiling (see boundedRevParse).
+func boundedCommonGitDir(dir, ceiling string) (string, error) {
+	commonDir, err := boundedRevParse(dir, ceiling, "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(dir, commonDir)
+	}
+	return filepath.Clean(commonDir), nil
+}
+
+// brokerProjectRoot is the project's workspace root on the local layout, as
+// the layout authority places it (localLayoutWorkspaceRoot) for the
+// project's own root directory as the broker knows it, from paths only: the
+// recorded workspace path of a project whose configuration lives in the
+// broker's project-configs tree, otherwise the directory holding the
+// project's .scion directory, otherwise the project directory itself. A
+// workspace_path setting is used only from the project-configs tree: merged
+// settings can include a settings file inside the project, which a shared
+// workspace mount exposes.
+func brokerProjectRoot(settings *config.VersionedSettings, projectDir string) string {
+	// A shared project configuration (<ProjectRoot>/.scion): the candidate
+	// is the shared layout's project-level workspace, <ProjectRoot>/workspace,
+	// whatever the backend places on this host.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return filepath.Join(filepath.Dir(filepath.Clean(projectDir)), projectfs.ProjectWorkspaceDirName)
+	}
+	own := projectDir
+	switch {
+	case settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir):
+		own = settings.WorkspacePath
+	case filepath.Base(projectDir) == config.DotScion:
+		own = filepath.Dir(projectDir)
+	}
+	return localLayoutWorkspaceRoot(own)
+}
+
+// projectRepoRoot returns the project's repository root: the nearest of
+// projectRoot and its ancestors that holds a .git entry, symlinks resolved,
+// or "" if there is none. It reads only the directory layout, never git
+// configuration.
+func projectRepoRoot(projectRoot string) string {
+	if projectRoot == "" {
 		return ""
 	}
-	if util.IsGitRepoDir(projectDir) {
-		root, _ := util.RepoRootDir(projectDir)
-		return root
+	// A project root that cannot be resolved has no repository root, on
+	// purpose: callers then mount the workspace plain or refuse, rather than
+	// walk up from an unresolved spelling of the path.
+	dir, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return ""
 	}
-	return ""
+	for {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// projectCommonDir returns the common git dir of the project checkout at
+// top (projectRepoRoot's result), or "" if it cannot be told from the
+// layout: top's .git directory, or, when top's .git is a pointer file (the
+// project is checked out in a linked worktree), the directory holding the
+// worktrees/<name> directory the pointer names. The commondir file inside
+// that worktree's admin directory is deliberately not read: it sits in the
+// main repository's .git directory, which worktree layouts mount writable
+// into agent containers. A pointer to a gitdir not shaped
+// <common>/worktrees/<name> (a submodule, for example) is used as is.
+func projectCommonDir(top string) string {
+	if top == "" {
+		return ""
+	}
+	dotGit := filepath.Join(top, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return dotGit
+	}
+	if !info.Mode().IsRegular() {
+		return ""
+	}
+	gitdir, ok := readGitdirPointer(dotGit)
+	if !ok {
+		return ""
+	}
+	if filepath.Base(filepath.Dir(gitdir)) == "worktrees" {
+		return filepath.Dir(filepath.Dir(gitdir))
+	}
+	return gitdir
+}
+
+// resolvedPathWithin is pathWithin on symlink-resolved paths (cleaned paths
+// are compared when either cannot be resolved).
+func resolvedPathWithin(p, root string) bool {
+	if p == "" || root == "" {
+		return false
+	}
+	// Both sides are compared in the same form on purpose (both resolved, or
+	// both as given): comparing a resolved path with an unresolved one can
+	// make a path whose symlinked components lead elsewhere look contained.
+	rp, errP := filepath.EvalSymlinks(p)
+	rr, errR := filepath.EvalSymlinks(root)
+	if errP != nil || errR != nil {
+		rp, rr = p, root
+	}
+	return pathWithin(rp, rr)
+}
+
+// workspaceSourceRoots returns the per-project root(s) a resolved workspace
+// source may fall under (any one of them is sufficient), for the fail-closed
+// check that runs before any mount is set up. It mirrors the same resolution
+// the non-git, no-explicit-workspace branches in provision.go's
+// workspaceSource logic already went through, so a legitimately resolved
+// source is never rejected by the containment check:
+//   - explicit workspace: no root (the containment check is skipped; an
+//     explicit --workspace may point anywhere, unchanged from today);
+//   - git project: this project's OWN repo root, derived from projectDir —
+//     never from effectiveWorkspace itself. (A source that happens to be
+//     some other git checkout entirely would otherwise trivially "verify"
+//     against its own repo; the root this function returns must always come
+//     from the project the agent belongs to, not from whatever the source
+//     claims to be.) Plus, when effectiveWorkspace is itself a worktree git
+//     has registered for THIS project's repo, verified via `git worktree
+//     list` against that repo rather than guessed from its path (see
+//     util.IsRegisteredWorktree) and cross-checked against the project's own
+//     common git dir — that worktree's own location. `git worktree add`
+//     accepts any destination, so a worktree the project attached to via an
+//     existing branch (provision.go's FindWorktreeByBranchIn) can legitimately
+//     sit anywhere on disk; git's own worktree registry, scoped to this
+//     project's repo, is the containment proof for that case, not a path
+//     prefix. Worktree-membership verification failure (git unavailable, for
+//     example) is not treated as membership — the source falls back to
+//     plain repo-root containment, same as if it had never been checked. If
+//     the project's own repo root cannot be resolved to a repository that
+//     actually is projectDir's own — either because resolution fails
+//     outright, or because it silently resolves to a different repository
+//     entirely — the whole call refuses instead of silently returning no
+//     roots, which the caller would otherwise treat as "no root available,
+//     check the rootless floor only" and accept far more than intended. A
+//     bare repository passes util.IsGitRepoDir (which checks only the exit
+//     status, not git's "false" output) but has no top level to resolve.
+//     Standalone, util.RepoRootDir then fails outright and the call refuses
+//     on that error alone. Nested inside another repository's work tree,
+//     util.RepoRootDir's parent-directory retry on failure returns the
+//     ENCLOSING repository's top level instead of erroring — a real,
+//     successfully-resolved root that just isn't projectDir's own — and
+//     workspaceSharesProjectRepo's common-git-dir comparison is what refuses
+//     that case, since a nested bare repo's common git dir never matches the
+//     enclosing repository's. The global project takes this branch too when
+//     its own directory (~/.scion) is itself a git work tree (a dotfiles
+//     repository, for example); that shape returns its own dedicated,
+//     actionable error instead of a root, since ProvisionAgent's resulting
+//     ~/.scion/agents/<name>/workspace can never pass the ~/.scion floor in
+//     runtime.ValidateWorkspaceSource, and deleting and recreating the agent
+//     cannot change that classification;
+//   - global project, no explicit workspace: <projectDir>/workspace, the
+//     directory ProvisionAgent's global-project branch creates. A global
+//     agent provisioned before that directory existed, whose persisted
+//     workspace is some other directory entirely, is intentionally refused
+//     on resume — see the caller's actionable-error wrapping;
+//   - externalized/non-git project: resolveProjectRoot's settings.WorkspacePath
+//     or parent-of-.scion fallback, which contain the resolved source in
+//     those branches (settings.WorkspacePath is typically equal to it; the
+//     parent-of-.scion fallback can also be a genuine ancestor of it).
+//
+// Whether projectDir counts as a git project here is decided by
+// isGitWorkspaceProject, the same helper ProvisionAgent uses to decide how
+// the workspace source was first resolved — so a workspace provisioned
+// through the non-git branch (SCION_HOST_UID set at provision time) is
+// checked against that same non-git root here, on every start including
+// resume, rather than being re-classified as git and checked against a
+// repo root it was never provisioned relative to.
+func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, settings *config.VersionedSettings, projectDir string) ([]string, error) {
+	if explicitWorkspace {
+		return nil, nil
+	}
+	if isGitWorkspaceProject(projectDir) {
+		if config.IsGlobalProjectDir(projectDir) {
+			// The global project's own directory (~/.scion) is, unusually,
+			// itself a git work tree (a dotfiles repository, for example).
+			// isGitWorkspaceProject then routes it through this git branch
+			// instead of the "global, no explicit workspace" branch below,
+			// so ProvisionAgent creates a per-agent worktree/workspace at
+			// ~/.scion/agents/<name>/workspace, the ordinary git-project
+			// shape -- not <projectDir>/workspace. That shape can never
+			// validate here: the ~/.scion floor (runtime.ValidateWorkspaceSource)
+			// only admits ~/.scion/workspace, ~/.scion/projects/<slug>, and
+			// ~/.scion/project-configs/<dir>/.scion/agents/<agent-id>/workspace,
+			// none of which this is, and root == ~/.scion itself is refused
+			// outright as a misconfigured root. Unlike every other
+			// rejection this function can produce, deleting and recreating
+			// the agent cannot help -- the same classification would
+			// recur -- so this returns its own actionable error instead of
+			// falling through to the generic one, and the global-agent hint
+			// wrapping at this function's Start() caller is never reached
+			// for it (rootsErr returns immediately, before that wrapping
+			// runs).
+			return nil, fmt.Errorf("the global project directory %q is itself inside a git work tree; restart with an explicit --workspace", projectDir)
+		}
+		projectRepoRoot, err := util.RepoRootDir(projectDir)
+		if err != nil || projectRepoRoot == "" || !workspaceSharesProjectRepo(projectDir, projectRepoRoot) {
+			// util.RepoRootDir retries from the parent directory on
+			// failure, so a bare repository nested inside another
+			// repository's work tree does not error here: the walk-up
+			// moves past the bare repo entirely and returns the ENCLOSING
+			// repository's top level instead, which is not projectDir's
+			// own repository at all. workspaceSharesProjectRepo's
+			// common-git-dir comparison catches that case even when
+			// RepoRootDir itself reports success.
+			return nil, fmt.Errorf("project directory %q does not resolve to its own git work tree (a bare repository, for example); workspace source cannot be validated: restart with an explicit --workspace, or use a project inside a non-bare git work tree", projectDir)
+		}
+		roots := []string{projectRepoRoot}
+		if effectiveWorkspace != "" {
+			ok, err := util.IsRegisteredWorktree(projectRepoRoot, effectiveWorkspace)
+			// A policy refusal carries its remedy, so it is returned instead
+			// of narrowing silently.
+			var refused *util.RepoConfigRefusedError
+			if errors.As(err, &refused) {
+				return nil, fmt.Errorf("workspace %q: cannot check its worktree registration in %q: %w", effectiveWorkspace, projectRepoRoot, err)
+			}
+			if err == nil && ok {
+				if workspaceSharesProjectRepo(projectDir, effectiveWorkspace) {
+					roots = append(roots, effectiveWorkspace)
+				}
+			}
+		}
+		return roots, nil
+	}
+	if config.IsGlobalProjectDir(projectDir) {
+		return []string{filepath.Join(projectDir, "workspace")}, nil
+	}
+	return []string{resolveProjectRoot(settings, projectDir)}, nil
+}
+
+// workspaceSharesProjectRepo reports whether workspace's own common git
+// directory matches projectDir's — an extra structural check alongside
+// util.IsRegisteredWorktree, so worktree membership is confirmed two ways
+// before it is trusted as a containment root.
+func workspaceSharesProjectRepo(projectDir, workspace string) bool {
+	projectCommonDir, err := util.GetCommonGitDir(projectDir)
+	if err != nil {
+		return false
+	}
+	workspaceCommonDir, err := util.GetCommonGitDir(workspace)
+	if err != nil {
+		return false
+	}
+	resolvedProjectCommonDir, err := filepath.EvalSymlinks(projectCommonDir)
+	if err != nil {
+		return false
+	}
+	resolvedWorkspaceCommonDir, err := filepath.EvalSymlinks(workspaceCommonDir)
+	if err != nil {
+		return false
+	}
+	return resolvedProjectCommonDir == resolvedWorkspaceCommonDir
+}
+
+// validatedWorktreeRepoRoot returns candidateRoot unchanged if
+// provision.ValidateWorktreeForBase confirms it is a genuine worktree base
+// for effectiveWorkspace, or "" otherwise (including when either argument is
+// empty or not an absolute path). This is the one, shared comparison every
+// caller in this package uses to decide what counts as a valid (root,
+// workspace) pair — Start's own RunConfig.RepoRoot resolution, the
+// persistence gate, and the workspace-storage-backend re-validation all call
+// this function directly, so the three always agree on the same pair.
+//
+// candidateRoot is compared fully resolved; effectiveWorkspace is Clean-ed
+// first by the caller (a trailing separator otherwise changes what
+// filepath.Dir treats as its final element) and then compared with its
+// parent directory resolved and its own final path element left exactly as
+// given (see resolveParentDir). This combination tolerates an ancestor
+// directory of either value being reached through a different spelling on
+// different calls — one dispatch's stored state and another dispatch's
+// freshly recovered value do not always agree on which — while still
+// distinguishing two final path elements that are not themselves the same
+// name. The return value is candidateRoot exactly as given, never a
+// resolved form, independent of how the comparison itself was performed.
+//
+// What Start passes on to RunConfig.RepoRoot varies by call site: the
+// EvalSymlinks pass after this function's first call, further down,
+// resolves the value that call produced before RunConfig ever sees it, but
+// the workspace-storage-backend re-validation's own reassignment of
+// repoRoot runs after that pass and reaches RunConfig in whatever form this
+// function returned it — candidateRoot exactly as given, same as always.
+// pkg/runtime/common.go's own mount-layout computation resolves
+// RunConfig.RepoRoot and RunConfig.Workspace again regardless, independently
+// of this function and of what form either value arrived in here.
+func validatedWorktreeRepoRoot(candidateRoot, effectiveWorkspace string) string {
+	if candidateRoot == "" || effectiveWorkspace == "" {
+		return ""
+	}
+	if !filepath.IsAbs(candidateRoot) || !filepath.IsAbs(effectiveWorkspace) {
+		return ""
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(candidateRoot)
+	if err != nil {
+		return ""
+	}
+	if err := provision.ValidateWorktreeForBase(resolvedRoot, resolveParentDir(filepath.Clean(effectiveWorkspace))); err != nil {
+		return ""
+	}
+	return candidateRoot
+}
+
+// resolveParentDir resolves p's parent directory, leaving p's own final path
+// element exactly as given. Two paths that reach a comparison through
+// different ancestor spellings — one following a symlinked ancestor
+// directory, one already in its resolved form — still compare equal after
+// this once both are passed through it, since only the shared ancestor
+// portion is normalized. The final path element is never resolved, so two
+// paths whose final elements are not themselves the same name (one of them
+// is, for example, its own symlink to a different final element) still
+// compare as different. Returns p unchanged if its parent cannot be
+// resolved (including when p is empty).
+func resolveParentDir(p string) string {
+	if p == "" {
+		return p
+	}
+	parent := filepath.Dir(p)
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return p
+	}
+	return filepath.Join(resolvedParent, filepath.Base(p))
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.
@@ -1286,30 +3931,38 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 	return filtered
 }
 
-// matchAgentProject returns true if the agent belongs to the given project.
-// It checks the project_id label first (authoritative in hosted mode), then
-// falls back to the project name label.
+// postRunEntryOfRun reports whether a, an entry Start lists right after
+// Run, may be the container of run runID: an entry of runID, or a legacy
+// entry that carries no run ID (it matches by name and ID alone). An entry
+// of any other run belongs to an earlier start and is skipped. It reads
+// only the entry, so it applies the same to every runtime.
+func postRunEntryOfRun(a api.AgentInfo, runID string) bool {
+	return a.RunID == "" || a.RunID == runID
+}
+
+// matchAgentProject reports whether the agent belongs to the given project.
+// A request scoped to a project (projectName or projectID set) accepts an
+// entry only if it is an entry of projectID (EntryInProject): identified by
+// its project ID label or field, or, with no project identity, a container
+// whose recorded path identifies as projectID. A project name label alone
+// is not an identity (names are directory slugs that projects can share),
+// and a scoped request without a projectID accepts nothing. An unscoped
+// request matches every entry.
 func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
-	// If we have a projectID, check the canonical project label first.
+	if projectName == "" && projectID == "" {
+		return true
+	}
+	return projectID != "" && EntryInProject(a, projectID)
+}
+
+// scopeProjectID returns the project ID a project-scoped match compares
+// entries against: projectID when known, else the ID recorded at
+// projectPath (ProjectIDAtPath), as the manager's stop and delete derive it.
+func scopeProjectID(projectID, projectPath string) string {
 	if projectID != "" {
-		if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-			return labelProjectID == projectID
-		}
-		if a.ProjectID != "" {
-			return a.ProjectID == projectID
-		}
+		return projectID
 	}
-	// Fall back to project name matching
-	if projectName != "" {
-		if labelProject := projectcompat.ProjectNameFromLabels(a.Labels); labelProject != "" {
-			return labelProject == projectName
-		}
-		if a.Project != "" {
-			return a.Project == projectName
-		}
-	}
-	// No project info on either side — match for backward compatibility
-	return true
+	return ProjectIDAtPath(projectPath)
 }
 
 // containerName returns a project-scoped container name to prevent Docker name
@@ -1321,32 +3974,67 @@ func containerName(projectName, agentName string) string {
 	return agentName
 }
 
-func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]string, []string, []string) {
+// buildAgentEnv merges the config layer (scionCfg.Env) with extraEnv
+// (opts.Env, which carries the hub's resolved env for a broker-mode start)
+// into the container environment. extraEnv wins on conflict.
+//
+// With brokerMode set, hub-only keys (see IsHubOnlyEnvKey) are skipped while
+// iterating the config layer, matched on the post-expansion key, and each
+// skipped value is returned in dropped. scionCfg itself is never modified.
+// An empty hub-only key in extraEnv is omitted without being reported as
+// missing: for those keys empty means "unset", never "required".
+//
+// defaultEnv is the lowest tier, below both layers (it carries the Hub's
+// defaults, see api.HubAgentDefaults.DefaultEnv). Each entry is applied only
+// when the key is absent from the merged env or has an empty value, i.e. when
+// no layer would otherwise put it in the container.
+func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
 	combined := make(map[string]string)
-	var warnings []string
-	var missingKeys []string
 
 	if scionCfg != nil && scionCfg.Env != nil {
 		for k, v := range scionCfg.Env {
-			// Support variable substitution in keys and values
-			expandedKey, _ := util.ExpandEnv(k)
-			expandedValue, warned := util.ExpandEnv(v)
+			// Support variable substitution in keys and values. Names
+			// reserved for the server process expand to empty.
+			expandedKey, _, refusedInKey := util.ExpandEnvRefusing(k, refuseHostEnvForAgent)
+			expandedValue, warned, refusedInValue := util.ExpandEnvRefusing(v, refuseHostEnvForAgent)
+			for _, name := range append(refusedInKey, refusedInValue...) {
+				warnings = append(warnings, refusedHostEnvWarning(name))
+			}
 
 			if expandedKey == "" {
 				continue
 			}
+			if skipBrokerLocalEnvKey(brokerMode, expandedKey) {
+				// Checked before the host passthrough below, so an empty
+				// marker never pulls in the broker host's value.
+				dropped = append(dropped, droppedBrokerEnv{Key: expandedKey, Value: expandedValue, Layer: envLayerConfig})
+				continue
+			}
 			// If the value is empty and we warned about a missing variable,
-			// skip adding it to combined to avoid a redundant warning later.
-			if expandedValue == "" && warned {
+			// or the value referenced only refused names (already warned
+			// above), skip adding it to combined to avoid a redundant warning
+			// later.
+			if expandedValue == "" && (warned || len(refusedInValue) > 0) {
 				continue
 			}
 			// If the value is empty (no variable reference was used),
 			// treat the key as an implicit host env passthrough: look up
-			// the environment variable of the same name on the host.
+			// the environment variable of the same name on the host. A
+			// name reserved for the server is omitted with a warning.
 			if expandedValue == "" {
+				if refuseHostEnvForAgent(expandedKey) {
+					warnings = append(warnings, refusedHostEnvWarning(expandedKey))
+					continue
+				}
 				if hostVal, ok := os.LookupEnv(expandedKey); ok && hostVal != "" {
 					expandedValue = hostVal
 				}
+			}
+			if brokerMode && expandedKey == "SCION_AUTH_TOKEN" {
+				// Not hub-issued: a hub-dispatched agent's hub token comes
+				// only from the hub (StartOptions.HubIssuedToken).
+				warnings = append(warnings, ignoredAuthTokenWarning)
+				continue
 			}
 			combined[expandedKey] = expandedValue
 		}
@@ -1355,9 +4043,21 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]str
 	for k, v := range extraEnv {
 		combined[k] = v
 	}
+	// Lowest tier: fill only what no layer above set.
+	for k, v := range defaultEnv {
+		if brokerMode && k == "SCION_AUTH_TOKEN" {
+			continue
+		}
+		if combined[k] == "" {
+			combined[k] = v
+		}
+	}
 
 	agentEnv := []string{}
 	for k, v := range combined {
+		if v == "" && skipBrokerLocalEnvKey(brokerMode, k) {
+			continue
+		}
 		if v == "" {
 			missingKeys = append(missingKeys, k)
 			warnings = append(warnings, fmt.Sprintf("Warning: Environment variable '%s' has no value and will be omitted.", k))
@@ -1365,14 +4065,87 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]str
 		}
 		agentEnv = append(agentEnv, fmt.Sprintf("%s=%s", k, v))
 	}
-	return agentEnv, warnings, missingKeys
+	sortDroppedBrokerEnv(dropped)
+	return agentEnv, warnings, missingKeys, dropped
+}
+
+// refuseHostEnvForAgent reports whether the host env value of name must never
+// be copied into an agent's env, whether by an empty-value passthrough or by
+// ${VAR} expansion (see util.IsAgentRefusedHostEnvName). Values set
+// explicitly by the caller (opts.Env) are not host passthrough and are
+// unaffected.
+func refuseHostEnvForAgent(name string) bool {
+	return util.IsAgentRefusedHostEnvName(name)
+}
+
+// ErrNoHubToken is the error a hub-dispatched start fails with when the hub
+// issued no agent token for it. Its text names the cause and no credential
+// value; the runtime broker returns it to the hub as the start's error
+// message.
+var ErrNoHubToken = errors.New("the hub issued no agent token for this start; " +
+	"check the hub's agent token service (see the hub log)")
+
+// hubDispatchedWithoutToken reports whether opts is a hub-dispatched start
+// (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) with no
+// hub-issued token (opts.HubIssuedToken).
+func hubDispatchedWithoutToken(opts api.StartOptions) bool {
+	return opts.BrokerMode &&
+		(opts.Env["SCION_HUB_ENDPOINT"] != "" || opts.Env["SCION_HUB_URL"] != "") &&
+		opts.HubIssuedToken == ""
+}
+
+// ignoredAuthTokenWarning is the start warning for a SCION_AUTH_TOKEN that
+// reached a hub-dispatched start from anywhere but the hub (the request's
+// config env, the agent config env, a harness-config env). It names no value.
+const ignoredAuthTokenWarning = "Warning: SCION_AUTH_TOKEN is set in the agent's environment configuration and is ignored: " +
+	"the agent's hub credential is only the token the hub issues for it."
+
+// expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
+// config env section with ${VAR} references expanded from the host env, or ""
+// when it is unset. Names refused by refuseHostEnvForAgent expand to empty
+// and are logged by name.
+func expandConfigHubEndpoint(agentName string, cfgEnv map[string]string) string {
+	ep := cfgEnv["SCION_HUB_ENDPOINT"]
+	if ep == "" {
+		return ""
+	}
+	expanded, _, refused := util.ExpandEnvRefusing(ep, refuseHostEnvForAgent)
+	for _, name := range refused {
+		slog.Warn("Start: host environment variable is reserved for the server and is not passed to agents", "agent", agentName, "variable", name)
+	}
+	return expanded
+}
+
+// refusedHostEnvWarning is the warning for a refused host env name. It names
+// the variable only, never its value.
+func refusedHostEnvWarning(name string) string {
+	return fmt.Sprintf("Warning: host environment variable '%s' is reserved for the server and is not passed to agents.", name)
+}
+
+// envLaunchID is the container env variable carrying the run ID, which
+// sciontool presents to the hub's conduit endpoint as its launch id.
+const envLaunchID = "SCION_LAUNCH_ID"
+
+// withLaunchIDEnv returns env with every SCION_LAUNCH_ID entry replaced by
+// a single one set to runID.
+func withLaunchIDEnv(env []string, runID string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, envLaunchID+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, envLaunchID+"="+runID)
 }
 
 // resolveAuthEnvOverlay injects settings-declared env vars into opts.Env and
 // returns the auth overlay that GatherAuthWithEnv consumes. It is the exact
 // sequence Start runs at the point auth resolution begins, extracted so it can
 // be exercised directly in tests.
-func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) map[string]string {
+//
+// For a broker-mode start, hub-only keys (see IsHubOnlyEnvKey) in the
+// harness-config entry are not merged; they are returned in dropped instead.
+func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) (overlay map[string]string, dropped []droppedBrokerEnv) {
 	// Inject harness-config env into opts.Env BEFORE the auth overlay is built,
 	// so GatherAuthWithEnv can see credentials the harness config declares
 	// (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION, ...).
@@ -1392,17 +4165,22 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 				opts.Env = make(map[string]string)
 			}
 			for k, v := range hcEntry.Env {
+				if skipBrokerLocalEnvKey(opts.BrokerMode, k) {
+					dropped = append(dropped, droppedBrokerEnv{Key: k, Value: v, Layer: envLayerHarnessConfigEntry})
+					continue
+				}
 				if _, exists := opts.Env[k]; !exists { // never clobber hub-supplied values
 					opts.Env[k] = v
 				}
 			}
 		}
 	}
+	sortDroppedBrokerEnv(dropped)
 
 	// Build a temporary auth overlay from resolved env-type secrets so auth
 	// resolution can detect credentials without mutating opts.Env (which is
 	// later projected into the container environment).
-	return buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets)
+	return buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets), dropped
 }
 
 // buildAuthEnvOverlay creates an auth-only view of the environment by layering
@@ -1428,6 +4206,97 @@ func buildAuthEnvOverlay(baseEnv map[string]string, secrets []api.ResolvedSecret
 		}
 	}
 	return overlay
+}
+
+// isNoAuthSelection reports whether the effective auth selection for a
+// start is the no-auth sentinel. A valid explicit harnessAuth decides on
+// its own; otherwise the auth_selectedType persisted in scion-agent.json
+// (cfg) is used. Harness implementation names are ignored as corrupted.
+func isNoAuthSelection(harnessAuth string, cfg *api.ScionConfig) bool {
+	if harnessAuth != "" && !harness.IsHarnessImplementationName(harnessAuth) {
+		return harness.IsNoAuthType(harnessAuth)
+	}
+	return cfg != nil && harness.IsNoAuthType(cfg.AuthSelectedType)
+}
+
+// autoDetectAuthSelectedType sets auth.SelectedType when nothing explicit has
+// selected one yet (CLI/template/profile overrides, scion-agent.json). It
+// mirrors the precedence the hub preflight already uses
+// (pkg/runtimebroker/handlers.go extractRequiredEnvKeys): file secrets, then
+// env vars, then GCP identity.
+//
+// Without this, container-script harnesses (e.g. antigravity) never learn a
+// resolved auth type for the auto-detect case: h.ResolveAuth forwards
+// auth.SelectedType into SCION_HARNESS_SELECTED_AUTH / explicit_type
+// (container_script_harness.go), which the container-side provisioner is
+// meant to trust instead of re-guessing via its own, harness-local method
+// ordering. Extracted (like resolveAuthEnvOverlay) so it can be exercised
+// directly in tests. See ptone/scion#1873.
+//
+// gcpSAAssigned is derived from opts.Env["SCION_METADATA_MODE"] rather than a
+// structured GCPIdentity: api.StartOptions carries no such field, and
+// SCION_METADATA_MODE is the only channel this signal has across the
+// runtimebroker -> agent package boundary (pkg/runtimebroker/start_context.go
+// sets it for assign, block, and passthrough alike).
+func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAuthMetadata, opts *api.StartOptions) {
+	if auth.SelectedType != "" || authMeta == nil {
+		return
+	}
+	// Skip in local/workstation mode: the GCP-identity signal
+	// (SCION_METADATA_MODE) and opts.Env / opts.ResolvedSecrets only reflect
+	// what the *broker* pre-resolved. GatherAuthWithEnv(authEnvOverlay,
+	// localSources=true, authMeta) separately discovers host env vars via
+	// os.Getenv and host credential files (e.g. ~/.claude/.credentials.json,
+	// the local ADC file) that never pass through opts.Env/opts.ResolvedSecrets
+	// at all — this function has no visibility into them. Deciding from opts
+	// alone in local mode would bind to a narrower view of the world than
+	// ResolveAuth/provision.py actually have, and could override a real host
+	// credential this function simply cannot see. SCION_METADATA_MODE is also
+	// broker-only by construction (pkg/runtimebroker/start_context.go), so
+	// the identity leg has nothing to contribute locally anyway.
+	if !opts.BrokerMode {
+		return
+	}
+
+	fileSecretNames := make(map[string]struct{})
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "file" {
+			fileSecretNames[sec.Name] = struct{}{}
+		}
+	}
+
+	envKeys := make(map[string]struct{})
+	for k, v := range opts.Env {
+		if v != "" {
+			envKeys[k] = struct{}{}
+		}
+	}
+	for _, sec := range opts.ResolvedSecrets {
+		if sec.Type == "environment" || sec.Type == "" {
+			target := sec.Target
+			if target == "" {
+				target = sec.Name
+			}
+			if target != "" {
+				envKeys[target] = struct{}{}
+			}
+		}
+	}
+
+	// gcpSAAssigned mirrors the broker's own check (extractRequiredEnvKeys:
+	// assign or passthrough both provide credentials).
+	metadataMode := opts.Env["SCION_METADATA_MODE"]
+	gcpSAAssigned := metadataMode == store.GCPMetadataModeAssign || metadataMode == store.GCPMetadataModePassthrough
+
+	// AutoDetectAuthType runs the file -> env -> identity precedence as a
+	// single call so a present default-type credential (e.g. antigravity's
+	// AGY_TOKEN, claude's ANTHROPIC_API_KEY) always wins over the identity leg.
+	// One exception to file-first: for an api-key default harness, an API key
+	// beats a gcloud-adc (vertex-ai) file credential (ptone/scion#4559). The
+	// runtimebroker preflight calls the same function, so both agree.
+	if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, envKeys, gcpSAAssigned); detected != "" {
+		auth.SelectedType = detected
+	}
 }
 
 // filterResolvedSecretsForResolvedAuth drops auth-candidate secrets that are
@@ -1539,6 +4408,38 @@ func configAuthEnvKeySet(authMeta *config.HarnessAuthMetadata) map[string]struct
 	return keys
 }
 
+// templateFallbackSuppressedKeys returns every env key a harness-config's
+// auth metadata lists, for any auth type: required_env any_of keys,
+// required_files alternative_env_keys and autodetect env keys. None of them
+// is ever filled from template env (RunConfig.SuppressedFallbackKeys), so a
+// template never supplies or selects a credential (ptone/scion#4968).
+//
+// It is deliberately wider than configAuthEnvKeySet, which drives Start's
+// auth-env filtering and must not change with it.
+func templateFallbackSuppressedKeys(authMeta *config.HarnessAuthMetadata) map[string]struct{} {
+	if authMeta == nil {
+		return nil
+	}
+	keys := make(map[string]struct{})
+	for k := range configAuthEnvKeySet(authMeta) {
+		keys[k] = struct{}{}
+	}
+	for _, authType := range authMeta.Types {
+		for _, req := range authType.RequiredFiles {
+			for _, k := range req.AlternativeEnvKeys {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	for k := range authMeta.Autodetect.Env {
+		keys[k] = struct{}{}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
+}
+
 func authFileKind(name, target string) string {
 	switch {
 	case name == "gcloud-adc" || strings.HasSuffix(target, "/application_default_credentials.json"):
@@ -1601,18 +4502,247 @@ func mergeExtraHosts(a, b []string) []string {
 	return result
 }
 
-// reResolveModelAlias detects when SCION_MODEL contains an unresolved size
-// alias (e.g. "large") that the hub failed to resolve, and returns the
-// broker-side resolved concrete model from cfg.Model. It returns ("", false)
-// when no re-resolution is needed — either because the value is not a known
-// alias, the config is nil, or the config model is empty.
-func reResolveModelAlias(envModel string, cfg *api.ScionConfig) (string, bool) {
-	if envModel == "" || cfg == nil || cfg.Model == "" {
+// launchedHarnessName is the name of the harness implementation this launch
+// resolved: the harness-config's declared harness for a declarative or
+// container-script harness, an embedded harness's name, or "generic" for the
+// plain Generic implementation. It is the container's SCION_HARNESS
+// (containerHarnessEnv).
+func launchedHarnessName(h api.Harness) string {
+	if h == nil {
+		return ""
+	}
+	return h.Name()
+}
+
+// containerHarnessEnv decides the container's SCION_HARNESS. It returns the
+// value to set and true when env has no SCION_HARNESS and launched is
+// non-empty. An SCION_HARNESS already in env (the caller's env, or the
+// settings harness_configs.<name>.env merged into it earlier) is an explicit
+// override and is kept; since an intentional parser override cannot be told
+// apart from a stale name, a fixed warning names both harnesses when they
+// differ. sciontool selects its usage-parsing rules and labels usage with
+// this value.
+func containerHarnessEnv(ctx context.Context, env map[string]string, launched string) (string, bool) {
+	if override, ok := env["SCION_HARNESS"]; ok {
+		if override != launched {
+			slog.WarnContext(ctx, "Start: SCION_HARNESS override differs from the launched harness",
+				"override", override, "launched", launched)
+		}
 		return "", false
 	}
-	normalized := config.NormalizeModelAlias(envModel)
-	if config.KnownModelAliases[normalized] && envModel != cfg.Model {
-		return cfg.Model, true
+	if launched == "" {
+		return "", false
 	}
-	return "", false
+	return launched, true
+}
+
+// resolveEffectiveModel returns the agent's one effective model: SCION_MODEL
+// from the start env when set (the hub-resolved model, or an explicit
+// --env), else the broker's own config model (an agent with no hub-resolved
+// model). A size alias left in that value (e.g. "large", when the hub's store
+// lacked the harness config's model_aliases) is resolved against the on-disk
+// harness-config's model_aliases, else the harness's built-in table
+// (harnesses/<harnessName>/config.yaml), so a bare alias never reaches the
+// harness verbatim. An alias neither table resolves is returned in its
+// normalized form (e.g. "large" for "L"). harnessName is the declared harness
+// of the harness-config this launch resolved (the stored name when no
+// harness-config resolved), not the stored name of a resolved launch, which a
+// harness-config switch leaves stale (ptone/scion#5946); empty means no
+// built-in table.
+//
+// The broker's config model never replaces a SCION_MODEL value, alias or
+// not: that model may be a broker template or harness-config default, which
+// ranks below the hub-resolved model.
+func resolveEffectiveModel(envModel string, cfg *api.ScionConfig, hcAliases map[string]string, harnessName string) string {
+	model := envModel
+	if model == "" && cfg != nil {
+		model = cfg.Model
+	}
+	if model == "" || !config.KnownModelAliases[config.NormalizeModelAlias(model)] {
+		return model
+	}
+	// Normalize once ("L" -> "large"), so an alias a partial on-disk table
+	// lacks still falls through to the built-in table.
+	model = config.NormalizeModelAlias(model)
+	if len(hcAliases) > 0 {
+		if resolved := config.ResolveModelAlias(model, hcAliases); resolved != model {
+			return resolved
+		}
+	}
+	if harnessName != "" {
+		if aliases := harness.DefaultModelAliases(harnessName); len(aliases) > 0 {
+			if resolved := config.ResolveModelAlias(model, aliases); resolved != model {
+				return resolved
+			}
+		}
+	}
+	return model
+}
+
+// modelCommandArgs prepends the harness model flag for model to args. It
+// returns args unchanged when model is empty.
+func modelCommandArgs(model string, args []string) []string {
+	if model == "" {
+		return args
+	}
+	return append([]string{"--model", model}, args...)
+}
+
+// isEmptyPerAgentStart reports whether opts start an empty-per-agent agent
+// (design #2703): set by the broker from the hub's WorkspaceMode, or carried
+// as SCION_WORKSPACE_MODE in the agent env.
+func isEmptyPerAgentStart(opts api.StartOptions) bool {
+	return opts.EmptyPerAgentWorkspace ||
+		store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeEmptyPerAgent
+}
+
+// infoTemplateHydrated reports whether cfg's agent info records a template
+// loaded from a content-addressed cache (see api.AgentInfo.TemplateHash).
+func infoTemplateHydrated(cfg *api.ScionConfig) bool {
+	return cfg != nil && cfg.Info != nil && cfg.Info.TemplateHash != ""
+}
+
+// startedTemplateHash is the content hash of the template a start ran
+// with: from the image provenance record for an agent with one, otherwise
+// from agent info. "" when the template was resolved by name (no hash is
+// known), so the hub records the effective template hash as unknown.
+func startedTemplateHash(provenance *imageProvenance, cfg *api.ScionConfig) string {
+	if provenance != nil {
+		return provenance.TemplateHash
+	}
+	if cfg != nil && cfg.Info != nil {
+		return cfg.Info.TemplateHash
+	}
+	return ""
+}
+
+// templateHydrated reports whether the agent's template was loaded from a
+// content-addressed cache. An agent with image provenance answers from the
+// provenance record alone (its TemplateHash, or a Template that is itself a
+// content hash); agent info is consulted only for an agent without one.
+func templateHydrated(provenance *imageProvenance, cfg *api.ScionConfig) bool {
+	if provenance != nil {
+		return provenance.TemplateHash != "" || transfer.IsContentHash(provenance.Template)
+	}
+	return infoTemplateHydrated(cfg)
+}
+
+// agentTemplateDisplayName returns the template name used for the
+// scion.template label and SCION_TEMPLATE_NAME: the dispatch's template slug
+// when set, else the name recorded in agent info. A content hash is never
+// returned; such a value yields "".
+func agentTemplateDisplayName(slug string, cfg *api.ScionConfig) string {
+	if slug != "" && !transfer.IsContentHash(slug) {
+		return slug
+	}
+	if cfg != nil && cfg.Info != nil && !transfer.IsContentHash(cfg.Info.Template) {
+		return cfg.Info.Template
+	}
+	return ""
+}
+
+// cloneTelemetryConfig returns a deep copy of t, or nil when t is nil, so a
+// shared telemetry object (such as the hub default carried on the request
+// context) is never aliased into an agent's config and later mutated, for
+// example by the TelemetryOverride applied at the end of Start.
+func cloneTelemetryConfig(t *api.TelemetryConfig) *api.TelemetryConfig {
+	if t == nil {
+		return nil
+	}
+	data, err := json.Marshal(t)
+	if err != nil {
+		return nil
+	}
+	var out api.TelemetryConfig
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return &out
+}
+
+// persistableAgentConfig returns the config Start writes back to
+// scion-agent.json. The settings telemetry and hub default telemetry tiers
+// are applied per start and must not be persisted (ptone/scion#4218,
+// ptone/scion#4241), so the written config carries agentTelemetry, the
+// agent's own telemetry from before those merges.
+func persistableAgentConfig(cfg *api.ScionConfig, agentTelemetry *api.TelemetryConfig) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Telemetry = cloneTelemetryConfig(agentTelemetry)
+	return &out
+}
+
+// injectHostCredentialFiles adds the harness-declared credential files found
+// under home to opts.ResolvedSecrets when the broker allowed it for this
+// start (opts.HostCredentialFiles, set only by a co-located workstation
+// broker). Only files that harness.InjectableHostCredentialFiles accepts are
+// considered: entries declared by harness configs shipped with scion, which
+// resolve to regular files inside home. It does nothing outside broker mode,
+// where local mode reads host credentials through GatherAuthWithEnv instead.
+// It returns the names of the secrets it added.
+func injectHostCredentialFiles(opts *api.StartOptions, authMeta *config.HarnessAuthMetadata, home string) []string {
+	if !opts.BrokerMode || !opts.HostCredentialFiles {
+		return nil
+	}
+	var injected []string
+	opts.ResolvedSecrets, injected = appendHostCredentialFileSecrets(opts.ResolvedSecrets, harness.InjectableHostCredentialFiles(authMeta, home), func(f harness.HostCredentialFile) ([]byte, error) {
+		return harness.ReadInjectableHostCredentialFile(f, home)
+	})
+	return injected
+}
+
+// appendHostCredentialFileSecrets adds each host credential file to secrets
+// as a file secret named after its required-file entry, targeted at the same
+// path under the container user's home, with its content from read. A file
+// is skipped when it has no declared name, when it is the gcloud ADC file
+// (left to the broker's auto_inject_gcloud_adc opt-in), when read fails, or
+// when secrets already holds a secret with the same name or a file secret
+// with the same target, so a hub-resolved secret always wins. It returns the
+// updated slice and the names of the secrets it added (never their contents).
+func appendHostCredentialFileSecrets(secrets []api.ResolvedSecret, files []harness.HostCredentialFile, read func(harness.HostCredentialFile) ([]byte, error)) ([]api.ResolvedSecret, []string) {
+	var injected []string
+	for _, f := range files {
+		if f.Name == "" || f.IsGcloudADC() {
+			continue
+		}
+		suffix := f.TargetSuffix
+		if !strings.HasPrefix(suffix, "/") {
+			suffix = "/" + suffix
+		}
+		target := "~" + suffix
+		if hostCredentialSecretPresent(secrets, f.Name, suffix) {
+			continue
+		}
+		data, err := read(f)
+		if err != nil {
+			util.Debugf("host credentials: skipping %s: %v", f.Name, err)
+			continue
+		}
+		secrets = append(secrets, api.ResolvedSecret{
+			Name:   f.Name,
+			Type:   "file",
+			Target: target,
+			Value:  string(data),
+			Source: "runtime_broker",
+		})
+		injected = append(injected, f.Name)
+	}
+	return secrets, injected
+}
+
+// hostCredentialSecretPresent reports whether secrets already holds a secret
+// named name, or a file secret whose target is the home-relative suffix
+// (written as "~"+suffix or as an absolute path ending in suffix).
+func hostCredentialSecretPresent(secrets []api.ResolvedSecret, name, suffix string) bool {
+	for _, s := range secrets {
+		if s.Name == name {
+			return true
+		}
+		if s.Type == "file" && (s.Target == "~"+suffix || strings.HasSuffix(s.Target, suffix)) {
+			return true
+		}
+	}
+	return false
 }

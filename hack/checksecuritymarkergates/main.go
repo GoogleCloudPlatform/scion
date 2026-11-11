@@ -49,11 +49,14 @@ func main() {
 	hcvPath := "pkg/hub/handlers_chat_v2.go"
 	mbPath := "pkg/hub/messagebroker.go"
 	hbiPath := "pkg/hub/handlers_broker_inbound.go"
+	hbirPath := "pkg/hub/handlers_broker_inbound_routed.go"
+	hbiaPath := "pkg/hub/handlers_broker_inbound_attachments.go"
+	bisPath := "pkg/hub/broker_inbound_sender.go"
 	notifPath := "pkg/hub/notifications.go"
 	serverPath := "pkg/hub/server.go"
 
 	// File-existence precheck (exit 2).
-	for _, f := range []string{hamPath, hcvPath, mbPath, hbiPath, notifPath, serverPath} {
+	for _, f := range []string{hamPath, hcvPath, mbPath, hbiPath, hbirPath, hbiaPath, bisPath, notifPath, serverPath} {
 		if _, err := os.Stat(f); err != nil {
 			fmt.Fprintf(os.Stderr, "ABORT: guarded file not found or not readable: %s\n", f)
 			fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is an environment/rename issue, not a guard failure.\n")
@@ -77,6 +80,9 @@ func main() {
 	hcv := mustParse(hcvPath)
 	mb := mustParse(mbPath)
 	hbi := mustParse(hbiPath)
+	hbir := mustParse(hbirPath)
+	hbia := mustParse(hbiaPath)
+	bis := mustParse(bisPath)
 	notif := mustParse(notifPath)
 	srv := mustParse(serverPath)
 
@@ -232,11 +238,49 @@ func main() {
 		"SenderID in handleBrokerInbound (B5 — canonical sender identity propagation)",
 		hbi, hbiPath, "handleBrokerInbound", "SenderID", 4)
 
-	// REQUIRED: NewAuthenticatedUser x1 in handleBrokerInbound
-	// Identity constructed from DB-resolved senderUser, not request payload.
+	// --- broker_inbound_sender.go: the shared broker sender resolver ---
+	// The user: sender resolution (store lookup, active status, eligibility)
+	// and the identity construction moved out of handleBrokerInbound into
+	// resolveBrokerInboundSender, which every broker inbound route shares.
+
+	// REQUIRED: emailResolvedPrincipalRefused x2 in resolveBrokerInboundSender
+	// The eligibility refusals that precede the identity build: once on the
+	// sender email before the store lookup, once on the resolved user. The
+	// count is 2 because the gate checks "at least N": with x1, dropping
+	// either refusal would pass unseen.
 	assertRequired(
-		"NewAuthenticatedUser in handleBrokerInbound (B5 — server-derived identity construction)",
-		hbi, hbiPath, "handleBrokerInbound", "NewAuthenticatedUser", 1)
+		"emailResolvedPrincipalRefused in resolveBrokerInboundSender (B5 — sender eligibility refusals before identity construction)",
+		bis, bisPath, "resolveBrokerInboundSender", "emailResolvedPrincipalRefused", 2)
+
+	// REQUIRED: NewAuthenticatedUser x1 in resolveBrokerInboundSender
+	// Identity constructed from the DB-resolved user, not request payload.
+	assertRequired(
+		"NewAuthenticatedUser in resolveBrokerInboundSender (B5 — server-derived identity construction)",
+		bis, bisPath, "resolveBrokerInboundSender", "NewAuthenticatedUser", 1)
+
+	// REQUIRED: the broker inbound routes must delegate sender resolution to
+	// resolveBrokerInboundSender. The checks above live in the resolver; these
+	// gates ensure each delegation call remains — removing one would silently
+	// bypass server-derived identity construction for that route.
+	assertRequired(
+		"resolveBrokerInboundSender in handleBrokerInbound (B5 — sender resolution delegation)",
+		hbi, hbiPath, "handleBrokerInbound", "resolveBrokerInboundSender", 1)
+	assertRequired(
+		"resolveBrokerInboundSender in handleBrokerInboundRouted (B5 — sender resolution delegation)",
+		hbir, hbirPath, "handleBrokerInboundRouted", "resolveBrokerInboundSender", 1)
+	assertRequired(
+		"resolveBrokerInboundSender in authorizeBrokerAttachmentRequest (B5 — sender resolution delegation)",
+		hbia, hbiaPath, "authorizeBrokerAttachmentRequest", "resolveBrokerInboundSender", 1)
+
+	// REQUIRED: both broker attachment routes must authorize through
+	// authorizeBrokerAttachmentRequest, which resolves the sender above —
+	// removing either call would silently bypass sender resolution for that route.
+	assertRequired(
+		"authorizeBrokerAttachmentRequest in handleBrokerAttachmentsCheck (B5 — attachment sender authorization delegation)",
+		hbia, hbiaPath, "handleBrokerAttachmentsCheck", "authorizeBrokerAttachmentRequest", 1)
+	assertRequired(
+		"authorizeBrokerAttachmentRequest in handleBrokerAttachmentsUpload (B5 — attachment sender authorization delegation)",
+		hbia, hbiaPath, "handleBrokerAttachmentsUpload", "authorizeBrokerAttachmentRequest", 1)
 
 	// REQUIRED: parseDMKeyIDs x1 in handleBrokerInbound
 	// Validates DM thread_id matches the resolved sender and agent.
@@ -510,7 +554,7 @@ func main() {
 		"processMentions":     "derivative of validated primary message (mention fan-out)",
 		"dispatchToAgent":     "server-internal lifecycle signal (notification dispatch)",
 		"dispatchToChannels":  "server-internal lifecycle signal (channel notification)",
-		"dispatchToBroker":    "server-internal lifecycle signal (broker notification)",
+		"publishToBroker":     "server-internal lifecycle signal (broker notification)",
 		"messageEventHandler": "scheduled payload validated at creation time",
 	}
 

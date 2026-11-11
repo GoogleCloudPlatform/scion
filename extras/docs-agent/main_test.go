@@ -57,6 +57,9 @@ func TestHandleHealthMethodNotAllowed(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", w.Code)
 	}
+	if got, want := w.Header().Get("Allow"), http.MethodGet; got != want {
+		t.Errorf("Allow = %q, want %q", got, want)
+	}
 }
 
 func TestHandleAskSuccess(t *testing.T) {
@@ -152,6 +155,9 @@ func TestHandleAskWrongMethod(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", w.Code)
 	}
+	if got, want := w.Header().Get("Allow"), http.MethodPost+", "+http.MethodOptions; got != want {
+		t.Errorf("Allow = %q, want %q", got, want)
+	}
 }
 
 func TestHandleAskCommandError(t *testing.T) {
@@ -201,6 +207,9 @@ func TestHandleRefreshWrongMethod(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", w.Code)
 	}
+	if got, want := w.Header().Get("Allow"), http.MethodPost+", "+http.MethodOptions; got != want {
+		t.Errorf("Allow = %q, want %q", got, want)
+	}
 }
 
 func TestHandleRefreshError(t *testing.T) {
@@ -241,6 +250,9 @@ func TestHandleChatWrongMethod(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", w.Code)
+	}
+	if got, want := w.Header().Get("Allow"), http.MethodGet; got != want {
+		t.Errorf("Allow = %q, want %q", got, want)
 	}
 }
 

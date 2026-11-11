@@ -5,16 +5,22 @@ description: Bidirectional communication between humans and agents.
 
 Scion provides a robust messaging system that allows for bidirectional communication between humans and running agents. This is particularly useful for long-running tasks where an agent might need clarification, approval, or simply wants to notify you of its progress.
 
-## The Inbox Tray
+## Unread Conversations
 
 :::note[Design Record]
 For an in-depth look at the architecture, semantic contract, and design invariants underlying the Scion messaging system, see the [Conversation Model Design](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model.md) and its companion [Defect Inventory](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model-findings.md) in the project repository.
 :::
 
-In the Web Dashboard, the **Inbox Tray** provides a centralized view of all messages sent by your agents.
-- **Unread Badges:** The top navigation bar displays a badge indicating the number of unread messages across all your agents.
-- **Mark as Read:** You can mark individual messages or all messages as read, helping you keep track of what needs your attention.
-- **Contextual Links:** Messages in the tray often link directly to the agent that sent them, allowing you to quickly jump in and provide the requested input or review the agent's work.
+In the Web Dashboard, messages from your agents and other users arrive as chat conversations (see [Native Web Chat](#native-web-chat) below). There is no separate inbox:
+- **Unread Badge:** The Chat entry in the header's mode selector shows how many of your conversations have unread messages. A conversation counts once, however many unread messages it has. Only unmuted DMs and unmuted threads that you are a member of and have permission to read are counted. The browser tab title shows the same number.
+- **Popups:** New chat messages raise chat popups and browser notifications (see [Push Notifications & Presence](#push-notifications--presence)).
+- **Agent events:** The bell's notification tray carries agent events (such as an agent stalling or asking for input), not chat messages. It also tells you when someone else reviews an artifact you own, with the start of the reviewer's note (see [Reviews](/scion/reference/artifacts/#reviews)), and when someone grants your user account access to an artifact with notifications enabled (`artifact_grant`, with status `ARTIFACT_REVIEW_REQUESTED` for a `review` grant or `ARTIFACT_SHARED` for a `read`, `write`, or `admin` grant; see [Grants](/scion/reference/artifacts/#grants)).
+
+The badge number comes from `GET /api/v1/chat/unread-count` (see the [API Reference](/scion/reference/api/)).
+
+:::caution[Changed behavior]
+The Hub no longer creates `MENTION` or `DM_RECEIVED` notification rows for chat, and the Messages envelope and inbox tray have been removed from the Web Dashboard. Unread chat is shown only by the unread badge.
+:::
 
 ## Native Web Chat
 
@@ -23,20 +29,70 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 ### Core Layout & Navigation
 
 - **Project-Scoped Spaces & Shared Threads**: Chat is organized into distinct spaces scoped to specific Projects. Within a project-scoped space, users and agents participate in shared discussion threads, creating focused hubs of collaboration.
+  - **Un-mentioned thread replies**: In a thread with no default agent, a reply with no mention and no target would reach nobody. When the latest message from someone else in that thread came from an agent, Scion appends a short note to the reply that mentions the most recent other human poster (or the thread creator) and names that agent, so that human receives a mention notification. Otherwise the reply is still delivered to no one.
 - **Project Context Preservation (Dashboard ↔ Chat Toggle)**: When you switch between dashboard and chat modes using the navigation icons in the header, Scion automatically maintains your active project context to avoid losing your work state:
   - **Dashboard → Chat**: Clicking the **Chat** icon while on a project-scoped dashboard page (e.g., `/projects/:id/...` or inside an agent view) takes you straight to that project's chat space (`/chat/space/:id`).
   - **Chat → Dashboard**: Clicking the **Dashboard** icon while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the toggle falls back to the top-level dashboard `/`.
 - **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
-  - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread. This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Use the promotion button located in the DM header.
-- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is highlighted with a "thread default" label in the AGENTS section of the sidebar. Members can be filtered (All/Unread toggle) and sorted (Alphabetical or Recent Activity).
+  - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread (requires `project.chat_post` on the project). This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Only the DM of an agent that still exists can be promoted (a deleted agent's DM gets `404`), and the agent becomes the new thread's default agent. Use the promotion button located in the DM header.
+- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM under collapsible **People** and **Agents** sections (each header shows its item count, and collapsed state is saved in the browser). This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is listed first in the AGENTS section of the sidebar, under a **Thread default** sub-heading. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be sorted (Alphabetical or Recent Activity). A blue dot marks members with unread messages; to find unread DMs, use the rail's **Unread** filter.
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
 - **Markdown & Rich Rendering**: Chat messages support fully-featured real-time **Markdown rendering** inside chat bubbles (including syntax-highlighted code fences, tables, and nested lists) for highly readable development chats.
+- **GitHub References**: `owner/repo#N` references in a message automatically link to the corresponding GitHub issue or pull request.
 - **Clickable File Paths**: File paths starting with `/workspace/...` or `/scion-volumes/...` render as interactive links. Clicking them immediately opens an on-demand file viewer dialog, fetching the current file content directly from the existing workspace and shared-directory APIs without leaving the chat context.
-- **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
+- **Clickable `gs://` Links**: A `gs://bucket/object` reference posted by an agent likewise opens the same on-demand viewer, fetching the object through the sending agent's own assigned GCP identity. See [gs:// links in chat](/scion/hosted/single-node/hub-server/#gs-links-in-chat) for what links, which identity is used, size limits, and error behavior.
+- **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers. Inputs use a 16px font so iOS does not zoom in on focus, and buttons and rail entries have 44px touch targets.
+- **Touch Menus & Bottom Action Sheets**: On touch screens, a long-press (about half a second) on a message, thread, space or member opens the same menu that right-click opens on desktop; iOS never sends a right-click for a long-press. At 768px wide or narrower, every chat menu opens as a bottom action sheet instead of a popup.
+- **Install as an App**: The web UI ships an app logo, PWA icons and a web app manifest, so it can be added to a phone's home screen with its own icon.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
+
+### Who Can See Chat Content
+
+- **Project spaces are visible to the whole project.** Every thread in a project space, and every message and attachment in it, can be read by everyone who has access to that project. There are no private threads, and access cannot be limited to individual threads.
+- **Conversations stay in their project.** A conversation keeps the project it was created in. Conversation lists and lookups return only conversations you can read, and replies, attachments, read markers and thread references stay inside their own conversation. Live DM events go only to the DM's participants, and live agent messages follow the same visibility rule as the agent's message history.
+- **Reading is not posting.** Reading a project's threads uses `project.read` (and allows deleting your own messages with `delete_own`, which also requires `inbox:write` when using a user access token); posting in a project thread, promoting a DM into one, creating or mutating threads or groups (`create_thread`, `create_group`, `rename`, `delete`, `set_default_agent`, `add_participant`), or editing your own message in a project thread (`edit_own`) requires `project.chat_post` on the project (`403` `chat_post_denied` when refused; setting a space's emoji requires `project.update`). Built-in project roles `project-owner`, `project-admin`, and `project-member` include `project.chat_post`, whereas `project-viewer` is read-only (`agent.list`, `agent.read`, `project.list`, `project.read`), and custom project roles are not backfilled on upgrade. Someone with read-only chat access (`reason` set to `read_only` when the account lacks `project.chat_post`, or `token_scope` when a user access token lacks `inbox:write`) sees the threads with a read-only notice in place of the message box and without thread/group creation or message-edit controls. See [Chat posting](/scion/hosted/ha/permissions/#chat-posting).
+- **Direct messages do not appear in the project space.** Messages you exchange with an agent also become part of that agent's history, which the agent's owner can see. If you promote an agent DM into a space thread, its messages move into the space, and everyone with access to the project can then read them.
+- **Pick the right place:**
+  - Use a DM to keep an exchange with one person or one agent out of the project space.
+  - Use a separate project when a group needs its own access boundary. Chat access follows project access, so only that project's members can read its space.
+
+:::caution[Keep credentials out of space threads]
+Do not post credentials, tokens, keys or other sensitive material in a space thread, even in a thread that looks quiet or narrowly named. Everyone with access to the project can read it. Do not send credentials in DMs either. To give an agent a credential, store it as a Hub secret instead (see [Secret & Environment Management](/scion/hosted/user/secrets/)) and refer to it by name in chat.
+:::
+
+:::note[Attachment and shared-directory permissions]
+Shared directories, and the attachment store that holds chat attachments when the `hub.attachment_artifacts` experiment is off, grant access by project, not per conversation or per member. Keep files that only some project members may see out of them.
+
+When `hub.attachment_artifacts` is off, `POST /api/v1/chat/attachments` stores uploaded files in the Hub's own attachment store, which is not mounted into agents. `project_id` is optional: an upload without it, for example from a DM, belongs to no project. When a message carrying such a file is sent to agents, the Hub copies the file into the project's `scratchpad` shared directory at `.attachments/_webchat/<id>/<name>`. On a shared workspace storage backend it makes that copy only for messages the whole project reads; on the `local` backend it makes it for every send, DMs included. `GET /api/v1/chat/attachments/{id}` serves the file to its uploader, to anyone who can read its project, and to anyone who can read a message it is attached to. A user access token can read a file that belongs to a project only if it has read access to that project. Anyone else gets `404`.
+
+With the `hub.attachment_artifacts` experiment on, a file uploaded in web chat or sent with `scion message --attach` is stored as an attachment of the message it is sent in, and is exactly as readable as that message at the moment it is read:
+
+- **Direct message:** its two participants.
+- **Thread in a project space:** everyone who can read the project.
+- **Group conversation without a project:** its current participants. Someone who joins can read the attachments of earlier messages, and someone who leaves stops being able to read them.
+- **Anyone the message is addressed to.**
+
+When the message goes to an agent, the file is delivered into that agent's own home (see [Attachments for agents](#attachments-for-agents)). For a message in a project thread, whose readers are the whole project, a copy is also placed in the project's `scratchpad` shared directory at `.attachments/_webchat/<id>/<name>`, so the project's other agents can find it (if looking up the topic fails, the Hub fails closed and skips the shared-directory copy rather than copying into the project scratchpad). Every agent and member with access to that directory can read the copy. Direct messages and group conversations are delivered only into the recipients' homes, with no shared copy. Copies are removed after `messaging.attachment_inbox_retention_days` (7 days by default). The experiment is on by default wherever the artifact service is ready, including Hubs with local storage (no object store needed), and on Hubs whose resource storage is an object store.
+
+Until it is sent, only the uploader can read it, and an upload that is not sent within 24 hours is removed. Deleting a message makes its attachments unreadable at once, and their stored bytes are removed after the artifact garbage-collection grace period. Any user who cannot read it gets the same "not found" answer as for an attachment that does not exist. A user access token uploads, sends and reads them for its holder under its own rule: it needs `inbox:read` to read and `inbox:write` to upload and send. It reads an attachment only when its holder may read the message, and the token's boundary must reach the project recorded for the attachment: a project boundary for that project, or a hub boundary. An attachment with no project, and the holder's own upload before it is sent, need a hub boundary. In a direct message with an agent, the token also needs `agent:read` on every agent in the conversation. An attachment recorded before projects were recorded is not readable with a token. Attachments are read only through their message: they have no share links, grants or versions, and they are not listed among artifacts.
+
+Each file can be up to the artifact file size limit (`artifacts.max_file_bytes`, 32 MiB by default), with up to 10 files per message. The experiment uses the artifact service, with its settings section enabled; `hub.artifacts` can stay off. Attachments stored while the experiment is on stay readable after it is turned off.
+:::
+
+### Attachments for agents
+
+With the `hub.attachment_artifacts` experiment on, agents send and receive attachments as files:
+
+- **Sending:** `scion message --attach <file>` first asks the Hub where uploads go. When the Hub stores attachments as artifacts (which for an agent caller also requires `project:artifact:read` on its token), the CLI checks the files, uploads them and names them in the send. Each file must be a readable regular file, no two files may have the same name, and HTML and SVG files are refused: publish one with `scion artifact publish` and send it with `--artifact`. With an agent recipient, the files must fit the delivery limit below. Any path works; the files do not need to be in a shared directory. A group send uploads the files once per recipient. If any file fails to upload, nothing is sent. When the experiment is off, or when the calling agent's token lacks `project:artifact:read` (for example when its delegation-chain ceiling withheld it, in which case `GET /api/v1/chat/attachments` answers `"legacy"` and `POST /api/v1/chat/attachments` answers `404 attachment_artifacts_unavailable`), `--attach` stages files in the shared directory as before.
+- **Receiving:** an agent that may read the message gets each file at `~/.scion/inbox/<message-id>/<name>` before the message text arrives, and the message lists those paths. For a project thread the message also lists the file's copy in the project scratchpad, after the inbox path, tagged with its shared directory (`attachment_mounts` in the envelope) and described as also visible to sibling agents; use the inbox path. `<name>` is the file name with every character other than letters, digits, `.`, `_` and `-` replaced by `_`. A file that could not be delivered gets one line after the message text: `Attachment not delivered: <path> (<size>): <reason>. Ask the sender to resend it.`
+- **Which agents get a file:** the agents that may read the message: a participant of its conversation, an agent of the project for a project thread, and an agent the message is addressed to, including an agent @mentioned in it. An agent in another project that is the recipient gets the file; other agents of that project do not.
+- **A snapshot:** a delivered file stays in the agent's home after the message is deleted, until the agent's inbox is pruned (directories older than `messaging.attachment_inbox_retention_days`, 7 days by default) or the agent is deleted.
+- **Kubernetes default pods:** the agent's home lives in the pod, so delivered files are lost when the pod is recreated. Homes on NFS, and runtimes that keep the home on the host, keep them.
+- **Settings:** a Hub administrator sets these in the Hub messaging settings (`GET` and `PUT /api/v1/admin/messaging`; `null` resets a field to its default). `attachment_delivery_max_bytes` (32 MiB by default) is the most the attachments of one message to an agent may total; a larger send is refused when it is sent, and with the setting at 0 attachments stored as artifacts cannot be sent to agents. `attachment_inbox_retention_days` (7 by default) is how long delivered files stay in an agent's inbox. `failed_message_retention_days` (7 by default, minimum 1) is how many days the Hub keeps agent messages whose delivery state is `failed` before the retention sweep purges them and their message-bound attachments, regardless of whether chat retention (`hub.chat_retention`) is enabled.
+- **Deferred messages:** a message saved for an agent that is reincarnating is delivered without its files; `scion conversation catch-up` lists them as not delivered.
 
 ---
 
@@ -45,22 +101,30 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 The native web chat includes a complete suite of collaboration and developer productivity tools (Phases 0–5):
 
 #### 1. Message Context Menu
-Right-clicking a message (on desktop) or long-pressing (on mobile) opens a contextual **context menu** providing several per-message actions:
-- **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions.
-- **Edit / Delete**: Edit or delete your own messages.
-- **Copy Permalink**: Generate a direct link to any message in the thread.
+Clicking the **More actions** (`⋯`) button in a message's header, right-clicking a message (on desktop), or tapping it (on touch devices without hover) opens a **context menu** providing several per-message actions. On touch devices, taps on links, buttons, mentions, and reply previews keep their normal behavior:
+- **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions. Choosing **Reply** moves focus to the composer so you can start typing immediately.
+- **Edit / Delete**: Edit or delete your own messages (in a project thread, **Edit message** requires `edit_own` via `project.chat_post` and `inbox:write`, while **Delete message** requires `delete_own` via `project.read` and `inbox:write`).
+- **Copy link to msg** (`copy-link`): Copy a direct permalink to the message in the thread.
+- **Copy link address** (`copy-link-address`): Shown when you open the message context menu on a link inside the message whose resolved URL uses `http:`, `https:`, or `mailto:` (or, on a touch screen, within 1 second of pressing such a link in that message; bare `#` file-path links and other schemes are excluded, and opening the menu from the keyboard does not use a remembered touch press). Copies the link's resolved `href` to the clipboard.
+- **Star message / Unstar message**: With the `web.chat_starred_messages` [experiment](/scion/reference/experiments/) on, bookmark a message in a project space thread or a direct message for your personal reference (see [Starred messages](#starred-messages)).
+- **Jump to message in conversation**: In the starred-only view, open the message in its full conversation (see [Starred messages](#starred-messages)).
+- **Open terminal / Open in graph**: On a message from an agent, open that agent's terminal or jump to it in the lineage graph. These act on the message's author, not the thread's default agent. **Open terminal** appears only when you can attach to that agent.
 
 #### 2. Advanced Organization
 - **Thread Pinning**: Pin critical threads to the top of the thread rail for easy access.
+- **Mark Unread**: Right-click a thread in the thread rail, or a member in the members sidebar (for an existing DM with messages), and choose **Mark unread** to restore its unread marker. The change syncs to your other open tabs.
 - **Conversation Muting**: Mute busy threads or spaces to suppress notifications while keeping the discussion active.
-- **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership and ordering are persisted server-side via user preferences.
+- **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership, ordering and each group's collapsed or expanded state are persisted server-side via your user preferences.
+- **Rail Sort**: The thread rail's **Sort** menu offers **Recent activity**, **Alphabetical**, and **Custom**. **Recent activity** and **Alphabetical** order both the spaces and the threads within each space, and choosing either discards any custom thread order. **Custom** applies to space order. Dragging a space switches the rail to **Custom**, and dragging a thread saves a custom thread order for that space only.
+- **Unread & Starred Rail Filters**: Switch the rail to **Unread** to show only spaces with unread messages or mentions, and, inside those spaces, only unread threads (muted threads never count as unread; the conversation you have open stays visible, together with its space, even after you have read it). With `web.chat_starred_messages` on, the rail also offers **Starred** to list only conversations where you have starred messages and open them in the [starred-only view](#starred-messages).
 - **Space Emoji Icons**: Assign optional emoji icons to spaces, stored in project annotations, for quick visual identification in the thread rail.
 - **Layout Density**: Choose between **Dense** and **Comfortable** layout modes via the density toggle. Dense mode reduces whitespace for maximum information density; Comfortable mode provides more breathing room for extended reading.
 
 #### 3. High-Density Developer Utilities
-- **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
+- **Quick Command Palette**: On the chat page, press Cmd/Ctrl-K to open a grouped, fuzzy-matched palette for jumping to any thread or DM, or opening a recent file, without leaving your keyboard. Results are grouped into **Agents**, **Threads**, **People** and **Documents**; threads also match their space's name, and **Documents** lists the files (attachments and detected file paths) that have most recently appeared in your chats. With an empty query, **People** lists up to 100 of the most recently active people on the hub; type two or more characters to search all hub users by name or email. Each agent row also shows the agent's project slug, so same-named agents in different projects can be told apart, and you can search by project slug or name. A space in your query also matches a hyphen or underscore, so `code review` finds `code-review` and `code_review`. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a document opens it in a preview dialog over the current conversation, which is left as it was (files that cannot be shown offer a **Download** button instead). Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. A button in the chat header also opens the same palette by tap or click, which is especially useful on touch screens, where the keyboard shortcut isn't available.
 - **Jump-to-Message from Search**: Clicking a search result automatically scrolls to the target message, even when it falls outside the currently loaded message buffer. The target message receives a highlight-flash animation, and a "Jump to latest" button appears to return to the live message stream.
-- **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition.
+- **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition. A thread with unread messages opens scrolled to the **New messages** divider rather than to the bottom.
+- **Day Separators**: Messages, including inter-agent messages, are split by day with the same date separator used throughout the thread.
 - **Rich Agent Output Rendering**: Dispatched agents can render complex interactive payloads directly inside the chat, including structural diffs, test suite results, and interactive JSON/YAML tree-structures.
 - **Collapsed Agent-to-Agent Messages**: To keep threads readable, background agent-to-agent messages (visible under the **Full** density filter) are collapsed into a compact, click-to-expand pill. When expanded, these messages are displayed with 2-line truncation. If a message is truncated, an expand icon ('arrows-angle-expand') appears next to it, allowing you to open a full-screen Markdown-rendered dialog overlay.
 - **Conversation Export**: Export any collaborative thread via the export dropdown in the chat header:
@@ -68,7 +132,18 @@ Right-clicking a message (on desktop) or long-pressing (on mobile) opens a conte
   - **Print / Save as PDF** for offline review.
   - **Copy to Clipboard** (HTML + plain text) for quick pasting into other tools.
   All exported content is HTML-escaped for safe rendering.
-- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands (e.g. `/start`, `/help`) and easily forward snippets or whole discussions directly to your agents as contextual guidance.
+- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands and easily forward snippets or whole discussions directly to your agents as contextual guidance. The built-in commands are `/status` (list the project's agents and their state), `/spawn <template> [name]` (create an agent), `/stop <agent>` (stop a running agent; it is not deleted), `/default <agent|clear>`, `/clear` and `/help`. In a DM with an agent, `/status`, `/spawn` and `/stop` act on that agent's project.
+
+#### Starred Messages
+With the `web.chat_starred_messages` [experiment](/scion/reference/experiments/) on (on by default; an admin can turn it off), you can star messages in project space threads and in direct messages, with agents or with other users, to find them again later:
+- **Starring and unstarring**: Open a message's menu and choose **Star message** or **Unstar message**. The menu opens by right-click or tap, from the message's **More actions** button, or from the keyboard (see below). A star appears beside the message, and the change shows in your other tabs and devices.
+- **Stars in this conversation**: The star button in the conversation header (**Starred messages in this conversation**) lists your starred messages in the open conversation, most recently starred first, with **Load more** when there are more. Each entry shows when you starred it, the sender and the current text of the message. Choose an entry to open the conversation at that message. On a narrow screen the list opens as a sheet from the bottom of the screen; **Close** or Escape closes it.
+- **Starred filter in the rail**: Next to **All** and **Unread**, the rail's filter offers **Starred**. It lists only the conversations in which you have starred messages, grouped into direct messages and project spaces, in the rail's **Recent activity** or **Alphabetical** order (**Custom** shows **Recent activity**).
+- **Starred-only view (`?messages=starred`)**: Choosing a conversation under **Starred**, or opening a conversation URL with `?messages=starred`, shows only your starred messages of that conversation, oldest first like the full conversation, with a **Starred messages only** banner in place of the composer. Choose **Show all messages** to return to the full conversation. In this view nothing is marked as read and new messages are not added; changes to your stars, edits and deletions update the list.
+- **Jump to message in conversation**: In the starred-only view, this menu action switches the rail back to **All** and opens the full conversation at the message, highlighted. Browser Back returns to the starred-only view where you left it. **Reply** and **Edit** also open the full conversation first.
+- **Keyboard**: The message list is a single Tab stop on one message's **More actions** button. Up, Down, Home and End move it between messages, and Enter, Space, Shift+F10 or the context-menu key open that message's menu. Escape closes a menu or the header list and returns focus to where you were.
+- **Privacy, access, and lifecycle**: Stars are private to your account. Other participants cannot see what you starred, and nothing about your stars is shown to them. Every list checks your current access: if you lose access to a conversation, its stars are hidden, and they come back if your access is restored. Starred messages always show their current text. Promoting an agent DM to a project thread carries its messages' stars into the thread. A deleted message is removed from every starred list in the same transaction, and so are the stars of a deleted conversation, project or account, with background upkeep purging any orphaned stars.
+- **When the experiment is off**: The star controls, the **Starred** filter and the [`/api/v1/chat/stars`](/scion/reference/api/#chat-starred-messages-apiv1chatstars) routes are hidden, and your stars are kept for when it is turned back on. For enabling, disabling and downgrading, see the [rollout notes](/scion/hosted/single-node/hub-server/#starred-messages-rollout).
 
 ---
 
@@ -76,7 +151,8 @@ Right-clicking a message (on desktop) or long-pressing (on mobile) opens a conte
 
 - **Real-Time Browser Notifications**: Stay informed of `@mentions` and incoming DMs with native browser push notifications.
 - **Smart Suppression**: Notifications are mute-aware and automatically suppressed for active conversations (threads you are currently looking at) to prevent alert fatigue.
-- **Unread Badges**: The tab title dynamically updates with an unread badge count when you are away from the tab.
+- **Chat Chime**: A short two-tone chime plays when a chat message arrives from someone else. Your own messages never chime. The chime plays at most once every 2 seconds and does not depend on browser notification permission. Turn it off globally with **Chat chime sound** in your profile's notification settings. To turn it off for one project, choose **Chime on/off** from the thread rail's options menu. Both preferences are stored in the browser. If the browser's autoplay policy blocks audio, no sound plays.
+- **Unread Badges**: The tab title shows the same unread conversation count as the Chat mode badge.
 - **Per-Thread Draft Persistence**: Drafts are saved locally per-thread, so if you switch threads or close the tab, your unsent message remains waiting when you return.
 
 ---
@@ -84,7 +160,9 @@ Right-clicking a message (on desktop) or long-pressing (on mobile) opens a conte
 ### Advanced Attachment Management
 
 The web composer features a security-hardened, developer-friendly file upload system:
+- **Attachment-Only Messages**: You can send a message with one or more file attachments and no text body; the message is stored with an empty body, and reply previews and notifications show `Attachment`.
 - **Executable Deny-List Strategy**: To maximize flexibility for developers, attachment uploads use a security-first deny-list rather than a restrictive mime-type allow-list. It blocks executable binaries/scripts but permits **34+ developer file types** (including configuration files, source code, and data structures).
+- **Artifact References**: With the `hub.artifacts` experiment on, the paperclip also offers **Attach artifact…**, which picks published artifacts to reference in the message. Artifact chips and `scion://artifact/` links in messages open a preview in place; see [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
 - **Paste-to-Upload**: Paste images or file content directly from your clipboard into the composer for instant attachment.
 - **Markdown Attachment Rendering**: Markdown files uploaded as attachments render directly within the chat bubble, featuring a source/preview toggle and a one-click clipboard copy.
 - **Partial Success Reporting**: When uploading multiple files simultaneously, the system supports partial success—successful uploads are staged instantly while failed individual files report explicit inline errors.
@@ -94,9 +172,12 @@ The web composer features a security-hardened, developer-friendly file upload sy
 ### Performance & Safety Safeguards
 
 - **Token-Bucket Rate Limiting**: Per-sender token-bucket rate limits prevent message flooding, ensuring platform stability and protecting backend model endpoints.
+- **Touch-Friendly Composer**: On touch devices without hover, `Enter` inserts a newline instead of sending, because there is no `Shift+Enter`. Use the **Send** button to send.
 - **16K Input Character Limit**: A robust 16,000-character limit is enforced in the composer, protecting token context limits.
 - **SSE Direct Append & Real-Time Attachments**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering. Additionally, attachment previews render immediately on incoming SSE messages, ensuring the user interface instantly displays attachment references without waiting for subsequent user-triggered renders.
 - **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
+- **Honest Delivery Status**: A message to an agent that is not running is marked **Agent unreachable** instead of **Accepted**. **Accepted** means the agent's runtime took the message and buffered it, not that the agent has read it; **Seen** appears once the agent has read it. A thread message that mentions no agent is saved to the thread but marked **Not delivered to any agent**; mention an agent to deliver the message to it. If the Runtime Broker fails to deliver a message to the agent's terminal, it makes up to 3 attempts in total, but never retries once part of the text has already reached the terminal (so the agent does not see it twice), and a user sender sees the failure live in the chat. Messages to an agent that has been deleted fail right away instead of waiting in the queue. Failed messages are purged after 7 days by default (a Hub admin can change this: messaging `failed_message_retention_days`).
+- **Wake and Send**: If you send to a suspended agent and you are allowed to start it (the `agent.lifecycle` permission), the chat asks whether to wake it instead of marking the message **Agent unreachable**. Choose **Wake and send**: the Hub resumes the agent, waits up to 30 seconds for it to be ready, and delivers your message as its first input. The bubble shows **Waking agent…** in the meantime. A retry after a dropped connection does not send the message twice. Without the permission, or when the agent is stopped, in error or deleted, you see the ordinary **Agent unreachable** status.
 - **Cursor-Based Scrollback Pagination**: Solved previous scroll-jump issues and cursor-mismatches. Scrollback pagination and scroll-to-bottom locks operate smoothly as history loads.
 
 ### Interactive @-Mentions & Autocomplete
@@ -105,6 +186,7 @@ When writing instructions, you can easily pull other agents into the thread:
 - **Autocomplete Popup**: Typing `@` in the chat input opens a dropdown list of active agents in the project. The list supports fuzzy-matching as you type, and full keyboard navigation (arrow keys to select, `Enter` to insert).
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
 - **Mention Leak Protection**: Direct mentions are safely partitioned, resolving a previous bug where mentions would leak into the default agent tab.
+- **Recipient-Form Mentions**: A mention written in recipient syntax, such as `@agent:hub-ops`, is rewritten to `@hub-ops` in the message body before the Hub stores it, so the mention reaches the named agent. The Hub does this for web, chat and CLI sends alike (`scion message` applies the same rewrite before sending). Code spans, fenced code blocks and quoted (`>`) lines are left as written, and an address such as `ops@agent:foo` is not a mention.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
 - **Bidirectional Mention Translation**: Mentions are automatically translated between the formats used by agents and the web chat. In the chat UI, mentions display as `@firstname-lastname`; when delivered to agents, they are translated to `@email` format, and vice versa. This ensures both humans and agents see the most natural identifier for their context.
 - **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
@@ -148,9 +230,48 @@ scion message agent:tech-lead "Please review the auth module."
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
 
+# Point at a published artifact (see Artifacts); the recipient is told how to fetch it
+scion message @tech-lead "Design ready for review." --artifact scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
+
 # Read message body from a file (useful for long messages or scripted workflows)
 scion message @tech-lead --body-file ./review-notes.md
+
+# Read the message body from stdin (`-`, or equivalently `--body-file -`)
+git log --oneline -5 | scion message @tech-lead -
+scion message @tech-lead --body-file - < ./review-notes.md
 ```
+
+For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read. When `--attach` cannot upload files to the Hub as artifacts (for example while the `hub.attachment_artifacts` experiment is off) and falls back to staging them on the local `scratchpad` shared directory, `scion message` prints a `Warning: attachments are staged on the local scratchpad instead of uploaded to the hub (<reason>); they may not reach the hub or recipients on another broker` line on stderr.
+
+A successful send to an agent prints `Message accepted for agent '<name>' (conversation <id>, message <id>).` A group send prints `(conversation <id>, message <id>)` on each accepted recipient's line, and `--format json` includes `conversation_id` and `message_id` on single sends and per-recipient `results` entries. The conversation ID is the conversation the message was recorded in and the one to reply into (`conv:<id>`). "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up. A send to a soft-deleted agent returns the same `404` as an unknown target.
+
+**Messages to an agent that is still starting.** Until its harness accepts input, an agent's activity is `initializing` (shown as "starting"). Messages sent in that window, from the CLI, web chat or a DM, are accepted and held by the agent's runtime. They are pasted once the harness reports it is ready, or after at most 90 seconds, so early messages are not lost. An `--interrupt` sent in that window is delivered as an ordinary message. To wait for readiness before you send, start the agent with [`scion start --wait-ready`](/scion/reference/cli/#scion-start-or-run).
+
+See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
+
+### Multiple-Choice Decisions (Experimental)
+
+When the `web.chat_choices` [experiment](/scion/reference/experiments/) is enabled (off by default; refused with `400 experiment_disabled` on sends and `404` on decision routes while off), an agent can send a `choice-prompt` message to a user (`user:<email>` or `@email`) or a conversation (`conv:<uuid>` or `#<thread>`) using `--choices <json>` or `--choices-file <path|->` (with optional `--update` to replace an earlier version of a decision key):
+
+```bash
+scion message @alice@example.com "Pick a target:" --choices '[{
+  "id": "D1",
+  "question": "Which environment should we deploy to?",
+  "default": "staging",
+  "choices": [
+    {"id": "staging", "label": "Staging", "description": "Verify on staging first"},
+    {"id": "prod", "label": "Production", "description": "Deploy directly to production"}
+  ]
+}]'
+```
+
+- **Agent-only sender**: Only an agent running in agent mode (`SCION_AGENT_NAME` set) can send `--choices`; human CLI callers and sends targeting an agent (`@agent-slug`), broadcast (`all`), or a group (`group[...]`) are refused (`400` `validation_error`), and client sends that set `type: "choice-prompt"` or `"choice-response"` directly are refused with `400 hub_minted_type`.
+- **Limits and keys**: A prompt carries **1 to 10 decisions** (serialized JSON up to 32,768 bytes), each with a markdown `question` (up to 2,000 runes), optional `default` (matching a choice by `id` or `label`), and **2 to 10 choices** (each choice is a string label or `{"id", "label", "description"}` with `label` up to 100 runes and `description` up to 300 runes). A decision `id` (`key` in stored views) is either chosen by the agent (`[A-Za-z0-9_-]{1,32}` containing at least one non-digit, such as `D234`) or omitted so the Hub assigns the agent's next positive integer (`1`, `2`, …; an unissued all-digit key is refused with `400 decision_key_not_issued`). Each agent may have at most 50 pending decisions (`409 too_many_pending_decisions`).
+- **Updating an earlier decision (`--update`)**: Re-using a decision key the agent already posted requires `--update` (`choices_update: true` in the message request); without it the Hub refuses the send with `409 choice_key_exists` (`details.existing` listing each existing key's `key`, `version`, `status`, and `answer`). With `--update`, the previous active version is marked `replaced` and the new row is created at `version: n + 1`.
+- **Markdown fallback and `ask_user` status**: The Hub appends a markdown rendering of the decisions to `msg` so notifications, bridged channels, and clients with `web.chat_choices` off still display the questions and options, and serves the intro and decision rows separately (`intro`, `decisions`, and `answerMode`) in chat history (`messageDecisions`, `messageChoiceIntros`, `messageChoiceResponses`) and SSE (`choice.updated`). After the send succeeds, `scion message` places the agent in `waiting_for_input`.
+- **Answering in Web Chat and via the API**:
+  - **Single-decision prompts (`answerMode: "single"`)**: Clicking a choice button calls `POST /api/v1/decisions/{rowId}/answer` with `{"choice_id": "<id>", "idempotency_key"?: "<key>"}` (interactive web session required; `409 already_answered` if already answered directly, `409 replaced` if replaced by `--update`, or `403 not_recorded_answerer` over an interpreted answer of another user), records the answer (the response carries `decision`, `responseMessageId`, and `replayed`), and dispatches a `choice-response` message (carrying `choice_key`, `choice_version`, `choice_id`, and `choice_provenance` metadata) to the asking agent.
+  - **Multi-decision prompts (`answerMode: "set"`, 2 to 10 decisions)**: Clicking choices stages a local selection for each decision (`N of M selected`). Once every actionable decision in the prompt has a selected choice, clicking **Submit answers** calls `POST /api/v1/choice-prompts/{messageId}/answers` with `{"answers": [{"decision_row_id": "<uuid>", "choice_id": "<id>"}, ...], "idempotency_key"?: "<key>"}`, records all answers in one transaction (the response carries `response_message_id`, `batch_id`, `decisions`, and `replayed`), and dispatches one combined `choice-response` (carrying `promptMessageId`, `batchId`, and `answers`) to the agent. Calling `POST /api/v1/decisions/{rowId}/answer` on a multi-decision prompt is refused with `409 batch_required`, and if the actionable set changed (for example a decision was replaced by `--update` or already answered), the set submit is refused with `409 answer_set_changed` (`details.decisions` and `details.reasons`; `422 idempotency_mismatch` if an `idempotency_key` is reused with different answers).
 
 ### Message Formatting
 
@@ -158,7 +279,17 @@ The `scion message` CLI delivers the body argument **verbatim** — it performs 
 
 To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n (`\n`) sequences — those will appear as literal characters in the delivered message.
 
-**Correct** — real newlines in a quoted string:
+:::caution[Backticks and `$(...)` are expanded by your shell]
+Inside a double-quoted argument, the shell runs anything in backticks or `$(...)` **before** `scion` starts, and substitutes the output into the message (often an empty string, plus whatever side effects the command had). Use double quotes only for plain text. For bodies that contain code, backticks, or `$`, use `--body-file`, or stdin with a quoted heredoc:
+
+```bash
+scion message --non-interactive @reviewer - <<'EOF'
+Please run `make test` and paste the output of $(go env GOPATH).
+EOF
+```
+:::
+
+**Correct** — real newlines in a quoted string (plain text only, no backticks or `$`):
 ```bash
 scion message --non-interactive @reviewer "PR #42 is ready for review.
 
@@ -186,14 +317,14 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 ### Related Commands
 
 - **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. The `--broadcast` and `--all` flags on `scion message` have been removed; use this command instead.
-- **`scion keys`**: Send raw keystrokes to an agent's tmux terminal (e.g., `scion keys editor "ENTER"`). Useful for unblocking interactive prompts. This replaces the old `--raw` flag on `scion message`.
+- **`scion keys`**: Send literal terminal input to an agent's tmux session (e.g., `scion keys editor "Enter"`, as a separate call from `scion keys editor "Escape"`), with no envelope and no automatic Enter. Useful for unblocking interactive prompts. Works for container-backed agents; not supported for managed-runtime agents (see [Managed Agents](/scion/hosted/single-node/managed-agents/#limitations)). When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused, by the CLI and the Hub alike; a human operator using `--project` can target other projects, with the same authority as `scion attach` on the target. It is authorized like terminal attach rather than messaging — message mode does not gate it — and requires, for an agent caller, a live attach relationship on the target in addition to shared project membership (see [CLI Reference](/scion/reference/cli/#scion-keys)). There is no key-sequence syntax: issue one `scion keys` call per key press. This replaces the removed `--raw` flag on `scion message`, which now fails with guidance naming `scion keys`.
 
 ### Conversation Management
 
-The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI. Requires Hub mode.
+The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI.
 
 Conversations are referenced using one of three forms:
-- `conv:<uuid>` — by conversation ID.
+- `conv:<uuid>` — by conversation ID. `scion conversation list` prints full conversation IDs, so a listed ID can be used as `conv:<id>`.
 - `@<agent-name>` — resolves the direct conversation with the named agent.
 - `#<thread-name>` — resolves a named group conversation.
 
@@ -224,6 +355,10 @@ scion conversation join "#sprint-planning" user user-id
 scion conversation leave "#sprint-planning"
 ```
 
+A direct conversation registers both participants, so DMs you send or receive appear in `scion conversation list`.
+
+An agent post into a group conversation or thread (by `conv:<id>` or thread ID) that @mentions no agent is delivered to the conversation's default agent, as a human post is (if the sender may message it, and never to the sender itself). When the post reaches no agent, the response sets `no_agent_woken` and `scion message` prints a one-line notice.
+
 For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
 
 ## Discord
@@ -246,11 +381,28 @@ channels, see [External Channels](/scion/hosted/user/external-channels/).
 
 When an agent uses the `ask_user` tool (or similar mechanism depending on the harness), Scion automatically performs two actions:
 1. **State Update:** The agent's state changes to `WAITING_FOR_INPUT`.
-2. **Explicit Message:** A persistent message is generated and delivered to your Inbox Tray (and Discord, if configured), clearly stating what the agent needs.
+2. **Explicit Message:** A persistent message from the agent, clearly stating what it needs, reaches you in Chat (and Discord, if configured), and the agent event appears in the notification tray.
 
 ## Real-Time Delivery
 
 Messages are delivered in real-time to the Web Dashboard via Server-Sent Events (SSE). The **Messages Tab** on the individual agent detail page provides a real-time stream of all communication with that specific agent.
+
+When an agent finishes a turn, its Stop hook mirrors the agent's reply to the user who created it, so it reaches you as a message from that agent. Only agents created directly by a user are mirrored; sub-agents (agents created by other agents) are not. Each user notification is stored exactly once.
+
+Messages record the sender's and recipient's projects. Human callers see these as `senderProjectId` and `recipientProjectId` on conversation messages; agent callers see them only on direct messages where both parties are named in the conversation.
+
+Messages sent by an agent with a [delegated credential](/scion/reference/agent-delegation/) keep the agent as `sender` (`agent:<slug>`) and record `authorizingUserId` and `delegationGrantId`. The CLI (`scion conversation messages`, `scion conversation catch-up`, and `scion messages`) and the Web Dashboard's agent message viewer show `authorized by <user> via delegation <grant>` (with the user's display name, email, or ID); web chat shows `authorized by <user>` with `via delegation <grant>` in the tooltip; and `scion conversation get-message` prints `AUTHORIZED BY`, `AUTHORIZING USER ID`, and `DELEGATION GRANT ID` rows.
+
+### Delivery failures
+
+Messages are not silently dropped in these cases:
+
+- **Non-running recipients.** A message is rejected if the recipient agent is not running (suspended, stopped, in error, or still starting). For direct messages, human or agent, the send fails immediately with a `409` error. Pass `--wake` to resume a suspended agent and then deliver. Waking requires the same lifecycle permission as starting the agent (`agent.lifecycle`), for user and agent senders alike; without it the send fails with `403` and the agent is not resumed. Broadcast, group, and message-broker deliveries are rejected per recipient. A sending agent gets a `DELIVERY_FAILED` system notice ("Message delivery to `<agent>` failed: …") for each rejected recipient.
+- **Reincarnating recipients.** While an agent is being migrated with [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate), messages to it are saved to its conversation history instead of being dispatched or dropped. DMs, group messages and @mentions return `202` with status `deferred`, and a sending agent gets a `DELIVERY_DEFERRED` system notice rather than a failure. The new generation is told to read what it missed with `scion conversation catch-up`. Scheduled messages that fire during a reincarnation fail loudly instead of being deferred.
+- **Late broker failures.** A Runtime Broker may accept a message into its short delivery buffer and then fail to deliver it, for example because the container has gone away. The broker reports this to the Hub. The Hub marks the message `failed` rather than leaving it `dispatched`, and notifies the sending agent.
+- **Group messages to non-running members.** Group messages do not wake agents. A member that is not running is not dispatched to; its copy of the message is stored as `failed` with a reason (suspended members get a group-specific one), and the sender gets a per-member failure result.
+- **Runtime Broker timeouts and cancelled requests.** An agent-to-agent direct message is dispatched on a context that the sending request's cancellation does not reach, capped at 30 seconds, so a sender that disconnects after the message is stored does not leave it `pending`. If the Runtime Broker refuses the delivery, the failure is still recorded: the message is marked `failed` and the sending agent gets its `DELIVERY_FAILED` notice. A dispatch that reaches the 30-second limit is reported as ambiguous: the message stays `pending` and is marked `failed` once it is 24 hours old. Failure reasons from the Runtime Broker are sanitized before they are stored or shown in a notice.
+- **Agent messages to humans.** If the Hub's delivery queue for a project is saturated, the agent's send fails with `503` (`unavailable`); retry later. A retry may duplicate the message on an external chat channel such as Discord.
 
 ## Message Authorization & Modes
 
@@ -268,9 +420,17 @@ The available modes are:
 
 - **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent (i.e., the agent's creator or their ancestors). This aligns messaging authorization with the terminal attach permission gate.
 - **Hub Mode**: Behaves like Project mode within the agent's own project, and additionally allows the agent to send direct messages across project boundaries when [cross-project messaging](#cross-project-messaging) is enabled. A project-mode agent can *receive* a cross-project DM but cannot *reply* across the boundary until granted Hub mode.
-- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it.
+- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it. Agent-to-agent messages need both agents in branch mode and one to be the other's direct parent; siblings, grandparents, and pairs that mix branch with another mode are denied.
 - **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
 - **None Mode**: Seals the agent from all messaging except system-plane notices. No users and no agents can message a none-mode agent through normal paths.
+
+A new agent's mode is set once, at creation: the `--message-mode` flag of `scion create` or `scion start` if given, else the template's `message_mode`, else the parent agent's mode when an agent creates it, else `project`. A default that resolves to `hub` still needs a hub-mode grant.
+
+To see modes:
+
+- `scion whoami --full` shows the calling agent's own mode (`messageMode` in `--format json`).
+- `scion conversation get` and `scion conversation participants` show a **MSG MODE** column for agent participants in the conversation's project; for a conversation without a project (a DM or legacy group), in the calling agent's project (`messageMode` in JSON). It shows `-` for users, for agents outside that project, and for every agent when a user reads a conversation without a project.
+- When a send is denied, the CLI error names the reason and both modes, for example `message_denied: Message delivery denied [reason: ..., sender mode: branch, recipient mode: project] (status: 403)`.
 
 ### Piercing
 Highly privileged users can bypass an agent's message mode restrictions. This is called **piercing**.
@@ -301,7 +461,7 @@ Each project controls which cross-project messages it accepts via its `crossProj
 | Policy | Meaning |
 | :--- | :--- |
 | `none` | Accept no agent messages from other projects (default). |
-| `members` | Accept an external agent only when its originating human is an active member of the receiving project. |
+| `members` | Accept an external agent only when its originating human holds active membership in the receiving project beyond `project-viewer` (viewer-only membership is denied with `cross_project_origin_not_member`). |
 | `any` | Accept an eligible agent from any project on the Hub. |
 
 ### Enabling Cross-Project Messaging
@@ -358,35 +518,50 @@ Scion maintains different limits depending on the recipient type:
   `validation_error: message exceeds 2000 character limit`
   * *Tip*: If you have a long message or log to send to a user, split it into multiple messages under 1,800 characters, or write the full content to a shared scratchpad file and send the filepath.
 * **Agent-to-Agent Messages**: **No enforced length cap in code**. You can send larger payloads safely between agents.
+* **Large-DM offload (opt-in)**: A Hub administrator can set `offload_threshold_runes` in the Hub messaging settings (`PUT /api/v1/admin/messaging`). When an agent-recipient DM body is longer than the threshold, the agent's terminal receives a short stub instead: the body size, a preview, and one command to fetch the full body (for example, `scion conversation get-message conv:<conversation-id> <message-id> --body`). The stored message, the Web Dashboard, and other observers always keep the full body. Plain messages are never offloaded. The default threshold is `0` (disabled); leave it there until your agent images include a `scion` CLI with that fetch command.
 
-### 2. Inbound Message Type Discrimination
+### 2. Reply Explicitly
 
-When an agent receives an inbound message, it arrives wrapped in standard delimiters and includes metadata:
+Scion does not forward an agent's end-of-turn text to anyone. A user, an agent or an [A2A](/scion/hosted/user/a2a-bridge/) caller sees only what the agent sends on purpose with `scion message`. Instruct agents that answer people or other agents to reply with `scion message`.
+
+### 3. Inbound Message Type Discrimination
+
+When an agent receives an inbound message in Hub mode, it arrives as a JSON object wrapped in standard delimiters:
 
 ```text
+You are receiving a message from the orchestration system:
+
 ---BEGIN SCION MESSAGE---
-sender: agent:tech-lead
-type: instruction
-thread_id: 1234
----
-Write a unit test for the auth package.
+{
+  "timestamp": "2026-10-08T21:00:41Z",
+  "message_id": "5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17",
+  "conversation": {
+    "id": "af3cd254-0489-408f-a876-a749ec6e7f98",
+    "kind": "direct",
+    "surface": "native"
+  },
+  "from": "agent:tech-lead",
+  "type": "message",
+  "msg": "Write a unit test for the auth package."
+}
 ---END SCION MESSAGE---
 ```
+
+The `timestamp` is when the message was created, and `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received, for example to tell the sender which message it is answering. When the envelope names a conversation, the agent can also fetch the message with `scion conversation get-message conv:<conversation.id> <message_id>`; when `conversation` is omitted (for example on a broadcast), there is no conversation to pass and the message cannot be fetched that way. `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain (`--plain`) deliveries, which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
+
+When a person sends the message and their user profile has a time zone set, the envelope's `metadata` carries it as `sender_timezone`, the IANA zone name as stored (for example `Europe/Berlin`), so the agent can read times the sender mentions in the sender's own zone. Only the Hub sets this key: it is absent when the profile has no time zone and when the sender is an agent, and a value supplied by a client is dropped. Setting a time zone in your profile shares it with any agent you message, including agents other members own, and the Hub's message log records it.
 
 **Always check the `type` field before acting or replying:**
 
 | Type | Meaning | Action Required |
 |---|---|---|
-| **`instruction`** | Direct instruction sent to you. | Read and act on it. |
-| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. Includes `reply_context` metadata with the first 32 characters of the replied-to message. | Read and act on it like an `instruction`. |
-| **`state-change`** | A notification that another agent changed phase (e.g. stopped or stalled). | Treat as FYI — no reply or action needed. |
-| **`input-needed`** | A broadcast that an agent has called `sciontool status ask_user`. | See handling rules below. |
-| **`mention`** | You were CC'd or mentioned in a message. | Treat as FYI unless explicitly directed otherwise. |
-| **`group-set`** | An `@-mention` targeting multiple agents. | Act on it like an `instruction`. |
-| **`system`** | Operational notices generated by the Hub (e.g. `delivery-failed`, `scheduler`, `port-forward`). | Treat as FYI or follow troubleshooting instructions in the notice. |
+| **`message`** | A message for you: a direct message, a group message, or a message routed to you in a chat thread. An @mention fanned out from another agent's `scion message` also arrives as `message`, and so does a notification that an agent you subscribe to is waiting for input (see below). When the message went to several agents, `to` may list them. | Read and act on it. |
+| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. `reply_to` is the ID of the message being replied to, and `reply_context` holds its first 32 characters. | Read and act on it like a `message`. |
+| **`mention`** | You were @mentioned in a chat message whose primary recipient is someone else. `to` lists every agent the message engaged, including you. | Treat as FYI unless explicitly directed otherwise. |
+| **`event`** | A notice generated by Scion rather than written to you. The `event` object says what happened: `event.type` is one of `agent.state-changed` (an agent you subscribe to changed state; `event.subject` names the agent and `event.status` the state, for example `COMPLETED` or `STALLED`), `schedule.fired` (a scheduled message; `msg` is the scheduled text), `delivery.failed` (a message you sent was not delivered; `event.status` is `DELIVERY_FAILED`, or `DELIVERY_DEFERRED` when it was saved for an agent that is reincarnating), `port.exposed`, or `artifact.review`. | Act on a `schedule.fired` message's text; treat the others as FYI or follow the instructions in the notice. |
 
 :::note[Conversation Model Migration]
-The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). During this transition, inbound messages continue to arrive with the `type` fields described above, and agents should continue to discriminate on the `type` field as documented. 
+The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). Inbound messages name their conversation in the envelope's `conversation` object (`id`, `kind`, `surface`, and `name` when it has one). The object is omitted when a delivery has no conversation, for example broadcasts, mentions fanned out from an agent's message, and notifications. Agents should discriminate on the envelope `type` values described above; the send types used by `scion message` and the API (such as `instruction`, `state-change` or `group-set`) are not shown to the recipient.
 
 To migrate historical messages that predate the conversation model, administrators can use the `scion server backfill` command.
 
@@ -398,18 +573,40 @@ If a backfill operation is interrupted, it can be safely resumed from its last p
 The backfill uses a robust **compound keyset cursor** `(created, id)` (rather than a strictly-greater-than timestamp). This eliminates the potential for permanent row loss on resume, ensuring that any messages sharing identical timestamps are correctly processed and never skipped during resumes.
 :::
 
-#### Handling `input-needed` Notifications
+#### Handling Waiting-for-Input Notifications
 
-When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user`), a notification of type `input-needed` is dispatched to all subscribed agents (including its creator).
+When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user`), a notification is dispatched to all subscribed agents (including its creator). It arrives as a `message` from the waiting agent, with text such as `<agent> is WAITING_FOR_INPUT: <question>`.
 
 * **Parent Agent Role**: If you are the parent agent that created the waiting agent, you may be the intended respondent. Use `scion message @<name>` to reply with the answer.
-* **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to `input-needed` notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send an explicit `instruction` instead.
+* **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to waiting-for-input notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send it an explicit message instead.
+
+#### Halted Agent Notifications
+
+When the platform [halts](/scion/concepts/#halted-phase-the-platform-ended-the-run) an agent (for example its Kubernetes pod was preempted or evicted, or it was killed for running out of memory), Scion sends one `HALTED` notification for that halt, with text such as:
+
+```
+worker-1 was halted by the platform (preempted). Workspace kept. Resume: scion start worker-1.
+```
+
+The workspace part says what `scion start` does with the workspace: `Workspace kept`, `Workspace re-cloned` (a workspace on the pod's own storage), or `Workspace may be re-cloned` (where it lives is not known).
+
+Who receives it:
+
+* **The agent's creator**, when they have no subscription to the agent or its project: the user who created the agent, or the agent that created it (while that agent still exists in the same project). A creator who has a subscription gets `HALTED` only if that subscription selects it.
+* **Subscribers with the `HALTED` trigger.** `HALTED` is one of the default triggers of the subscription recorded when an agent is created with notify on, and one of the Web Dashboard's default and selectable triggers. The default triggers of `scion notifications subscribe` do not include it; add it with `--triggers`.
+* **Subscribers with only the `ERROR` trigger**, when the halt replaced what would have been an `error` (for example a preempted pod whose workspace did not survive). They receive it with status `ERROR`, as they would have without the halt.
+
+Each subscriber, including the creator, receives one notification per halt.
+
+#### Notification Delivery Retries
+
+If a notification cannot be delivered to a subscriber agent (for example because its Runtime Broker is not connected), it is not marked as sent. A notification to a `suspended` subscriber is kept pending without a delivery attempt and without starting its container, and is delivered by the first sweep after the agent resumes (only direct messages with `wake` resume a suspended agent). A notification to a [held](/scion/reference/agent-suspension/) subscriber is never delivered, even after the hold is lifted: it is recorded as `failed` with the reason `subscriber_held`. The Hub's sweep runs about every 5 minutes, and delivery is also retried when the Runtime Broker reconnects; after a failed attempt the next retry waits 5 minutes, doubling with each attempt up to one hour. Each notification records its number of delivery attempts (`dispatchAttempts`) and an outcome (`dispatchOutcome`): `delivered`, or `failed` with a reason (`dispatchReason`): `expired` once it is 24 hours old and still undelivered (including for a subscriber that stayed suspended or has no Runtime Broker), or `subscription_gone`, `subscriber_gone`, `watched_agent_gone` or `subscriber_held`. The outcome is empty while delivery is still pending.
 
 :::tip[Project-Scoped Message Isolation]
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.
 :::
 
-### 3. Subscription Management and Agent Self-Service
+### 4. Subscription Management and Agent Self-Service
 
 * **Automatic Subscription**: The `--notify` flag on `scion start` is **deprecated**. When you start a sub-agent, Scion automatically registers your subscription via creation ancestry.
 * **Explicit Messaging Subscription**: Use the `--notify` flag on `scion message` only when you need to subscribe to notifications from a peer agent that you did *not* create.
@@ -419,7 +616,7 @@ When using slug-based query paths or addressing agents via `agent:<name>` (e.g.,
   - **Granular Scopes**: Authorization gates require the agent token to hold the `project:read` scope for reading subscriptions and the `project:agent:notify` scope for writing (creating, updating, or deleting) subscriptions.
   - **Ownership Constraints**: Acknowledging notifications or modifying/deleting existing subscriptions strictly requires ownership validation, meaning an agent can only modify or acknowledge subscriptions that target or belong to itself.
 
-### 4. Security Controls for Direct Messages & Broadcasts
+### 5. Security Controls for Direct Messages & Broadcasts
 
 Scion employs strict, ingress-level security controls and invariants for Direct Messages (DMs) and Broadcasts to prevent spoofing, cross-project injection, and message divergence:
 - **Server-Side Sender Identity & Derivation**: Sender identity is forced server-side based on the authenticated request context, completely ignoring any sender claims in the payload. Furthermore, DM conversation keys are derived dynamically from the authenticated caller rather than trusting the payload, closing spoofed-sender conversation-selection vectors.
@@ -428,7 +625,7 @@ Scion employs strict, ingress-level security controls and invariants for Direct 
 - **Broadcast Authorization**: Project membership is strictly required and enforced for all broadcast calls.
 - **Publish Gating & Stamping**: Message publishing to real-time streams (SSE) is securely gated on successful database persistence (dual-write conversation stamping). This ensures that a message is never broadcasted to clients without being safely committed to history.
 
-### 5. Sleep Anti-Pattern & Polling
+### 6. Sleep Anti-Pattern & Polling
 
 :::danger[Avoid Sleep]
 **Never use the shell `sleep` command to wait for external processes.** Running a blocking `sleep` loop keeps your agent alive but inactive, triggering the Hub's stall detector and leading to an automatic suspend.
@@ -443,7 +640,7 @@ sciontool status blocked "Waiting for build job 103"
 ```
 The scheduled message delivers the wake-up poke; `status blocked` tells the platform that your silence is intentional, keeping you from being suspended.
 
-### 6. @mention Parsing & Conversation Addressing
+### 7. @mention Parsing & Conversation Addressing
 
 `@<agent-name>` is now the **preferred addressing form** for sending messages to agents via the CLI (e.g., `scion message @tech-lead "..."`). This form addresses the agent's conversation directly.
 
@@ -457,6 +654,7 @@ To send to multiple recipients at once, use the `group[...]` addressing form:
 ```bash
 scion message "group[tech-lead, dev-agent, qa-agent]" "Let's review the deployment strategy"
 ```
+A group send reports each recipient's outcome and exits `3` when only some recipients received the message; see [Group sends and exit codes](/scion/reference/cli/#scion-message-or-msg).
 
 :::caution[Deprecated Flag]
 The `--cc` flag on `scion message` is deprecated and will be removed in a future release. It still works but triggers a deprecation warning. Use `group[...]` addressing or body `@mentions` for multi-recipient delivery instead.
@@ -466,4 +664,5 @@ The `--cc` flag on `scion message` is deprecated and will be removed in a future
 1. **Deduplication**: If an agent is both `@mentioned` inside the body of a message and explicitly addressed as a recipient, Scion automatically deduplicates the list so they only receive a single `mention` message.
 2. **Project Scope Restriction**: Mentions are restricted to the parent project boundary. Body-mentions can only be resolved and delivered to agents that belong to the *same* project. Unresolved names will result in a warning printed to stderr, but will not fail delivery of the primary message.
 3. **Fan-Out Restrictions**: A single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
+4. **Agent-Authored Mentions**: When an agent's message @mentions another agent, the Hub delivers the mention server-side, authorized like a direct message and charged to the sender's send budget. Mentions between the same pair of agents are also capped (10 deliveries per 10 minutes) to stop mention loops. A mention that is denied or rate-limited is skipped without failing the primary message.
 

@@ -68,6 +68,7 @@ func entInviteToStore(i *ent.InviteCode) *store.InviteCode {
 		CreatedBy:  i.CreatedBy,
 		Note:       i.Note,
 		Created:    i.Created,
+		IssuanceID: i.IssuanceID,
 	}
 }
 
@@ -173,16 +174,28 @@ func (s *AllowListStore) ListAllowListEntries(ctx context.Context, opts store.Li
 	return result, nil
 }
 
+// cursorLookupError maps the error from resolving an ID cursor to its row. A
+// well-formed cursor naming no row (deleted since, or never issued) is caller
+// error like any other malformed cursor: store.ErrInvalidCursor (HTTP 400), not
+// store.ErrNotFound, which would read as the listed resource itself being
+// missing (ptone/scion#1957). Other errors keep the usual mapping.
+func cursorLookupError(err error) error {
+	if ent.IsNotFound(err) {
+		return fmt.Errorf("%w: cursor names no row", store.ErrInvalidCursor)
+	}
+	return mapError(err)
+}
+
 // allowListCursorPredicate builds the keyset predicate for paginating after the
 // entry identified by cursor (an entry ID).
 func (s *AllowListStore) allowListCursorPredicate(ctx context.Context, cursor string) (predicate.AllowListEntry, error) {
-	cursorUID, err := parseUUID(cursor)
+	cursorUID, err := parseCursorUUID(cursor)
 	if err != nil {
 		return nil, fmt.Errorf("invalid cursor: %w", err)
 	}
 	c, err := s.client.AllowListEntry.Get(ctx, cursorUID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid cursor: %w", mapError(err))
+		return nil, fmt.Errorf("invalid cursor: %w", cursorLookupError(err))
 	}
 	return allowlistentry.Or(
 		allowlistentry.CreatedLT(c.Created),
@@ -270,6 +283,7 @@ func (s *AllowListStore) BulkAddAllowListEntries(ctx context.Context, entries []
 // users.
 func (s *AllowListStore) ListEmailDomains(ctx context.Context) ([]string, error) {
 	emails, err := s.client.User.Query().
+		Where(notFederated()).
 		Select(user.FieldEmail).
 		Strings(ctx)
 	if err != nil {
@@ -374,6 +388,17 @@ func (s *AllowListStore) CreateInviteCode(ctx context.Context, invite *store.Inv
 	if invite.Created.IsZero() {
 		invite.Created = time.Now()
 	}
+	// Grant shaping (admin tier A3): an invite code made by an admin-kind
+	// test identity expires no later than the identity and carries its
+	// issuance ID.
+	shaping, err := grantShapingFor(ctx, s.client, invite.CreatedBy)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		invite.ExpiresAt = *shaping.ClampExpiry(&invite.ExpiresAt)
+	}
+	invite.IssuanceID = issuanceStamp(shaping)
 
 	create := s.client.InviteCode.Create().
 		SetID(uid).
@@ -385,7 +410,8 @@ func (s *AllowListStore) CreateInviteCode(ctx context.Context, invite *store.Inv
 		SetRevoked(invite.Revoked).
 		SetCreatedBy(invite.CreatedBy).
 		SetNote(invite.Note).
-		SetCreated(invite.Created)
+		SetCreated(invite.Created).
+		SetNillableIssuanceID(invite.IssuanceID)
 
 	if err := create.Exec(ctx); err != nil {
 		return mapError(err)
@@ -432,13 +458,13 @@ func (s *AllowListStore) ListInviteCodes(ctx context.Context, opts store.ListOpt
 
 	query := s.client.InviteCode.Query()
 	if opts.Cursor != "" {
-		cursorUID, err := parseUUID(opts.Cursor)
+		cursorUID, err := parseCursorUUID(opts.Cursor)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
 		c, err := s.client.InviteCode.Get(ctx, cursorUID)
 		if err != nil {
-			return nil, fmt.Errorf("invalid cursor: %w", mapError(err))
+			return nil, fmt.Errorf("invalid cursor: %w", cursorLookupError(err))
 		}
 		query.Where(invitecode.Or(
 			invitecode.CreatedLT(c.Created),

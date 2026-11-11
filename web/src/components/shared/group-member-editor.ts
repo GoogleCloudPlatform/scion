@@ -39,6 +39,7 @@ import type { PrincipalChangeDetail } from './principal-picker.js';
 import type { SecurityReviewDetail } from './security-review-dialog.js';
 import { parseSecurityReviewResponse, parseLockoutResponse } from './security-review-dialog.js';
 import { listMembers, addMember, removeMember, GroupsApiError } from '../../client/groups-api.js';
+import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 import { showToast } from '../../utils/toast.js';
 import { formatRelativeTime } from '../../utils/time.js';
 import { showConfirm } from './confirm-dialog.js';
@@ -539,6 +540,7 @@ export class ScionGroupMemberEditor extends LitElement {
         memberId: this.addMemberInput.trim(),
         role: this.addMemberRole as 'member' | 'admin' | 'owner',
       });
+      dispatchMembershipChanged({ kind: 'group', id: this.groupId });
 
       this.closeAddDialog();
       await this.loadMembers();
@@ -610,6 +612,7 @@ export class ScionGroupMemberEditor extends LitElement {
       const result = await removeMember(this.groupId, member.memberType, member.memberId);
 
       if (result.outcome === 'ok') {
+        dispatchMembershipChanged({ kind: 'group', id: this.groupId });
         await this.loadMembers();
       } else if (result.outcome === 'lockout') {
         const lockout = parseLockoutResponse(result.rawBody);

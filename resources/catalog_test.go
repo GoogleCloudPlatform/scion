@@ -106,6 +106,218 @@ func TestBuiltinResources(t *testing.T) {
 	}
 }
 
+// TestPlatformSkillsFS_ScionAgentManageLifecycleReferencesReincarnate is the
+// design §3.9 / Amendment A25's "2b" bullet skill-embedding test: "the
+// one-line pointer in the scion-agent-manage lifecycle reference." It
+// exercises the actual embedded path (PlatformSkillsFS, the same accessor
+// pkg/agent/provision.go and pkg/hub/platform_skills_seed.go use to inject
+// this skill into agents), so it fails if the pointer only exists in the
+// source tree but was never wired into go:embed, and it fails if the
+// pointer stops naming the right command.
+func TestPlatformSkillsFS_ScionAgentManageLifecycleReferencesReincarnate(t *testing.T) {
+	data, err := fs.ReadFile(PlatformSkillsFS(), "scion-agent-manage/references/agent-lifecycle.md")
+	if err != nil {
+		t.Fatalf("reading embedded scion-agent-manage lifecycle reference: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "scion reincarnate") {
+		t.Errorf("embedded scion-agent-manage/references/agent-lifecycle.md does not mention `scion reincarnate`; " +
+			"coordinators need a pointer to it as an alternative to delete-and-recreate")
+	}
+}
+
+// TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove pins the
+// embedded skill's move section (ptone/scion#2727 phase 3): agents learn
+// the --broker command, its same-NFS-export requirement, the self-move
+// limit and that the CLI does not set their status.
+func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
+	data, err := fs.ReadFile(PlatformSkillsFS(), "scion-agent-manage/references/agent-lifecycle.md")
+	if err != nil {
+		t.Fatalf("reading embedded scion-agent-manage lifecycle reference: %v", err)
+	}
+	// Compare with whitespace collapsed, so a reflow does not break the pins.
+	content := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{
+		"### Moving to another Runtime Broker",
+		"scion reincarnate <agent> --broker <name|id>",
+		"**same NFS export**",
+		"already serves your project",
+		"The CLI does not set your status",
+		"An agent never links a new broker",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("embedded scion-agent-manage/references/agent-lifecycle.md does not contain %q", want)
+		}
+	}
+}
+
+// TestPlatformSkillsFS_ScionWebServing pins the scion-web-serving platform
+// skill (ptone/scion#5567). It reads the embedded copies, the ones agents
+// get, so it fails if the skill or its web-apps reference is not embedded,
+// is gated to a subset of agents, or loses its guidance: scion expose
+// and the URL as printed, what the proxy carries, scion tunnel for full apps,
+// and for pages one self-contained file (relative URLs only with the Hub's
+// page view on) and an honest browser check.
+func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		data, err := fs.ReadFile(PlatformSkillsFS(), name)
+		if err != nil {
+			t.Fatalf("reading embedded %s: %v", name, err)
+		}
+		return strings.ReplaceAll(string(data), "\r\n", "\n")
+	}
+	skillRaw := read("scion-web-serving/SKILL.md")
+	webRaw := read("scion-web-serving/references/web-apps.md")
+
+	front, _, ok := strings.Cut(strings.TrimPrefix(skillRaw, "---\n"), "\n---\n")
+	if !strings.HasPrefix(skillRaw, "---\n") || !ok {
+		t.Fatalf("embedded scion-web-serving/SKILL.md has no frontmatter block")
+	}
+	if !strings.Contains(front, "\nname: scion-web-serving\n") && !strings.HasPrefix(front, "name: scion-web-serving\n") {
+		t.Errorf("frontmatter does not declare name: scion-web-serving:\n%s", front)
+	}
+	if !strings.Contains(front, "description:") {
+		t.Errorf("frontmatter has no description")
+	}
+	if !strings.Contains(strings.Join(strings.Fields(front), " "), "The link serves web protocols only; for a non-HTTP port, point the person to scion tunnel.") {
+		t.Errorf("frontmatter description does not say the link serves web protocols only and points to scion tunnel:\n%s", front)
+	}
+	if strings.Contains(front, "inject_when") {
+		t.Errorf("scion-web-serving must reach every agent; frontmatter sets inject_when:\n%s", front)
+	}
+	if _, err := fs.Stat(PlatformSkillsFS(), "scion-port-serving"); err == nil {
+		t.Errorf("the interim scion-port-serving skill directory is still embedded")
+	}
+
+	// Compare with whitespace collapsed, so a reflow does not break the pins.
+	skill := strings.Join(strings.Fields(skillRaw), " ")
+	web := strings.Join(strings.Fields(webRaw), " ")
+	pins := []struct {
+		file, content string
+		want          []string
+	}{
+		{"SKILL.md", skill, []string{
+			"scion expose <port> --label",
+			"scion expose --list",
+			"scion unexpose <port>",
+			"exactly as printed",
+			"trailing `/`",
+			"9810 and 18380 cannot be exposed",
+			"at most 10 ports exposed",
+			"may be exposed again on its next scan",
+			"WebSockets and streamed responses",
+			"a WebSocket request is refused",
+			"Keep the port exposed with `scion expose <port>` (the tunnel only reaches exposed ports)",
+			"scion tunnel <agent> --port <port>",
+			"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/",
+			"references/web-apps.md",
+			"The link serves web protocols only",
+			"For a non-HTTP port",
+			"the person uses `scion tunnel` instead, and the port must stay exposed",
+		}},
+		{"references/web-apps.md", web, []string{
+			"one self-contained HTML file",
+			"vite-plugin-singlefile",
+			"data:",
+			"scion expose <port>",
+			"exactly as printed",
+			"trailing `/`",
+			"Keep the port exposed with `scion expose <port>` (the tunnel only reaches exposed ports)",
+			"scion tunnel <agent> --port <port>",
+			"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps",
+			"is NOT proof",
+			"headless browser",
+			"If you could not run a browser, say so",
+			"Does not work: client-side routing by path",
+			"`HashRouter`, `createWebHashHistory`",
+			"Search your SOURCE (not the build) for `BrowserRouter`, `createBrowserRouter` and `createWebHistory`",
+			"If you do not know, build **one self-contained HTML file**: it works either way.",
+			"Does not work: URLs that start with `/`",
+			"## With the Hub's page view on",
+			"never `/app.js`",
+			"On the port-forward tunnel it is refused.",
+			"The page link grants access: do not log it, paste it into tickets or chats, or send it anywhere.",
+		}},
+	}
+	for _, p := range pins {
+		for _, want := range p.want {
+			if !strings.Contains(p.content, want) {
+				t.Errorf("embedded scion-web-serving/%s does not contain %q", p.file, want)
+			}
+		}
+	}
+
+	// Relative URLs and a relative build base make a multi-file page work
+	// only with the Hub's page view on. So that guidance may appear only in
+	// the web-apps reference's page view section, and nowhere else in
+	// either file.
+	pageView := ""
+	if _, rest, ok := strings.Cut(webRaw, "\n## With the Hub's page view on\n"); ok {
+		pageView, _, _ = strings.Cut(rest, "\n## ")
+	}
+	if pageView == "" {
+		t.Fatalf("embedded scion-web-serving/references/web-apps.md has no page view section")
+	}
+	outside := map[string]string{
+		"SKILL.md":               skillRaw,
+		"references/web-apps.md": strings.Replace(webRaw, pageView, "", 1),
+	}
+	for file, raw := range outside {
+		lower := strings.ToLower(strings.Join(strings.Fields(raw), " "))
+		for _, unwanted := range []string{
+			"relative urls work",
+			"only what the page can reach with relative urls",
+			"base: './'",
+			"base './'",
+			"--base ./",
+			`"homepage": "."`,
+		} {
+			if strings.Contains(lower, unwanted) {
+				t.Errorf("embedded scion-web-serving/%s contains %q outside the page view section, guidance that holds only with the Hub's page view on", file, unwanted)
+			}
+		}
+	}
+	for _, want := range []string{"Relative URLs work", "base: './'"} {
+		if !strings.Contains(pageView, want) {
+			t.Errorf("the page view section of web-apps.md does not contain %q", want)
+		}
+	}
+}
+
+// TestMandatoryBoilerplate_PointsToWebServingSkill pins the one-line hint
+// to the scion-web-serving skill in the boilerplate every agent receives
+// (ptone/scion#5567).
+func TestMandatoryBoilerplate_PointsToWebServingSkill(t *testing.T) {
+	fsys := MandatoryBoilerplateFS()
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		t.Fatalf("reading mandatory boilerplate: %v", err)
+	}
+	var hits []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, err := fs.ReadFile(fsys, e.Name())
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+			if strings.Contains(line, "scion-web-serving") {
+				hits = append(hits, e.Name()+": "+line)
+			}
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("mandatory boilerplate has %d lines naming scion-web-serving, want exactly 1: %q", len(hits), hits)
+	}
+	if !strings.Contains(hits[0], "scion expose") {
+		t.Errorf("scion-web-serving hint does not mention scion expose: %q", hits[0])
+	}
+}
+
 func TestSourceURLFormat(t *testing.T) {
 	const harnessPrefix = "https://github.com/GoogleCloudPlatform/scion/harnesses/"
 	const builtinPrefix = "builtin://scion/"

@@ -20,6 +20,17 @@ import (
 	"testing"
 )
 
+// testLockClassID is a per-object class ID used only by tests. It is outside
+// the range of production keys and must not be declared in concurrency.go.
+const testLockClassID AdvisoryLockKey = 0x5C10F001
+
+// Retired per-object class ID values (see concurrency.go). They stay
+// reserved so that no new key reuses them.
+const (
+	retiredWorkspaceProvisionKey AdvisoryLockKey = 0x5C101001
+	retiredAgentHomeStartKey     AdvisoryLockKey = 0x5C101003
+)
+
 // StableProjectHash must be deterministic: same input → same output.
 func TestStableProjectHash_Deterministic(t *testing.T) {
 	id := "550e8400-e29b-41d4-a716-446655440000"
@@ -81,6 +92,25 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockChatLinkCodeEviction,
 		LockWebchatMigration,
 		LockDataMigrations,
+		LockReleaseUpdateCheck,
+		LockFailedMessageRetention,
+		LockBrokerQuotaReconcile,
+		LockReincarnationSweep,
+		LockConduitRegistryReap,
+		LockStartClaimReaper,
+		LockMembershipStandingSweep,
+		LockMembershipExpiryScan,
+		LockMembershipStopRetry,
+		LockAgentLaunchDeadline,
+		LockBrokerJoinTokenCleanup,
+		LockTelegramSchema,
+		LockNotificationOrphanGC,
+		LockHubInstancePrune,
+		LockTestIdentityIssuance,
+		LockTestIdentityReaper,
+		LockAgentDelegatedCredentialPurge,
+		LockChatRetention,
+		LockPendingSecretExpiry,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -93,8 +123,9 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 
 	// Per-object class IDs must not collide with singletons or each other.
 	classIDs := []AdvisoryLockKey{
-		LockWorkspaceProvision,
 		LockQuotaEnforcement,
+		LockPendingSecretOwnerWrite,
+		testLockClassID,
 	}
 	for _, k := range classIDs {
 		if seen[k] {
@@ -159,11 +190,31 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockWebchatMigration", LockWebchatMigration},
 		{"LockDataMigrations", LockDataMigrations},
 		{"LockRecoveryAuthz", LockRecoveryAuthz},
+		{"LockReincarnationSweep", LockReincarnationSweep},
+		{"LockConduitRegistryReap", LockConduitRegistryReap},
+		{"LockStartClaimReaper", LockStartClaimReaper},
+		{"LockMembershipStandingSweep", LockMembershipStandingSweep},
+		{"LockMembershipExpiryScan", LockMembershipExpiryScan},
+		{"LockMembershipStopRetry", LockMembershipStopRetry},
 		// Per-object class IDs (different range, but must not collide
 		// with singletons or each other).
-		{"LockWorkspaceProvision", LockWorkspaceProvision},
 		{"LockQuotaEnforcement", LockQuotaEnforcement},
 		{"LockNotificationDispatchSweep", LockNotificationDispatchSweep},
+		{"LockReleaseUpdateCheck", LockReleaseUpdateCheck},
+		{"LockFailedMessageRetention", LockFailedMessageRetention},
+		{"LockBrokerQuotaReconcile", LockBrokerQuotaReconcile},
+		{"LockAgentLaunchDeadline", LockAgentLaunchDeadline},
+		{"LockBrokerJoinTokenCleanup", LockBrokerJoinTokenCleanup},
+		{"LockTelegramSchema", LockTelegramSchema},
+		{"LockNotificationOrphanGC", LockNotificationOrphanGC},
+		{"LockHubInstancePrune", LockHubInstancePrune},
+		{"LockTestIdentityIssuance", LockTestIdentityIssuance},
+		{"LockTestIdentityReaper", LockTestIdentityReaper},
+		{"LockAgentDelegatedCredentialPurge", LockAgentDelegatedCredentialPurge},
+		{"LockChatRetention", LockChatRetention},
+		{"LockHubSettingsGuardedBatch", LockHubSettingsGuardedBatch},
+		{"LockPendingSecretExpiry", LockPendingSecretExpiry},
+		{"LockPendingSecretOwnerWrite", LockPendingSecretOwnerWrite},
 	}
 
 	// --- Check 1: value uniqueness ---
@@ -173,6 +224,15 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 			t.Errorf("duplicate advisory lock key value 0x%X: %s and %s", int64(e.key), prev, e.name)
 		}
 		seen[e.key] = e.name
+	}
+
+	// Retired values stay reserved and must not be reused, and the
+	// test-only class ID must not be taken by a production key.
+	reserved := []AdvisoryLockKey{retiredWorkspaceProvisionKey, retiredAgentHomeStartKey, testLockClassID}
+	for _, k := range reserved {
+		if name, used := seen[k]; used {
+			t.Errorf("%s uses reserved advisory lock key value 0x%X", name, int64(k))
+		}
 	}
 
 	// --- Check 2: completeness against source ---

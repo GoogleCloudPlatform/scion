@@ -16,15 +16,20 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // mockRuntimeBrokerService implements hubclient.RuntimeBrokerService for testing.
@@ -32,6 +37,34 @@ type mockRuntimeBrokerService struct {
 	mu             sync.Mutex
 	heartbeatCalls []mockHeartbeatCall
 	heartbeatErr   error
+	// heartbeatResp is returned by Heartbeat; nil is an older Hub's empty
+	// response body.
+	heartbeatResp *hubclient.BrokerHeartbeatResponse
+
+	messageFailureReports []*hubclient.MessageFailuresReport
+
+	// launchReports records every ReportAgentLaunch call, in order.
+	launchReports []*mockLaunchReportCall
+	// launchReportFunc, when set, computes ReportAgentLaunch's answer for
+	// each report; it lets a test script a sequence of Hub answers (claim
+	// applied, a checkpoint 409, a terminal "completed", ...). When nil,
+	// ReportAgentLaunch answers "applied" to everything.
+	launchReportFunc func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error)
+	// ctxHook, when set, is called with the ctx ReportAgentLaunch actually
+	// received for every call, so a test can inspect the attempt ctx a
+	// launchSender call site built (e.g. its deadline) without needing the
+	// call to fail or time out.
+	ctxHook func(ctx context.Context)
+	// workspaceDownloadFunc, when set, answers WorkspaceDownload; when nil
+	// it answers a 404 (a Hub without the route).
+	workspaceDownloadFunc func(ctx context.Context, brokerID, agentID string, req *api.WorkspaceDownloadRequest) (*api.WorkspaceDownloadResponse, error)
+}
+
+// mockLaunchReportCall records one ReportAgentLaunch invocation.
+type mockLaunchReportCall struct {
+	BrokerID string
+	AgentID  string
+	Report   *hubclient.AgentLaunchReport
 }
 
 type mockHeartbeatCall struct {
@@ -68,7 +101,7 @@ func (m *mockRuntimeBrokerService) ListProjects(ctx context.Context, brokerID st
 	return nil, nil
 }
 
-func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *hubclient.BrokerHeartbeat) error {
+func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *hubclient.BrokerHeartbeat) (*hubclient.BrokerHeartbeatResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.heartbeatCalls = append(m.heartbeatCalls, mockHeartbeatCall{
@@ -76,13 +109,73 @@ func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID strin
 		Heartbeat: status,
 		Time:      time.Now(),
 	})
-	return m.heartbeatErr
+	if m.heartbeatErr != nil {
+		return nil, m.heartbeatErr
+	}
+	return m.heartbeatResp, nil
+}
+
+func (m *mockRuntimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *hubclient.MessageFailuresReport) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messageFailureReports = append(m.messageFailureReports, req)
+	return nil
+}
+
+func (m *mockRuntimeBrokerService) WorkspaceDownload(ctx context.Context, brokerID, agentID string, req *api.WorkspaceDownloadRequest) (*api.WorkspaceDownloadResponse, error) {
+	m.mu.Lock()
+	fn := m.workspaceDownloadFunc
+	m.mu.Unlock()
+	if fn == nil {
+		return nil, &apiclient.APIError{StatusCode: http.StatusNotFound}
+	}
+	return fn(ctx, brokerID, agentID, req)
 }
 
 func (m *mockRuntimeBrokerService) getHeartbeatCalls() []mockHeartbeatCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]mockHeartbeatCall{}, m.heartbeatCalls...)
+}
+
+func (m *mockRuntimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+	m.mu.Lock()
+	m.launchReports = append(m.launchReports, &mockLaunchReportCall{BrokerID: brokerID, AgentID: agentID, Report: req})
+	fn := m.launchReportFunc
+	hook := m.ctxHook
+	m.mu.Unlock()
+	if hook != nil {
+		hook(ctx)
+	}
+	if fn == nil {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+	// Run fn in its own goroutine and select on it against ctx, so a test's
+	// fn that deliberately never returns (simulating an unresponsive Hub) is
+	// still bounded by the real attemptCtx launchSender builds -- this mock
+	// has no HTTP transport of its own to enforce that, unlike the real
+	// hubclient.RuntimeBrokerService implementation.
+	type fnResult struct {
+		result *hubclient.AgentLaunchReportResult
+		err    error
+	}
+	done := make(chan fnResult, 1)
+	go func() {
+		result, err := fn(req)
+		done <- fnResult{result, err}
+	}()
+	select {
+	case r := <-done:
+		return r.result, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *mockRuntimeBrokerService) getLaunchReports() []*mockLaunchReportCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*mockLaunchReportCall{}, m.launchReports...)
 }
 
 // heartbeatMockManager implements agent.Manager for testing.
@@ -95,15 +188,35 @@ func (m *heartbeatMockManager) Provision(ctx context.Context, opts api.StartOpti
 	return nil, nil
 }
 
+func (m *heartbeatMockManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return nil, nil
+}
+
 func (m *heartbeatMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
 
-func (m *heartbeatMockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+func (m *heartbeatMockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	return nil
 }
 
-func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *heartbeatMockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
+	return false, nil
+}
+
+func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return false, nil
 }
 
@@ -115,7 +228,11 @@ func (m *heartbeatMockManager) Message(ctx context.Context, agentID, projectID s
 	return nil
 }
 
-func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
+func (m *heartbeatMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }
 
@@ -208,13 +325,92 @@ func TestHeartbeatService_ForceHeartbeat(t *testing.T) {
 	}
 }
 
+// TestHeartbeatService_ReportsReprovisionCapability is the design §3.4
+// Amendment A2.2(b) regression test: every heartbeat must report
+// Capabilities.Reprovision=true, since that is what lets an already-joined
+// remote broker's capabilities self-heal after an upgrade without a manual
+// --force re-registration (the hub refreshes its stored capabilities from
+// this field — see hub handlers_runtime_brokers.go's heartbeat handler).
+func TestHeartbeatService_ReportsReprovisionCapability(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 heartbeat call, got %d", len(calls))
+	}
+	hb := calls[0].Heartbeat
+	if hb.Capabilities == nil {
+		t.Fatal("expected the heartbeat to include Capabilities")
+	}
+	if !hb.Capabilities.Reprovision {
+		t.Error("expected Capabilities.Reprovision to be true on every heartbeat")
+	}
+	if !hb.Capabilities.Sync || !hb.Capabilities.Attach {
+		t.Error("expected Sync and Attach capabilities to still be reported")
+	}
+}
+
+// TestHeartbeatService_ReportsEmptyPerAgentWorkspaceCapability pins that
+// every heartbeat advertises empty-per-agent support (design #2703 P2), so
+// the hub's dispatch gate admits this broker for such projects and an
+// upgraded, already-joined broker self-heals its stored capabilities.
+func TestHeartbeatService_ReportsEmptyPerAgentWorkspaceCapability(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 || calls[0].Heartbeat.Capabilities == nil {
+		t.Fatalf("expected 1 heartbeat with capabilities, got %d calls", len(calls))
+	}
+	if !calls[0].Heartbeat.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected Capabilities.EmptyPerAgentWorkspace to be true on every heartbeat")
+	}
+}
+
+// noEmptyPerAgentTestRuntime is a MockRuntime that opts out of the optional
+// runtime.EmptyPerAgentCapableRuntime capability, as Cloud Run does.
+type noEmptyPerAgentTestRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (r *noEmptyPerAgentTestRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
+var _ runtime.EmptyPerAgentCapableRuntime = (*noEmptyPerAgentTestRuntime)(nil)
+
+// TestHeartbeatService_EmptyPerAgentFollowsDefaultRuntime pins that the
+// heartbeat's EmptyPerAgentWorkspace reflects the default runtime, like
+// Attach: false when it opts out (Cloud Run), so the hub never routes an
+// empty-per-agent project to a broker that would reject it at Run.
+func TestHeartbeatService_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+	svc.SetDefaultRuntime(&noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{}})
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 || calls[0].Heartbeat.Capabilities == nil {
+		t.Fatalf("expected 1 heartbeat with capabilities, got %d calls", len(calls))
+	}
+	if calls[0].Heartbeat.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("Capabilities.EmptyPerAgentWorkspace = true, want false for a default runtime that opts out")
+	}
+}
+
 func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
-			{Name: "agent-2", ProjectID: "grove-1", Phase: "running", Activity: "waiting_for_input"},
-			{Name: "agent-3", Project: "grove-2", Phase: "running", Activity: "completed"},
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
+			{Name: "agent-2", ProjectID: "project-1", Phase: "running", Activity: "waiting_for_input"},
+			{Name: "agent-3", Project: "project-2", Phase: "running", Activity: "completed"},
 		},
 	}
 
@@ -234,17 +430,49 @@ func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 		t.Errorf("Expected 2 projects in heartbeat, got %d", len(heartbeat.Projects))
 	}
 
-	// Check grove counts
+	// Check project counts
 	projectCounts := make(map[string]int)
 	for _, g := range heartbeat.Projects {
 		projectCounts[g.ProjectID] = g.AgentCount
 	}
 
-	if projectCounts["grove-1"] != 2 {
-		t.Errorf("Expected grove-1 to have 2 agents, got %d", projectCounts["grove-1"])
+	if projectCounts["project-1"] != 2 {
+		t.Errorf("Expected project-1 to have 2 agents, got %d", projectCounts["project-1"])
 	}
-	if projectCounts["grove-2"] != 1 {
-		t.Errorf("Expected grove-2 to have 1 agent, got %d", projectCounts["grove-2"])
+	if projectCounts["project-2"] != 1 {
+		t.Errorf("Expected project-2 to have 1 agent, got %d", projectCounts["project-2"])
+	}
+}
+
+// TestHeartbeatService_ReportsRunIDLabel: each listed entry carries its
+// scion.run_id label (ptone/scion#3661); an unlabelled entry carries none.
+func TestHeartbeatService_ReportsRunIDLabel(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	manager := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "labelled", ProjectID: "project-1", Phase: "running", RunID: "run-1"},
+			{Name: "unlabelled", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	got := map[string]string{}
+	for _, p := range calls[0].Heartbeat.Projects {
+		for _, a := range p.Agents {
+			got[a.Slug] = a.RunID
+		}
+	}
+	if got["labelled"] != "run-1" {
+		t.Errorf("labelled entry RunID = %q, want run-1", got["labelled"])
+	}
+	if v, ok := got["unlabelled"]; !ok || v != "" {
+		t.Errorf("unlabelled entry RunID = %q (reported %v), want empty", v, ok)
 	}
 }
 
@@ -254,19 +482,19 @@ func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 		agents: []api.AgentInfo{
 			{
 				Name:      "agent-structured",
-				ProjectID: "grove-1",
+				ProjectID: "project-1",
 				Phase:     "running",
 				Activity:  "thinking",
 			},
 			{
 				Name:      "agent-waiting",
-				ProjectID: "grove-1",
+				ProjectID: "project-1",
 				Phase:     "running",
 				Activity:  "waiting_for_input",
 			},
 			{
 				Name:      "agent-stopped",
-				ProjectID: "grove-1",
+				ProjectID: "project-1",
 				Phase:     "stopped",
 			},
 		},
@@ -408,14 +636,14 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 	// Default manager has docker agents
 	defaultMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "docker-agent", ProjectID: "grove-1", Phase: "running"},
+			{Name: "docker-agent", ProjectID: "project-1", Phase: "running"},
 		},
 	}
 
 	// Auxiliary manager has K8s agents
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "k8s-agent", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
+			{Name: "k8s-agent", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
 		},
 	}
 
@@ -461,17 +689,17 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 
-	// Default-runtime "coordinator" lives in grove-1.
+	// Default-runtime "coordinator" lives in project-1.
 	defaultMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
+			{Name: "coordinator", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
 		},
 	}
 
-	// Auxiliary-runtime "coordinator" lives in a different project, grove-2.
+	// Auxiliary-runtime "coordinator" lives in a different project, project-2.
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-2", Phase: "running", Activity: "working"},
+			{Name: "coordinator", ProjectID: "project-2", Phase: "running", Activity: "working"},
 		},
 	}
 
@@ -489,7 +717,7 @@ func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing
 
 	heartbeat := calls[0].Heartbeat
 	if len(heartbeat.Projects) != 2 {
-		t.Fatalf("Expected 2 projects (grove-1 and grove-2), got %d", len(heartbeat.Projects))
+		t.Fatalf("Expected 2 projects (project-1 and project-2), got %d", len(heartbeat.Projects))
 	}
 
 	// Both projects must report their "coordinator" agent with its own status.
@@ -498,14 +726,56 @@ func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing
 		byProject[p.ProjectID] = p.Agents
 	}
 
-	g1 := byProject["grove-1"]
-	if len(g1) != 1 || g1[0].Slug != "coordinator" || g1[0].Activity != "thinking" {
-		t.Errorf("grove-1 coordinator missing or wrong status: %+v", g1)
+	p1 := byProject["project-1"]
+	if len(p1) != 1 || p1[0].Slug != "coordinator" || p1[0].Activity != "thinking" {
+		t.Errorf("project-1 coordinator missing or wrong status: %+v", p1)
 	}
 
-	g2 := byProject["grove-2"]
-	if len(g2) != 1 || g2[0].Slug != "coordinator" || g2[0].Activity != "working" {
-		t.Errorf("grove-2 coordinator missing or wrong status (dropped by slug-only dedup?): %+v", g2)
+	p2 := byProject["project-2"]
+	if len(p2) != 1 || p2[0].Slug != "coordinator" || p2[0].Activity != "working" {
+		t.Errorf("project-2 coordinator missing or wrong status (dropped by slug-only dedup?): %+v", p2)
+	}
+}
+
+// TestHeartbeatService_ForwardsStartingAgent (ptone/scion#4756): an agent
+// the manager lists with Phase and ContainerStatus "starting" (a start the
+// runtime has not confirmed, for example one interrupted by a crash) is
+// reported to the hub with those values, so the hub does not treat it as
+// missing.
+func TestHeartbeatService_ForwardsStartingAgent(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	mgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "starter", ProjectID: "project-1", Phase: "starting", ContainerStatus: "starting"},
+		},
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, mgr, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	var found []hubclient.AgentHeartbeat
+	for _, p := range calls[0].Heartbeat.Projects {
+		if p.ProjectID != "project-1" {
+			continue
+		}
+		for _, a := range p.Agents {
+			if a.Slug == "starter" {
+				found = append(found, a)
+			}
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("starting agent reported %d times in project-1, want 1: %+v", len(found), calls[0].Heartbeat.Projects)
+	}
+	got := found[0]
+	if got.Phase != "starting" || got.ContainerStatus != "starting" || got.Status != "starting" {
+		t.Errorf("starting agent reported as Phase=%q ContainerStatus=%q Status=%q, want all \"starting\"", got.Phase, got.ContainerStatus, got.Status)
 	}
 }
 
@@ -517,12 +787,12 @@ func TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent(t *testing.T) {
 
 	defaultMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-1", Phase: "running"},
+			{Name: "coordinator", ProjectID: "project-1", Phase: "running"},
 		},
 	}
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "coordinator", ProjectID: "grove-1", Phase: "running"},
+			{Name: "coordinator", ProjectID: "project-1", Phase: "running"},
 		},
 	}
 
@@ -547,6 +817,57 @@ func TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent(t *testing.T) {
 	}
 }
 
+// TestHeartbeatService_DedupedEntryReportedWithRunLabel: an agent listed by
+// the default and an auxiliary runtime is reported once, and the auxiliary
+// entry goes with it as an OtherEntries item carrying its target and run
+// label; the inventory says every entry's label is reported only while
+// every target is identified and listed (ptone/scion#3661).
+func TestHeartbeatService_DedupedEntryReportedWithRunLabel(t *testing.T) {
+	newSvc := func(auxErr error, auxName string) (*HeartbeatService, *mockRuntimeBrokerService) {
+		client := &mockRuntimeBrokerService{}
+		defaultMgr := &namedHeartbeatManager{name: "docker", heartbeatMockManager: heartbeatMockManager{
+			agents: []api.AgentInfo{{Name: "coordinator", ProjectID: "project-1", Phase: "running", RunID: "run-default"}},
+		}}
+		auxMgr := &namedHeartbeatManager{name: auxName, targetID: k8sTargetA, heartbeatMockManager: heartbeatMockManager{
+			agents: []api.AgentInfo{{Name: "coordinator", ProjectID: "project-1", Phase: "running", RunID: "run-aux"}},
+			err:    auxErr,
+		}}
+		if auxName == "" {
+			auxMgr.targetID = ""
+		}
+		svc := NewHeartbeatService(client, "test-host", time.Hour, defaultMgr, nil, slog.Default())
+		svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
+		return svc, client
+	}
+
+	svc, client := newSvc(nil, "kubernetes")
+	hb := lastHeartbeat(t, svc, client)
+	if !hb.Inventory.RunLabels {
+		t.Fatalf("inventory must report RunLabels: %+v", hb.Inventory)
+	}
+	if len(hb.Projects) != 1 || len(hb.Projects[0].Agents) != 1 {
+		t.Fatalf("expected one reported agent, got %+v", hb.Projects)
+	}
+	ag := hb.Projects[0].Agents[0]
+	if ag.RunID != "run-default" || ag.RuntimeTarget != "docker" {
+		t.Errorf("reported entry = %q on %q, want run-default on docker", ag.RunID, ag.RuntimeTarget)
+	}
+	want := []hubclient.AgentRuntimeEntry{{RuntimeTarget: k8sTargetA, RunID: "run-aux"}}
+	if !reflect.DeepEqual(ag.OtherEntries, want) {
+		t.Errorf("OtherEntries = %+v, want %+v", ag.OtherEntries, want)
+	}
+
+	// A failed listing, or an unidentified target, may hide entries.
+	svc, client = newSvc(errors.New("forbidden"), "kubernetes")
+	if hb := lastHeartbeat(t, svc, client); hb.Inventory.RunLabels {
+		t.Error("RunLabels must be false when a target's listing failed")
+	}
+	svc, client = newSvc(nil, "")
+	if hb := lastHeartbeat(t, svc, client); hb.Inventory.RunLabels {
+		t.Error("RunLabels must be false when a target is unidentified")
+	}
+}
+
 // TestHeartbeatService_DefaultManagerFailsFallsBackToAuxiliary verifies that
 // when the default manager's List() returns an error (e.g. the runtime binary
 // is missing), the heartbeat still collects agents from auxiliary managers
@@ -562,8 +883,8 @@ func TestHeartbeatService_DefaultManagerFailsFallsBackToAuxiliary(t *testing.T) 
 	// Auxiliary manager (e.g. podman) has agents
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "podman-agent-1", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
-			{Name: "podman-agent-2", ProjectID: "grove-1", Phase: "running", Activity: "working"},
+			{Name: "podman-agent-1", ProjectID: "project-1", Phase: "running", Activity: "thinking"},
+			{Name: "podman-agent-2", ProjectID: "project-1", Phase: "running", Activity: "working"},
 		},
 	}
 
@@ -586,8 +907,8 @@ func TestHeartbeatService_DefaultManagerFailsFallsBackToAuxiliary(t *testing.T) 
 	}
 
 	project := heartbeat.Projects[0]
-	if project.ProjectID != "grove-1" {
-		t.Errorf("Expected project ID 'grove-1', got %q", project.ProjectID)
+	if project.ProjectID != "project-1" {
+		t.Errorf("Expected project ID 'project-1', got %q", project.ProjectID)
 	}
 	if project.AgentCount != 2 {
 		t.Errorf("Expected 2 agents from auxiliary runtime, got %d", project.AgentCount)

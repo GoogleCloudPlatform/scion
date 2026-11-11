@@ -1,0 +1,460 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ptone/scion#1961: on the synchronous launch path (create, lifecycle start
+// and restart, and a start/resume/restart through create), a client that
+// gives up mid-dispatch (the CLI hub client times out at 30s) must not cancel
+// the broker launch, and the hub must not roll the agent back as a failed
+// create. Each dispatch is instead bounded by syncDispatchTimeout. These
+// tests are not parallel: some shorten the package-level timeout.
+
+func countCreateCompensations(t *testing.T, s store.Store) int {
+	t.Helper()
+	failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+	require.NoError(t, err)
+	return len(failed)
+}
+
+func TestSyncLaunch_Create_ClientCancelDuringDispatch_AgentSurvives(t *testing.T) {
+	for _, gather := range []bool{false, true} {
+		name := "plain"
+		if gather {
+			name = "gather-env"
+		}
+		t.Run(name, func(t *testing.T) {
+			disp := &launchProbeDispatcher{mode: probeCancelRequest}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			setAgentQuotaLimits(t, s)
+
+			cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "sync-cancel-" + name, ProjectID: project.ID, Task: "work", GatherEnv: gather,
+			})
+			disp.cancelRequest = cancel
+			rec := serve()
+
+			require.NotNil(t, disp.capturedAgent)
+			requireAllLive(t, disp, 1)
+			assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			assert.False(t, disp.deleteCalled, "a client cancel must not delete the runtime")
+			assert.Zero(t, countCreateCompensations(t, s), "a client cancel is not a failed create")
+
+			got, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+			require.NoError(t, err, "the agent row must survive the client cancel")
+			assert.Equal(t, string(state.PhaseRunning), got.Phase, "the post-dispatch write must land despite the cancel")
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, got.ID), "the broker reservation is kept")
+		})
+	}
+}
+
+func TestSyncLaunch_ProvisionOnly_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "sync-cancel-provision", ProjectID: project.ID, ProvisionOnly: true,
+	})
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	require.NotNil(t, disp.capturedAgent)
+	requireAllLive(t, disp, 1)
+	assert.Less(t, rec.Code, 300, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "context canceled", "no provision warning from the client cancel")
+	got, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseCreated), got.Phase)
+}
+
+// A real dispatch failure still rolls the create back exactly as before.
+func TestSyncLaunch_Create_RealDispatchFailure_StillCleansUp(t *testing.T) {
+	disp := &failingCreateDispatcher{createErr: errors.New("simulated broker failure")}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setAgentQuotaLimits(t, s)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "sync-real-failure", ProjectID: project.ID, Task: "work",
+	})
+	require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+	require.NotNil(t, disp.capturedAgent)
+	assert.True(t, disp.deleteCalled, "the runtime is deleted")
+	_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the agent row is deleted")
+	assert.Equal(t, 1, countCreateCompensations(t, s), "the rolled-back create is recorded once")
+	assertNoReservations(t, s, disp.capturedAgent.ID)
+}
+
+// The detached dispatch still honours its own deadline: the dispatch ctx is
+// done once syncDispatchTimeout passes (on the control channel that sends
+// the broker a cancel frame). The outcome is then unknown (the broker may
+// still be starting the agent), so the create is kept for the start-claim
+// reaper and answered 504 start_outcome_unknown, not rolled back
+// (ptone/scion#4817).
+func TestSyncLaunch_Create_DispatchHonoursOwnTimeout(t *testing.T) {
+	shortenSyncDispatchTimeout(t, 50*time.Millisecond)
+	disp := &launchProbeDispatcher{mode: probeBlock}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setAgentQuotaLimits(t, s)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "sync-timeout", ProjectID: project.ID, Task: "work",
+	})
+	require.NotNil(t, disp.capturedAgent)
+	require.Len(t, disp.ctxErrs, 1)
+	require.ErrorIs(t, disp.ctxErrs[0], context.DeadlineExceeded, "the dispatch ctx must be done at its deadline")
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeStartOutcomeUnknown)
+	assert.False(t, disp.deleteCalled, "the timed-out create keeps its runtime: the broker may still be starting it")
+	_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	assert.NoError(t, err, "the timed-out create keeps the agent")
+	assert.Equal(t, 0, countCreateCompensations(t, s), "the create is not rolled back")
+}
+
+func TestSyncLaunch_LifecycleStart_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setAgentQuotaLimits(t, s)
+	agent := createSiteAgent(t, s, project, "sync-cancel-start", state.PhaseStopped, store.RunIntentStopped)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	assert.Equal(t, 1, disp.startCalls)
+	requireAllLive(t, disp, 1)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the final status write must land despite the cancel")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, agent.ID), "the start keeps its reservation")
+}
+
+func TestSyncLaunch_LifecycleStart_DispatchHonoursOwnTimeout(t *testing.T) {
+	shortenSyncDispatchTimeout(t, 50*time.Millisecond)
+	disp := &launchProbeDispatcher{mode: probeBlock}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setAgentQuotaLimits(t, s)
+	agent := createSiteAgent(t, s, project, "sync-timeout-start", state.PhaseStopped, store.RunIntentStopped)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Len(t, disp.ctxErrs, 1)
+	require.ErrorIs(t, disp.ctxErrs[0], context.DeadlineExceeded, "the start dispatch ctx must be done at its deadline")
+	assert.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, agent.ID), "a timed-out start rolls back its reservation")
+}
+
+// The client gives up during the restart's stop leg: the start leg still
+// runs, on a live ctx, and the agent ends up running.
+func TestSyncLaunch_LifecycleRestart_ClientCancelDuringStopLeg(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setAgentQuotaLimits(t, s)
+	agent := createSiteAgent(t, s, project, "sync-cancel-restart", state.PhaseStopped, store.RunIntentStopped)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	assert.Equal(t, 1, disp.stopCalls)
+	assert.Equal(t, 1, disp.startCalls)
+	requireAllLive(t, disp, 2)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, agent.ID))
+}
+
+// A create that starts, resumes or restarts an existing agent
+// (handleExistingAgent) follows the same rule.
+func TestSyncLaunch_CreateExistingAgent_ClientCancelDuringDispatch(t *testing.T) {
+	cases := []struct {
+		name  string
+		phase state.Phase
+		req   CreateAgentRequest
+	}{
+		{name: "suspended-resume", phase: state.PhaseSuspended},
+		{name: "stopped-resume", phase: state.PhaseStopped, req: CreateAgentRequest{Resume: true}},
+		{name: "provisioning-start", phase: state.PhaseProvisioning},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &launchProbeDispatcher{mode: probeCancelRequest}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			name := "sync-existing-" + tc.name
+			agent := createSiteAgent(t, s, project, name, tc.phase, store.RunIntentStopped)
+
+			req := tc.req
+			req.Name, req.ProjectID, req.Task = name, project.ID, "work"
+			cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
+			disp.cancelRequest = cancel
+			rec := serve()
+
+			assert.Equal(t, 1, disp.startCalls)
+			requireAllLive(t, disp, 1)
+			assert.Less(t, rec.Code, 300, rec.Body.String())
+			got, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		})
+	}
+}
+
+func TestSyncDispatch_DetachedAndBounded(t *testing.T) {
+	type key struct{}
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "v"))
+	detached := detachLaunchFromClient(parent)
+	cancel()
+	require.NoError(t, detached.Err(), "the detached ctx ignores the parent's cancel")
+	assert.Equal(t, "v", detached.Value(key{}), "values are kept")
+
+	shortenSyncDispatchTimeout(t, 20*time.Millisecond)
+	var dctxErr error
+	err := syncDispatch(detached, func(dctx context.Context) error {
+		if !awaitCanceled(dctx) {
+			return errProbeNeverDone
+		}
+		dctxErr = dctx.Err()
+		return dctx.Err()
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, dctxErr, context.DeadlineExceeded)
+}
+
+// The gather-env 202 branch: the broker asks for env after the client gave
+// up; the row stays provisioning for the env submit.
+func TestSyncLaunch_Create_GatherEnv202_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	disp.envReqs = &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "sync-cancel-gather-202", ProjectID: project.ID, Task: "work", GatherEnv: true,
+	})
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	require.NotNil(t, disp.capturedAgent)
+	requireAllLive(t, disp, 1)
+	assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.Zero(t, countCreateCompensations(t, s))
+	got, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseProvisioning), got.Phase)
+}
+
+// The env submit (POST .../env) is where a CLI create (always GatherEnv)
+// often launches: it follows the same rule.
+func TestSyncLaunch_SubmitEnv_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	agent := createSiteAgent(t, s, project, "sync-cancel-env", state.PhaseProvisioning, store.RunIntentRunning)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/env", SubmitEnvRequest{
+		Env: map[string]string{"SOME_REQUIRED_KEY": "v"},
+	})
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	requireAllLive(t, disp, 1)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the post-dispatch write must land despite the cancel")
+}
+
+// The workspace-bootstrap finalize (POST .../workspace/sync-to/finalize on
+// a provisioning agent) dispatches the create: same rule.
+func TestSyncLaunch_WorkspaceBootstrapFinalize_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetStorage(newContentMockStorage("test-bucket"))
+	agent := createSiteAgent(t, s, project, "sync-cancel-bootstrap", state.PhaseProvisioning, store.RunIntentRunning)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-to/finalize", SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0"},
+	})
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	assert.Equal(t, 1, disp.createCalls)
+	requireAllLive(t, disp, 1)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the post-dispatch write must land despite the cancel")
+}
+
+// requireFailedStillProvisioning checks a launch of an existing
+// provisioning agent that ran past its own deadline: the request fails, and
+// the row stays provisioning with no launch in flight, so it can be retried.
+func requireFailedStillProvisioning(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	assert.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	require.NotNil(t, disp.capturedAgent)
+	got, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseProvisioning), got.Phase)
+	assert.False(t, got.IsInFlight(), "no launch is left in flight")
+}
+
+// Own-deadline cases for the remaining sites: each dispatch ctx is done at
+// syncDispatchTimeout.
+func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup returns the request to send.
+		setup   func(t *testing.T, s store.Store, project *store.Project) (method, path string, body any)
+		storage bool // configure workspace storage
+		// blockStartOnly uses probeBlockStart instead of probeBlock.
+		blockStartOnly bool
+		wantCalls      int
+		// check runs extra assertions on the outcome.
+		check func(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder)
+	}{
+		{
+			// A stop leg that runs past its own deadline aborts the restart
+			// before the start leg (GoogleCloudPlatform/scion#2486).
+			name: "restart-stop-leg-timeout-aborts",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-restart-stop", state.PhaseRunning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/restart", nil
+			},
+			wantCalls: 1,
+			check: func(t *testing.T, _ store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+				assert.Equal(t, 1, disp.stopCalls)
+				assert.Equal(t, 0, disp.startCalls, "a stop that timed out must not be followed by a start")
+				require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+				assert.Equal(t, restartStopFailedRetryAfter, rec.Header().Get("Retry-After"))
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+				assert.Empty(t, body.Error.Details, "a ctx error carries no broker code")
+			},
+		},
+		{
+			// After a clean stop, the start leg gets its own deadline.
+			name: "restart-start-leg-own-deadline",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-restart-start", state.PhaseRunning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/restart", nil
+			},
+			blockStartOnly: true,
+			wantCalls:      1, // the stop leg is not probed in probeBlockStart
+			check: func(t *testing.T, _ store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+				assert.Equal(t, 1, disp.stopCalls)
+				assert.Equal(t, 1, disp.startCalls)
+				assert.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+			},
+		},
+		{
+			name: "existing-suspended-resume",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				createSiteAgent(t, s, project, "own-deadline-suspended", state.PhaseSuspended, store.RunIntentStopped)
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-suspended", ProjectID: project.ID, Task: "work"}
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "existing-stopped-resume",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				createSiteAgent(t, s, project, "own-deadline-stopped", state.PhaseStopped, store.RunIntentStopped)
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-stopped", ProjectID: project.ID, Task: "work", Resume: true}
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "existing-provisioning-start",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				createSiteAgent(t, s, project, "own-deadline-provisioning", state.PhaseProvisioning, store.RunIntentStopped)
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-provisioning", ProjectID: project.ID, Task: "work"}
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "provision-only-keeps-row",
+			setup: func(t *testing.T, _ store.Store, project *store.Project) (string, string, any) {
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-provision", ProjectID: project.ID, ProvisionOnly: true}
+			},
+			wantCalls: 1,
+			check: func(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+				assert.Less(t, rec.Code, 300, rec.Body.String())
+				require.NotNil(t, disp.capturedAgent)
+				_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+				assert.NoError(t, err, "a provision that timed out keeps the row (a warning, as before)")
+			},
+		},
+		{
+			name: "submit-env",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-env", state.PhaseProvisioning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/env", SubmitEnvRequest{Env: map[string]string{"K": "v"}}
+			},
+			wantCalls: 1,
+			check:     requireFailedStillProvisioning,
+		},
+		{
+			name: "workspace-bootstrap-finalize",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-bootstrap", state.PhaseProvisioning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/workspace/sync-to/finalize", SyncToFinalizeRequest{Manifest: &transfer.Manifest{Version: "1.0"}}
+			},
+			storage:   true,
+			wantCalls: 1,
+			check:     requireFailedStillProvisioning,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shortenSyncDispatchTimeout(t, 50*time.Millisecond)
+			disp := &launchProbeDispatcher{mode: probeBlock}
+			if tc.blockStartOnly {
+				disp.mode = probeBlockStart
+			}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			if tc.storage {
+				srv.SetStorage(newContentMockStorage("test-bucket"))
+			}
+			method, path, body := tc.setup(t, s, project)
+			rec := doRequest(t, srv, method, path, body)
+
+			require.Len(t, disp.ctxErrs, tc.wantCalls, rec.Body.String())
+			for i, err := range disp.ctxErrs {
+				assert.ErrorIs(t, err, context.DeadlineExceeded, "dispatch %d ctx must be done at its deadline", i)
+			}
+			if tc.check != nil {
+				tc.check(t, s, disp, rec)
+			}
+		})
+	}
+}

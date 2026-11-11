@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"golang.org/x/text/unicode/norm"
@@ -35,17 +36,50 @@ const (
 var (
 	// nonAlphanumeric matches any character that isn't a lowercase letter or digit
 	nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]+`)
-	// leadingTrailingDash matches leading or trailing dashes
-	leadingTrailingDash = regexp.MustCompile(`^-+|-+$`)
 )
+
+// isAlreadySlug reports whether s is already a valid canonical slug:
+// non-empty, at most MaxSlugLength, no leading or trailing dashes,
+// containing only lowercase alphanumeric ASCII and non-consecutive dashes.
+func isAlreadySlug(s string) bool {
+	if len(s) == 0 || len(s) > MaxSlugLength {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	nextCanBeDash := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			nextCanBeDash = true
+		} else if c == '-' {
+			if !nextCanBeDash {
+				return false
+			}
+			nextCanBeDash = false
+		} else {
+			return false
+		}
+	}
+	return true
+}
 
 // Slugify converts a string to a URL-safe slug.
 // It normalizes unicode, converts to lowercase, replaces non-alphanumeric
 // characters with dashes, and enforces length limits.
 func Slugify(s string) string {
+	if s == "" {
+		return ""
+	}
+	if isAlreadySlug(s) {
+		return s
+	}
+
 	// Normalize unicode (NFD decomposition then remove combining marks)
 	s = norm.NFD.String(s)
 	var builder strings.Builder
+	builder.Grow(len(s))
 	for _, r := range s {
 		if !unicode.Is(unicode.Mn, r) { // Mn = Mark, Nonspacing
 			builder.WriteRune(r)
@@ -60,7 +94,7 @@ func Slugify(s string) string {
 	s = nonAlphanumeric.ReplaceAllString(s, "-")
 
 	// Remove leading/trailing dashes
-	s = leadingTrailingDash.ReplaceAllString(s, "")
+	s = strings.Trim(s, "-")
 
 	// Enforce length limit
 	if len(s) > MaxSlugLength {
@@ -81,6 +115,98 @@ func ValidateAgentName(name string) (string, error) {
 		return "", fmt.Errorf("agent name %q produces an empty slug: must contain at least one alphanumeric character", name)
 	}
 	return slug, nil
+}
+
+// MaxDisplayNameLength is the maximum length, in runes, of an agent display
+// name. It is independent of MaxSlugLength, which caps the slug itself in
+// bytes.
+const MaxDisplayNameLength = 63
+
+// reservedDisplayNameKeys are identity keys (post-Slugify) an agent display
+// name must not produce, so a display name can never be confused for a
+// system principal or role rather than an agent identity.
+var reservedDisplayNameKeys = map[string]bool{
+	"user":   true,
+	"system": true,
+	"hub":    true,
+	"scion":  true,
+	"admin":  true,
+}
+
+// ValidateDisplayName enforces the agent display-name allowlist: 1-63 runes,
+// each either one of the literal separators (space, '-', '_', '.') or a rune
+// Slugify keeps or folds to a single ASCII letter or digit, slugifying
+// overall to a non-empty key that is not a reserved word. Returns the
+// identity key (Slugify(name)) on success.
+//
+// The per-rune check is deliberately narrower than
+// unicode.Is(unicode.Latin, r) || unicode.IsDigit(r): that wider allowlist
+// admits characters Slugify itself drops or folds to nothing -- small-capital
+// and fullwidth letter forms, ligatures, Roman numerals, dotless i, letters
+// with no canonical decomposition such as o-stroke or sharp s, and non-ASCII
+// digits. Those would let a display name render as one thing (for example a
+// reserved word, or a value equal to a different agent's key) while
+// producing an unrelated key of its own that separately passes the reserved-
+// word and uniqueness checks. Requiring Slugify(string(r)) to collapse to
+// exactly one ASCII alphanumeric character keeps the persisted key visibly
+// tied to what the name displays.
+func ValidateDisplayName(name string) (key string, err error) {
+	if name == "" {
+		return "", fmt.Errorf("display name must not be empty")
+	}
+	if utf8.RuneCountInString(name) > MaxDisplayNameLength {
+		return "", fmt.Errorf("display name %q is too long: must be at most %d characters", name, MaxDisplayNameLength)
+	}
+	for _, r := range name {
+		if r == ' ' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		// Fast-path: ASCII alphanumeric characters always slugify to a single ASCII character,
+		// equivalent to the len(Slugify(string(r))) == 1 check below.
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		if len(Slugify(string(r))) == 1 {
+			continue
+		}
+		return "", fmt.Errorf("display name %q contains an unsupported character %q: must use letters that reduce to a-z, digits, space, '-', '_' or '.'", name, r)
+	}
+	key = Slugify(name)
+	if key == "" {
+		return "", fmt.Errorf("display name %q produces an empty key: must contain at least one Latin letter or digit", name)
+	}
+	if reservedDisplayNameKeys[key] {
+		return "", fmt.Errorf("display name %q is a reserved word", name)
+	}
+	return key, nil
+}
+
+// IdentityKeysFor returns the distinct, non-empty identity keys an agent's
+// slug and display name resolve to: the slug itself, plus the display
+// name's slugified key when that differs from the slug and is non-empty.
+// The slug is always keys[0]; the display-name key, when present, is
+// always keys[1] -- callers that need to treat the two differently (for
+// example, inserting every agent's slug before any agent's display-name
+// key) may rely on that order.
+//
+// The slug key is always present -- a valid Slug can never itself slugify to
+// "", or the agent could not have been created. The display-name key is
+// omitted when Slugify(name) is empty: new display names cannot produce this
+// (ValidateDisplayName rejects an empty key), but a legacy Name predating
+// that validation can. agent_identity_keys.key has a NotEmpty schema
+// validator, so writing an empty key would be a permanent failure for every
+// future write involving that agent.
+//
+// Every writer of agent_identity_keys -- create, rename, restore, and the
+// backfill migration -- computes the key set with this exact function, so
+// the identity-key set for a given (slug, name) pair is identical no matter
+// which writer computed it.
+func IdentityKeysFor(slug, name string) []string {
+	keys := []string{slug}
+	if nameKey := Slugify(name); nameKey != "" && nameKey != slug {
+		keys = append(keys, nameKey)
+	}
+	return keys
 }
 
 // SlugifyWithSuffix creates a slug with a collision-avoidance suffix.

@@ -17,22 +17,29 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secretmigration"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -42,9 +49,15 @@ import (
 // and must be carried over during reconfigure (they are not in config files).
 var pluginBrokerNS = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 
+// hubKeys lists every hub wiring key that getPluginHubCreds supplies,
+// including the transport settings (transport_mode, transport_audience).
+// It has two uses: resolveIntegrationMergedConfig keeps these keys out of
+// the cached-config carry-over (the live hub values override them), and
+// filterSensitiveConfig omits them from integration settings responses.
 var hubKeys = map[string]bool{
 	"hub_url": true, "broker_id": true, "hmac_key": true,
 	"plugin_name": true, "project_slug_map": true,
+	"transport_mode": true, "transport_audience": true,
 	"database_driver": true, "database_url": true,
 }
 
@@ -125,9 +138,14 @@ type IntegrationStatus struct {
 }
 
 // IntegrationConfigUpdateRequest is the request body for the PUT config endpoint.
+//
+// Settings is merged key by key into the stored config: a key the body
+// omits keeps its stored value, a key with a string value (including "")
+// replaces it, and a key sent as JSON null is deleted from the stored
+// config, so the plugin's own default applies again (ptone/scion#3913).
 type IntegrationConfigUpdateRequest struct {
-	Settings map[string]string `json:"settings"`
-	Secrets  map[string]string `json:"secrets"`
+	Settings map[string]*string `json:"settings"`
+	Secrets  map[string]string  `json:"secrets"`
 }
 
 // AvailableIntegration represents a plugin that could be installed.
@@ -190,9 +208,6 @@ func lookupKnownPlugin(name string) *KnownPlugin {
 	return nil
 }
 
-// SettingsWriteMu guards concurrent writes to settings.yaml.
-var SettingsWriteMu sync.Mutex
-
 // pluginBuildMu guards concurrent build operations per plugin name.
 var pluginBuildMu sync.Map
 
@@ -205,33 +220,23 @@ func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request)
 	case http.MethodGet:
 		s.handleListIntegrations(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
 // handleAdminIntegrationByName dispatches requests under
-// /api/v1/admin/integrations/{name}[/config|/restart|/health].
-// Authorization: route guard checks hub.integrations.read for GET.
-// Write operations (PUT/POST/DELETE) require hub.integrations.update via inline Decide.
+// /api/v1/admin/integrations/{name}[/config|/restart|/health|/update|/install].
+// Authorization: route guard checks hub.integrations.read for every method.
+// Write operations (PUT/POST/DELETE) require hub.integrations.update via
+// inline Decide. Install and starting an update build and install code on
+// the hub host, so they also require an interactive session
+// (HOST_OPERATIONS) before any permission check.
 func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Request) {
-	// Inline authorization for write operations — the route guard only
-	// checks the read permission. Writes need hub.integrations.update.
-	switch r.Method {
-	case http.MethodPut, http.MethodPost, http.MethodDelete:
-		if _, ok := s.requireWritePermission(w, r, "hub.integrations.update"); !ok {
-			return
-		}
-	}
-
 	// Parse: /api/v1/admin/integrations/{name}[/{action}[/{sub}]]
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/integrations/")
 	path = strings.TrimSuffix(path, "/")
 	parts := strings.SplitN(path, "/", 3)
 	name := parts[0]
-	if name == "" {
-		NotFound(w, "integration")
-		return
-	}
 
 	action := ""
 	if len(parts) >= 2 {
@@ -240,6 +245,25 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 	actionSub := ""
 	if len(parts) >= 3 {
 		actionSub = parts[2]
+	}
+
+	// Inline authorization for write operations — the route guard only
+	// checks the read permission. Writes need hub.integrations.update.
+	switch r.Method {
+	case http.MethodPut, http.MethodPost, http.MethodDelete:
+		if action == "install" || action == "update" {
+			if _, ok := s.requireSessionCredentialFor(w, r.Context(), authzop.ReasonHostOperations); !ok {
+				return
+			}
+		}
+		if _, ok := s.requireWritePermission(w, r, "hub.integrations.update"); !ok {
+			return
+		}
+	}
+
+	if name == "" {
+		NotFound(w, "integration")
+		return
 	}
 
 	// Special-case: "available" as a name with no action is the available-integrations list.
@@ -251,41 +275,47 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 	switch action {
 	case "":
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.handleGetIntegration(w, r, name)
 	case "config":
 		if r.Method != http.MethodPut {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPut)
 			return
 		}
 		s.handleUpdateIntegrationConfig(w, r, name)
 	case "restart":
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleRestartIntegration(w, r, name)
 	case "health":
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.handleIntegrationHealth(w, r, name)
 	case "update":
-		if actionSub != "" && r.Method == http.MethodGet {
+		// .../update/{id} is the status lookup and accepts only GET; only a
+		// POST to the bare .../update starts an update (ptone/scion#2422).
+		if actionSub != "" {
+			if r.Method != http.MethodGet {
+				MethodNotAllowed(w, http.MethodGet)
+				return
+			}
 			s.handleGetUpdateStatus(w, r, name, actionSub)
 			return
 		}
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleUpdateIntegration(w, r, name)
 	case "install":
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleInstallIntegration(w, r, name)
@@ -409,7 +439,7 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request, na
 func (s *Server) resolveIntegrationSettings(ctx context.Context, mgr IntegrationManager, name string, runtimeCfg map[string]string) map[string]string {
 	if s.isHAIntegration(mgr, name) {
 		if s.entClient != nil {
-			provider := config.NewPostgresConfigProvider(s.entClient, name)
+			provider := pgprovider.NewPostgresConfigProvider(s.entClient, name)
 			if settings, err := provider.Load(ctx); err == nil {
 				// Merge runtime keys as underlay — provider values win.
 				for k, v := range runtimeCfg {
@@ -485,6 +515,13 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 	}
 
 	ctx := r.Context()
+
+	// A credential other than an interactive session writes configuration
+	// settings keys only (integration_token_settings.go). Checked on the
+	// decoded request, which is what is written, before any write.
+	if writeTokenRefusedIntegrationKeys(w, ctx, tokenRefusedIntegrationConfigKeys(name, req)) {
+		return
+	}
 	user := GetUserIdentityFromContext(ctx)
 	userID := ""
 	if user != nil {
@@ -499,12 +536,19 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			allowedSecrets[m.ConfigKey] = m.SecretKey
 		}
 
-		for configKey, value := range req.Secrets {
-			secretKey, ok := allowedSecrets[configKey]
-			if !ok {
-				BadRequest(w, "unknown secret key: "+configKey)
-				return
+		// Every unknown key is refused before any secret is stored.
+		var unknown []settingsFieldError
+		for _, configKey := range slices.Sorted(maps.Keys(req.Secrets)) {
+			if _, ok := allowedSecrets[configKey]; !ok {
+				unknown = append(unknown, settingsFieldError{Field: "secrets." + configKey, Message: "unknown secret key: " + configKey})
 			}
+		}
+		if len(unknown) > 0 {
+			writeSettingsValidation(w, unknown[0].Message, unknown, nil)
+			return
+		}
+		for configKey, value := range req.Secrets {
+			secretKey := allowedSecrets[configKey]
 			if err := s.SetChatIntegrationSecret(ctx, secretKey, value, ChatSecretDescription(secretKey), userID); err != nil {
 				slog.Error("Failed to store integration secret", "plugin", name, "key", configKey, "error", err)
 				InternalError(w)
@@ -534,7 +578,7 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 				return
 			}
 			defer func() { _ = haTx.Rollback() }()
-			pgProvider := config.NewPostgresConfigProvider(haTx.Client(), name)
+			pgProvider := pgprovider.NewPostgresConfigProvider(haTx.Client(), name)
 			pgProvider.SetUpdatedBy(userID)
 			provider = pgProvider
 			haConfigTx = haTx
@@ -572,14 +616,24 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			InternalError(w)
 			return
 		}
+		// A stored Postgres row whose config is JSON null loads as a nil
+		// map; start from an empty map so the merge below cannot panic.
+		if existing == nil {
+			existing = make(map[string]string)
+		}
 
 		// Merge new settings into existing, filtering out any secret keys.
+		// A null value deletes the stored key.
 		secretKeys := allSecretConfigKeys(name)
 		for k, v := range req.Settings {
 			if secretKeys[k] {
 				continue
 			}
-			existing[k] = v
+			if v == nil {
+				delete(existing, k)
+				continue
+			}
+			existing[k] = *v
 		}
 
 		if err := provider.Save(ctx, existing); err != nil {
@@ -607,16 +661,15 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the config update.
 	}
-	SettingsWriteMu.Unlock()
 
 	// Reconfigure the running integration with updated config.
 	// For HA integrations the DB write + NOTIFY is the reconfigure path —
 	// pushing a hub-side merge over gRPC would race with the DB-backed reload.
+	var activationWarnings []string
 	if loaded {
 		if !isHA {
 			if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
@@ -638,12 +691,18 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			slog.Warn("Config saved but plugin activation failed (likely still missing required fields)",
 				"plugin", name, "error", err)
 		} else {
-			s.refreshBrokerSpoke(mgr, name)
+			if err := s.refreshBrokerSpoke(mgr, name); err != nil { // also logged inside
+				activationWarnings = append(activationWarnings, fmt.Sprintf("plugin %q activated, but its message routing was not fully restored: %v", name, err))
+			}
 			slog.Info("Plugin activated after config update", "plugin", name)
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	resp := map[string]interface{}{"status": "ok"}
+	if len(activationWarnings) > 0 {
+		resp["warnings"] = activationWarnings
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request, name string) {
@@ -658,12 +717,10 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the restart.
 	}
-	SettingsWriteMu.Unlock()
 
 	// Resolve the latest config from file + secrets + hub wiring creds.
 	merged := s.resolveIntegrationMergedConfig(r.Context(), mgr, name)
@@ -683,10 +740,13 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 	// plugin process. The old spoke wraps a dead connection from the killed
 	// process. refreshBrokerSpoke replaces an existing spoke or adds a new
 	// one if none existed (e.g. first install before a full hub restart).
-	s.refreshBrokerSpoke(mgr, name)
+	refreshErr := s.refreshBrokerSpoke(mgr, name) // also logged inside
 
 	// Post-restart validation: check that the plugin is wired into the FanOut.
 	warnings := s.validateIntegrationWiring(name)
+	if refreshErr != nil {
+		warnings = append(warnings, fmt.Sprintf("plugin %q restarted, but its message routing was not fully restored: %v", name, refreshErr))
+	}
 
 	response := map[string]interface{}{
 		"status": "ok",
@@ -783,12 +843,10 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the update.
 	}
-	SettingsWriteMu.Unlock()
 
 	if err := mgr.UpdatePlugin(name, repoPath); err != nil {
 		slog.Error("Failed to update integration", "plugin", name, "error", err)
@@ -800,9 +858,12 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		slog.Warn("Plugin rebuilt but reconfigure failed", "plugin", name, "error", err)
 	}
 
-	s.refreshBrokerSpoke(mgr, name)
+	resp := map[string]interface{}{"status": "ok"}
+	if err := s.refreshBrokerSpoke(mgr, name); err != nil { // also logged inside
+		resp["warnings"] = []string{fmt.Sprintf("plugin %q updated, but its message routing was not fully restored: %v", name, err)}
+	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request, name string) {
@@ -900,12 +961,10 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		slog.Info("Plugin config file already exists, preserving", "plugin", name, "path", resolvedConfigPath)
 	}
 
-	SettingsWriteMu.Lock()
 	err = config.AddPluginToSettings(name, configFilePath)
 	if err == nil {
 		err = config.AddPluginToMessageBrokerTypes(name)
 	}
-	SettingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add plugin to settings.yaml", "plugin", name, "error", err)
 		InternalError(w)
@@ -1003,7 +1062,7 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 			InternalError(w)
 			return
 		}
-		if err := createBridgeConfigTemplate(name, bridgeConfigPath, s.config.HubEndpoint); err != nil {
+		if err := createBridgeConfigTemplate(name, bridgeConfigPath, s.HubEndpointFor(HubEndpointForChatBridge)); err != nil {
 			slog.Error("Failed to create bridge config template", "plugin", name, "error", err)
 			InternalError(w)
 			return
@@ -1014,13 +1073,11 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 
 	// 3. Register in settings.yaml with self-managed fields and broker type
 	//    in a single read-modify-write cycle.
-	SettingsWriteMu.Lock()
 	err = config.AddSelfManagedPluginWithBrokerType(config.SelfManagedPluginEntry{
 		Name:       name,
 		Address:    "localhost:9090",
 		ConfigFile: adminConfigPath,
 	})
-	SettingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add self-managed plugin to settings.yaml", "plugin", name, "error", err)
 		InternalError(w)
@@ -1207,12 +1264,10 @@ func (s *Server) handleRebuildSelfManaged(w http.ResponseWriter, _ *http.Request
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(kp.Name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", kp.Name, "error", err)
 		// Non-fatal — continue with the rebuild response.
 	}
-	SettingsWriteMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "rebuilt",
@@ -1419,22 +1474,19 @@ func (s *Server) checkIntegrationSecrets(ctx context.Context, name string) map[s
 	return result
 }
 
-// filterSensitiveConfig returns a copy of the config map with secret values
-// and internal runtime keys removed.
+// filterSensitiveConfig returns a copy of the config map with secret values,
+// hub wiring keys (hubKeys) and internal runtime keys removed.
 func filterSensitiveConfig(name string, cfg map[string]string) map[string]string {
 	filtered := make(map[string]string, len(cfg))
 
 	secretKeys := allSecretConfigKeys(name)
 	internalKeys := map[string]bool{
-		"hub_url":     true,
-		"hmac_key":    true,
-		"broker_id":   true,
 		"bot_id":      true,
 		"config_file": true,
 	}
 
 	for k, v := range cfg {
-		if secretKeys[k] || internalKeys[k] {
+		if secretKeys[k] || hubKeys[k] || internalKeys[k] {
 			continue
 		}
 		filtered[k] = v
@@ -1453,9 +1505,70 @@ func allSecretConfigKeys(name string) map[string]bool {
 	return keys
 }
 
+// PluginTransportAuth returns the transport auth mode and the resolved OIDC
+// audience that broker plugins use to call IAP-protected hub endpoints, or
+// empty strings when transport auth is not configured. Startup credential
+// injection and the plugin restart paths both use it, so a restarted
+// plugin gets the same values it got at boot. Both are set at
+// construction, together with the transport minter, which startup creates
+// whenever a transport mode other than "none" is configured.
+func (s *Server) PluginTransportAuth() (mode, audience string) {
+	return s.transportMode, s.transportAudience
+}
+
+// brokerSupervisionWiring is implemented by plugin managers that supervise
+// broker plugin sessions (*plugin.Manager).
+type brokerSupervisionWiring interface {
+	SetBrokerConfigProvider(plugin.BrokerConfigProvider)
+	OnBrokerRestart(plugin.BrokerRestartHook)
+}
+
+// registerBrokerSupervision wires the plugin supervisor to the hub: a
+// restarted or re-dialled broker plugin is configured with the same merged
+// config an admin restart uses (file config, secrets, hub credentials),
+// and its fan-out spoke is then replaced, which replays the subscriptions.
+func (s *Server) registerBrokerSupervision(m IntegrationManager) {
+	w, ok := m.(brokerSupervisionWiring)
+	if !ok {
+		return
+	}
+	w.SetBrokerConfigProvider(func(ctx context.Context, name string) (map[string]string, error) {
+		return s.resolveIntegrationMergedConfigChecked(ctx, m, name)
+	})
+	w.OnBrokerRestart(func(name string) error {
+		return s.refreshBrokerSpoke(m, name)
+	})
+}
+
+// brokerSupervisionReader is implemented by plugin managers that supervise
+// broker plugin sessions (*plugin.Manager).
+type brokerSupervisionReader interface {
+	BrokerSupervision(name string) (plugin.SupervisionStatus, bool)
+}
+
 // getIntegrationStatus queries health and info from the plugin manager.
+// A plugin whose session the supervisor reports lost is degraded (while a
+// restart is pending) or unhealthy (after repeated failed attempts) and not
+// connected, without calling the plugin.
 func getIntegrationStatus(mgr IntegrationManager, name string) *IntegrationStatus {
 	status := &IntegrationStatus{}
+
+	if sr, ok := mgr.(brokerSupervisionReader); ok {
+		if sup, ok := sr.BrokerSupervision(name); ok && sup.State != plugin.SupervisionRunning {
+			status.Health = HealthStatusDegraded
+			if sup.State == plugin.SupervisionFailing {
+				status.Health = HealthStatusUnhealthy
+			}
+			status.Connected = false
+			status.Message = fmt.Sprintf("plugin session lost; restarting (attempt %d, %d messages dropped this outage)",
+				sup.Attempt, sup.DroppedThisOutage)
+			if sup.State == plugin.SupervisionFailing {
+				status.Message = fmt.Sprintf("plugin session lost; repeatedly failing to restart (attempt %d, %d messages dropped this outage)",
+					sup.Attempt, sup.DroppedThisOutage)
+			}
+			return status
+		}
+	}
 
 	version, channelID, capabilities, err := mgr.BrokerInfo(name)
 	if err != nil {
@@ -1474,6 +1587,9 @@ func getIntegrationStatus(mgr IntegrationManager, name string) *IntegrationStatu
 		status.Message = "failed to query health"
 		return status
 	}
+	// Normalise casing once here, so the Integrations page, the health
+	// summary and the hub all compare the same words.
+	health = strings.ToLower(strings.TrimSpace(health))
 	status.Health = health
 	status.Message = message
 	status.Details = details
@@ -1507,17 +1623,69 @@ func releasePluginBuildLock(name string) {
 	}
 }
 
+// errPluginBrokerRow marks a failure to confirm the plugin's runtime broker
+// row. The error text is fixed: store errors are not carried, so neither the
+// returned error nor the log echoes store internals.
+var errPluginBrokerRow = errors.New("plugin broker row")
+
+// ensurePluginBroker creates the runtime broker row for the named broker
+// plugin when it does not exist, with the same fields server startup
+// (cmd/server_foreground.go) uses. A plugin activated or reconfigured
+// without a restart, or whose row was deleted, then has the live row its
+// HMAC secret authenticates against. It reports a failed look-up (other
+// than not found) or create (other than already exists), wrapping
+// errPluginBrokerRow.
+func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) error {
+	if s.store == nil {
+		return nil
+	}
+	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		slog.WarnContext(ctx, "Failed to look up plugin broker row", "plugin", name, "brokerId", brokerID)
+		return fmt.Errorf("%w look-up failed", errPluginBrokerRow)
+	}
+	now := time.Now()
+	b := &store.RuntimeBroker{
+		ID:              brokerID,
+		Name:            "plugin-" + name,
+		Slug:            api.Slugify("plugin-" + name),
+		Version:         "0.1.0",
+		Status:          store.BrokerStatusOnline,
+		ConnectionState: "embedded",
+		Labels:          map[string]string{pluginBrokerLabel: name},
+		Created:         now,
+		Updated:         now,
+	}
+	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.WarnContext(ctx, "Failed to create plugin broker row", "plugin", name, "brokerId", brokerID)
+		return fmt.Errorf("%w create failed", errPluginBrokerRow)
+	}
+	return nil
+}
+
 // getPluginHubCreds reconstructs the hub wiring credentials for a broker
 // plugin from live, authoritative sources — the same values that
 // server_foreground.go injects via ConfigureBroker at startup. This avoids
 // relying on the plugin manager's config map, which may be stale or empty
 // after a process restart.
 func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]string {
+	creds, _ := s.getPluginHubCredsChecked(ctx, name)
+	return creds
+}
+
+// getPluginHubCredsChecked is getPluginHubCreds that also reports a failure
+// to confirm the plugin's broker row, read the HMAC key or read the project
+// list (the map then lacks hmac_key or project_slug_map).
+func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map[string]string, error) {
+	var credsErr error
 	creds := make(map[string]string)
 
 	// hub_url: from the server config (same value that startup resolves).
-	if s.config.HubEndpoint != "" {
-		creds["hub_url"] = s.config.HubEndpoint
+	if hubURL := s.HubEndpointFor(HubEndpointForPluginBrokers); hubURL != "" {
+		creds["hub_url"] = hubURL
 	}
 
 	// broker_id: deterministic UUIDv5 — same namespace and seed as startup.
@@ -1526,9 +1694,15 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	creds["broker_id"] = brokerID
 
 	// hmac_key: from BrokerAuthService (idempotent — returns existing key).
+	// A broker secret authenticates only a live broker row, so the plugin's
+	// row is ensured first, as startup does; without a confirmed row no
+	// secret is generated or rotated.
 	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
-		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
+		if err := s.ensurePluginBroker(ctx, name, brokerID); err != nil {
+			credsErr = fmt.Errorf("hmac key: %w", err)
+		} else if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
 			slog.Error("Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
+			credsErr = fmt.Errorf("hmac key: %w", err)
 		} else {
 			creds["hmac_key"] = secretKey
 		}
@@ -1541,6 +1715,7 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	if s.store != nil {
 		if projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); err != nil {
 			slog.Warn("Failed to list projects for plugin slug map", "plugin", name, "error", err)
+			credsErr = errors.Join(credsErr, fmt.Errorf("project slug map: %w", err))
 		} else {
 			slugMap := make(map[string]string, len(projects.Items))
 			for _, p := range projects.Items {
@@ -1556,13 +1731,22 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 		}
 	}
 
+	// transport_mode + transport_audience: so plugins can authenticate
+	// with IAP-protected hub endpoints; the same values startup injects.
+	if mode, audience := s.PluginTransportAuth(); mode != "" {
+		creds["transport_mode"] = mode
+		if audience != "" {
+			creds["transport_audience"] = audience
+		}
+	}
+
 	// database_driver + database_url: only for Postgres backends.
 	if s.dbDriver != "" && s.dbDriver != "sqlite" {
 		creds["database_driver"] = s.dbDriver
 		creds["database_url"] = s.databaseDSN
 	}
 
-	return creds
+	return creds, credsErr
 }
 
 // resolveIntegrationMergedConfig builds the full merged config map for a plugin
@@ -1571,6 +1755,20 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 // map is ready to be pushed to the plugin via ReplaceBrokerConfig or
 // RestartBrokerPlugin.
 func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr IntegrationManager, name string) map[string]string {
+	merged, _ := s.resolveIntegrationMergedConfigChecked(ctx, mgr, name)
+	return merged
+}
+
+// resolveIntegrationMergedConfigChecked is resolveIntegrationMergedConfig
+// that also reports the inputs it could not read: the config file, a
+// mapped secret (a missing secret is not an error), the HMAC key or the
+// project list. The map is the same either way; it is complete only when
+// the error is nil. The plugin supervisor and Reconnect use it (through the
+// plugin manager's config provider), so an unattended restart retries, and
+// a self-managed plugin's reconnect reports the error, rather than starting
+// the plugin with a partial config.
+func (s *Server) resolveIntegrationMergedConfigChecked(ctx context.Context, mgr IntegrationManager, name string) (map[string]string, error) {
+	var errs []error
 	pluginCfg := mgr.GetPluginConfig("broker", name)
 
 	// Re-read config file if one is configured. Prefer the immutable
@@ -1592,6 +1790,7 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 	merged, err := config.ResolvePluginConfig(configFile, inlineToPass)
 	if err != nil {
 		slog.Error("Failed to resolve config for integration", "plugin", name, "error", err)
+		errs = append(errs, fmt.Errorf("resolve config file: %w", err))
 		merged = make(map[string]string)
 	}
 
@@ -1602,6 +1801,9 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 			continue
 		}
 		val, err := s.LoadChatIntegrationSecret(ctx, m.SecretKey)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("load secret for %s: %w", m.ConfigKey, err))
+		}
 		if err != nil || val == "" {
 			continue
 		}
@@ -1622,7 +1824,10 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 	// and apply as OVERRIDE. The manager's cached config may be stale or
 	// empty (e.g. after process restart), so we recompute these values the
 	// same way server_foreground.go does at startup.
-	hubCreds := s.getPluginHubCreds(ctx, name)
+	hubCreds, credsErr := s.getPluginHubCredsChecked(ctx, name)
+	if credsErr != nil {
+		errs = append(errs, credsErr)
+	}
 	for k, v := range hubCreds {
 		if v != "" {
 			merged[k] = v
@@ -1636,7 +1841,7 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 		merged["config_file"] = configFile
 	}
 
-	return merged
+	return merged, errors.Join(errs...)
 }
 
 // reconfigureIntegration reloads config for a plugin and calls ReplaceBrokerConfig
@@ -1707,29 +1912,35 @@ func (s *Server) ensureBrokerSpoke(mgr IntegrationManager, name string) {
 		ChannelID: channelID,
 	}
 	if err := fanout.AddSpoke(spoke); err != nil {
-		slog.Error("ensureBrokerSpoke: failed to add spoke", "plugin", name, "error", err)
+		// Either the spoke already exists, or it was added and replaying
+		// subscriptions onto it failed.
+		slog.Error("ensureBrokerSpoke: adding spoke failed or was incomplete", "plugin", name, "error", err)
 	} else {
 		slog.Info("Wired broker plugin as FanOut spoke after admin operation", "plugin", name)
 	}
 }
 
 // refreshBrokerSpoke replaces the stale fan-out eventbus spoke for a broker
-// plugin after its process has been restarted (e.g. UpdatePlugin). The old
-// spoke wraps a dead RPC connection; this swaps in a fresh one.
-func (s *Server) refreshBrokerSpoke(mgr IntegrationManager, name string) {
+// plugin after its process has been restarted (e.g. UpdatePlugin, or the
+// plugin supervisor after a lost session). The old spoke wraps a dead RPC
+// connection; this swaps in a fresh one and replays the fan-out
+// subscriptions onto it, which is what starts a chat plugin's gateway or
+// polling again. A replay failure is returned (and logged at ERROR); the
+// spoke is replaced either way.
+func (s *Server) refreshBrokerSpoke(mgr IntegrationManager, name string) error {
 	proxy := s.GetMessageBrokerProxy()
 	if proxy == nil {
-		return
+		return nil
 	}
 	fanout, ok := proxy.bus.(*eventbus.FanOutEventBus)
 	if !ok {
-		return
+		return nil
 	}
 
 	newBus, err := mgr.GetBroker(name)
 	if err != nil {
 		slog.Error("Failed to get broker for spoke refresh", "plugin", name, "error", err)
-		return
+		return fmt.Errorf("get broker %q: %w", name, err)
 	}
 
 	var observer bool
@@ -1750,18 +1961,24 @@ func (s *Server) refreshBrokerSpoke(mgr IntegrationManager, name string) {
 		Observer:  observer,
 		ChannelID: channelID,
 	}
-	if err := fanout.ReplaceSpoke(name, spoke); err != nil {
+	err = fanout.ReplaceSpoke(name, spoke)
+	if errors.Is(err, eventbus.ErrSpokeNotFound) {
 		// No existing spoke — the plugin was activated after startup (e.g. it
 		// failed to load at boot and was configured via the admin UI). Add it.
 		if addErr := fanout.AddSpoke(spoke); addErr != nil {
-			slog.Error("Failed to replace or add broker spoke", "plugin", name,
+			slog.Error("Failed to add broker spoke", "plugin", name,
 				"replace_error", err, "add_error", addErr)
-		} else {
-			slog.Info("Added broker spoke for newly activated plugin", "plugin", name)
+			return fmt.Errorf("add spoke %q: %w", name, addErr)
 		}
-	} else {
-		slog.Info("Replaced broker spoke after plugin restart", "plugin", name)
+		slog.Info("Added broker spoke for newly activated plugin", "plugin", name)
+		return nil
 	}
+	if err != nil {
+		slog.Error("Broker spoke replaced, but replaying subscriptions failed", "plugin", name, "error", err)
+		return err
+	}
+	slog.Info("Replaced broker spoke after plugin restart", "plugin", name)
+	return nil
 }
 
 // requirePostgres is a feature gate for Mode 3 (HA) endpoints that require

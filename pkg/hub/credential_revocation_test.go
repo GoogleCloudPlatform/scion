@@ -30,56 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupCredentialTestServer creates a test server and required fixtures
-// (user, project, hub membership) for credential revocation tests.
-func setupCredentialTestServer(t *testing.T) (*Server, store.Store, *store.User, *store.Project) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	user := &store.User{
-		ID:          tid("user-cred-test"),
-		Email:       "credtest@test.com",
-		DisplayName: "Credential Tester",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, user.ID)
-
-	project := &store.Project{
-		ID:        tid("project-cred-test"),
-		Name:      "cred-test-project",
-		Slug:      "cred-test-project",
-		OwnerID:   user.ID,
-		CreatedBy: user.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
-
-	return srv, s, user, project
-}
-
-// createCredTestAgent creates a minimal agent in the store for testing.
-func createCredTestAgent(t *testing.T, s store.Store, agentID, projectID, ownerID string) *store.Agent {
-	t.Helper()
-	agent := &store.Agent{
-		ID:        agentID,
-		Name:      "test-agent-" + agentID[:8],
-		Slug:      "test-agent-" + agentID[:8],
-		ProjectID: projectID,
-		OwnerID:   ownerID,
-		Phase:     "running",
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	return agent
-}
-
 // TestNewlyIssuedTokensPersisted verifies that generating a token via the
 // service records a credential in the store.
 func TestNewlyIssuedTokensPersisted(t *testing.T) {
@@ -140,7 +90,7 @@ func TestRevokedTokenDeniedBeforeExpiry(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "revoked")
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // TestDeletedAgentTokenDenied verifies that tokens for deleted agents are denied.
@@ -174,7 +124,7 @@ func TestDeletedAgentTokenDenied(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "revoked")
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // TestSuspendedAgentTokenDenied verifies that tokens for suspended agents are denied.
@@ -201,7 +151,7 @@ func TestSuspendedAgentTokenDenied(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "revoked")
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // TestRefreshFromRevokedTokenFails verifies that refreshing a revoked token fails.
@@ -480,15 +430,14 @@ func TestHashJTI(t *testing.T) {
 	assert.Equal(t, 64, len(hash1), "SHA-256 hex should be 64 chars")
 }
 
-// TestCredentialRecorderNilSafe verifies that token generation works without
-// a credential recorder (nil-safe backward compatibility).
-func TestCredentialRecorderNilSafe(t *testing.T) {
+// TestServiceTokenWithoutStore verifies that the service signs tokens
+// without any credential store.
+func TestServiceTokenWithoutStore(t *testing.T) {
 	service, err := NewAgentTokenService(AgentTokenConfig{
 		SigningKey:    make([]byte, 32),
 		TokenDuration: time.Hour,
 	})
 	require.NoError(t, err)
-	// Do NOT set credential recorder
 
 	token, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
 	require.NoError(t, err)

@@ -27,6 +27,7 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeInstancesClient and friends are a purpose-built double for
@@ -37,9 +38,25 @@ import (
 type fakeInstanceOperation struct {
 	instance *runpb.Instance
 	waitErr  error
+	// name is the operation name Name reports.
+	name string
+	// blocks makes Wait block until its ctx ends, then return blockErr,
+	// or the ctx's error when blockErr is nil.
+	blocks   bool
+	blockErr error
 }
 
+// Name reports the operation name, as the Cloud Run client's operations do.
+func (o *fakeInstanceOperation) Name() string { return o.name }
+
 func (o *fakeInstanceOperation) Wait(ctx context.Context, opts ...gax.CallOption) (*runpb.Instance, error) {
+	if o.blocks {
+		<-ctx.Done()
+		if o.blockErr != nil {
+			return nil, o.blockErr
+		}
+		return nil, ctx.Err()
+	}
 	if o.waitErr != nil {
 		return nil, o.waitErr
 	}
@@ -64,6 +81,15 @@ func (it *fakeInstanceIterator) Next() (*runpb.Instance, error) {
 	return inst, nil
 }
 
+// fakeGetResult is one canned GetInstance result.
+type fakeGetResult struct {
+	inst *runpb.Instance
+	err  error
+}
+
+// fakeDeleteOpName is the name of every delete operation the fake returns.
+const fakeDeleteOpName = "projects/test-project/locations/us-central1/operations/delete-op-1"
+
 type fakeInstancesClient struct {
 	// Canned responses.
 	getInstance *runpb.Instance
@@ -75,6 +101,46 @@ type fakeInstancesClient struct {
 	waitErr     error // applied to whichever operation is returned
 	listResult  []*runpb.Instance
 	listErr     error
+
+	// Launch cleanup extensions (ptone/scion#4761).
+	// getSeq and deleteErrSeq are per-call results, consumed in order;
+	// once exhausted, getInstance/getErr and deleteErr apply.
+	getSeq       []fakeGetResult
+	deleteErrSeq []error
+	// createBlocks and deleteBlocks make the call block until its ctx
+	// ends and return the ctx's error.
+	createBlocks bool
+	deleteBlocks bool
+	// createWaitErr and deleteWaitErr, when set, replace waitErr for the
+	// create and the delete operation.
+	createWaitErr error
+	deleteWaitErr error
+	// deleteWaitBlocks makes the delete operation's Wait block until its
+	// ctx ends, then return deleteWaitBlockErr, or the ctx's error when
+	// that is nil (ptone/scion#5154).
+	deleteWaitBlocks   bool
+	deleteWaitBlockErr error
+	// onCreate, when set, runs at the start of CreateInstance.
+	onCreate func()
+	// reconcilingReads is the number of further GetInstance calls that
+	// report the instance Reconciling; while it is above 0 DeleteInstance
+	// is refused with FailedPrecondition.
+	reconcilingReads int
+	// createOpInstance and startOpInstance, when set, are the instance
+	// the create or start operation's Wait returns. Unset, the create's
+	// is the requested instance and the start's the read instance, each
+	// in the ready shape (fakeReadyInstance).
+	createOpInstance *runpb.Instance
+	startOpInstance  *runpb.Instance
+	// beforeGet, when set, runs at the start of every GetInstance with the
+	// call's 1-based index.
+	beforeGet func(n int)
+	// beforeStart, when set, runs at the start of every StartInstance with
+	// the call's 1-based index.
+	beforeStart func(n int)
+	// startErrSeq is per-call StartInstance errors, consumed in order (a
+	// nil entry lets that call succeed); once exhausted, startErr applies.
+	startErrSeq []error
 
 	// Recorded requests.
 	getReqs    []*runpb.GetInstanceRequest
@@ -88,26 +154,83 @@ type fakeInstancesClient struct {
 
 func (c *fakeInstancesClient) GetInstance(ctx context.Context, req *runpb.GetInstanceRequest, opts ...gax.CallOption) (*runpb.Instance, error) {
 	c.getReqs = append(c.getReqs, req)
-	if c.getErr != nil {
-		return nil, c.getErr
+	if c.beforeGet != nil {
+		c.beforeGet(len(c.getReqs))
 	}
-	return c.getInstance, nil
+	inst, err := c.getInstance, c.getErr
+	if len(c.getSeq) > 0 {
+		inst, err = c.getSeq[0].inst, c.getSeq[0].err
+		c.getSeq = c.getSeq[1:]
+	}
+	if err != nil {
+		return nil, err
+	}
+	if inst != nil && c.reconcilingReads > 0 {
+		c.reconcilingReads--
+		cp := proto.Clone(inst).(*runpb.Instance)
+		cp.Reconciling = true
+		return cp, nil
+	}
+	return inst, nil
 }
 
 func (c *fakeInstancesClient) CreateInstance(ctx context.Context, req *runpb.CreateInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.createReqs = append(c.createReqs, req)
+	if c.onCreate != nil {
+		c.onCreate()
+	}
+	if c.createBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if c.createErr != nil {
 		return nil, c.createErr
 	}
-	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
+	if c.createWaitErr != nil {
+		return &fakeInstanceOperation{waitErr: c.createWaitErr}, nil
+	}
+	inst := c.createOpInstance
+	if inst == nil {
+		inst = fakeReadyInstance(req.GetInstance(), req.GetParent()+"/instances/"+req.GetInstanceId(), 0)
+	}
+	return &fakeInstanceOperation{instance: inst, waitErr: c.waitErr}, nil
+}
+
+// fakeReadyInstance is a copy of base (nil for an empty one) named name,
+// in the ready shape a create or start operation returns: terminal
+// condition succeeded, not reconciling, observed generation equal to a
+// generation one above gen.
+func fakeReadyInstance(base *runpb.Instance, name string, gen int64) *runpb.Instance {
+	inst := &runpb.Instance{}
+	if base != nil {
+		inst = proto.Clone(base).(*runpb.Instance)
+	}
+	inst.Name = name
+	inst.Reconciling = false
+	inst.Generation = gen + 1
+	inst.ObservedGeneration = gen + 1
+	inst.TerminalCondition = &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_SUCCEEDED}
+	return inst
 }
 
 func (c *fakeInstancesClient) StartInstance(ctx context.Context, req *runpb.StartInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.startReqs = append(c.startReqs, req)
-	if c.startErr != nil {
-		return nil, c.startErr
+	if c.beforeStart != nil {
+		c.beforeStart(len(c.startReqs))
 	}
-	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
+	err := c.startErr
+	if len(c.startErrSeq) > 0 {
+		err = c.startErrSeq[0]
+		c.startErrSeq = c.startErrSeq[1:]
+	}
+	if err != nil {
+		return nil, err
+	}
+	inst := c.startOpInstance
+	if inst == nil {
+		inst = fakeReadyInstance(c.getInstance, req.GetName(), c.getInstance.GetGeneration())
+	}
+	return &fakeInstanceOperation{instance: inst, waitErr: c.waitErr}, nil
 }
 
 func (c *fakeInstancesClient) StopInstance(ctx context.Context, req *runpb.StopInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
@@ -120,10 +243,28 @@ func (c *fakeInstancesClient) StopInstance(ctx context.Context, req *runpb.StopI
 
 func (c *fakeInstancesClient) DeleteInstance(ctx context.Context, req *runpb.DeleteInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.deleteReqs = append(c.deleteReqs, req)
-	if c.deleteErr != nil {
-		return nil, c.deleteErr
+	if c.deleteBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
-	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
+	if c.reconcilingReads > 0 {
+		return nil, status.Error(codes.FailedPrecondition, "instance is reconciling")
+	}
+	err := c.deleteErr
+	if len(c.deleteErrSeq) > 0 {
+		err = c.deleteErrSeq[0]
+		c.deleteErrSeq = c.deleteErrSeq[1:]
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.deleteWaitBlocks {
+		return &fakeInstanceOperation{name: fakeDeleteOpName, blocks: true, blockErr: c.deleteWaitBlockErr}, nil
+	}
+	if c.deleteWaitErr != nil {
+		return &fakeInstanceOperation{name: fakeDeleteOpName, waitErr: c.deleteWaitErr}, nil
+	}
+	return &fakeInstanceOperation{name: fakeDeleteOpName, waitErr: c.waitErr}, nil
 }
 
 func (c *fakeInstancesClient) ListInstances(ctx context.Context, req *runpb.ListInstancesRequest, opts ...gax.CallOption) cloudrun.InstanceIterator {
@@ -149,16 +290,31 @@ func newFakeCloudRunRuntime(t *testing.T, fake *fakeInstancesClient) *CloudRunRu
 	rt.newClient = func(ctx context.Context) (cloudrun.InstancesAPI, error) {
 		return fake, nil
 	}
+	rt.provisionNFS = stubCloudRunNFSProvision
 	return rt
 }
 
-// runConfigForTest returns a RunConfig that does not exercise NFS provisioning,
-// so Run reaches the Instances API without touching the filesystem.
+// stubCloudRunNFSProvision stands in for provisionCloudRunNFS: it returns
+// fixed NFS export paths without touching the filesystem, so Run reaches
+// the Instances API on the NFS backend.
+func stubCloudRunNFSProvision(context.Context, RunConfig, string, int, int) (*cloudRunNFSProvisionPaths, error) {
+	return &cloudRunNFSProvisionPaths{
+		server:              "10.0.0.2",
+		workspaceExportPath: "/ws/projects/proj/workspace",
+		homeExportPath:      "/ws/projects/proj/agents/agent-1/home",
+		secretsExportPath:   "/ws/projects/proj/agents/agent-1/staged",
+	}, nil
+}
+
+// runConfigForTest returns a RunConfig on the NFS backend, the only one Run
+// accepts. With newFakeCloudRunRuntime's provisioning stub, Run reaches the
+// Instances API without touching the filesystem.
 func runConfigForTest() RunConfig {
 	return RunConfig{
-		Name:   "test-agent",
-		Image:  "docker.io/scion/agent:latest",
-		Labels: map[string]string{"agent_id": "agent-1"},
+		Name:                 "test-agent",
+		Image:                "docker.io/scion/agent:latest",
+		Labels:               map[string]string{"agent_id": "agent-1"},
+		WorkspaceBackendName: "nfs",
 	}
 }
 
@@ -223,11 +379,73 @@ func TestCloudRunRun_CreatesInstanceWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestCloudRunRun_NoSystemAnnotations checks that the built Instance carries
+// no run.googleapis.com/ annotation. The Instances API rejects system
+// annotations (including run.googleapis.com/restart-policy) with
+// INVALID_ARGUMENT, so any such key makes every create fail.
+func TestCloudRunRun_NoSystemAnnotations(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	_, err := rt.Run(context.Background(), runConfigForTest())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	inst := fake.createReqs[0].Instance
+	if inst == nil {
+		t.Fatal("CreateInstance Instance is nil")
+	}
+	for k, v := range inst.Annotations {
+		if strings.HasPrefix(k, "run.googleapis.com/") {
+			t.Errorf("Instance.Annotations has system annotation %q=%q; the Instances API rejects run.googleapis.com/ annotations", k, v)
+		}
+	}
+}
+
+func TestCloudRunRun_HubEndpointEnvPassthrough(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	cfg := runConfigForTest()
+	cfg.Env = []string{
+		"SCION_HUB_ENDPOINT=https://hub.example.com",
+		"SCION_HUB_URL=https://hub.example.com",
+	}
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	container := fake.createReqs[0].Instance.Containers[0]
+	foundEndpoint := false
+	for _, ev := range container.Env {
+		if ev.Name == "SCION_HUB_ENDPOINT" {
+			val := ev.GetValues().(*runpb.EnvVar_Value).Value
+			if val != "https://hub.example.com" {
+				t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", val, "https://hub.example.com")
+			}
+			foundEndpoint = true
+		}
+	}
+	if !foundEndpoint {
+		t.Error("SCION_HUB_ENDPOINT env var not found in container")
+	}
+}
+
 func TestCloudRunRun_StartsExistingInstance(t *testing.T) {
 	wantID := cloudRunInstanceID("agent-1")
 	wantName := "projects/test-project/locations/us-central1/instances/" + wantID
-	fake := &fakeInstancesClient{getInstance: &runpb.Instance{Name: wantName}}
+	fake := &fakeInstancesClient{}
 	rt := newFakeCloudRunRuntime(t, fake)
+	fake.getInstance = computedCloudRunInstance(t, rt, runConfigForTest())
 
 	id, err := rt.Run(context.Background(), runConfigForTest())
 	if err != nil {
@@ -237,7 +455,8 @@ func TestCloudRunRun_StartsExistingInstance(t *testing.T) {
 		t.Errorf("Run returned id %q, want %q", id, wantID)
 	}
 
-	// An existing instance is started, never re-created.
+	// An existing instance that matches the computed spec is started,
+	// never re-created.
 	if len(fake.startReqs) != 1 {
 		t.Fatalf("StartInstance called %d times, want 1", len(fake.startReqs))
 	}
@@ -254,6 +473,8 @@ func TestCloudRunRun_ErrorPaths(t *testing.T) {
 		name    string
 		fake    *fakeInstancesClient
 		wantErr string
+		// existing sets an existing instance with the computed spec.
+		existing bool
 		// assertions on what must NOT have happened
 		wantNoCreate bool
 		wantNoStart  bool
@@ -279,13 +500,15 @@ func TestCloudRunRun_ErrorPaths(t *testing.T) {
 		},
 		{
 			name:         "start call fails",
-			fake:         &fakeInstancesClient{getInstance: &runpb.Instance{}, startErr: errors.New("boom")},
+			fake:         &fakeInstancesClient{startErr: errors.New("boom")},
+			existing:     true,
 			wantErr:      "failed to start existing instance",
 			wantNoCreate: true,
 		},
 		{
 			name:         "start operation wait fails",
-			fake:         &fakeInstancesClient{getInstance: &runpb.Instance{}, waitErr: errors.New("lro failed")},
+			fake:         &fakeInstancesClient{waitErr: errors.New("lro failed")},
+			existing:     true,
 			wantErr:      "wait for start operation failed",
 			wantNoCreate: true,
 		},
@@ -294,6 +517,9 @@ func TestCloudRunRun_ErrorPaths(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := newFakeCloudRunRuntime(t, tc.fake)
+			if tc.existing {
+				tc.fake.getInstance = computedCloudRunInstance(t, rt, runConfigForTest())
+			}
 			id, err := rt.Run(context.Background(), runConfigForTest())
 			if err == nil {
 				t.Fatalf("Run returned id %q, want error", id)
@@ -328,7 +554,7 @@ func TestCloudRunTeardown_SendsQualifiedName(t *testing.T) {
 	}{
 		{
 			name: "Stop",
-			call: func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), id) },
+			call: func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), RunRef{ID: id}) },
 			reqName: func(f *fakeInstancesClient) (string, int) {
 				if len(f.stopReqs) == 0 {
 					return "", 0
@@ -338,7 +564,7 @@ func TestCloudRunTeardown_SendsQualifiedName(t *testing.T) {
 		},
 		{
 			name: "Delete",
-			call: func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), id) },
+			call: func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), RunRef{ID: id}) },
 			reqName: func(f *fakeInstancesClient) (string, int) {
 				if len(f.deleteReqs) == 0 {
 					return "", 0
@@ -374,8 +600,8 @@ func TestCloudRunTeardown_SendsQualifiedName(t *testing.T) {
 // TestCloudRunTeardown_ErrorPaths covers Stop and Delete failing at both the
 // call layer and the long-running-operation wait layer.
 func TestCloudRunTeardown_ErrorPaths(t *testing.T) {
-	stop := func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), "agent-x") }
-	del := func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), "agent-x") }
+	stop := func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), RunRef{ID: "agent-x"}) }
+	del := func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), RunRef{ID: "agent-x"}) }
 
 	tests := []struct {
 		name    string
@@ -407,21 +633,22 @@ func TestCloudRunTeardown_ErrorPaths(t *testing.T) {
 func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 	const wanted = "projects/test-project/locations/us-central1/instances/agent-wanted-0000000000"
 
-	// The "scion.name" key here is the label the runtime emits today
-	// (pkg/agent/run.go). It is a fixture, not a contract: if label-key
-	// sanitization is introduced for GCP resource labels, these fixtures and
-	// the filter key below need updating to the sanitized form.
+	// Label keys stored in Cloud Run are sanitized by buildCloudRunInstance
+	// (dots/slashes → underscores via sanitizeGCPLabelKey). The fixtures
+	// below use the sanitized form ("scion_name") to match what the runtime
+	// actually stores. The filter key passed to List uses the original form
+	// ("scion.name") because List sanitizes it before lookup.
 	newFake := func() *fakeInstancesClient {
 		return &fakeInstancesClient{
 			listResult: []*runpb.Instance{
 				{
 					Name:              wanted,
-					Labels:            map[string]string{"scion.name": "wanted", "agent_id": "agent-1"},
+					Labels:            map[string]string{"scion_name": "wanted", "agent_id": "agent-1"},
 					TerminalCondition: &runpb.Condition{State: runpb.Condition_CONDITION_SUCCEEDED},
 				},
 				{
 					Name:   "projects/test-project/locations/us-central1/instances/agent-other-1111111111",
-					Labels: map[string]string{"scion.name": "other", "agent_id": "agent-2"},
+					Labels: map[string]string{"scion_name": "other", "agent_id": "agent-2"},
 				},
 			},
 		}
@@ -431,7 +658,7 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		fake := newFake()
 		rt := newFakeCloudRunRuntime(t, fake)
 
-		agents, err := rt.List(context.Background(), map[string]string{"scion.name": "wanted"})
+		agents, err := rt.List(context.Background(), map[string]string{"scion_name": "wanted"})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -453,13 +680,13 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		if a.ContainerID != "agent-wanted-0000000000" {
 			t.Errorf("AgentInfo.ContainerID = %q, want the short instance ID", a.ContainerID)
 		}
-		// Characterization, not a normalization contract: List currently
-		// surfaces the raw Cloud Run condition string. A future status/Phase
-		// mapping fix is expected to change this assertion.
+		// List keeps the raw Cloud Run condition string as the container
+		// status; the phase mapping is covered by
+		// TestCloudRunList_MapsInstanceConditionToPhase.
 		if a.ContainerStatus != runpb.Condition_CONDITION_SUCCEEDED.String() {
 			t.Errorf("AgentInfo.ContainerStatus = %q, want %q", a.ContainerStatus, runpb.Condition_CONDITION_SUCCEEDED.String())
 		}
-		if a.Labels["scion.name"] != "wanted" {
+		if a.Labels["scion_name"] != "wanted" {
 			t.Errorf("AgentInfo.Labels = %v, want the instance labels", a.Labels)
 		}
 		if fake.closeCount != 1 {
@@ -539,7 +766,7 @@ func TestCloudRunLifecycle_RunListStopDelete(t *testing.T) {
 	// Stop and Delete accept that ContainerID and address the same instance.
 	stopFake := &fakeInstancesClient{}
 	rt.newClient = func(ctx context.Context) (cloudrun.InstancesAPI, error) { return stopFake, nil }
-	if err := rt.Stop(ctx, containerID); err != nil {
+	if err := rt.Stop(ctx, RunRef{ID: containerID}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if got := stopFake.stopReqs[0].Name; got != instanceName {
@@ -548,7 +775,7 @@ func TestCloudRunLifecycle_RunListStopDelete(t *testing.T) {
 
 	deleteFake := &fakeInstancesClient{}
 	rt.newClient = func(ctx context.Context) (cloudrun.InstancesAPI, error) { return deleteFake, nil }
-	if err := rt.Delete(ctx, containerID); err != nil {
+	if err := rt.Delete(ctx, RunRef{ID: containerID}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if got := deleteFake.deleteReqs[0].Name; got != instanceName {
@@ -567,10 +794,10 @@ func TestCloudRunRuntime_ClientFactoryError(t *testing.T) {
 	if _, err := rt.Run(context.Background(), runConfigForTest()); err == nil || !strings.Contains(err.Error(), "failed to create client") {
 		t.Errorf("Run error = %v, want 'failed to create client'", err)
 	}
-	if err := rt.Stop(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "failed to create client") {
+	if err := rt.Stop(context.Background(), RunRef{ID: "x"}); err == nil || !strings.Contains(err.Error(), "failed to create client") {
 		t.Errorf("Stop error = %v, want 'failed to create client'", err)
 	}
-	if err := rt.Delete(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "failed to create client") {
+	if err := rt.Delete(context.Background(), RunRef{ID: "x"}); err == nil || !strings.Contains(err.Error(), "failed to create client") {
 		t.Errorf("Delete error = %v, want 'failed to create client'", err)
 	}
 	if _, err := rt.List(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "failed to create client") {

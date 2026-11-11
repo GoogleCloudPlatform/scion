@@ -505,7 +505,7 @@ func TestGitHubAppRouteMethodMatrix(t *testing.T) {
 			admin := NewAuthenticatedUser(tid("admin-ga"), "admin-ga@test.com", "Admin", "admin", "api")
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			req.Header.Set("Content-Type", "application/json")
-			req = req.WithContext(contextWithIdentity(ctx, admin))
+			req = req.WithContext(contextWithCredentialContext(contextWithIdentity(ctx, admin), CredentialContext{Kind: CredentialKindInteractive}))
 			rr := httptest.NewRecorder()
 			srv.mux.ServeHTTP(rr, req)
 
@@ -518,7 +518,7 @@ func TestGitHubAppRouteMethodMatrix(t *testing.T) {
 			member := NewAuthenticatedUser(tid("member-ga"), "member-ga@test.com", "Member", "member", "api")
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			req.Header.Set("Content-Type", "application/json")
-			req = req.WithContext(contextWithIdentity(ctx, member))
+			req = req.WithContext(contextWithCredentialContext(contextWithIdentity(ctx, member), CredentialContext{Kind: CredentialKindInteractive}))
 			rr := httptest.NewRecorder()
 			srv.mux.ServeHTTP(rr, req)
 

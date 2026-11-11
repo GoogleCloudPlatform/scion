@@ -27,24 +27,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
-
-func newTestServerWithStore(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create sqlite store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-	srv := &Server{
-		store:          s,
-		maintenanceLog: logging.Subsystem("hub.maintenance"),
-	}
-	return srv, s
-}
 
 func TestListMaintenanceOperations(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)
@@ -95,8 +79,8 @@ func TestExecuteMigration_NotFound(t *testing.T) {
 func TestExecuteMigration_AlreadyCompleted(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
 
-	// Mark the migration as completed.
-	op, err := s.GetMaintenanceOperation(context.Background(), "secret-hub-id-migration")
+	// Mark a migration that is not re-runnable as completed.
+	op, err := s.GetMaintenanceOperation(context.Background(), "applied-config-env-cleanup")
 	if err != nil {
 		t.Fatalf("failed to get operation: %v", err)
 	}
@@ -108,13 +92,48 @@ func TestExecuteMigration_AlreadyCompleted(t *testing.T) {
 	}
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/secret-hub-id-migration/run", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/applied-config-env-cleanup/run", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminMaintenanceMigrations(rr, req)
 
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// The 409 body must not point an operator at a CLI flag that does not
+	// exist -- there is no command in cmd/ that re-runs a completed
+	// migration through this endpoint.
+	if body := rr.Body.String(); strings.Contains(body, "--force") || strings.Contains(body, "CLI") {
+		t.Errorf("409 body must not reference a nonexistent CLI flag, got: %s", body)
+	}
+}
+
+// TestExecuteMigration_SecretMigrationRunsAgainAfterCompleted checks that a
+// completed secret migration does not block another run: a run made before
+// values were decoded and verified must not count as final. The run gets
+// past the completed check and stops only for the missing secret backend.
+func TestExecuteMigration_SecretMigrationRunsAgainAfterCompleted(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+
+	op, err := s.GetMaintenanceOperation(context.Background(), entadapter.SecretHubIDMigrationKey)
+	if err != nil {
+		t.Fatalf("failed to get operation: %v", err)
+	}
+	now := time.Now()
+	op.Status = store.MaintenanceStatusCompleted
+	op.CompletedAt = &now
+	if err := s.UpdateMaintenanceOperation(context.Background(), op); err != nil {
+		t.Fatalf("failed to update operation: %v", err)
+	}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+entadapter.SecretHubIDMigrationKey+"/run", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceMigrations(rr, req)
+
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "no secret backend configured") {
+		t.Fatalf("expected the run to pass the completed check and stop for the missing backend (400), got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -531,6 +550,135 @@ func TestParseMigrationParams(t *testing.T) {
 	}
 }
 
+// TestParseMigrationRunRequest pins the dryRun forms the migration run
+// endpoint accepts (ptone/scion#1976). Before, anything but a boolean under
+// "params" was dropped and a real run started; every form a caller is likely
+// to send is now honored, and an unreadable one is an error (400), never a
+// silent real run.
+func TestParseMigrationRunRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		query   string
+		body    string
+		wantDry bool
+		wantErr bool
+	}{
+		{name: "no body", body: ""},
+		{name: "empty object", body: `{}`},
+		{name: "params bool true", body: `{"params":{"dryRun":true}}`, wantDry: true},
+		{name: "params bool false", body: `{"params":{"dryRun":false}}`},
+		{name: "params string true", body: `{"params":{"dryRun":"true"}}`, wantDry: true},
+		{name: "top-level bool true", body: `{"dryRun":true}`, wantDry: true},
+		{name: "top-level string false", body: `{"dryRun":"false"}`},
+		{name: "query true", query: "?dryRun=true", wantDry: true},
+		{name: "query 1 with empty body", query: "?dryRun=1", body: `{}`, wantDry: true},
+		{name: "any true source wins", query: "?dryRun=false", body: `{"params":{"dryRun":true}}`, wantDry: true},
+		{name: "unreadable params value", body: `{"params":{"dryRun":"maybe"}}`, wantErr: true},
+		{name: "unreadable top-level value", body: `{"dryRun":1}`, wantErr: true},
+		{name: "unreadable query value", query: "?dryRun=please", wantErr: true},
+		{name: "params not an object", body: `{"params":"dryRun"}`, wantErr: true},
+		{name: "malformed JSON", body: `{"params":`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost,
+				"/api/v1/admin/maintenance/migrations/x/run"+tt.query, strings.NewReader(tt.body))
+			params, err := parseMigrationRunRequest(req)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got params %v", params)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := params["dryRun"] == "true"; got != tt.wantDry {
+				t.Errorf("dryRun = %v, want %v (params %v)", got, tt.wantDry, params)
+			}
+		})
+	}
+}
+
+// TestExecuteMigration_TopLevelDryRunIsHonored is the end-to-end form of the
+// ptone/scion#1976 bug: POSTing {"dryRun": true} to the migration run
+// endpoint used to start a REAL applied-config-env-cleanup run and strip the
+// key. It must now be a dry run (record left pending, row untouched), and an
+// unreadable dryRun must be rejected with 400 without starting anything.
+func TestExecuteMigration_TopLevelDryRunIsHonored(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	ctx := context.Background()
+	const key = "applied-config-env-cleanup"
+
+	project := &store.Project{ID: tid("project-mig-dryrun"), Name: "Mig DryRun Project", Slug: "mig-dryrun-project"}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	agent := &store.Agent{
+		ID:        tid("agent-mig-dryrun"),
+		Slug:      "agent-mig-dryrun",
+		Name:      "Mig DryRun Agent",
+		ProjectID: project.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			Env: map[string]string{"GITHUB_TOKEN": "gh-token-value"},
+		},
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	post := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+key+"/run", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminMaintenanceMigrations(rr, req)
+		return rr
+	}
+
+	// Unreadable dryRun: 400, and the migration is not started.
+	if rr := post(`{"dryRun":"maybe"}`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unreadable dryRun, got %d: %s", rr.Code, rr.Body.String())
+	}
+	op, err := s.GetMaintenanceOperation(ctx, key)
+	if err != nil {
+		t.Fatalf("failed to get operation: %v", err)
+	}
+	if op.Status != store.MaintenanceStatusPending || op.StartedAt != nil {
+		t.Fatalf("a rejected request must not start the migration; status=%s startedAt=%v", op.Status, op.StartedAt)
+	}
+
+	if rr := post(`{"dryRun":true}`); rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		op, err = s.GetMaintenanceOperation(ctx, key)
+		if err == nil && op.Status != store.MaintenanceStatusRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("migration did not finish; last status %v, err %v", op, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if op.Status != store.MaintenanceStatusPending {
+		t.Errorf("a dry run must leave the migration pending, got %s (result %s)", op.Status, op.Result)
+	}
+	if !strings.Contains(op.Result, `"dryRun":true`) {
+		t.Errorf("result must record the dry run, got %s", op.Result)
+	}
+	reloaded, err := s.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("failed to reload agent: %v", err)
+	}
+	if _, ok := reloaded.AppliedConfig.Env["GITHUB_TOKEN"]; !ok {
+		t.Error("a dry run must not modify the stored row, but GITHUB_TOKEN was removed")
+	}
+}
+
 func TestCheckForUpdates_NoRepoPath(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)
 	// No RepoPath configured — should return 400.
@@ -544,6 +692,12 @@ func TestCheckForUpdates_NoRepoPath(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// The error names the real knobs; there is no maintenance.repo_path key.
+	body := rr.Body.String()
+	if !strings.Contains(body, "SCION_MAINTENANCE_REPO_PATH") || !strings.Contains(body, "workspace_path") ||
+		strings.Contains(body, "maintenance.repo_path") {
+		t.Errorf("error text = %s", body)
 	}
 }
 
@@ -682,5 +836,52 @@ func TestListMaintenanceOperations_ShowsContainerBinariesWhenEnvSet(t *testing.T
 	}
 	if !found {
 		t.Error("rebuild-container-binaries should be visible when SCION_DEV_BINARIES is set")
+	}
+}
+
+// An invalid branch parameter on rebuild-server or rebuild-web is refused
+// with 400 and the allowed form, before any run is created. That includes a
+// key the parameter parser would trim to "branch", and a second such key. A
+// padded key with a valid value passes the branch check and is refused by
+// the raw-key allow-list as an unknown parameter.
+func TestExecuteOperation_InvalidBranchRejected(t *testing.T) {
+	cases := []struct {
+		name, body string
+		wants      []string
+	}{
+		{"invalid", `{"params":{"branch":"--upload-pack=x"}}`, []string{"invalid branch name", "start with a letter or digit"}},
+		{"padded key", `{"params":{" branch":"x+y"}}`, []string{"invalid branch name", "start with a letter or digit"}},
+		{"repeated key", `{"params":{"branch":"main","branch ":"x+y"}}`, []string{"branch is given more than once", "start with a letter or digit"}},
+		{"padded key, valid value", `{"params":{" branch ":"main"}}`, []string{"unknown_param", "unknown parameter(s):  branch  (allowed: branch)"}},
+	}
+	for _, key := range []string{"rebuild-server", "rebuild-web"} {
+		for _, tc := range cases {
+			t.Run(key+" "+tc.name, func(t *testing.T) {
+				srv, s := newTestServerWithStore(t)
+				admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/"+key+"/run",
+					strings.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+				req = req.WithContext(contextWithIdentity(req.Context(), admin))
+				rr := httptest.NewRecorder()
+				srv.handleAdminMaintenanceOps(rr, req)
+
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+				}
+				for _, want := range tc.wants {
+					if !strings.Contains(rr.Body.String(), want) {
+						t.Errorf("expected %q in the body, got %s", want, rr.Body.String())
+					}
+				}
+				runs, err := s.ListMaintenanceRuns(context.Background(), key, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(runs) != 0 {
+					t.Errorf("a rejected request must not create a run, got %d", len(runs))
+				}
+			})
+		}
 	}
 }

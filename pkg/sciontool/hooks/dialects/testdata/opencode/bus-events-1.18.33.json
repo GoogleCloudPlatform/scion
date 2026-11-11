@@ -1,0 +1,4398 @@
+[
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15de6c001xpXu6U37t2pLzB",
+      "properties": {
+        "info": {
+          "cost": 0,
+          "directory": "/workspace/project",
+          "id": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "path": "",
+          "projectID": "<project-id>",
+          "slug": "playful-garden",
+          "time": {
+            "created": 1790684028523,
+            "updated": 1790684028523
+          },
+          "title": "New session - 2026-09-29T12:13:48.523Z",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          },
+          "version": "1.18.33"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "session.created"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15deb2001IUR6Q8McVOY3bv",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "created": 1790684028583
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e1f7001Yzg1bXeuFAsXLS",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15deb0001FygKSMeAI314aE",
+          "messageID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "text": "Look at the repo and tell me if it looks fine.",
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684029431
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e205001ZiQLxWgpSUcXVn",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e20b0014h8Bg2XsPAXV1X",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "id": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "created": 1790684029450
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e2ac0015azErKU0hcj5Sh",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790684028583
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e54d001OZTW55ZeBhMDds",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e561001SVuBwr3SOw689y",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e561001xU4LfiUDDODEWa",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030305
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e565001gdouXDLO3u7zCL",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e564001BPayIAcIFhV0n3",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "text": "",
+          "time": {
+            "start": 1790684030308
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030309
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e5670019iqmPhHtP88DDE",
+      "properties": {
+        "delta": "Checking",
+        "field": "text",
+        "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+        "partID": "prt_0ed15e564001BPayIAcIFhV0n3",
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.part.delta"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e568001h8smL4tx8pfZYm",
+      "properties": {
+        "delta": " the",
+        "field": "text",
+        "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+        "partID": "prt_0ed15e564001BPayIAcIFhV0n3",
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.part.delta"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e56900275Ys36ZKNKamdg",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed15e569001m6DMsJBigTqswf",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {},
+            "raw": "",
+            "status": "pending"
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030313
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "tool.execute.before",
+    "payload": {
+      "input": {
+        "callID": "call_1",
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "tool": "bash"
+      },
+      "output": {
+        "args": {
+          "command": "ls -la"
+        }
+      }
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e576001WYpJVhvW3FbImM",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed15e569001m6DMsJBigTqswf",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {
+              "command": "ls -la"
+            },
+            "status": "running",
+            "time": {
+              "start": 1790684030325
+            }
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030326
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e57f001P8oWV6rs4EI9pA",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e564001BPayIAcIFhV0n3",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "text": "Checking the repo layout.",
+          "time": {
+            "end": 1790684030335,
+            "start": 1790684030308
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030335
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e5be001n50wp6Ol07HXPE",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed15e569001m6DMsJBigTqswf",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {
+              "command": "ls -la"
+            },
+            "metadata": {
+              "output": ""
+            },
+            "status": "running",
+            "time": {
+              "start": 1790684030325
+            }
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030398
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e5cf0015bagnBDA6ISBxi",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed15e569001m6DMsJBigTqswf",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {
+              "command": "ls -la"
+            },
+            "metadata": {
+              "output": "total 16\ndrwxr-xr-x 3 scion scion 4096 Sep 29 12:10 .\ndrwxr-xr-x 5 scion scion 4096 Sep 29 12:13 ..\ndrwxr-xr-x 7 scion scion 4096 Sep 29 12:11 .git\n-rw-r--r-- 1 scion scion   12 Sep 29 12:10 README.md\n"
+            },
+            "status": "running",
+            "time": {
+              "start": 1790684030325
+            }
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030415
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "tool.execute.after",
+    "payload": {
+      "input": {
+        "args": {
+          "command": "ls -la"
+        },
+        "callID": "call_1",
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "tool": "bash"
+      },
+      "output": {
+        "metadata": {
+          "exit": 0,
+          "output": "total 16\ndrwxr-xr-x 3 scion scion 4096 Sep 29 12:10 .\ndrwxr-xr-x 5 scion scion 4096 Sep 29 12:13 ..\ndrwxr-xr-x 7 scion scion 4096 Sep 29 12:11 .git\n-rw-r--r-- 1 scion scion   12 Sep 29 12:10 README.md\n",
+          "truncated": false
+        },
+        "output": "total 16\ndrwxr-xr-x 3 scion scion 4096 Sep 29 12:10 .\ndrwxr-xr-x 5 scion scion 4096 Sep 29 12:13 ..\ndrwxr-xr-x 7 scion scion 4096 Sep 29 12:11 .git\n-rw-r--r-- 1 scion scion   12 Sep 29 12:10 README.md\n",
+        "title": "ls -la"
+      }
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e5d9001qlCAI2TQUvPmYa",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed15e569001m6DMsJBigTqswf",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {
+              "command": "ls -la"
+            },
+            "metadata": {
+              "exit": 0,
+              "output": "total 16\ndrwxr-xr-x 3 scion scion 4096 Sep 29 12:10 .\ndrwxr-xr-x 5 scion scion 4096 Sep 29 12:13 ..\ndrwxr-xr-x 7 scion scion 4096 Sep 29 12:11 .git\n-rw-r--r-- 1 scion scion   12 Sep 29 12:10 README.md\n",
+              "truncated": false
+            },
+            "output": "total 16\ndrwxr-xr-x 3 scion scion 4096 Sep 29 12:10 .\ndrwxr-xr-x 5 scion scion 4096 Sep 29 12:13 ..\ndrwxr-xr-x 7 scion scion 4096 Sep 29 12:11 .git\n-rw-r--r-- 1 scion scion   12 Sep 29 12:10 README.md\n",
+            "status": "completed",
+            "time": {
+              "end": 1790684030425,
+              "start": 1790684030325
+            },
+            "title": "ls -la"
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030425
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e5fb001w0xZdQ9RkFKQXR",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed15e5fb001F6NXJkFafd3D2V",
+          "messageID": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "reason": "tool-calls",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030459
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e600001OpHyqYFtXuN2e2",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "created": 1790684029450
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e61f001Q2xUXI3obfi7hB",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed15e20a001ZiDh0gkmLAZS4V",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "completed": 1790684030495,
+            "created": 1790684029450
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e622001n8caSrR116VvSm",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e624001vM7NojHUT9xJR2",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "id": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "created": 1790684030500
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e65a001VQbx84UqpnGYyu",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e66c001gZFqhUDCEImWP4",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790684028583
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e671001Bx40hrPzbawtY3",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e670001Qt1IhN4kLQtF6h",
+          "messageID": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030577
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e674001ynEKXd13fVf0RM",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e673001YOP0kYUCe1S1pY",
+          "messageID": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "text": "",
+          "time": {
+            "start": 1790684030579
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030579
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e678001jPJAR4CVWQupVG",
+      "properties": {
+        "part": {
+          "callID": "call_2",
+          "id": "prt_0ed15e678001XeiLJQtP2HxBsF",
+          "messageID": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {},
+            "raw": "",
+            "status": "pending"
+          },
+          "tool": "read",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030584
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "tool.execute.before",
+    "payload": {
+      "input": {
+        "callID": "call_2",
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "tool": "read"
+      },
+      "output": {
+        "args": {
+          "filePath": "/workspace/project/README.md"
+        }
+      }
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e67f001SCiRkIb95L74Qg",
+      "properties": {
+        "part": {
+          "callID": "call_2",
+          "id": "prt_0ed15e678001XeiLJQtP2HxBsF",
+          "messageID": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {
+              "filePath": "/workspace/project/README.md"
+            },
+            "status": "running",
+            "time": {
+              "start": 1790684030590
+            }
+          },
+          "tool": "read",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030591
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e681001kREwGBSs7bGiov",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e673001YOP0kYUCe1S1pY",
+          "messageID": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "text": "Reading the target file.",
+          "time": {
+            "end": 1790684030593,
+            "start": 1790684030579
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030593
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "tool.execute.after",
+    "payload": {
+      "input": {
+        "args": {
+          "filePath": "/workspace/project/README.md"
+        },
+        "callID": "call_2",
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "tool": "read"
+      },
+      "output": {
+        "metadata": {
+          "display": {
+            "lineEnd": 1,
+            "lineStart": 1,
+            "path": "/workspace/project/README.md",
+            "text": "# Test repo",
+            "totalLines": 1,
+            "truncated": false,
+            "type": "file"
+          },
+          "loaded": [],
+          "preview": "# Test repo",
+          "truncated": false
+        },
+        "output": "<path>/workspace/project/README.md</path>\n<type>file</type>\n<content>\n1: # Test repo\n\n(End of file - total 1 lines)\n</content>",
+        "title": "README.md"
+      }
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e6a3001uABqIG1B6dnj6u",
+      "properties": {
+        "part": {
+          "callID": "call_2",
+          "id": "prt_0ed15e678001XeiLJQtP2HxBsF",
+          "messageID": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "state": {
+            "input": {
+              "filePath": "/workspace/project/README.md"
+            },
+            "metadata": {
+              "display": {
+                "lineEnd": 1,
+                "lineStart": 1,
+                "path": "/workspace/project/README.md",
+                "text": "# Test repo",
+                "totalLines": 1,
+                "truncated": false,
+                "type": "file"
+              },
+              "loaded": [],
+              "preview": "# Test repo",
+              "truncated": false
+            },
+            "output": "<path>/workspace/project/README.md</path>\n<type>file</type>\n<content>\n1: # Test repo\n\n(End of file - total 1 lines)\n</content>",
+            "status": "completed",
+            "time": {
+              "end": 1790684030627,
+              "start": 1790684030590
+            },
+            "title": "README.md"
+          },
+          "tool": "read",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030627
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e6c40015ssbVnbhE3vyAy",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed15e6c3001ZnFqm7kaAN0c44",
+          "messageID": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "reason": "tool-calls",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 384,
+              "write": 0
+            },
+            "input": 516,
+            "output": 25,
+            "reasoning": 0,
+            "total": 925
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030660
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e6c6001ntg6Ox0js5UtVZ",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "created": 1790684030500
+          },
+          "tokens": {
+            "cache": {
+              "read": 384,
+              "write": 0
+            },
+            "input": 516,
+            "output": 25,
+            "reasoning": 0,
+            "total": 925
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e6da001FES6P5tuOqvwNU",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed15e624001y8N9mEfdzmYDup",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "completed": 1790684030682,
+            "created": 1790684030500
+          },
+          "tokens": {
+            "cache": {
+              "read": 384,
+              "write": 0
+            },
+            "input": 516,
+            "output": 25,
+            "reasoning": 0,
+            "total": 925
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e6dd001N0wMWDQh5QNvq4",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e6df001xVLxxIP4gWaFeI",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "id": "msg_0ed15e6de001MsFbxaUX1SCqNq",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "created": 1790684030686
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e716001hoR53IG7KpVikN",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e71f001e6RN57fMp1Jx9X",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e71f001abmIanvLxUwTrN",
+          "messageID": "msg_0ed15e6de001MsFbxaUX1SCqNq",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030751
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e722001wtre8FNOgtfd7N",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e722001rPQ759ts4dV1Xn",
+          "messageID": "msg_0ed15e6de001MsFbxaUX1SCqNq",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "text": "",
+          "time": {
+            "start": 1790684030754
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030754
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e728001OphvOHnWJ8Z1AR",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e722001rPQ759ts4dV1Xn",
+          "messageID": "msg_0ed15e6de001MsFbxaUX1SCqNq",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "text": "The repo looks fine.",
+          "time": {
+            "end": 1790684030760,
+            "start": 1790684030754
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030760
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e72b001LEAgq4UxcZdSdc",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790684028583
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e749001a4i1gd6x4T8bD8",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed15e749001AZdih4qJdXsgwE",
+          "messageID": "msg_0ed15e6de001MsFbxaUX1SCqNq",
+          "reason": "stop",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 1152,
+              "write": 0
+            },
+            "input": 148,
+            "output": 18,
+            "reasoning": 0,
+            "total": 1318
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "time": 1790684030793
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e74b001jSx4Nj4PF8b1Bb",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "stop",
+          "id": "msg_0ed15e6de001MsFbxaUX1SCqNq",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "created": 1790684030686
+          },
+          "tokens": {
+            "cache": {
+              "read": 1152,
+              "write": 0
+            },
+            "input": 148,
+            "output": 18,
+            "reasoning": 0,
+            "total": 1318
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e75f001PDsVg9y96kcIE7",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "stop",
+          "id": "msg_0ed15e6de001MsFbxaUX1SCqNq",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "time": {
+            "completed": 1790684030815,
+            "created": 1790684030686
+          },
+          "tokens": {
+            "cache": {
+              "read": 1152,
+              "write": 0
+            },
+            "input": 148,
+            "output": 18,
+            "reasoning": 0,
+            "total": 1318
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e761001lhbooNc759233i",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e7660014pABpwfJtA61p4",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e767001E3MTRpIsrf4oWy",
+      "properties": {
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "session.idle"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e78e001rFyl9zORNo1cse",
+      "properties": {
+        "info": {
+          "cost": 0,
+          "directory": "/workspace/project",
+          "id": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "path": "",
+          "projectID": "<project-id>",
+          "slug": "kind-forest",
+          "time": {
+            "created": 1790684030861,
+            "updated": 1790684030861
+          },
+          "title": "Checking the repo layout. (fork #1)",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          },
+          "version": "1.18.33"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js"
+      },
+      "type": "session.created"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e790001uKJENERmtUZN9Y",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed15e790001ysWwjW3MDWEdOr",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790684028583
+          }
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e792001536CnUC76FGu9A",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e792001hBGPzY0ckfuEdX",
+          "messageID": "msg_0ed15e790001ysWwjW3MDWEdOr",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "text": "Look at the repo and tell me if it looks fine.",
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030866
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e794001KxIF5fQBu6ZtCs",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed15e794001BsxZsNjLIW0zOc",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15e790001ysWwjW3MDWEdOr",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "time": {
+            "completed": 1790684030495,
+            "created": 1790684029450
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          }
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e795001xZwmH7TTj332qv",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e7950018p1oTTvtyQ96DN",
+          "messageID": "msg_0ed15e794001BsxZsNjLIW0zOc",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030869
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e796001bV0LylcnIVQXjL",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e7960015z5pw5ub043VE0",
+          "messageID": "msg_0ed15e794001BsxZsNjLIW0zOc",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "text": "Checking the repo layout.",
+          "time": {
+            "end": 1790684030335,
+            "start": 1790684030308
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030870
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e798001vHghc0knjjCAit",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed15e798001dmJAIz43y0FbV4",
+          "messageID": "msg_0ed15e794001BsxZsNjLIW0zOc",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "state": {
+            "input": {
+              "command": "ls -la"
+            },
+            "metadata": {
+              "exit": 0,
+              "output": "total 16\ndrwxr-xr-x 3 scion scion 4096 Sep 29 12:10 .\ndrwxr-xr-x 5 scion scion 4096 Sep 29 12:13 ..\ndrwxr-xr-x 7 scion scion 4096 Sep 29 12:11 .git\n-rw-r--r-- 1 scion scion   12 Sep 29 12:10 README.md\n",
+              "truncated": false
+            },
+            "output": "total 16\ndrwxr-xr-x 3 scion scion 4096 Sep 29 12:10 .\ndrwxr-xr-x 5 scion scion 4096 Sep 29 12:13 ..\ndrwxr-xr-x 7 scion scion 4096 Sep 29 12:11 .git\n-rw-r--r-- 1 scion scion   12 Sep 29 12:10 README.md\n",
+            "status": "completed",
+            "time": {
+              "end": 1790684030425,
+              "start": 1790684030325
+            },
+            "title": "ls -la"
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030872
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e79a001gSeIwr0DFwNueU",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed15e79a001b4qOVa4bjkFhf1",
+          "messageID": "msg_0ed15e794001BsxZsNjLIW0zOc",
+          "reason": "tool-calls",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030874
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e79c001K7sgOZgGNoy31C",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed15e79c001Qq8J4oTKOYnzpu",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed15e790001ysWwjW3MDWEdOr",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "time": {
+            "completed": 1790684030682,
+            "created": 1790684030500
+          },
+          "tokens": {
+            "cache": {
+              "read": 384,
+              "write": 0
+            },
+            "input": 516,
+            "output": 25,
+            "reasoning": 0,
+            "total": 925
+          }
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e79d001PdEpsuvFHYsdyw",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e79d001NICfQZq0zSyXPO",
+          "messageID": "msg_0ed15e79c001Qq8J4oTKOYnzpu",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030877
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e79f001jljM8ir9AdvOE6",
+      "properties": {
+        "part": {
+          "id": "prt_0ed15e79f001O5emwYz116tYxf",
+          "messageID": "msg_0ed15e79c001Qq8J4oTKOYnzpu",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "text": "Reading the target file.",
+          "time": {
+            "end": 1790684030593,
+            "start": 1790684030579
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030879
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e7a0001Pfn2Sa5MMKUnyB",
+      "properties": {
+        "part": {
+          "callID": "call_2",
+          "id": "prt_0ed15e7a0001M10vl7TOMq6Rpx",
+          "messageID": "msg_0ed15e79c001Qq8J4oTKOYnzpu",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "state": {
+            "input": {
+              "filePath": "/workspace/project/README.md"
+            },
+            "metadata": {
+              "display": {
+                "lineEnd": 1,
+                "lineStart": 1,
+                "path": "/workspace/project/README.md",
+                "text": "# Test repo",
+                "totalLines": 1,
+                "truncated": false,
+                "type": "file"
+              },
+              "loaded": [],
+              "preview": "# Test repo",
+              "truncated": false
+            },
+            "output": "<path>/workspace/project/README.md</path>\n<type>file</type>\n<content>\n1: # Test repo\n\n(End of file - total 1 lines)\n</content>",
+            "status": "completed",
+            "time": {
+              "end": 1790684030627,
+              "start": 1790684030590
+            },
+            "title": "README.md"
+          },
+          "tool": "read",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030880
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e7ac001GN56xCKtiwYnjg",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed15e7ac001ogJUMNctjrgGH0",
+          "messageID": "msg_0ed15e79c001Qq8J4oTKOYnzpu",
+          "reason": "tool-calls",
+          "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 384,
+              "write": 0
+            },
+            "input": 516,
+            "output": 25,
+            "reasoning": 0,
+            "total": 925
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12ea1872ffe1GsSyI0UgkJ5js",
+        "time": 1790684030892
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed15e7b20015WtxXdXf2GdShN",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed15dea7001XwhLl7tdKHGCQB",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790684028583
+          }
+        },
+        "sessionID": "ses_f12ea2194ffe6aiAS2NbDyhx70"
+      },
+      "type": "message.updated"
+    },
+    "run": "run2"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17d4f1001AlKaSsj7lxgw7v",
+      "properties": {
+        "info": {
+          "cost": 0,
+          "directory": "/workspace/project",
+          "id": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+          "path": "",
+          "permission": [
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "question"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_enter"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_exit"
+            }
+          ],
+          "projectID": "<project-id>",
+          "slug": "gentle-pixel",
+          "time": {
+            "created": 1790684157168,
+            "updated": 1790684157168
+          },
+          "title": "New session - 2026-09-29T12:15:57.168Z",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          },
+          "version": "1.18.33"
+        },
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "session.created"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17d558001mCaS7XriCmkv4v",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed17d54d0013WOiKQGtobt21J",
+          "model": {
+            "modelID": "error-model",
+            "providerID": "errorprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+          "time": {
+            "created": 1790684157261
+          }
+        },
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17d838001pMjBKTlszXN5K7",
+      "properties": {
+        "part": {
+          "id": "prt_0ed17d5560019yDCHGgrUUdQ5y",
+          "messageID": "msg_0ed17d54d0013WOiKQGtobt21J",
+          "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+          "text": "\"trigger an error please\"",
+          "type": "text"
+        },
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "time": 1790684158008
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17d846001877POTNliQO52y",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17d84c001FlCGinh94LwSQH",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "id": "msg_0ed17d84c001miLIhEqZFTKY20",
+          "mode": "build",
+          "modelID": "error-model",
+          "parentID": "msg_0ed17d54d0013WOiKQGtobt21J",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "errorprov",
+          "role": "assistant",
+          "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+          "time": {
+            "created": 1790684158028
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17d8c8001kiQDjvNO8E8Fkk",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed17d54d0013WOiKQGtobt21J",
+          "model": {
+            "modelID": "error-model",
+            "providerID": "errorprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790684157261
+          }
+        },
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17db42001D5MvBZIuwZgBmX",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17db57001pDYcco5RBtPi5s",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 1,
+          "message": "mock upstream failure",
+          "next": 1790684160961,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17e3ca001lPOBq5fGVg4OJT",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17e3d1001bvsnidfBxKy6Ue",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 2,
+          "message": "mock upstream failure",
+          "next": 1790684165664,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17f628001mSN1HyabYmVOXF",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed17f631001Vy5rkNrEzAaK15",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 3,
+          "message": "mock upstream failure",
+          "next": 1790684174371,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1818250015JEsphbHPMcJLe",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18182e001Me5uAY5d0boGMm",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 4,
+          "message": "mock upstream failure",
+          "next": 1790684192909,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1860950011shwPiJzt0DREm",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1860a3001IjQ5qB5yL1PKWp",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "attempt": 5,
+          "message": "mock upstream failure",
+          "next": 1790684232014,
+          "type": "retry"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f9510016xhhj5eIZ77Sc0",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f964001mCwsUrA0Ogh26E",
+      "properties": {
+        "error": {
+          "data": {
+            "isRetryable": true,
+            "message": "mock upstream failure",
+            "metadata": {
+              "url": "http://127.0.0.1:4322/v1/chat/completions"
+            },
+            "responseBody": "{\"error\":{\"message\":\"mock upstream failure\",\"type\":\"server_error\"}}",
+            "responseHeaders": {
+              "connection": "keep-alive",
+              "content-type": "application/json",
+              "date": "Tue, 29 Sep 2026 12:17:12 GMT",
+              "keep-alive": "timeout=5",
+              "transfer-encoding": "chunked"
+            },
+            "statusCode": 500
+          },
+          "name": "APIError"
+        },
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "session.error"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f965001qSGMWg1Ra8j44y",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f966001YXAq8yP6jZVj4x",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "session.idle"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f98d001AjfLaO5qYYj93Z",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "error": {
+            "data": {
+              "isRetryable": true,
+              "message": "mock upstream failure",
+              "metadata": {
+                "url": "http://127.0.0.1:4322/v1/chat/completions"
+              },
+              "responseBody": "{\"error\":{\"message\":\"mock upstream failure\",\"type\":\"server_error\"}}",
+              "responseHeaders": {
+                "connection": "keep-alive",
+                "content-type": "application/json",
+                "date": "Tue, 29 Sep 2026 12:17:12 GMT",
+                "keep-alive": "timeout=5",
+                "transfer-encoding": "chunked"
+              },
+              "statusCode": 500
+            },
+            "name": "APIError"
+          },
+          "id": "msg_0ed17d84c001miLIhEqZFTKY20",
+          "mode": "build",
+          "modelID": "error-model",
+          "parentID": "msg_0ed17d54d0013WOiKQGtobt21J",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "errorprov",
+          "role": "assistant",
+          "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+          "time": {
+            "completed": 1790684232077,
+            "created": 1790684158028
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f996001SQgY9ohjGHa9zH",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed18f9970015lH0aBHD5ReFHd",
+      "properties": {
+        "sessionID": "ses_f12e82b0fffeTWfXQtofqh9VxA"
+      },
+      "type": "session.idle"
+    },
+    "run": "run3"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed193a3d0014l04PjUwgXT5i6",
+      "properties": {
+        "info": {
+          "cost": 0,
+          "directory": "/workspace/project",
+          "id": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "path": "",
+          "permission": [
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "question"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_enter"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_exit"
+            }
+          ],
+          "projectID": "<project-id>",
+          "slug": "glowing-comet",
+          "time": {
+            "created": 1790684248636,
+            "updated": 1790684248636
+          },
+          "title": "New session - 2026-09-29T12:17:28.636Z",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          },
+          "version": "1.18.33"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "session.created"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed193a8c0013LBkdbdkPOr65B",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed193a790014oBY2Znq0zA1NN",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "time": {
+            "created": 1790684248697
+          }
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed193d79001yiQ4fXD1JwfOzz",
+      "properties": {
+        "part": {
+          "id": "prt_0ed193a89001rCySO5EOoRB9CP",
+          "messageID": "msg_0ed193a790014oBY2Znq0zA1NN",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "text": "\"Look at the repo and tell me if it looks fine.\"",
+          "type": "text"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684249465
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed193d87001LBB0WnmnTIAQqW",
+      "properties": {
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed193d8e001HiSDOFaqdf4tMK",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "id": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed193a790014oBY2Znq0zA1NN",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "time": {
+            "created": 1790684249485
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed193e27001vImm2mPWDSMJri",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed193a790014oBY2Znq0zA1NN",
+          "model": {
+            "modelID": "mock-model",
+            "providerID": "mockprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790684248697
+          }
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed19409a0015JwVrGh2rxP0Yr",
+      "properties": {
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1940ba001I3QkRE43isqmbm",
+      "properties": {
+        "part": {
+          "id": "prt_0ed1940b9001YhOdseiKpaCBl4",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684250298
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1940be001AQWt7S7MUvYotu",
+      "properties": {
+        "part": {
+          "id": "prt_0ed1940be001w3E2TGVzy05VAz",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "text": "",
+          "time": {
+            "start": 1790684250302
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684250302
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1940c1001lG4D5AcT6gZHkC",
+      "properties": {
+        "delta": "Checking",
+        "field": "text",
+        "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+        "partID": "prt_0ed1940be001w3E2TGVzy05VAz",
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "message.part.delta"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1940c2001dbUtCLjk9zHgFT",
+      "properties": {
+        "delta": " the",
+        "field": "text",
+        "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+        "partID": "prt_0ed1940be001w3E2TGVzy05VAz",
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "message.part.delta"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1940c5001T3LBv4Ki3Z4CYh",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed1940c50019AuyANYD726Hlc",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "state": {
+            "input": {},
+            "raw": "",
+            "status": "pending"
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684250309
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "tool.execute.before",
+    "payload": {
+      "input": {
+        "callID": "call_1",
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "tool": "bash"
+      },
+      "output": {
+        "args": {
+          "command": "ls -la"
+        }
+      }
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1940d1001PvZRxNxlsnPzKY",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed1940c50019AuyANYD726Hlc",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "state": {
+            "input": {
+              "command": "ls -la"
+            },
+            "status": "running",
+            "time": {
+              "start": 1790684250321
+            }
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684250321
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1940d900159dfsMF9F21PCT",
+      "properties": {
+        "part": {
+          "id": "prt_0ed1940be001w3E2TGVzy05VAz",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "text": "Checking the repo layout.",
+          "time": {
+            "end": 1790684250329,
+            "start": 1790684250302
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684250329
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1941200011XiOUkPNpT00di",
+      "properties": {
+        "always": [
+          "ls *"
+        ],
+        "id": "per_0ed19411f0014AxQWQLL437eAm",
+        "metadata": {
+          "command": "ls -la"
+        },
+        "patterns": [
+          "ls -la"
+        ],
+        "permission": "bash",
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "tool": {
+          "callID": "call_1",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL"
+        }
+      },
+      "type": "permission.asked"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed1941230012vs2ZRsEOjqhw0",
+      "properties": {
+        "reply": "reject",
+        "requestID": "per_0ed19411f0014AxQWQLL437eAm",
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "permission.replied"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed194127001zOycDSfjmdGAEX",
+      "properties": {
+        "part": {
+          "callID": "call_1",
+          "id": "prt_0ed1940c50019AuyANYD726Hlc",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "state": {
+            "error": "The user rejected permission to use this specific tool call.",
+            "input": {
+              "command": "ls -la"
+            },
+            "status": "error",
+            "time": {
+              "end": 1790684250407,
+              "start": 1790684250321
+            }
+          },
+          "tool": "bash",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684250407
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed19414e001iju04WolWcxlYy",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed19414e001qsuIYD16KoucqP",
+          "messageID": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "reason": "tool-calls",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "time": 1790684250446
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed194152001lxBkuwVmQkLrsY",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed193a790014oBY2Znq0zA1NN",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "time": {
+            "created": 1790684249485
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          }
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed194172001kOzhqHjqj6J7zp",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed193d8d001shZgyIbSGQP3lL",
+          "mode": "build",
+          "modelID": "mock-model",
+          "parentID": "msg_0ed193a790014oBY2Znq0zA1NN",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "mockprov",
+          "role": "assistant",
+          "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+          "time": {
+            "completed": 1790684250482,
+            "created": 1790684249485
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 400,
+            "output": 25,
+            "reasoning": 5,
+            "total": 430
+          }
+        },
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "message.updated"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed194178001S9o47VT8rCkaSV",
+      "properties": {
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed194178002xZjE7vFnVScfAa",
+      "properties": {
+        "sessionID": "ses_f12e6c5c4ffe1emp3L50deNqBA"
+      },
+      "type": "session.idle"
+    },
+    "run": "run4"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc325001CMzctrgATkiXXY",
+      "properties": {
+        "info": {
+          "cost": 0,
+          "directory": "/workspace/project",
+          "id": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "path": "",
+          "permission": [
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "question"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_enter"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_exit"
+            }
+          ],
+          "projectID": "<project-id>",
+          "slug": "calm-panda",
+          "time": {
+            "created": 1790687822628,
+            "updated": 1790687822628
+          },
+          "title": "New session - 2026-09-29T13:17:02.628Z",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          },
+          "version": "1.18.33"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "session.created"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc397001WDRsxMHnlovn3l",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "model": {
+            "modelID": "task-model",
+            "providerID": "taskprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "time": {
+            "created": 1790687822730
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc63c0017TFKqhFnkm5KY3",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fc3950013qv2sy3WLL83lX",
+          "messageID": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "text": "\"Delegate this trivial task to a subagent.\"",
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687823420
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc64a0010yrFg1RxHFaGC2",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc64e001fuSOSuC7Slntd2",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "id": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "mode": "build",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "time": {
+            "created": 1790687823438
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc6d4001OfsRBuQcURoXsb",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "model": {
+            "modelID": "task-model",
+            "providerID": "taskprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790687822730
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc985001vza8eHP0YbZfXr",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc997001PTC9zwHtIw0jk0",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fc997001o5rL5Oy8P5gBuo",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824279
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc99a001Rt5hBPbjagz6KC",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fc99a001fe1mrrQZFQMm0y",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "text": "",
+          "time": {
+            "start": 1790687824282
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824282
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc99e001KoQ3Rxyno0Wshe",
+      "properties": {
+        "delta": "Delegating.",
+        "field": "text",
+        "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+        "partID": "prt_0ed4fc99a001fe1mrrQZFQMm0y",
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.part.delta"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc99f001O1hE3i9rBzNTxa",
+      "properties": {
+        "part": {
+          "callID": "call_task_1",
+          "id": "prt_0ed4fc99f001n74ta3eTuj5qhd",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "state": {
+            "input": {},
+            "raw": "",
+            "status": "pending"
+          },
+          "tool": "task",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824287
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9b8001LrPWa2GeYJDiIZ",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "cost": 0,
+          "directory": "/workspace/project",
+          "id": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "parentID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "path": "",
+          "permission": [
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "question"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_enter"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "plan_exit"
+            },
+            {
+              "action": "deny",
+              "pattern": "*",
+              "permission": "task"
+            }
+          ],
+          "projectID": "<project-id>",
+          "slug": "curious-orchid",
+          "time": {
+            "created": 1790687824311,
+            "updated": 1790687824311
+          },
+          "title": "trivial task (@general subagent)",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          },
+          "version": "1.18.33"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "session.created"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9c9001BnvOxytItcIQyu",
+      "properties": {
+        "part": {
+          "callID": "call_task_1",
+          "id": "prt_0ed4fc99f001n74ta3eTuj5qhd",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "state": {
+            "input": {
+              "description": "trivial task",
+              "prompt": "say hi",
+              "subagent_type": "general"
+            },
+            "metadata": {
+              "model": {
+                "modelID": "task-model",
+                "providerID": "taskprov"
+              },
+              "parentSessionId": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+              "sessionId": "ses_f12b03648ffei4AUCIS1LPYa9v"
+            },
+            "status": "running",
+            "time": {
+              "start": 1790687824329
+            },
+            "title": "trivial task"
+          },
+          "tool": "task",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824329
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9d4001aWjGWvfkCe8Ryy",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "id": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "model": {
+            "modelID": "task-model",
+            "providerID": "taskprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "time": {
+            "created": 1790687824335
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9d6001WhDsOD6omm9jLJ",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fc9d3001ena03hY193G3zn",
+          "messageID": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "text": "say hi",
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824342
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9df001RG0VFDMZagWPzL",
+      "properties": {
+        "part": {
+          "callID": "call_task_1",
+          "id": "prt_0ed4fc99f001n74ta3eTuj5qhd",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "state": {
+            "input": {
+              "description": "trivial task",
+              "prompt": "say hi",
+              "subagent_type": "general"
+            },
+            "metadata": {
+              "model": {
+                "modelID": "task-model",
+                "providerID": "taskprov"
+              },
+              "parentSessionId": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+              "sessionId": "ses_f12b03648ffei4AUCIS1LPYa9v"
+            },
+            "status": "running",
+            "time": {
+              "start": 1790687824329
+            },
+            "title": "trivial task"
+          },
+          "tool": "task",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824351
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9e3001JnCZc0thV4BKnv",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fc99a001fe1mrrQZFQMm0y",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "text": "Delegating.",
+          "time": {
+            "end": 1790687824355,
+            "start": 1790687824282
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824355
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9e8001qsDLaLKoP987oE",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fc9ea001krGWdqaH1d3Heo",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "cost": 0,
+          "id": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "mode": "general",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "time": {
+            "created": 1790687824362
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca17001v4xCLNWkkaGZMo",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "id": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "model": {
+            "modelID": "task-model",
+            "providerID": "taskprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790687824335
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca250014I5hx4Gdvz6LbV",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca34001perpJUJbShdFt5",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fca34001Ox9BxBmqPXomCE",
+          "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824436
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca37001Ngau6M6t9NjE5r",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fca37001IT2sjGFKlm5p3K",
+          "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "text": "",
+          "time": {
+            "start": 1790687824439
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824439
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca39001a3nojtaScMLcFy",
+      "properties": {
+        "delta": "Delegating.",
+        "field": "text",
+        "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+        "partID": "prt_0ed4fca37001IT2sjGFKlm5p3K",
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.part.delta"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca3a001WasMu6Jb0nXf29",
+      "properties": {
+        "part": {
+          "callID": "call_task_1",
+          "id": "prt_0ed4fca39001A0KGA2CclpvQzX",
+          "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "state": {
+            "input": {},
+            "raw": "",
+            "status": "pending"
+          },
+          "tool": "task",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824442
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca54001Dz0bfKeF79MLXI",
+      "properties": {
+        "part": {
+          "callID": "call_task_1",
+          "id": "prt_0ed4fca39001A0KGA2CclpvQzX",
+          "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "state": {
+            "input": {
+              "error": "Model tried to call unavailable tool 'task'. Available tools: bash, edit, glob, grep, invalid, read, skill, webfetch, write.",
+              "tool": "task"
+            },
+            "status": "running",
+            "time": {
+              "start": 1790687824468
+            }
+          },
+          "tool": "invalid",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824468
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca5a0014SyQOXpOM73KQI",
+      "properties": {
+        "part": {
+          "callID": "call_task_1",
+          "id": "prt_0ed4fca39001A0KGA2CclpvQzX",
+          "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "state": {
+            "input": {
+              "error": "Model tried to call unavailable tool 'task'. Available tools: bash, edit, glob, grep, invalid, read, skill, webfetch, write.",
+              "tool": "task"
+            },
+            "metadata": {
+              "truncated": false
+            },
+            "output": "The arguments provided to the tool are invalid: Model tried to call unavailable tool 'task'. Available tools: bash, edit, glob, grep, invalid, read, skill, webfetch, write.",
+            "status": "completed",
+            "time": {
+              "end": 1790687824474,
+              "start": 1790687824468
+            },
+            "title": "Invalid Tool"
+          },
+          "tool": "invalid",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824474
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca5e001IZH6uJ2W7LZLBy",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fca37001IT2sjGFKlm5p3K",
+          "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "text": "Delegating.",
+          "time": {
+            "end": 1790687824478,
+            "start": 1790687824439
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824478
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca7f001PWPrgW2Xvux4SA",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed4fca7f00155VwQ1XoOdvbAU",
+          "messageID": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "reason": "tool-calls",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 200,
+            "output": 10,
+            "reasoning": 0,
+            "total": 210
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824511
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fca8e001j1IQJa4qe442tp",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "mode": "general",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "time": {
+            "created": 1790687824362
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 200,
+            "output": 10,
+            "reasoning": 0,
+            "total": 210
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcaaf001a3h9D3Xylzs6VK",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed4fc9ea0017Br3CEcSMVZCiZ",
+          "mode": "general",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "time": {
+            "completed": 1790687824559,
+            "created": 1790687824362
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 200,
+            "output": 10,
+            "reasoning": 0,
+            "total": 210
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcab2001IPQHyRBhwmaVR3",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcab4001z0LnQ7VIKrKiG0",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "cost": 0,
+          "id": "msg_0ed4fcab4001EP6lwEuwUO9RXZ",
+          "mode": "general",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "time": {
+            "created": 1790687824564
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcaec001xKOJH8L2q6xUId",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcaed001RDHdK3rTS4NFu2",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "id": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "model": {
+            "modelID": "task-model",
+            "providerID": "taskprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790687824335
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb02001hS3AueMBpVe0Ny",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fcb02001NBJ739omdf8Kd3",
+          "messageID": "msg_0ed4fcab4001EP6lwEuwUO9RXZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824642
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb06001nkIgTm5pGHUvFg",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fcb06001QVfVOdaeHtB79a",
+          "messageID": "msg_0ed4fcab4001EP6lwEuwUO9RXZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "text": "",
+          "time": {
+            "start": 1790687824646
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824646
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb0a001AepdfYhhLfJgfQ",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fcb06001QVfVOdaeHtB79a",
+          "messageID": "msg_0ed4fcab4001EP6lwEuwUO9RXZ",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "text": "Done.",
+          "time": {
+            "end": 1790687824649,
+            "start": 1790687824646
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824649
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb26001E92zJtX72fz9p3",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed4fcb260019wBzn9nlsrR6ua",
+          "messageID": "msg_0ed4fcab4001EP6lwEuwUO9RXZ",
+          "reason": "stop",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 250,
+            "output": 8,
+            "reasoning": 0,
+            "total": 258
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "time": 1790687824678
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb33001rE2xb2fs5ZQTAH",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "cost": 0,
+          "finish": "stop",
+          "id": "msg_0ed4fcab4001EP6lwEuwUO9RXZ",
+          "mode": "general",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "time": {
+            "created": 1790687824564
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 250,
+            "output": 8,
+            "reasoning": 0,
+            "total": 258
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb5400121jVeMf00WL3G2",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "cost": 0,
+          "finish": "stop",
+          "id": "msg_0ed4fcab4001EP6lwEuwUO9RXZ",
+          "mode": "general",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "time": {
+            "completed": 1790687824724,
+            "created": 1790687824564
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 250,
+            "output": 8,
+            "reasoning": 0,
+            "total": 258
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb57001X5YZoyS736668x",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb5b0013ZpSq8hBLlYVwh",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb5b0025uQOzCARc6WNUM",
+      "properties": {
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "session.idle"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb74001RCOxThVQyzGa7Y",
+      "properties": {
+        "part": {
+          "callID": "call_task_1",
+          "id": "prt_0ed4fc99f001n74ta3eTuj5qhd",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "state": {
+            "input": {
+              "description": "trivial task",
+              "prompt": "say hi",
+              "subagent_type": "general"
+            },
+            "metadata": {
+              "model": {
+                "modelID": "task-model",
+                "providerID": "taskprov"
+              },
+              "parentSessionId": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+              "sessionId": "ses_f12b03648ffei4AUCIS1LPYa9v",
+              "truncated": false
+            },
+            "output": "<task id=\"ses_f12b03648ffei4AUCIS1LPYa9v\" state=\"completed\">\n<task_result>\nDone.\n</task_result>\n</task>",
+            "status": "completed",
+            "time": {
+              "end": 1790687824755,
+              "start": 1790687824329
+            },
+            "title": "trivial task"
+          },
+          "tool": "task",
+          "type": "tool"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824756
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcb9c001e3815QZynz9akW",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed4fcb9c001HpyD6zgOeKZgA7",
+          "messageID": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "reason": "tool-calls",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 200,
+            "output": 10,
+            "reasoning": 0,
+            "total": 210
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824796
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcbaa001OdMTUlcIGvVBcn",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "mode": "build",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "time": {
+            "created": 1790687823438
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 200,
+            "output": 10,
+            "reasoning": 0,
+            "total": 210
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcbc60015iSylIe1X8vESx",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "tool-calls",
+          "id": "msg_0ed4fc64e001hKvG4fxuuqyTrS",
+          "mode": "build",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "time": {
+            "completed": 1790687824838,
+            "created": 1790687823438
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 200,
+            "output": 10,
+            "reasoning": 0,
+            "total": 210
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcbc8001c2CpM3tpC5l516",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcbcb001PP6w0ek6rU6K2t",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "id": "msg_0ed4fcbcb001oHQtzhMjcQMnuS",
+          "mode": "build",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "time": {
+            "created": 1790687824843
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 0,
+            "output": 0,
+            "reasoning": 0
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcbf2001m9JiO2oZbHgHKp",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc040014bdMitQRPvID3w",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fcc04001iiLukWzJz7ldGg",
+          "messageID": "msg_0ed4fcbcb001oHQtzhMjcQMnuS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "snapshot": "<git-snapshot-hash>",
+          "type": "step-start"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824900
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc07001wEZFTWytgHZPay",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fcc07001pCA5qmlcZqCuV1",
+          "messageID": "msg_0ed4fcbcb001oHQtzhMjcQMnuS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "text": "",
+          "time": {
+            "start": 1790687824903
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824903
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc0b002N3ml7zrU5i3NE6",
+      "properties": {
+        "part": {
+          "id": "prt_0ed4fcc07001pCA5qmlcZqCuV1",
+          "messageID": "msg_0ed4fcbcb001oHQtzhMjcQMnuS",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "text": "Done.",
+          "time": {
+            "end": 1790687824907,
+            "start": 1790687824903
+          },
+          "type": "text"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824907
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc10001PLc0aORphPsNXB",
+      "properties": {
+        "info": {
+          "agent": "general",
+          "id": "msg_0ed4fc9ce001TbBd3YTD5nRd77",
+          "model": {
+            "modelID": "task-model",
+            "providerID": "taskprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790687824335
+          }
+        },
+        "sessionID": "ses_f12b03648ffei4AUCIS1LPYa9v"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc29001J47DC3NYDBXpHK",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "id": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "model": {
+            "modelID": "task-model",
+            "providerID": "taskprov"
+          },
+          "role": "user",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "summary": {
+            "diffs": []
+          },
+          "time": {
+            "created": 1790687822730
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc3c001XSrDaXnKikl5SH",
+      "properties": {
+        "part": {
+          "cost": 0,
+          "id": "prt_0ed4fcc3c001kXKtUJKm3KTvyT",
+          "messageID": "msg_0ed4fcbcb001oHQtzhMjcQMnuS",
+          "reason": "stop",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "snapshot": "<git-snapshot-hash>",
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 250,
+            "output": 8,
+            "reasoning": 0,
+            "total": 258
+          },
+          "type": "step-finish"
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "time": 1790687824956
+      },
+      "type": "message.part.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc480019TrhMaQZLOmzPN",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "stop",
+          "id": "msg_0ed4fcbcb001oHQtzhMjcQMnuS",
+          "mode": "build",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "time": {
+            "created": 1790687824843
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 250,
+            "output": 8,
+            "reasoning": 0,
+            "total": 258
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc62001htInS4oehXPwM0",
+      "properties": {
+        "info": {
+          "agent": "build",
+          "cost": 0,
+          "finish": "stop",
+          "id": "msg_0ed4fcbcb001oHQtzhMjcQMnuS",
+          "mode": "build",
+          "modelID": "task-model",
+          "parentID": "msg_0ed4fc389001SRA2vEoayWFI6z",
+          "path": {
+            "cwd": "/workspace/project",
+            "root": "/workspace/project"
+          },
+          "providerID": "taskprov",
+          "role": "assistant",
+          "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+          "time": {
+            "completed": 1790687824994,
+            "created": 1790687824843
+          },
+          "tokens": {
+            "cache": {
+              "read": 0,
+              "write": 0
+            },
+            "input": 250,
+            "output": 8,
+            "reasoning": 0,
+            "total": 258
+          }
+        },
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "message.updated"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc64001oudZM6NPsG5707",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "busy"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc660016IFO1yVE7j2EbL",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4",
+        "status": {
+          "type": "idle"
+        }
+      },
+      "type": "session.status"
+    },
+    "run": "run5"
+  },
+  {
+    "kind": "event",
+    "payload": {
+      "id": "evt_0ed4fcc66002LztvYqRiHyRCPT",
+      "properties": {
+        "sessionID": "ses_f12b03cdbffeYqBsQVXJhSteV4"
+      },
+      "type": "session.idle"
+    },
+    "run": "run5"
+  }
+]

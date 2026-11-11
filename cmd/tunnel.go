@@ -1,0 +1,410 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/spf13/cobra"
+)
+
+var (
+	tunnelPort         int
+	tunnelLocalPort    int
+	tunnelStdio        bool
+	tunnelSSH          bool
+	tunnelKnownHosts   string
+	tunnelHostKeyAlias string
+)
+
+var tunnelCmd = &cobra.Command{
+	Use:   "tunnel <agent> (--port N [--local-port L] | --ssh) [--stdio]",
+	Short: "Open a tunnel to a port inside an agent through the Hub",
+	Long: `Open a tunnel to a port inside an agent through the Hub.
+
+By default the tunnel listens on 127.0.0.1 (a random port, or --local-port)
+and forwards each connection to the agent's loopback port. With --stdio the
+tunnel carries bytes on stdin and stdout instead, for use as an ssh
+ProxyCommand. --ssh asks for the agent's ssh service instead of a port.
+
+The command never prompts. --hub and --project make it independent of the
+working directory. Exit codes:
+  0 success, 1 other error, 2 usage error, 3 no usable credential or identity
+  changed, 4 agent not found, 5 not permitted, 6 hub unreachable or
+  unavailable, 7 tunnel closed by policy, 8 tunnel limit reached, 9 agent not
+  running, 10 agent unreachable, 11 hub does not support tunnels,
+  130 interrupted, 143 terminated.`,
+	Example: `  scion tunnel my-agent --port 5173
+  scion tunnel my-agent --port 5173 --local-port 8080
+  scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my-agent`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return tunnelclient.Errorf(tunnelclient.ExitUsage, "expected exactly one agent, got %d arguments", len(args))
+		}
+		return nil
+	},
+	RunE: runTunnel,
+}
+
+func init() {
+	tunnelCmd.Flags().IntVar(&tunnelPort, "port", 0, "Agent-local TCP port to reach")
+	tunnelCmd.Flags().IntVar(&tunnelLocalPort, "local-port", 0, "Local port to listen on (default: a random free port)")
+	tunnelCmd.Flags().BoolVar(&tunnelStdio, "stdio", false, "Carry the tunnel on stdin/stdout instead of a local listener")
+	tunnelCmd.Flags().BoolVar(&tunnelSSH, "ssh", false, "Reach the agent's ssh service instead of a port")
+	tunnelCmd.Flags().StringVar(&tunnelKnownHosts, "known-hosts", "", "With --ssh: absolute path of the known-hosts file holding the agent's pin, for the host-key hint only (written by scion vscode)")
+	tunnelCmd.Flags().StringVar(&tunnelHostKeyAlias, "host-key-alias", "", "With --ssh: the pin's name in --known-hosts, the Host block's HostKeyAlias (written by scion vscode)")
+	tunnelCmd.SetFlagErrorFunc(tunnelFlagError)
+	rootCmd.AddCommand(tunnelCmd)
+}
+
+// tunnelFlagError marks a flag parse error on the tunnel commands as a
+// usage error (exit 2).
+func tunnelFlagError(_ *cobra.Command, err error) error {
+	return &tunnelclient.Error{Code: tunnelclient.ExitUsage, Msg: err.Error()}
+}
+
+// reportPlainError writes a failed command's error as one plain line (no
+// colour, no usage block) and returns its exit code: the code of a
+// *tunnelclient.Error, otherwise 1. Flag and argument errors are marked
+// with exit 2 where they are raised (tunnelFlagError and the commands'
+// Args validators).
+func reportPlainError(w io.Writer, err error) int {
+	code := tunnelclient.ExitError
+	var te *tunnelclient.Error
+	if errors.As(err, &te) {
+		code = te.Code
+	}
+	_, _ = fmt.Fprintf(w, "Error: %s\n", plainErrorLine(config.RedactURLsIn(err.Error())))
+	return code
+}
+
+// plainErrorLine removes ANSI sequences and folds the message onto one line.
+func plainErrorLine(s string) string {
+	s = util.StripANSI(s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// tunnelTransportSource is the transport resolver (a test seam).
+var tunnelTransportSource = func(ts *transportauth.TransportSettings) (transportauth.TokenSource, transportauth.HeaderMode, error) {
+	return transportauth.FromSettings(ts, adcsource.New)
+}
+
+// tunnelCredential resolves the credential through the CLI's WebSocket
+// credential chain (getHubAccessToken) and labels its kind. The lookup
+// normalises the endpoint as config.NormalizeEndpoint does; a different
+// scheme, host, port or path never matches.
+func tunnelCredential(endpoint string) tunnelclient.Credential {
+	tok := getHubAccessToken(endpoint)
+	switch {
+	case tok == "":
+		return tunnelclient.Credential{}
+	case tok == credentials.GetAccessToken(endpoint):
+		return tunnelclient.Credential{Token: tok, Kind: tunnelclient.CredentialOAuth}
+	case tok == os.Getenv("SCION_HUB_TOKEN"):
+		return tunnelclient.Credential{Token: tok, Kind: tunnelclient.CredentialToken}
+	default:
+		return tunnelclient.Credential{Token: tok, Kind: tunnelclient.CredentialDev}
+	}
+}
+
+// tunnelHub is the REST side of a tunnel, over the hub client.
+type tunnelHub struct {
+	endpoint string
+	src      transportauth.TokenSource
+	mode     transportauth.HeaderMode
+	// lookupMissed records that ResolveAgent found no such project or
+	// agent, so runTunnel can name the project and its source.
+	lookupMissed atomic.Bool
+	// projectUnlisted records that, for a token from the environment, the
+	// project list was empty and the lookup by slug or id found nothing.
+	// A user access token without project:list sees an empty list, so the
+	// project may exist.
+	projectUnlisted atomic.Bool
+}
+
+func (h *tunnelHub) client(cred tunnelclient.Credential) (hubclient.Client, error) {
+	opts := []hubclient.Option{hubclient.WithBearerToken(cred.Token)}
+	if h.src != nil {
+		opts = append(opts, hubclient.WithTransportAuth(h.src, h.mode))
+	}
+	return newUserHubClient(h.endpoint, opts...)
+}
+
+// Whoami implements tunnelclient.Hub.
+func (h *tunnelHub) Whoami(ctx context.Context, cred tunnelclient.Credential) (tunnelclient.User, error) {
+	c, err := h.client(cred)
+	if err != nil {
+		return tunnelclient.User{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	u, err := c.Auth().Me(ctx)
+	if err != nil {
+		return tunnelclient.User{}, tunnelHTTPError(err)
+	}
+	return tunnelclient.User{ID: u.ID, Email: u.Email}, nil
+}
+
+// ResolveAgent implements tunnelclient.Hub: the project by slug (or id),
+// then the agent by slug (or id) within it.
+func (h *tunnelHub) ResolveAgent(ctx context.Context, cred tunnelclient.Credential, project, agent string) (tunnelclient.Target, error) {
+	c, err := h.client(cred)
+	if err != nil {
+		return tunnelclient.Target{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	projectID := ""
+	list, err := c.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: project})
+	if err != nil {
+		return tunnelclient.Target{}, tunnelHTTPError(err)
+	}
+	if len(list.Projects) == 1 {
+		projectID = list.Projects[0].ID
+	} else {
+		p, err := c.Projects().Get(ctx, project)
+		if err != nil {
+			err = h.lookupError(err)
+			var he *tunnelclient.HTTPError
+			if len(list.Projects) == 0 && cred.Kind == tunnelclient.CredentialToken &&
+				errors.As(err, &he) && he.Status == http.StatusNotFound {
+				h.projectUnlisted.Store(true)
+			}
+			return tunnelclient.Target{}, err
+		}
+		projectID = p.ID
+	}
+	a, err := c.ProjectAgents(projectID).Get(ctx, agent)
+	if err != nil {
+		return tunnelclient.Target{}, h.lookupError(err)
+	}
+	if !a.DeletedAt.IsZero() {
+		h.lookupMissed.Store(true)
+		return tunnelclient.Target{}, &tunnelclient.HTTPError{Status: http.StatusNotFound, Code: "agent_not_found", Message: "agent was deleted"}
+	}
+	return tunnelclient.Target{AgentID: a.ID, ProjectID: projectID}, nil
+}
+
+// lookupError is tunnelHTTPError for a project or agent lookup, recording
+// a not-found answer in lookupMissed.
+func (h *tunnelHub) lookupError(err error) error {
+	err = tunnelHTTPError(err)
+	var he *tunnelclient.HTTPError
+	if errors.As(err, &he) && he.Status == http.StatusNotFound {
+		h.lookupMissed.Store(true)
+	}
+	return err
+}
+
+// tunnelHTTPError turns a hub client error into a tunnelclient.HTTPError
+// when the hub answered.
+func tunnelHTTPError(err error) error {
+	var ae *apiclient.APIError
+	if errors.As(err, &ae) {
+		return &tunnelclient.HTTPError{Status: ae.StatusCode, Code: ae.Code, Message: ae.Message}
+	}
+	return err
+}
+
+// tunnelSignalContext returns a context cancelled by SIGINT or SIGTERM,
+// and a function reporting which signal ended it (nil if none).
+func tunnelSignalContext(parent context.Context) (context.Context, func() os.Signal, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	var got atomic.Value // os.Signal
+	done := make(chan struct{})
+	go func() {
+		select {
+		case s := <-ch:
+			got.Store(s)
+			cancel()
+		case <-done:
+		}
+	}()
+	stop := func() {
+		signal.Stop(ch)
+		close(done)
+		cancel()
+	}
+	signalled := func() os.Signal {
+		s, _ := got.Load().(os.Signal)
+		return s
+	}
+	return ctx, signalled, stop
+}
+
+// tunnelSignalError is the failure for a run ended by sig: "interrupted"
+// with exit 130 for SIGINT, "terminated" with exit 143 for SIGTERM.
+func tunnelSignalError(sig os.Signal) error {
+	word := "interrupted"
+	if sig == syscall.SIGTERM {
+		word = "terminated"
+	}
+	return tunnelclient.Errorf(tunnelclient.SignalExit(sig), "%s", word)
+}
+
+// tunnelStateStore is the store of status records.
+func tunnelStateStore() (tunnelclient.StateStore, error) {
+	scionDir, err := config.GetGlobalDir()
+	if err != nil {
+		return nil, err
+	}
+	return tunnelclient.FileStore{Dir: tunnelclient.StateDir(os.Getenv("XDG_RUNTIME_DIR"), scionDir)}, nil
+}
+
+func runTunnel(cmd *cobra.Command, args []string) error {
+	endpoint := invocationHubEndpoint()
+	if endpoint == "" {
+		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or select a hub with 'scion use --hub <name>'")
+	}
+	// The transport rule, before the host-key hint or the tunnel reads a
+	// credential (tunnelClientConfig checks again for its other callers).
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
+	target := resolveHubOnlyProject()
+	if err := target.unlinkedError(); err != nil {
+		return err
+	}
+	project := target.ref
+	req := tunnelclient.Request{
+		Agent:     args[0],
+		Project:   project,
+		Port:      tunnelPort,
+		LocalPort: tunnelLocalPort,
+		SSH:       tunnelSSH,
+		Stdio:     tunnelStdio,
+		Stdin:     cmd.InOrStdin(),
+		Stdout:    cmd.OutOrStdout(),
+	}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	pin, err := tunnelPinSource()
+	if err != nil {
+		return err
+	}
+	tunnelSSHHostKeyHintIn(cmd, tunnelSSH, endpoint, project, args[0], pin)
+	cfg, hub, err := tunnelClientConfig(endpoint, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+	ctx, signalled, stop := tunnelSignalContext(cmd.Context())
+	defer stop()
+	err = tunnelclient.Run(ctx, cfg, req)
+	if s := signalled(); s != nil {
+		return tunnelSignalError(s)
+	}
+	if err == nil {
+		return nil
+	}
+	var te *tunnelclient.Error
+	if errors.As(err, &te) {
+		return tunnelNotFoundError(te, hub.lookupMissed.Load(), hub.projectUnlisted.Load(), args[0], target)
+	}
+	return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+}
+
+// tunnelPinSource checks --known-hosts and --host-key-alias and returns
+// where the host-key hint reads the pin. The flags steer only that hint;
+// ssh's own host-key check is unchanged.
+func tunnelPinSource() (sshPinSource, error) {
+	if tunnelKnownHosts == "" && tunnelHostKeyAlias == "" {
+		return sshPinSource{}, nil
+	}
+	if tunnelKnownHosts == "" || tunnelHostKeyAlias == "" {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "--known-hosts and --host-key-alias must be given together")
+	}
+	if !tunnelSSH {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "--known-hosts and --host-key-alias need --ssh")
+	}
+	if !filepath.IsAbs(tunnelKnownHosts) || hasControl(tunnelKnownHosts) {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "invalid --known-hosts %q: use an absolute path", tunnelKnownHosts)
+	}
+	parts := strings.Split(tunnelHostKeyAlias, ".")
+	if len(parts) != 4 || parts[0] != "scion" || checkSSHNameParts(parts[1], parts[2], parts[3]) != nil {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "invalid --host-key-alias %q: use scion.<hub>.<project>.<agent>", tunnelHostKeyAlias)
+	}
+	return sshPinSource{knownHosts: tunnelKnownHosts, alias: tunnelHostKeyAlias}, nil
+}
+
+// tunnelClientConfig builds the tunnel client configuration for endpoint:
+// the transport auth of its hub list entry (or the environment), the CLI
+// credential chain and the state store. The returned hub records agent
+// lookup misses.
+func tunnelClientConfig(endpoint string, stderr io.Writer) (tunnelclient.Config, *tunnelHub, error) {
+	// The transport rule, before the transport source or the credential is
+	// resolved: the conduit dial would otherwise use ws:// for http.
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
+	src, mode, err := tunnelTransportSource(hubTransportSettings(endpoint))
+	if err != nil {
+		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
+	}
+	hub := &tunnelHub{endpoint: endpoint, src: src, mode: mode}
+	var apply func(h http.Header) error
+	if src != nil {
+		apply = func(h http.Header) error { return transportauth.ApplyHeaders(h, src, mode) }
+	}
+	cfg := tunnelclient.Config{
+		Endpoint:          endpoint,
+		ResolveCredential: func() tunnelclient.Credential { return tunnelCredential(endpoint) },
+		Hub:               hub,
+		ApplyTransport:    apply,
+		ClientVersion:     version.Short(),
+		Stderr:            stderr,
+	}
+	if store, err := tunnelStateStore(); err == nil {
+		cfg.State = store
+	}
+	return cfg, hub, nil
+}
+
+// tunnelNotFoundError names the project and its source in te when the
+// agent lookup found no such project or agent (missed); the hub's own
+// message would show the project as sent, often a raw id. When the project
+// was not listed for a token (unlisted), it adds that the token may lack
+// project:list. Other errors are returned as they are.
+func tunnelNotFoundError(te *tunnelclient.Error, missed, unlisted bool, agent string, target hubOnlyProject) *tunnelclient.Error {
+	if te.Code != tunnelclient.ExitAgentNotFound || !missed {
+		return te
+	}
+	if unlisted {
+		return tunnelclient.Errorf(te.Code, "agent %s not found in %s; the token may lack the project:list scope", agent, target.describe())
+	}
+	return tunnelclient.Errorf(te.Code, "agent %s not found in %s", agent, target.describe())
+}

@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,7 +26,6 @@ import (
 	"go/token"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,11 +117,24 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 		"seed.go":                         "bootstrap seeding: creates initial system/hub-level role bindings, not project membership",
 		"server.go":                       "server initialization: system-level bootstrap, not project membership",
 		"handlers_users_core.go":          "user admin role sync: creates/deletes system-scoped super-admin and hub-member bindings inside atomic role transitions, guarded by CanDelegate and per-field permission checks",
+		"project_fixture_purge.go":        "test identity purge (ptone/scion#4240): removes only the purged test identity's own bindings on a stamped project it keeps, inside the purge transaction under the project lock, right before the identity is deleted; not a membership mutation of any other principal",
+		"project_leave.go":                "removeProjectBindingsTx, the governed remove step shared by ProjectMembershipService.RemoveMember and LeaveProject (ptone/scion#7494): both callers run their governance and take the membership service's locks and guards (last owner, constraint-admin lockout) before the delete, in the same transaction; matches the catalog exemption for removeProjectBindingsTx",
+		// internal/hubtestutil is scanned through guardScanSubdirs, so its
+		// entries are keyed by slash path. Only test code may import it
+		// (its no_hub_import_test.go); these files seed test fixtures.
+		"internal/hubtestutil/access_sqlite.go": "test-only fixture seeder (PvSeedRoleBinding): writes the role binding a test asks for into the test's own store; no request reaches it, not a membership mutation",
+		"internal/hubtestutil/authz_sqlite.go":  "test-only fixture seeders (SystemRoleUserWithPermissions, CreateTestUserWithRole, CreateTestUserWithProjectRole, AddProjectMemberWithRole, GrantProjectAccessOnly): set up the users and role bindings a test asks for in the test's own store; no request reaches them, not a membership mutation",
 	}
 
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.
 	hubDir := filepath.Join(repoRoot, "pkg", "hub")
-	entries, err := os.ReadDir(hubDir)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards Create/DeleteRoleBinding call sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards Create/DeleteRoleBinding call sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards Create/DeleteRoleBinding call sites.
+	entries, err := readGuardScanDirs(hubDir)
 	require.NoError(t, err)
 
 	fset := token.NewFileSet()
@@ -175,49 +186,6 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 // (b) Scoped UAT credential tests — R2-R3: mint real UATs through production
 // token path and exercise actual cross-project denial.
 // ---------------------------------------------------------------------------
-
-// doRequestWithUAT makes an HTTP request authenticated with a real scoped UAT.
-func doRequestWithUAT(t *testing.T, srv *Server, uatKey, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+uatKey)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// rs4MintContext returns a context with the actor identity and credential
-// context required by the RS4 bounded UAT service for audit record creation.
-func rs4MintContext(userID string) context.Context {
-	identity := NewAuthenticatedUser(userID, userID+"@test.com", "Test User", "member", string(ClientTypeAPI))
-	ctx := contextWithIdentity(context.Background(), identity)
-	return contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
-}
-
-// mintScopedUAT mints a real scoped UAT through the production token service.
-// RS4: The issuer must have role bindings with the requested scopes in the
-// target project; the context must carry the actor identity for audit.
-func mintScopedUAT(t *testing.T, srv *Server, userID, projectID string, scopes []string) string {
-	t.Helper()
-	ctx := rs4MintContext(userID)
-	key, _, err := srv.uatService.CreateToken(
-		ctx, userID, "test-uat", projectID, scopes, nil,
-	)
-	require.NoError(t, err, "failed to mint scoped UAT")
-	return key
-}
 
 func TestRS1_ScopedUAT_SameProjectAllowed(t *testing.T) {
 	srv, s := testServer(t)
@@ -290,11 +258,12 @@ func TestRS1_ScopedUAT_CrossProjectDenied(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRS1_ScopedUAT_MutationInProject mints a project:manage UAT and uses
-// it to remove a member — proving that the UAT scope covers membership
-// mutations. We test RemoveMember rather than AddMember because AddMember's
-// delegation check requires the actor to hold ALL permissions from the
-// target role (filtered by UAT scopes), and project:manage alone does not
-// cover the agent:create etc. permissions in the target role.
+// it to remove a member: a project:manage token on its own project removes
+// a member through its holder's owner role. RemoveMember is used rather
+// than AddMember because AddMember's delegation check requires the token's
+// selectors to cover ALL permissions of the target role, and
+// project:manage alone does not cover the agent:create etc. permissions
+// in the target role.
 func TestRS1_ScopedUAT_MutationInProject(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -327,14 +296,12 @@ func TestRS1_ScopedUAT_MutationInProject(t *testing.T) {
 	// R3-2: mint a real project:manage UAT.
 	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"project:manage"})
 
-	// R2-2: Membership mutations now enforce a credential-kind allowlist at
-	// the service boundary. UAT credentials are rejected regardless of scope.
-	// This is the correct behavior per the R2 hardening brief: only
-	// interactive and dev human sessions may perform membership mutations.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodDelete,
 		"/api/v1/projects/"+projectID+"/members/"+binding.ID, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"R2-2: UAT credential should be rejected for membership mutations (got %d: %s)", rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusNoContent, rec.Code,
+		"a project:manage token removes a member in its own project (got %d: %s)", rec.Code, rec.Body.String())
+	_, getErr := s.GetRoleBinding(ctx, binding.ID)
+	assert.ErrorIs(t, getErr, store.ErrNotFound, "the member binding is removed")
 }
 
 // TestRS1_ScopedUAT_MutationCrossProjectDenied proves a project:manage UAT
@@ -1031,9 +998,7 @@ func TestRS1_ConcurrentRemoveAndTransfer(t *testing.T) {
 		"RS1: concurrent transfer should complete cleanly (got %d)", transferCode)
 
 	// Verify no zero-owner state.
-	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.True(t, count >= 1, "RS1: after concurrent ops, at least one owner must remain (got %d)", count)
 }
 
@@ -1104,7 +1069,7 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 	}()
 	wg.Wait()
 
-	// R2-R1 fix: enforceLastOwnerTx now runs INSIDE the transaction, so
+	// R2-R1 fix: the last-owner check (enforceOwnerRemovalTx) runs INSIDE the transaction, so
 	// the owner count is read within the transactional snapshot. Under SQLite's
 	// serialized transactions, concurrent demotions execute sequentially and the
 	// second sees the post-demotion state. At most one should succeed.
@@ -1120,9 +1085,7 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 		"RS1: at least one concurrent demotion should succeed when two owners exist")
 
 	// Verify at least one owner remains — the invariant MUST hold.
-	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.True(t, count >= 1,
 		"RS1: after concurrent demotions, at least one owner must remain (got %d)", count)
 }
@@ -1472,9 +1435,8 @@ func TestRS1_MemberCapabilities(t *testing.T) {
 func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 	// This test works by creating a server with a store that does NOT expose
 	// a DB() method, which simulates a missing raw-DB capability.
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	// Wrap the store in a type that hides the DB() method.
@@ -1487,16 +1449,10 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, noDBStore)
+	_, err = newTestHubServer(t, cfg, noDBStore)
 	require.Error(t, err, "RS1 R4-1: NewServer must fail if D4 index cannot be installed")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R4-1: error must mention D4 membership index")
-}
-
-// noDBStore wraps a store.Store but does NOT expose DB(). This simulates
-// the case where the store doesn't support raw database access.
-type noDBStore struct {
-	store.Store
 }
 
 // TestRS1_D4_DDLFailurePath proves that a DDL execution failure during D4
@@ -1504,9 +1460,8 @@ type noDBStore struct {
 // a real DDL error by dropping the role_bindings table before the D4 DDL runs,
 // so ExecContext returns an error on the actual DDL path (server.go:3779).
 func TestRS1_D4_DDLFailurePath(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	// Wrap the store with one that drops the role_bindings table when DB()
@@ -1522,7 +1477,7 @@ func TestRS1_D4_DDLFailurePath(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, ddlFail)
+	_, err = newTestHubServer(t, cfg, ddlFail)
 	require.Error(t, err, "RS1 R5-2: NewServer must fail when DDL ExecContext returns an error")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R5-2: error must mention D4 DDL failure, not just missing DB (got: %s)", err.Error())
@@ -1554,9 +1509,8 @@ func (s *ddlFailStore) DB() *sql.DB {
 // The MigrateMultiRoleBindings step normally cleans these up, but we insert
 // them AFTER migration by using the raw store (not the full test server).
 func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	realDB := s.(interface{ DB() *sql.DB }).DB()
@@ -1600,7 +1554,7 @@ func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	require.Error(t, err, "NewServer must fail when CREATE INDEX fails due to conflicting data")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"error must mention D4 failure (got: %s)", err.Error())
@@ -2616,22 +2570,6 @@ func TestRS1_StaleAuthorityForcedOverlap_Transfer(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-func findRS1RepoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	require.NoError(t, err)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("cannot find repo root (no go.mod found)")
-		}
-		dir = parent
-	}
-}
 
 // Suppress unused import warnings for packages used in specific tests.
 var _ = strings.Contains

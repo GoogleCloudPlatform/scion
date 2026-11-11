@@ -18,10 +18,12 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -405,12 +407,210 @@ func TestUnmarkNotificationDispatched(t *testing.T) {
 	require.NoError(t, s.MarkNotificationDispatched(ctx, notifID))
 
 	// Unmark.
-	require.NoError(t, s.UnmarkNotificationDispatched(ctx, notifID))
+	reverted, err := s.UnmarkNotificationDispatched(ctx, notifID, time.Time{})
+	require.NoError(t, err)
+	assert.True(t, reverted, "a row with no outcome must be reverted")
 
 	// Should be claimable again.
 	claimed, err := s.ClaimNotificationForDispatch(ctx, notifID)
 	require.NoError(t, err)
 	assert.True(t, claimed, "notification should be claimable after unmark")
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch attempts and outcome tests (ptone/scion#4800)
+// ---------------------------------------------------------------------------
+
+// createAgentNotification stores an undispatched agent-targeted notification
+// and returns its ID.
+func createAgentNotification(t *testing.T, s *NotificationStore) string {
+	t.Helper()
+	id := uuid.NewString()
+	require.NoError(t, s.CreateNotification(context.Background(), &store.Notification{
+		ID:             id,
+		SubscriptionID: uuid.NewString(),
+		AgentID:        uuid.NewString(),
+		ProjectID:      uuid.NewString(),
+		SubscriberType: "agent",
+		SubscriberID:   "some-agent",
+		Status:         "COMPLETED",
+		Message:        "done",
+	}))
+	return id
+}
+
+func TestNotificationDispatchFields_DefaultOnCreate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.Zero(t, got.DispatchAttempts)
+	assert.Empty(t, got.DispatchOutcome, "a new notification has no outcome")
+	assert.False(t, got.Dispatched)
+}
+
+func TestRecordNotificationDispatchAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, s.RecordNotificationDispatchAttempt(ctx, id))
+	}
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.DispatchAttempts)
+	assert.False(t, got.Dispatched, "recording an attempt must not claim the notification")
+	assert.Empty(t, got.DispatchOutcome, "recording an attempt must not set an outcome")
+
+	assert.ErrorIs(t, s.RecordNotificationDispatchAttempt(ctx, uuid.NewString()), store.ErrNotFound)
+}
+
+func TestRecordNotificationDispatchAttempt_Concurrent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	const recorders = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, recorders)
+	wg.Add(recorders)
+	for i := 0; i < recorders; i++ {
+		go func() {
+			defer wg.Done()
+			errs <- s.RecordNotificationDispatchAttempt(ctx, id)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, recorders, got.DispatchAttempts, "the increment must be atomic")
+}
+
+func TestSetNotificationDispatchOutcome(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+
+	for _, outcome := range []string{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed} {
+		t.Run(outcome, func(t *testing.T) {
+			id := createAgentNotification(t, s)
+			require.NoError(t, s.RecordNotificationDispatchAttempt(ctx, id))
+			applied, err := s.SetNotificationDispatchOutcome(ctx, id, outcome, "")
+			require.NoError(t, err)
+			assert.True(t, applied, "the first outcome must apply")
+
+			got, err := s.GetNotification(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, outcome, got.DispatchOutcome)
+			assert.True(t, got.Dispatched, "an outcome is terminal: the row must be dispatched")
+			assert.Equal(t, 1, got.DispatchAttempts, "setting the outcome must keep the attempt count")
+
+			claimed, err := s.ClaimNotificationForDispatch(ctx, id)
+			require.NoError(t, err)
+			assert.False(t, claimed, "a notification with an outcome must not be claimable for a retry")
+		})
+	}
+}
+
+func TestSetNotificationDispatchOutcome_Rejects(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	for _, bad := range []string{"", "pending", "FAILED"} {
+		_, err := s.SetNotificationDispatchOutcome(ctx, id, bad, "")
+		assert.ErrorIs(t, err, store.ErrInvalidInput, "outcome %q", bad)
+	}
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.False(t, got.Dispatched, "a rejected outcome must write nothing")
+	assert.Empty(t, got.DispatchOutcome)
+
+	for _, outcome := range []string{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed} {
+		_, err = s.SetNotificationDispatchOutcome(ctx, uuid.NewString(), outcome, "")
+		assert.ErrorIs(t, err, store.ErrNotFound, "outcome %q on a missing row", outcome)
+	}
+}
+
+// Once an outcome is recorded, a revert is refused and the row stays
+// dispatched with its outcome, so an empty outcome still means pending or in
+// flight and the sweep does not deliver it again (ptone/scion#5030).
+func TestUnmarkNotificationDispatched_RefusedAfterOutcome(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+
+	for _, outcome := range []string{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed} {
+		t.Run(outcome, func(t *testing.T) {
+			id := createAgentNotification(t, s)
+			claimed, err := s.ClaimNotificationForDispatch(ctx, id)
+			require.NoError(t, err)
+			require.True(t, claimed)
+			applied, err := s.SetNotificationDispatchOutcome(ctx, id, outcome, "")
+			require.NoError(t, err)
+			require.True(t, applied)
+
+			reverted, err := s.UnmarkNotificationDispatched(ctx, id, time.Time{})
+			require.NoError(t, err, "a refused revert is not an error")
+			assert.False(t, reverted, "a row with an outcome must not be reverted")
+
+			got, err := s.GetNotification(ctx, id)
+			require.NoError(t, err)
+			assert.True(t, got.Dispatched, "a row with an outcome must stay dispatched")
+			assert.Equal(t, outcome, got.DispatchOutcome)
+
+			claimed, err = s.ClaimNotificationForDispatch(ctx, id)
+			require.NoError(t, err)
+			assert.False(t, claimed, "a row with an outcome must not be claimable again")
+		})
+	}
+
+	reverted, err := s.UnmarkNotificationDispatched(ctx, uuid.NewString(), time.Time{})
+	require.NoError(t, err)
+	assert.False(t, reverted, "a missing row is not reverted")
+}
+
+// Racing outcome writes keep the most informative outcome: delivered
+// replaces failed (the message did reach the subscriber), and nothing
+// replaces delivered or re-applies failed. A refused write returns no
+// error and leaves the recorded outcome in place (ptone/scion#5030).
+func TestSetNotificationDispatchOutcome_DeliveredBeatsFailed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+
+	cases := []struct {
+		first, second string
+		wantApplied   bool
+		want          string
+	}{
+		{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed, false, store.NotificationOutcomeDelivered},
+		{store.NotificationOutcomeFailed, store.NotificationOutcomeDelivered, true, store.NotificationOutcomeDelivered},
+		{store.NotificationOutcomeDelivered, store.NotificationOutcomeDelivered, false, store.NotificationOutcomeDelivered},
+		{store.NotificationOutcomeFailed, store.NotificationOutcomeFailed, false, store.NotificationOutcomeFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.first+"_then_"+tc.second, func(t *testing.T) {
+			id := createAgentNotification(t, s)
+			applied, err := s.SetNotificationDispatchOutcome(ctx, id, tc.first, "")
+			require.NoError(t, err)
+			require.True(t, applied, "the first outcome must apply")
+
+			applied, err = s.SetNotificationDispatchOutcome(ctx, id, tc.second, "")
+			require.NoError(t, err, "a refused second outcome is not an error")
+			assert.Equal(t, tc.wantApplied, applied, "whether the second outcome applies")
+
+			got, err := s.GetNotification(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got.DispatchOutcome, "the recorded outcome")
+			assert.True(t, got.Dispatched)
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -586,4 +786,175 @@ func TestGetUndispatchedAgentNotifications_BrokerFilter(t *testing.T) {
 	all, err := s.GetUndispatchedAgentNotifications(ctx, "")
 	require.NoError(t, err)
 	assert.Len(t, all, 2)
+}
+
+func TestPurgeOrphanedNotifications(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("GC Project").SetSlug("gc-project").Save(ctx)
+	require.NoError(t, err)
+	liveAgentID := uuid.New()
+	_, err = client.Agent.Create().SetID(liveAgentID).SetSlug("live").SetName("Live").
+		SetProjectID(projectID).Save(ctx)
+	require.NoError(t, err)
+	liveSub := &store.NotificationSubscription{
+		ID: uuid.NewString(), Scope: store.SubscriptionScopeAgent, AgentID: liveAgentID.String(),
+		SubscriberType: "user", SubscriberID: "user-1", ProjectID: projectID.String(),
+		TriggerActivities: []string{"DELETED"}, CreatedBy: "tester",
+	}
+	require.NoError(t, s.CreateNotificationSubscription(ctx, liveSub))
+
+	newNotif := func(agentID, subID string, acked bool) string {
+		t.Helper()
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: subID, AgentID: agentID, ProjectID: projectID.String(),
+			SubscriberType: "user", SubscriberID: "user-1", Status: "DELETED", Message: "deleted",
+		}))
+		if acked {
+			require.NoError(t, s.AcknowledgeNotification(ctx, id))
+		}
+		return id
+	}
+	goneAgent, goneSub := uuid.NewString(), uuid.NewString()
+	orphanAcked := newNotif(goneAgent, goneSub, true)
+	orphanUnacked := newNotif(goneAgent, goneSub, false)
+	agentLive := newNotif(liveAgentID.String(), goneSub, true)
+	subLive := newNotif(goneAgent, liveSub.ID, true)
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, purged)
+
+	_, err = s.GetNotification(ctx, orphanAcked)
+	assert.ErrorIs(t, err, store.ErrNotFound, "acknowledged orphan is removed")
+	for name, id := range map[string]string{
+		"unacknowledged orphan": orphanUnacked,
+		"agent still present":   agentLive,
+		"subscription present":  subLive,
+	} {
+		_, err := s.GetNotification(ctx, id)
+		assert.NoError(t, err, "%s must be kept", name)
+	}
+
+	purged, err = s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged, "a second run removes nothing")
+}
+
+func TestPurgeOrphanedNotifications_DeletesInBatches(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	prev := orphanPurgeBatchSize
+	orphanPurgeBatchSize = 2
+	t.Cleanup(func() { orphanPurgeBatchSize = prev })
+
+	var deletes int
+	client.Notification.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(ent.OpDelete) {
+				deletes++
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("Batch Project").SetSlug("batch-project").Save(ctx)
+	require.NoError(t, err)
+	const orphans = 5
+	for i := 0; i < orphans; i++ {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: uuid.NewString(), AgentID: uuid.NewString(),
+			ProjectID: projectID.String(), SubscriberType: "user", SubscriberID: "user-1",
+			Status: "DELETED", Message: "deleted",
+		}))
+		require.NoError(t, s.AcknowledgeNotification(ctx, id))
+	}
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, orphans, purged, "every orphan is removed across batches")
+	assert.Equal(t, 3, deletes, "5 rows in batches of 2 take 3 delete statements")
+
+	purged, err = s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+}
+
+// A full batch whose delete removes no rows ends the purge instead of
+// selecting the same rows again.
+func TestPurgeOrphanedNotifications_StopsWhenDeleteRemovesNothing(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	prev := orphanPurgeBatchSize
+	orphanPurgeBatchSize = 2
+	t.Cleanup(func() { orphanPurgeBatchSize = prev })
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("Stuck Project").SetSlug("stuck-project").Save(ctx)
+	require.NoError(t, err)
+	for i := 0; i < orphanPurgeBatchSize; i++ {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: uuid.NewString(), AgentID: uuid.NewString(),
+			ProjectID: projectID.String(), SubscriberType: "user", SubscriberID: "user-1",
+			Status: "DELETED", Message: "deleted",
+		}))
+		require.NoError(t, s.AcknowledgeNotification(ctx, id))
+	}
+
+	// Every delete removes nothing. Past a few attempts, fail the delete
+	// so a looping purge returns an error instead of hanging the test.
+	var deletes int
+	client.Notification.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if !m.Op().Is(ent.OpDelete) {
+				return next.Mutate(ctx, m)
+			}
+			deletes++
+			if deletes > 5 {
+				return nil, errors.New("purge kept deleting the same rows")
+			}
+			return 0, nil
+		})
+	})
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+	assert.Equal(t, 1, deletes, "the purge stops after one delete that removes nothing")
+}
+
+func TestNotificationStore_UpdateNotificationContent(t *testing.T) {
+	s := newTestNotificationStore(t)
+	ctx := context.Background()
+	created := time.Now().UTC().Truncate(time.Second)
+	n := &store.Notification{
+		ID: uuid.NewString(), SubscriptionID: store.CreatorFallbackSubscriptionID, AgentID: uuid.Nil.String(),
+		ProjectID: uuid.Nil.String(), SubscriberType: store.SubscriberTypeUser, SubscriberID: "user-1",
+		Status: "SECRET_PENDING", Message: "first", CreatedAt: created, Kind: "secret_pending",
+		ResourceType: "pending_secret", ResourceID: "pend-1",
+	}
+	require.NoError(t, s.CreateNotification(ctx, n))
+	require.NoError(t, s.AcknowledgeNotification(ctx, n.ID))
+
+	require.NoError(t, s.UpdateNotificationContent(ctx, n.ID, "second", "pend-2"))
+	got, err := s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "second", got.Message)
+	assert.Equal(t, "pend-2", got.ResourceID)
+	assert.False(t, got.Acknowledged, "an updated notification shows again")
+	assert.True(t, got.CreatedAt.Equal(created))
+	assert.Equal(t, "secret_pending", got.Kind)
+
+	assert.ErrorIs(t, s.UpdateNotificationContent(ctx, uuid.NewString(), "x", "y"), store.ErrNotFound)
 }

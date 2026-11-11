@@ -439,7 +439,7 @@ kept in the record rather than a broker-local directory:
 | `scion delete <name>` | Delete container + files | Stop interaction + delete Hub Agent record |
 | `scion list` | Merge container + on-disk state | Read managed agents from the Hub Agent store |
 | `scion message <name> <msg>` | tmux paste-buffer + send-keys | Create new interaction with message |
-| `scion message --raw <name>` | tmux send-keys (control chars) | Error: "not supported for managed agents" |
+| `scion keys <name> <keys>` | tmux send-keys via the dedicated keys operation (replaces the removed `scion message --raw`) | `422 keys_unsupported`; never downgraded to a message |
 | `scion message --broadcast` | Fan-out tmux delivery | Fan-out interaction creation |
 | `scion look <name>` | tmux capture-pane | Fetch latest interaction, format as text |
 | `scion attach <name>` | tmux attach-session | Error: "not supported for managed agents — use scion message and scion look" (deferred, Q2) |

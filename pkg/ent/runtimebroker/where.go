@@ -115,14 +115,19 @@ func Runtimes(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimes, v))
 }
 
-// Labels applies equality check predicate on the "labels" field. It's identical to LabelsEQ.
-func Labels(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldLabels, v))
+// DefaultProfile applies equality check predicate on the "default_profile" field. It's identical to DefaultProfileEQ.
+func DefaultProfile(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldDefaultProfile, v))
 }
 
-// Annotations applies equality check predicate on the "annotations" field. It's identical to AnnotationsEQ.
-func Annotations(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldAnnotations, v))
+// WorkspaceStorage applies equality check predicate on the "workspace_storage" field. It's identical to WorkspaceStorageEQ.
+func WorkspaceStorage(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldWorkspaceStorage, v))
+}
+
+// Health applies equality check predicate on the "health" field. It's identical to HealthEQ.
+func Health(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHealth, v))
 }
 
 // Endpoint applies equality check predicate on the "endpoint" field. It's identical to EndpointEQ.
@@ -150,6 +155,26 @@ func GcpHostProjectID(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostProjectID, v))
 }
 
+// GcpHostSource applies equality check predicate on the "gcp_host_source" field. It's identical to GcpHostSourceEQ.
+func GcpHostSource(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostSource, v))
+}
+
+// HostIdentityObservedEmail applies equality check predicate on the "host_identity_observed_email" field. It's identical to HostIdentityObservedEmailEQ.
+func HostIdentityObservedEmail(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservation applies equality check predicate on the "host_identity_observation" field. It's identical to HostIdentityObservationEQ.
+func HostIdentityObservation(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservedAt applies equality check predicate on the "host_identity_observed_at" field. It's identical to HostIdentityObservedAtEQ.
+func HostIdentityObservedAt(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedAt, v))
+}
+
 // ConnectedHubID applies equality check predicate on the "connected_hub_id" field. It's identical to ConnectedHubIDEQ.
 func ConnectedHubID(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedHubID, v))
@@ -163,6 +188,66 @@ func ConnectedSessionID(v string) predicate.RuntimeBroker {
 // ConnectedAt applies equality check predicate on the "connected_at" field. It's identical to ConnectedAtEQ.
 func ConnectedAt(v time.Time) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedAt, v))
+}
+
+// RuntimeTargetID applies equality check predicate on the "runtime_target_id" field. It's identical to RuntimeTargetIDEQ.
+func RuntimeTargetID(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetType applies equality check predicate on the "runtime_target_type" field. It's identical to RuntimeTargetTypeEQ.
+func RuntimeTargetType(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetDisplayName applies equality check predicate on the "runtime_target_display_name" field. It's identical to RuntimeTargetDisplayNameEQ.
+func RuntimeTargetDisplayName(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetPresentation applies equality check predicate on the "runtime_target_presentation" field. It's identical to RuntimeTargetPresentationEQ.
+func RuntimeTargetPresentation(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationHash applies equality check predicate on the "runtime_target_presentation_hash" field. It's identical to RuntimeTargetPresentationHashEQ.
+func RuntimeTargetPresentationHash(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetPresentationHash, v))
+}
+
+// PresentationEpoch applies equality check predicate on the "presentation_epoch" field. It's identical to PresentationEpochEQ.
+func PresentationEpoch(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationEpoch, v))
+}
+
+// PresentationSeq applies equality check predicate on the "presentation_seq" field. It's identical to PresentationSeqEQ.
+func PresentationSeq(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationSeq, v))
+}
+
+// PresentationFencedAt applies equality check predicate on the "presentation_fenced_at" field. It's identical to PresentationFencedAtEQ.
+func PresentationFencedAt(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationFencedAt, v))
+}
+
+// PresentationObservedAt applies equality check predicate on the "presentation_observed_at" field. It's identical to PresentationObservedAtEQ.
+func PresentationObservedAt(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationObservedAt, v))
+}
+
+// ConversionPlanPresentation applies equality check predicate on the "conversion_plan_presentation" field. It's identical to ConversionPlanPresentationEQ.
+func ConversionPlanPresentation(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationHash applies equality check predicate on the "conversion_plan_presentation_hash" field. It's identical to ConversionPlanPresentationHashEQ.
+func ConversionPlanPresentationHash(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanObservedAt applies equality check predicate on the "conversion_plan_observed_at" field. It's identical to ConversionPlanObservedAtEQ.
+func ConversionPlanObservedAt(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConversionPlanObservedAt, v))
 }
 
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
@@ -965,59 +1050,229 @@ func RuntimesContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimes, v))
 }
 
-// LabelsEQ applies the EQ predicate on the "labels" field.
-func LabelsEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldLabels, v))
+// DefaultProfileEQ applies the EQ predicate on the "default_profile" field.
+func DefaultProfileEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldDefaultProfile, v))
 }
 
-// LabelsNEQ applies the NEQ predicate on the "labels" field.
-func LabelsNEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNEQ(FieldLabels, v))
+// DefaultProfileNEQ applies the NEQ predicate on the "default_profile" field.
+func DefaultProfileNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldDefaultProfile, v))
 }
 
-// LabelsIn applies the In predicate on the "labels" field.
-func LabelsIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldIn(FieldLabels, vs...))
+// DefaultProfileIn applies the In predicate on the "default_profile" field.
+func DefaultProfileIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldDefaultProfile, vs...))
 }
 
-// LabelsNotIn applies the NotIn predicate on the "labels" field.
-func LabelsNotIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNotIn(FieldLabels, vs...))
+// DefaultProfileNotIn applies the NotIn predicate on the "default_profile" field.
+func DefaultProfileNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldDefaultProfile, vs...))
 }
 
-// LabelsGT applies the GT predicate on the "labels" field.
-func LabelsGT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGT(FieldLabels, v))
+// DefaultProfileGT applies the GT predicate on the "default_profile" field.
+func DefaultProfileGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldDefaultProfile, v))
 }
 
-// LabelsGTE applies the GTE predicate on the "labels" field.
-func LabelsGTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGTE(FieldLabels, v))
+// DefaultProfileGTE applies the GTE predicate on the "default_profile" field.
+func DefaultProfileGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldDefaultProfile, v))
 }
 
-// LabelsLT applies the LT predicate on the "labels" field.
-func LabelsLT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLT(FieldLabels, v))
+// DefaultProfileLT applies the LT predicate on the "default_profile" field.
+func DefaultProfileLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldDefaultProfile, v))
 }
 
-// LabelsLTE applies the LTE predicate on the "labels" field.
-func LabelsLTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLTE(FieldLabels, v))
+// DefaultProfileLTE applies the LTE predicate on the "default_profile" field.
+func DefaultProfileLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldDefaultProfile, v))
 }
 
-// LabelsContains applies the Contains predicate on the "labels" field.
-func LabelsContains(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContains(FieldLabels, v))
+// DefaultProfileContains applies the Contains predicate on the "default_profile" field.
+func DefaultProfileContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldDefaultProfile, v))
 }
 
-// LabelsHasPrefix applies the HasPrefix predicate on the "labels" field.
-func LabelsHasPrefix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldLabels, v))
+// DefaultProfileHasPrefix applies the HasPrefix predicate on the "default_profile" field.
+func DefaultProfileHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldDefaultProfile, v))
 }
 
-// LabelsHasSuffix applies the HasSuffix predicate on the "labels" field.
-func LabelsHasSuffix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldLabels, v))
+// DefaultProfileHasSuffix applies the HasSuffix predicate on the "default_profile" field.
+func DefaultProfileHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldDefaultProfile, v))
+}
+
+// DefaultProfileIsNil applies the IsNil predicate on the "default_profile" field.
+func DefaultProfileIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldDefaultProfile))
+}
+
+// DefaultProfileNotNil applies the NotNil predicate on the "default_profile" field.
+func DefaultProfileNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldDefaultProfile))
+}
+
+// DefaultProfileEqualFold applies the EqualFold predicate on the "default_profile" field.
+func DefaultProfileEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldDefaultProfile, v))
+}
+
+// DefaultProfileContainsFold applies the ContainsFold predicate on the "default_profile" field.
+func DefaultProfileContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldDefaultProfile, v))
+}
+
+// WorkspaceStorageEQ applies the EQ predicate on the "workspace_storage" field.
+func WorkspaceStorageEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageNEQ applies the NEQ predicate on the "workspace_storage" field.
+func WorkspaceStorageNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageIn applies the In predicate on the "workspace_storage" field.
+func WorkspaceStorageIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldWorkspaceStorage, vs...))
+}
+
+// WorkspaceStorageNotIn applies the NotIn predicate on the "workspace_storage" field.
+func WorkspaceStorageNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldWorkspaceStorage, vs...))
+}
+
+// WorkspaceStorageGT applies the GT predicate on the "workspace_storage" field.
+func WorkspaceStorageGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageGTE applies the GTE predicate on the "workspace_storage" field.
+func WorkspaceStorageGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageLT applies the LT predicate on the "workspace_storage" field.
+func WorkspaceStorageLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageLTE applies the LTE predicate on the "workspace_storage" field.
+func WorkspaceStorageLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageContains applies the Contains predicate on the "workspace_storage" field.
+func WorkspaceStorageContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageHasPrefix applies the HasPrefix predicate on the "workspace_storage" field.
+func WorkspaceStorageHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageHasSuffix applies the HasSuffix predicate on the "workspace_storage" field.
+func WorkspaceStorageHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageIsNil applies the IsNil predicate on the "workspace_storage" field.
+func WorkspaceStorageIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldWorkspaceStorage))
+}
+
+// WorkspaceStorageNotNil applies the NotNil predicate on the "workspace_storage" field.
+func WorkspaceStorageNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldWorkspaceStorage))
+}
+
+// WorkspaceStorageEqualFold applies the EqualFold predicate on the "workspace_storage" field.
+func WorkspaceStorageEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldWorkspaceStorage, v))
+}
+
+// WorkspaceStorageContainsFold applies the ContainsFold predicate on the "workspace_storage" field.
+func WorkspaceStorageContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldWorkspaceStorage, v))
+}
+
+// HealthEQ applies the EQ predicate on the "health" field.
+func HealthEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHealth, v))
+}
+
+// HealthNEQ applies the NEQ predicate on the "health" field.
+func HealthNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHealth, v))
+}
+
+// HealthIn applies the In predicate on the "health" field.
+func HealthIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHealth, vs...))
+}
+
+// HealthNotIn applies the NotIn predicate on the "health" field.
+func HealthNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHealth, vs...))
+}
+
+// HealthGT applies the GT predicate on the "health" field.
+func HealthGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHealth, v))
+}
+
+// HealthGTE applies the GTE predicate on the "health" field.
+func HealthGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHealth, v))
+}
+
+// HealthLT applies the LT predicate on the "health" field.
+func HealthLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHealth, v))
+}
+
+// HealthLTE applies the LTE predicate on the "health" field.
+func HealthLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHealth, v))
+}
+
+// HealthContains applies the Contains predicate on the "health" field.
+func HealthContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldHealth, v))
+}
+
+// HealthHasPrefix applies the HasPrefix predicate on the "health" field.
+func HealthHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldHealth, v))
+}
+
+// HealthHasSuffix applies the HasSuffix predicate on the "health" field.
+func HealthHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldHealth, v))
+}
+
+// HealthIsNil applies the IsNil predicate on the "health" field.
+func HealthIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHealth))
+}
+
+// HealthNotNil applies the NotNil predicate on the "health" field.
+func HealthNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHealth))
+}
+
+// HealthEqualFold applies the EqualFold predicate on the "health" field.
+func HealthEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldHealth, v))
+}
+
+// HealthContainsFold applies the ContainsFold predicate on the "health" field.
+func HealthContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldHealth, v))
 }
 
 // LabelsIsNil applies the IsNil predicate on the "labels" field.
@@ -1030,71 +1285,6 @@ func LabelsNotNil() predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNotNull(FieldLabels))
 }
 
-// LabelsEqualFold applies the EqualFold predicate on the "labels" field.
-func LabelsEqualFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldLabels, v))
-}
-
-// LabelsContainsFold applies the ContainsFold predicate on the "labels" field.
-func LabelsContainsFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldLabels, v))
-}
-
-// AnnotationsEQ applies the EQ predicate on the "annotations" field.
-func AnnotationsEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldAnnotations, v))
-}
-
-// AnnotationsNEQ applies the NEQ predicate on the "annotations" field.
-func AnnotationsNEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNEQ(FieldAnnotations, v))
-}
-
-// AnnotationsIn applies the In predicate on the "annotations" field.
-func AnnotationsIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldIn(FieldAnnotations, vs...))
-}
-
-// AnnotationsNotIn applies the NotIn predicate on the "annotations" field.
-func AnnotationsNotIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNotIn(FieldAnnotations, vs...))
-}
-
-// AnnotationsGT applies the GT predicate on the "annotations" field.
-func AnnotationsGT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGT(FieldAnnotations, v))
-}
-
-// AnnotationsGTE applies the GTE predicate on the "annotations" field.
-func AnnotationsGTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGTE(FieldAnnotations, v))
-}
-
-// AnnotationsLT applies the LT predicate on the "annotations" field.
-func AnnotationsLT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLT(FieldAnnotations, v))
-}
-
-// AnnotationsLTE applies the LTE predicate on the "annotations" field.
-func AnnotationsLTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLTE(FieldAnnotations, v))
-}
-
-// AnnotationsContains applies the Contains predicate on the "annotations" field.
-func AnnotationsContains(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContains(FieldAnnotations, v))
-}
-
-// AnnotationsHasPrefix applies the HasPrefix predicate on the "annotations" field.
-func AnnotationsHasPrefix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldAnnotations, v))
-}
-
-// AnnotationsHasSuffix applies the HasSuffix predicate on the "annotations" field.
-func AnnotationsHasSuffix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldAnnotations, v))
-}
-
 // AnnotationsIsNil applies the IsNil predicate on the "annotations" field.
 func AnnotationsIsNil() predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldIsNull(FieldAnnotations))
@@ -1103,16 +1293,6 @@ func AnnotationsIsNil() predicate.RuntimeBroker {
 // AnnotationsNotNil applies the NotNil predicate on the "annotations" field.
 func AnnotationsNotNil() predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNotNull(FieldAnnotations))
-}
-
-// AnnotationsEqualFold applies the EqualFold predicate on the "annotations" field.
-func AnnotationsEqualFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldAnnotations, v))
-}
-
-// AnnotationsContainsFold applies the ContainsFold predicate on the "annotations" field.
-func AnnotationsContainsFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldAnnotations, v))
 }
 
 // EndpointEQ applies the EQ predicate on the "endpoint" field.
@@ -1425,6 +1605,281 @@ func GcpHostProjectIDContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostProjectID, v))
 }
 
+// GcpHostSourceEQ applies the EQ predicate on the "gcp_host_source" field.
+func GcpHostSourceEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceNEQ applies the NEQ predicate on the "gcp_host_source" field.
+func GcpHostSourceNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceIn applies the In predicate on the "gcp_host_source" field.
+func GcpHostSourceIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldGcpHostSource, vs...))
+}
+
+// GcpHostSourceNotIn applies the NotIn predicate on the "gcp_host_source" field.
+func GcpHostSourceNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldGcpHostSource, vs...))
+}
+
+// GcpHostSourceGT applies the GT predicate on the "gcp_host_source" field.
+func GcpHostSourceGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceGTE applies the GTE predicate on the "gcp_host_source" field.
+func GcpHostSourceGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceLT applies the LT predicate on the "gcp_host_source" field.
+func GcpHostSourceLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceLTE applies the LTE predicate on the "gcp_host_source" field.
+func GcpHostSourceLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceContains applies the Contains predicate on the "gcp_host_source" field.
+func GcpHostSourceContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceHasPrefix applies the HasPrefix predicate on the "gcp_host_source" field.
+func GcpHostSourceHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceHasSuffix applies the HasSuffix predicate on the "gcp_host_source" field.
+func GcpHostSourceHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceIsNil applies the IsNil predicate on the "gcp_host_source" field.
+func GcpHostSourceIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldGcpHostSource))
+}
+
+// GcpHostSourceNotNil applies the NotNil predicate on the "gcp_host_source" field.
+func GcpHostSourceNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldGcpHostSource))
+}
+
+// GcpHostSourceEqualFold applies the EqualFold predicate on the "gcp_host_source" field.
+func GcpHostSourceEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceContainsFold applies the ContainsFold predicate on the "gcp_host_source" field.
+func GcpHostSourceContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostSource, v))
+}
+
+// HostIdentityObservedEmailEQ applies the EQ predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailNEQ applies the NEQ predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailIn applies the In predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHostIdentityObservedEmail, vs...))
+}
+
+// HostIdentityObservedEmailNotIn applies the NotIn predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHostIdentityObservedEmail, vs...))
+}
+
+// HostIdentityObservedEmailGT applies the GT predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailGTE applies the GTE predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailLT applies the LT predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailLTE applies the LTE predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailContains applies the Contains predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailHasPrefix applies the HasPrefix predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailHasSuffix applies the HasSuffix predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailIsNil applies the IsNil predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHostIdentityObservedEmail))
+}
+
+// HostIdentityObservedEmailNotNil applies the NotNil predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHostIdentityObservedEmail))
+}
+
+// HostIdentityObservedEmailEqualFold applies the EqualFold predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailContainsFold applies the ContainsFold predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservationEQ applies the EQ predicate on the "host_identity_observation" field.
+func HostIdentityObservationEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationNEQ applies the NEQ predicate on the "host_identity_observation" field.
+func HostIdentityObservationNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationIn applies the In predicate on the "host_identity_observation" field.
+func HostIdentityObservationIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHostIdentityObservation, vs...))
+}
+
+// HostIdentityObservationNotIn applies the NotIn predicate on the "host_identity_observation" field.
+func HostIdentityObservationNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHostIdentityObservation, vs...))
+}
+
+// HostIdentityObservationGT applies the GT predicate on the "host_identity_observation" field.
+func HostIdentityObservationGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationGTE applies the GTE predicate on the "host_identity_observation" field.
+func HostIdentityObservationGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationLT applies the LT predicate on the "host_identity_observation" field.
+func HostIdentityObservationLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationLTE applies the LTE predicate on the "host_identity_observation" field.
+func HostIdentityObservationLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationContains applies the Contains predicate on the "host_identity_observation" field.
+func HostIdentityObservationContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationHasPrefix applies the HasPrefix predicate on the "host_identity_observation" field.
+func HostIdentityObservationHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationHasSuffix applies the HasSuffix predicate on the "host_identity_observation" field.
+func HostIdentityObservationHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationIsNil applies the IsNil predicate on the "host_identity_observation" field.
+func HostIdentityObservationIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHostIdentityObservation))
+}
+
+// HostIdentityObservationNotNil applies the NotNil predicate on the "host_identity_observation" field.
+func HostIdentityObservationNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHostIdentityObservation))
+}
+
+// HostIdentityObservationEqualFold applies the EqualFold predicate on the "host_identity_observation" field.
+func HostIdentityObservationEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationContainsFold applies the ContainsFold predicate on the "host_identity_observation" field.
+func HostIdentityObservationContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservedAtEQ applies the EQ predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtNEQ applies the NEQ predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtNEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtIn applies the In predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHostIdentityObservedAt, vs...))
+}
+
+// HostIdentityObservedAtNotIn applies the NotIn predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtNotIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHostIdentityObservedAt, vs...))
+}
+
+// HostIdentityObservedAtGT applies the GT predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtGT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtGTE applies the GTE predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtGTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtLT applies the LT predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtLT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtLTE applies the LTE predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtLTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtIsNil applies the IsNil predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHostIdentityObservedAt))
+}
+
+// HostIdentityObservedAtNotNil applies the NotNil predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHostIdentityObservedAt))
+}
+
 // ConnectedHubIDEQ applies the EQ predicate on the "connected_hub_id" field.
 func ConnectedHubIDEQ(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedHubID, v))
@@ -1623,6 +2078,781 @@ func ConnectedAtIsNil() predicate.RuntimeBroker {
 // ConnectedAtNotNil applies the NotNil predicate on the "connected_at" field.
 func ConnectedAtNotNil() predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNotNull(FieldConnectedAt))
+}
+
+// RuntimeTargetIDEQ applies the EQ predicate on the "runtime_target_id" field.
+func RuntimeTargetIDEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDNEQ applies the NEQ predicate on the "runtime_target_id" field.
+func RuntimeTargetIDNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDIn applies the In predicate on the "runtime_target_id" field.
+func RuntimeTargetIDIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldRuntimeTargetID, vs...))
+}
+
+// RuntimeTargetIDNotIn applies the NotIn predicate on the "runtime_target_id" field.
+func RuntimeTargetIDNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldRuntimeTargetID, vs...))
+}
+
+// RuntimeTargetIDGT applies the GT predicate on the "runtime_target_id" field.
+func RuntimeTargetIDGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDGTE applies the GTE predicate on the "runtime_target_id" field.
+func RuntimeTargetIDGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDLT applies the LT predicate on the "runtime_target_id" field.
+func RuntimeTargetIDLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDLTE applies the LTE predicate on the "runtime_target_id" field.
+func RuntimeTargetIDLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDContains applies the Contains predicate on the "runtime_target_id" field.
+func RuntimeTargetIDContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDHasPrefix applies the HasPrefix predicate on the "runtime_target_id" field.
+func RuntimeTargetIDHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDHasSuffix applies the HasSuffix predicate on the "runtime_target_id" field.
+func RuntimeTargetIDHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDIsNil applies the IsNil predicate on the "runtime_target_id" field.
+func RuntimeTargetIDIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldRuntimeTargetID))
+}
+
+// RuntimeTargetIDNotNil applies the NotNil predicate on the "runtime_target_id" field.
+func RuntimeTargetIDNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldRuntimeTargetID))
+}
+
+// RuntimeTargetIDEqualFold applies the EqualFold predicate on the "runtime_target_id" field.
+func RuntimeTargetIDEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetIDContainsFold applies the ContainsFold predicate on the "runtime_target_id" field.
+func RuntimeTargetIDContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimeTargetID, v))
+}
+
+// RuntimeTargetTypeEQ applies the EQ predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeNEQ applies the NEQ predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeIn applies the In predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldRuntimeTargetType, vs...))
+}
+
+// RuntimeTargetTypeNotIn applies the NotIn predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldRuntimeTargetType, vs...))
+}
+
+// RuntimeTargetTypeGT applies the GT predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeGTE applies the GTE predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeLT applies the LT predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeLTE applies the LTE predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeContains applies the Contains predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeHasPrefix applies the HasPrefix predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeHasSuffix applies the HasSuffix predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeIsNil applies the IsNil predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldRuntimeTargetType))
+}
+
+// RuntimeTargetTypeNotNil applies the NotNil predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldRuntimeTargetType))
+}
+
+// RuntimeTargetTypeEqualFold applies the EqualFold predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetTypeContainsFold applies the ContainsFold predicate on the "runtime_target_type" field.
+func RuntimeTargetTypeContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimeTargetType, v))
+}
+
+// RuntimeTargetDisplayNameEQ applies the EQ predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameNEQ applies the NEQ predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameIn applies the In predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldRuntimeTargetDisplayName, vs...))
+}
+
+// RuntimeTargetDisplayNameNotIn applies the NotIn predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldRuntimeTargetDisplayName, vs...))
+}
+
+// RuntimeTargetDisplayNameGT applies the GT predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameGTE applies the GTE predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameLT applies the LT predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameLTE applies the LTE predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameContains applies the Contains predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameHasPrefix applies the HasPrefix predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameHasSuffix applies the HasSuffix predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameIsNil applies the IsNil predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldRuntimeTargetDisplayName))
+}
+
+// RuntimeTargetDisplayNameNotNil applies the NotNil predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldRuntimeTargetDisplayName))
+}
+
+// RuntimeTargetDisplayNameEqualFold applies the EqualFold predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetDisplayNameContainsFold applies the ContainsFold predicate on the "runtime_target_display_name" field.
+func RuntimeTargetDisplayNameContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimeTargetDisplayName, v))
+}
+
+// RuntimeTargetPresentationEQ applies the EQ predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationNEQ applies the NEQ predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationIn applies the In predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldRuntimeTargetPresentation, vs...))
+}
+
+// RuntimeTargetPresentationNotIn applies the NotIn predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldRuntimeTargetPresentation, vs...))
+}
+
+// RuntimeTargetPresentationGT applies the GT predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationGTE applies the GTE predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationLT applies the LT predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationLTE applies the LTE predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationContains applies the Contains predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationHasPrefix applies the HasPrefix predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationHasSuffix applies the HasSuffix predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationIsNil applies the IsNil predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldRuntimeTargetPresentation))
+}
+
+// RuntimeTargetPresentationNotNil applies the NotNil predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldRuntimeTargetPresentation))
+}
+
+// RuntimeTargetPresentationEqualFold applies the EqualFold predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationContainsFold applies the ContainsFold predicate on the "runtime_target_presentation" field.
+func RuntimeTargetPresentationContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimeTargetPresentation, v))
+}
+
+// RuntimeTargetPresentationHashEQ applies the EQ predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashNEQ applies the NEQ predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashIn applies the In predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldRuntimeTargetPresentationHash, vs...))
+}
+
+// RuntimeTargetPresentationHashNotIn applies the NotIn predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldRuntimeTargetPresentationHash, vs...))
+}
+
+// RuntimeTargetPresentationHashGT applies the GT predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashGTE applies the GTE predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashLT applies the LT predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashLTE applies the LTE predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashContains applies the Contains predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashHasPrefix applies the HasPrefix predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashHasSuffix applies the HasSuffix predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashIsNil applies the IsNil predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldRuntimeTargetPresentationHash))
+}
+
+// RuntimeTargetPresentationHashNotNil applies the NotNil predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldRuntimeTargetPresentationHash))
+}
+
+// RuntimeTargetPresentationHashEqualFold applies the EqualFold predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldRuntimeTargetPresentationHash, v))
+}
+
+// RuntimeTargetPresentationHashContainsFold applies the ContainsFold predicate on the "runtime_target_presentation_hash" field.
+func RuntimeTargetPresentationHashContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimeTargetPresentationHash, v))
+}
+
+// PresentationEpochEQ applies the EQ predicate on the "presentation_epoch" field.
+func PresentationEpochEQ(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationEpoch, v))
+}
+
+// PresentationEpochNEQ applies the NEQ predicate on the "presentation_epoch" field.
+func PresentationEpochNEQ(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldPresentationEpoch, v))
+}
+
+// PresentationEpochIn applies the In predicate on the "presentation_epoch" field.
+func PresentationEpochIn(vs ...int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldPresentationEpoch, vs...))
+}
+
+// PresentationEpochNotIn applies the NotIn predicate on the "presentation_epoch" field.
+func PresentationEpochNotIn(vs ...int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldPresentationEpoch, vs...))
+}
+
+// PresentationEpochGT applies the GT predicate on the "presentation_epoch" field.
+func PresentationEpochGT(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldPresentationEpoch, v))
+}
+
+// PresentationEpochGTE applies the GTE predicate on the "presentation_epoch" field.
+func PresentationEpochGTE(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldPresentationEpoch, v))
+}
+
+// PresentationEpochLT applies the LT predicate on the "presentation_epoch" field.
+func PresentationEpochLT(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldPresentationEpoch, v))
+}
+
+// PresentationEpochLTE applies the LTE predicate on the "presentation_epoch" field.
+func PresentationEpochLTE(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldPresentationEpoch, v))
+}
+
+// PresentationEpochIsNil applies the IsNil predicate on the "presentation_epoch" field.
+func PresentationEpochIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldPresentationEpoch))
+}
+
+// PresentationEpochNotNil applies the NotNil predicate on the "presentation_epoch" field.
+func PresentationEpochNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldPresentationEpoch))
+}
+
+// PresentationSeqEQ applies the EQ predicate on the "presentation_seq" field.
+func PresentationSeqEQ(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationSeq, v))
+}
+
+// PresentationSeqNEQ applies the NEQ predicate on the "presentation_seq" field.
+func PresentationSeqNEQ(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldPresentationSeq, v))
+}
+
+// PresentationSeqIn applies the In predicate on the "presentation_seq" field.
+func PresentationSeqIn(vs ...int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldPresentationSeq, vs...))
+}
+
+// PresentationSeqNotIn applies the NotIn predicate on the "presentation_seq" field.
+func PresentationSeqNotIn(vs ...int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldPresentationSeq, vs...))
+}
+
+// PresentationSeqGT applies the GT predicate on the "presentation_seq" field.
+func PresentationSeqGT(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldPresentationSeq, v))
+}
+
+// PresentationSeqGTE applies the GTE predicate on the "presentation_seq" field.
+func PresentationSeqGTE(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldPresentationSeq, v))
+}
+
+// PresentationSeqLT applies the LT predicate on the "presentation_seq" field.
+func PresentationSeqLT(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldPresentationSeq, v))
+}
+
+// PresentationSeqLTE applies the LTE predicate on the "presentation_seq" field.
+func PresentationSeqLTE(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldPresentationSeq, v))
+}
+
+// PresentationSeqIsNil applies the IsNil predicate on the "presentation_seq" field.
+func PresentationSeqIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldPresentationSeq))
+}
+
+// PresentationSeqNotNil applies the NotNil predicate on the "presentation_seq" field.
+func PresentationSeqNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldPresentationSeq))
+}
+
+// PresentationFencedAtEQ applies the EQ predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationFencedAt, v))
+}
+
+// PresentationFencedAtNEQ applies the NEQ predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtNEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldPresentationFencedAt, v))
+}
+
+// PresentationFencedAtIn applies the In predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldPresentationFencedAt, vs...))
+}
+
+// PresentationFencedAtNotIn applies the NotIn predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtNotIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldPresentationFencedAt, vs...))
+}
+
+// PresentationFencedAtGT applies the GT predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtGT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldPresentationFencedAt, v))
+}
+
+// PresentationFencedAtGTE applies the GTE predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtGTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldPresentationFencedAt, v))
+}
+
+// PresentationFencedAtLT applies the LT predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtLT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldPresentationFencedAt, v))
+}
+
+// PresentationFencedAtLTE applies the LTE predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtLTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldPresentationFencedAt, v))
+}
+
+// PresentationFencedAtIsNil applies the IsNil predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldPresentationFencedAt))
+}
+
+// PresentationFencedAtNotNil applies the NotNil predicate on the "presentation_fenced_at" field.
+func PresentationFencedAtNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldPresentationFencedAt))
+}
+
+// PresentationObservedAtEQ applies the EQ predicate on the "presentation_observed_at" field.
+func PresentationObservedAtEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldPresentationObservedAt, v))
+}
+
+// PresentationObservedAtNEQ applies the NEQ predicate on the "presentation_observed_at" field.
+func PresentationObservedAtNEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldPresentationObservedAt, v))
+}
+
+// PresentationObservedAtIn applies the In predicate on the "presentation_observed_at" field.
+func PresentationObservedAtIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldPresentationObservedAt, vs...))
+}
+
+// PresentationObservedAtNotIn applies the NotIn predicate on the "presentation_observed_at" field.
+func PresentationObservedAtNotIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldPresentationObservedAt, vs...))
+}
+
+// PresentationObservedAtGT applies the GT predicate on the "presentation_observed_at" field.
+func PresentationObservedAtGT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldPresentationObservedAt, v))
+}
+
+// PresentationObservedAtGTE applies the GTE predicate on the "presentation_observed_at" field.
+func PresentationObservedAtGTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldPresentationObservedAt, v))
+}
+
+// PresentationObservedAtLT applies the LT predicate on the "presentation_observed_at" field.
+func PresentationObservedAtLT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldPresentationObservedAt, v))
+}
+
+// PresentationObservedAtLTE applies the LTE predicate on the "presentation_observed_at" field.
+func PresentationObservedAtLTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldPresentationObservedAt, v))
+}
+
+// PresentationObservedAtIsNil applies the IsNil predicate on the "presentation_observed_at" field.
+func PresentationObservedAtIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldPresentationObservedAt))
+}
+
+// PresentationObservedAtNotNil applies the NotNil predicate on the "presentation_observed_at" field.
+func PresentationObservedAtNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldPresentationObservedAt))
+}
+
+// ConversionPlanPresentationEQ applies the EQ predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationNEQ applies the NEQ predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationIn applies the In predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldConversionPlanPresentation, vs...))
+}
+
+// ConversionPlanPresentationNotIn applies the NotIn predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldConversionPlanPresentation, vs...))
+}
+
+// ConversionPlanPresentationGT applies the GT predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationGTE applies the GTE predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationLT applies the LT predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationLTE applies the LTE predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationContains applies the Contains predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationHasPrefix applies the HasPrefix predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationHasSuffix applies the HasSuffix predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationIsNil applies the IsNil predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldConversionPlanPresentation))
+}
+
+// ConversionPlanPresentationNotNil applies the NotNil predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldConversionPlanPresentation))
+}
+
+// ConversionPlanPresentationEqualFold applies the EqualFold predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationContainsFold applies the ContainsFold predicate on the "conversion_plan_presentation" field.
+func ConversionPlanPresentationContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldConversionPlanPresentation, v))
+}
+
+// ConversionPlanPresentationHashEQ applies the EQ predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashNEQ applies the NEQ predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashIn applies the In predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldConversionPlanPresentationHash, vs...))
+}
+
+// ConversionPlanPresentationHashNotIn applies the NotIn predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldConversionPlanPresentationHash, vs...))
+}
+
+// ConversionPlanPresentationHashGT applies the GT predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashGTE applies the GTE predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashLT applies the LT predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashLTE applies the LTE predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashContains applies the Contains predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashHasPrefix applies the HasPrefix predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashHasSuffix applies the HasSuffix predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashIsNil applies the IsNil predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldConversionPlanPresentationHash))
+}
+
+// ConversionPlanPresentationHashNotNil applies the NotNil predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldConversionPlanPresentationHash))
+}
+
+// ConversionPlanPresentationHashEqualFold applies the EqualFold predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanPresentationHashContainsFold applies the ContainsFold predicate on the "conversion_plan_presentation_hash" field.
+func ConversionPlanPresentationHashContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldConversionPlanPresentationHash, v))
+}
+
+// ConversionPlanObservedAtEQ applies the EQ predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConversionPlanObservedAt, v))
+}
+
+// ConversionPlanObservedAtNEQ applies the NEQ predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtNEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldConversionPlanObservedAt, v))
+}
+
+// ConversionPlanObservedAtIn applies the In predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldConversionPlanObservedAt, vs...))
+}
+
+// ConversionPlanObservedAtNotIn applies the NotIn predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtNotIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldConversionPlanObservedAt, vs...))
+}
+
+// ConversionPlanObservedAtGT applies the GT predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtGT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldConversionPlanObservedAt, v))
+}
+
+// ConversionPlanObservedAtGTE applies the GTE predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtGTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldConversionPlanObservedAt, v))
+}
+
+// ConversionPlanObservedAtLT applies the LT predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtLT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldConversionPlanObservedAt, v))
+}
+
+// ConversionPlanObservedAtLTE applies the LTE predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtLTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldConversionPlanObservedAt, v))
+}
+
+// ConversionPlanObservedAtIsNil applies the IsNil predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldConversionPlanObservedAt))
+}
+
+// ConversionPlanObservedAtNotNil applies the NotNil predicate on the "conversion_plan_observed_at" field.
+func ConversionPlanObservedAtNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldConversionPlanObservedAt))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

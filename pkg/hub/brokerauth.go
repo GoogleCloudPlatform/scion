@@ -16,7 +16,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -24,13 +23,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -79,6 +79,31 @@ type BrokerAuthService struct {
 	nonces             *NonceCache      // in-memory fallback (used when DB is unavailable)
 	nonceStore         *NonceCacheStore // DB-backed nonce cache (used in multi-instance mode)
 	onBehalfOfResolver OnBehalfOfResolver
+	// brokerAdmission, when set, is consulted before any HMAC credential is
+	// checked. A non-nil error refuses the request. The hub sets it to
+	// Server.testAdminBrokerAdmission, which refuses every broker other than
+	// the co-located one while the test admin tier is on.
+	brokerAdmission func(ctx context.Context, brokerID string) error
+	// deferNonce, when set and true for a request, makes
+	// ValidateBrokerSignature verify the request without recording its
+	// nonce. The hub sets it to Server.conduitIngressDefersBrokerNonce: a
+	// conduit dial the ingress forwards to a separate relay, whose Admit
+	// records the nonce instead (conduit_ingress_broker_nonce.go).
+	deferNonce func(r *http.Request) bool
+}
+
+// defersNonce reports whether ValidateBrokerSignature leaves r's nonce to
+// the hop that admits it (deferNonce).
+func (s *BrokerAuthService) defersNonce(r *http.Request) bool {
+	return s != nil && s.deferNonce != nil && s.deferNonce(r)
+}
+
+// admitBroker applies brokerAdmission, if any.
+func (s *BrokerAuthService) admitBroker(ctx context.Context, brokerID string) error {
+	if s == nil || s.brokerAdmission == nil {
+		return nil
+	}
+	return s.brokerAdmission(ctx, brokerID)
 }
 
 // NonceCache provides replay attack prevention by caching used nonces.
@@ -196,6 +221,40 @@ type CreateBrokerRegistrationRequest struct {
 	// host. Set by the operator so the Hub can gate passthrough on actAs.
 	GCPHostServiceAccountEmail string `json:"gcpHostServiceAccountEmail,omitempty"`
 	GCPHostProjectID           string `json:"gcpHostProjectId,omitempty"`
+
+	// RuntimeTarget is the registration descriptor of a flat (single-target)
+	// Runtime Broker (.design/flat-runtime-brokers-contract.md section 6).
+	// Nil means a legacy registration.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+
+	// JoinTokenTTLSeconds is the lifetime of the issued join token. Zero
+	// means BrokerAuthConfig.JoinTokenExpiry; any other value must be within
+	// [MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds].
+	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`
+
+	// PreserveSettings, when the request matches an existing broker, leaves
+	// that broker's record unchanged (AutoProvide, labels and GCP host
+	// fields) and only issues a new join token. For a new broker it creates
+	// the record with AutoProvide off and no GCP host fields, whatever the
+	// request says; only Labels are applied. It skips only the
+	// broker.auto_provide check, because AutoProvide is never stored: the
+	// caller must still hold broker.create, and for a matched broker must be
+	// its creator or a super-admin presenting an interactive session or dev
+	// credential.
+	PreserveSettings bool `json:"preserveSettings,omitempty"`
+}
+
+// Join token lifetime bounds for CreateBrokerRegistrationRequest.JoinTokenTTLSeconds.
+const (
+	MinJoinTokenTTLSeconds = 300   // 5 minutes
+	MaxJoinTokenTTLSeconds = 86400 // 24 hours
+)
+
+// ValidJoinTokenTTLSeconds reports whether ttl is an acceptable
+// JoinTokenTTLSeconds value: zero (use the configured default) or within
+// [MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds].
+func ValidJoinTokenTTLSeconds(ttl int) bool {
+	return ttl == 0 || (ttl >= MinJoinTokenTTLSeconds && ttl <= MaxJoinTokenTTLSeconds)
 }
 
 // CreateBrokerRegistrationResponse is the response for POST /api/v1/brokers.
@@ -204,6 +263,23 @@ type CreateBrokerRegistrationResponse struct {
 	JoinToken    string    `json:"joinToken"` // scion_join_<base64>
 	ExpiresAt    time.Time `json:"expiresAt"`
 	Reregistered bool      `json:"reregistered,omitempty"`
+	// RuntimeTarget echoes the stored descriptor of a flat Runtime Broker
+	// row (the activation acknowledgement); nil for a legacy row.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// Reissued is true when an earlier join token for this broker was
+	// replaced by this one. The earlier token no longer works.
+	Reissued bool `json:"reissued,omitempty"`
+	// JoinTokenTTL is the lifetime the token was issued with. It is
+	// recorded in the audit log and not sent to the client.
+	JoinTokenTTL time.Duration `json:"-"`
+	// KeptSettings lists requested values that were not applied because
+	// the stored value is kept (see KeptSetting). Empty requested values
+	// are never listed.
+	KeptSettings []KeptSetting `json:"keptSettings,omitempty"`
+	// GCPHostSet is true when this registration filled the GCP host pair
+	// of an existing broker. It is recorded in the audit log and not sent
+	// to the client.
+	GCPHostSet bool `json:"-"`
 }
 
 // BrokerJoinRequest is the request body for POST /api/v1/brokers/join.
@@ -214,6 +290,15 @@ type BrokerJoinRequest struct {
 	Version      string                `json:"version"`
 	Capabilities []string              `json:"capabilities,omitempty"`
 	Profiles     []store.BrokerProfile `json:"profiles,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor. An
+	// older broker omits it and the stored descriptor is left unchanged.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// DefaultProfile is the broker's default (active) profile name. An
+	// older broker omits it and the stored value is left unchanged.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// RuntimeTarget is the flat Runtime Broker descriptor; it must equal the
+	// stored target. Nil means a legacy join.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // BrokerJoinResponse is the response for POST /api/v1/brokers/join.
@@ -221,70 +306,294 @@ type BrokerJoinResponse struct {
 	SecretKey   string `json:"secretKey"` // Base64-encoded 256-bit key
 	HubEndpoint string `json:"hubEndpoint"`
 	BrokerID    string `json:"brokerId"`
+	// RuntimeTarget echoes the stored descriptor of a flat Runtime Broker
+	// row (the activation acknowledgement); nil for a legacy row.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // JoinTokenPrefix is the prefix for join tokens.
 const JoinTokenPrefix = "scion_join_"
 
+// capabilitiesFromStrings converts the broker-reported capability name list
+// (CreateBrokerRegistrationRequest.Capabilities / BrokerJoinRequest.Capabilities,
+// e.g. []string{"sync", "attach", "reprovision"}) into the structured
+// store.BrokerCapabilities the hub gates dispatch decisions on. Unrecognized
+// names are ignored rather than rejected, so an older hub talking to a newer
+// broker (or vice versa) never fails registration over an unknown capability
+// string.
+func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
+	caps := &store.BrokerCapabilities{}
+	for _, name := range names {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "webpty", "web_pty":
+			caps.WebPTY = true
+		case "sync":
+			caps.Sync = true
+		case "attach":
+			caps.Attach = true
+		case "reprovision":
+			caps.Reprovision = true
+		case "asynclaunch", "async_launch":
+			caps.AsyncLaunch = true
+		case "asyncstart", "async_start":
+			caps.AsyncStart = true
+		case "emptyperagentworkspace", "empty_per_agent_workspace":
+			caps.EmptyPerAgentWorkspace = true
+		case "agentmove", "agent_move":
+			caps.AgentMove = true
+		case "agentmoverecreate", "agent_move_recreate":
+			caps.AgentMoveRecreate = true
+		case "attachmentdelivery", "attachment_delivery":
+			caps.AttachmentDelivery = true
+		case "reprovisionemptyperagent", "reprovision_empty_per_agent":
+			caps.ReprovisionEmptyPerAgent = true
+		case "changedfields", "changed_fields":
+			caps.ChangedFields = true
+		case "clearedfields", "cleared_fields":
+			caps.ClearedFields = true
+		case "unlimitedcountlimits", "unlimited_count_limits":
+			caps.UnlimitedCountLimits = true
+		case "clearedresourcesubfields", "cleared_resource_subfields":
+			caps.ClearedResourceSubfields = true
+		case "startsinflight", "starts_in_flight":
+			caps.StartsInFlight = true
+		case "templatetiers", "template_tiers":
+			caps.TemplateTiers = true
+		}
+	}
+	return caps
+}
+
+// FindExistingBroker looks up the broker record, if any, that a registration
+// request for the given name and (optional) caller-supplied ID would match.
+// It returns (nil, nil) when no existing broker matches, which means the
+// request describes a brand-new registration. Callers that need to authorize
+// a match before it is acted upon (e.g. the HTTP handler's ownership gate)
+// should use this method rather than re-deriving the matching rule, and pin
+// the mutation to its result.
+//
+// A flat registration (target non-nil) is matched by ID only; a flat row is
+// never matched by name. A legacy registration (target nil) matches first by
+// name among legacy rows only (GetLegacyRuntimeBrokerByName), then by ID.
+func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, brokerID string, target *api.RuntimeTargetDescriptor) (*store.RuntimeBroker, error) {
+	var existingBroker *store.RuntimeBroker
+	if target == nil {
+		byName, err := s.store.GetLegacyRuntimeBrokerByName(ctx, name)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to check existing broker: %w", err)
+		}
+		existingBroker = byName
+	}
+
+	if existingBroker == nil && brokerID != "" {
+		existingByID, err := s.store.GetRuntimeBroker(ctx, brokerID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to check existing broker by ID: %w", err)
+		}
+		existingBroker = existingByID
+	}
+
+	return existingBroker, nil
+}
+
+// brokerRegistrationLookupKey marks the context of the existing-broker
+// lookup that createBrokerRegistration performs itself, so a store wrapper
+// can tell it apart from the caller's authorization-time lookup.
+type brokerRegistrationLookupKey struct{}
+
+func withBrokerRegistrationLookup(ctx context.Context) context.Context {
+	return context.WithValue(ctx, brokerRegistrationLookupKey{}, true)
+}
+
+// isBrokerRegistrationLookup reports whether ctx belongs to the lookup that
+// createBrokerRegistration performs before it mutates the broker.
+func isBrokerRegistrationLookup(ctx context.Context) bool {
+	v, _ := ctx.Value(brokerRegistrationLookupKey{}).(bool)
+	return v
+}
+
+// ErrBrokerRegistrationAuthorizationStale is returned by
+// CreateBrokerRegistrationForAuthorizedMatch and
+// CreateBrokerRegistrationForAuthorizedNew when the existing-broker lookup
+// performed during the mutation no longer matches what the caller was
+// authorized against: the authorization decision and this call must agree
+// on whether an existing broker is being reused, and on which one, and a
+// re-registration that keeps auto-provide on without the broker.auto_provide
+// check requires the re-read broker to still have it on.
+var ErrBrokerRegistrationAuthorizationStale = errors.New("broker registration authorization is stale; retry")
+
+// ErrJoinTokenTTLOutOfRange is returned when
+// CreateBrokerRegistrationRequest.JoinTokenTTLSeconds is outside the
+// accepted range.
+var ErrJoinTokenTTLOutOfRange = fmt.Errorf("joinTokenTtlSeconds must be between %d and %d", MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds)
+
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
+//
+// It carries no host service account decision, so a registration through it
+// never writes the broker's host service account email. On a new row a
+// requested one is refused with ErrHostSAClaimNotAuthorized. On an existing
+// row whose pair is unset and not set through the update API
+// (registrationFillsGCPHost) it is refused with ErrHostSAClaimStale, after
+// the record update; on any other existing row the requested pair is kept
+// and reported.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", false, true, hostSAClaimVerdict{})
+}
+
+// CreateBrokerRegistrationForAuthorizedMatch is CreateBrokerRegistration for
+// a caller that has already been authorized against a specific existing
+// broker returned by FindExistingBroker. expectedExistingBrokerID must equal
+// that broker's ID; if the lookup performed here resolves to a different
+// broker, or no longer finds a match at all, the registration is refused
+// (ErrBrokerRegistrationAuthorizationStale) rather than mutating a record
+// the caller was not authorized against.
+//
+// autoProvideAuthorized reports whether the caller passed the
+// broker.auto_provide check. When it is false and req.AutoProvide is true,
+// the caller was admitted only to keep an auto-provide setting that was
+// already on, so the broker re-read here must still have auto-provide on;
+// otherwise the registration is refused with
+// ErrBrokerRegistrationAuthorizationStale.
+//
+// hostSA is the caller's actAs decision for the requested host service
+// account (Server.evaluateHostSAClaim). The write stores a changed, non-empty
+// host service account only when hostSA allows exactly that value; otherwise
+// it is refused with ErrHostSAClaimNotAuthorized and nothing is written.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
+	if expectedExistingBrokerID == "" {
+		return nil, errors.New("expectedExistingBrokerID is required")
+	}
+	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false, autoProvideAuthorized, hostSA)
+}
+
+// CreateBrokerRegistrationForAuthorizedNew is CreateBrokerRegistration for a
+// caller that has already been authorized for a first-time registration,
+// specifically because FindExistingBroker found no match at authorization
+// time. If the lookup performed here now finds an existing broker — a
+// registration for the same name or ID landed in the window between
+// authorization and this call — the request is refused
+// (ErrBrokerRegistrationAuthorizationStale) rather than treated as an
+// implicit re-registration of a broker the caller was never authorized
+// against. hostSA is as for CreateBrokerRegistrationForAuthorizedMatch.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", true, true, hostSA)
+}
+
+// createBrokerRegistration implements CreateBrokerRegistration,
+// CreateBrokerRegistrationForAuthorizedMatch, and
+// CreateBrokerRegistrationForAuthorizedNew.
+//
+// expectedExistingBrokerID and expectNoExistingMatch express what the
+// caller was authorized for, if anything:
+//   - both unset (empty / false): no pin, used by the plain entry point
+//     that performs no HTTP-level authorization decision of its own.
+//   - expectedExistingBrokerID set: the lookup below must resolve to that
+//     exact broker.
+//   - expectNoExistingMatch true: the lookup below must resolve to no
+//     broker at all.
+//
+// autoProvideAuthorized false with req.AutoProvide true means the caller was
+// admitted only to keep auto-provide on for the matched broker, so the
+// broker re-read below must still have it on. A first-time registration
+// always passes true: its caller checks broker.auto_provide whenever
+// req.AutoProvide is set, except for a PreserveSettings request, whose
+// AutoProvide is forced off below and by the HTTP handler.
+//
+// hostSA is the caller's host service account decision. Immediately before
+// the row is written, hostSAClaimWriteAllowed compares the stored value of
+// the row re-read here with the value about to be stored; a change to a
+// non-empty value needs hostSA to allow exactly that value.
+func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
+	if err := s.admitBroker(ctx, req.BrokerID); err != nil {
+		return nil, err
+	}
+	// Hub-reserved labels are never taken from a client.
+	req.Labels = stripReservedBrokerLabels(req.Labels)
 	if req.Name == "" {
 		return nil, errors.New("name is required")
+	}
+	if !ValidJoinTokenTTLSeconds(req.JoinTokenTTLSeconds) {
+		return nil, ErrJoinTokenTTLOutOfRange
+	}
+
+	if req.PreserveSettings {
+		// A token-only request never sets broker settings.
+		req.AutoProvide = false
+		req.GCPHostServiceAccountEmail = ""
+		req.GCPHostProjectID = ""
 	}
 
 	// GCP SA emails are case-insensitive; normalize to lowercase before
 	// storage so that later comparisons (e.g. actAs checks) are reliable.
 	req.GCPHostServiceAccountEmail = strings.ToLower(req.GCPHostServiceAccountEmail)
 
-	// Default broker-type label to "external" if not provided
-	if req.Labels == nil {
-		req.Labels = make(map[string]string)
-	}
-	if _, exists := req.Labels["scion.io/broker-type"]; !exists {
-		req.Labels["scion.io/broker-type"] = "external"
-	}
-
 	// Before generating a new broker ID, check for an existing broker with same name
 	var brokerID string
 	var reregistered bool
 
-	existingBroker, err := s.store.GetRuntimeBrokerByName(ctx, req.Name)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("failed to check existing broker: %w", err)
+	// Flat registrations go through Server.registerFlatRuntimeBroker; this
+	// service path handles legacy (profile-based) registrations only.
+	if req.RuntimeTarget != nil {
+		return nil, errors.New("flat Runtime Broker registrations are handled by the Hub's flat registration path")
 	}
 
-	// Also check for re-registration by client-supplied BrokerID
-	if existingBroker == nil && req.BrokerID != "" {
-		existingByID, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("failed to check existing broker by ID: %w", err)
-		}
-		if existingByID != nil {
-			existingBroker = existingByID
+	existingBroker, err := s.FindExistingBroker(withBrokerRegistrationLookup(ctx), req.Name, req.BrokerID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if expectedExistingBrokerID != "" && (existingBroker == nil || existingBroker.ID != expectedExistingBrokerID) {
+		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
+	if expectNoExistingMatch && existingBroker != nil {
+		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
+	if existingBroker != nil && req.AutoProvide && !autoProvideAuthorized && !existingBroker.AutoProvide {
+		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
+
+	// R4: a legacy registration never re-registers a flat row, and never
+	// creates a row next to a flat row with the same name or slug.
+	if existingBroker.IsFlat() {
+		return nil, runtimeTargetChangedRefusal(existingBroker.ID, existingBroker.RuntimeTarget.ID, "")
+	}
+	if existingBroker == nil {
+		if err := legacyRegistrationNameConflict(ctx, s.store, req.Name, slugify(req.Name), req.BrokerID); err != nil {
+			return nil, err
 		}
 	}
 
-	if existingBroker != nil {
-		// Reuse existing broker - update its metadata
+	var kept []KeptSetting
+	var gcp registrationGCPHostResult
+	if existingBroker != nil && req.PreserveSettings {
+		// Reuse existing broker and leave its record as it is: only a new
+		// join token is issued below.
 		brokerID = existingBroker.ID
 		reregistered = true
-		existingBroker.AutoProvide = req.AutoProvide
-		existingBroker.GCPHostServiceAccountEmail = req.GCPHostServiceAccountEmail
-		existingBroker.GCPHostProjectID = req.GCPHostProjectID
-		// Merge request labels into existing labels to preserve any
-		// user-set labels while updating registration-provided ones.
-		if len(req.Labels) > 0 {
-			if existingBroker.Labels == nil {
-				existingBroker.Labels = make(map[string]string, len(req.Labels))
-			}
-			for k, v := range req.Labels {
-				existingBroker.Labels[k] = v
-			}
+	} else if existingBroker != nil {
+		// Reuse existing broker - update its metadata. Labels are added
+		// when the key is absent; the GCP host pair is filled below only
+		// while unset (see broker_registration_fields.go).
+		brokerID = existingBroker.ID
+		reregistered = true
+		// A refused fill of the host service account refuses the
+		// registration before anything is written.
+		if err := registrationFillDenied(req.GCPHostServiceAccountEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
 		}
+		priorHostSA := hostSAClaimOf(existingBroker)
+		existingBroker.AutoProvide = req.AutoProvide
+		existingBroker.Labels, kept = mergeRegistrationLabels(existingBroker.Labels, req.Labels)
 		existingBroker.Updated = time.Now()
+		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(existingBroker), hostSA); err != nil {
+			return nil, err
+		}
 		if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
 			return nil, fmt.Errorf("failed to update existing broker: %w", err)
+		}
+		if gcp, err = fillRegistrationGCPHost(ctx, s.store, brokerID, req.GCPHostServiceAccountEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
 		}
 	} else {
 		// Create new broker - use client-supplied ID if provided, otherwise generate
@@ -294,25 +603,49 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 			brokerID = uuid.New().String()
 		}
 
+		labels := registrationLabels(req.Labels)
+		labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
 		broker := &store.RuntimeBroker{
 			ID:                         brokerID,
 			Name:                       req.Name,
 			Slug:                       slugify(req.Name),
 			Status:                     store.BrokerStatusOffline,
 			AutoProvide:                req.AutoProvide,
-			Labels:                     req.Labels,
+			Labels:                     labels,
 			GCPHostServiceAccountEmail: req.GCPHostServiceAccountEmail,
 			GCPHostProjectID:           req.GCPHostProjectID,
 			Created:                    time.Now(),
 			Updated:                    time.Now(),
 			CreatedBy:                  createdBy,
 		}
+		if broker.GCPHostServiceAccountEmail != "" || broker.GCPHostProjectID != "" {
+			broker.GCPHostSource = store.GCPHostSourceRegistration
+		}
 
-		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
+		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(broker), hostSA); err != nil {
+			return nil, err
+		}
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 			return nil, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	}
 
+	resp, err := s.issueJoinToken(ctx, brokerID, createdBy, reregistered, req.JoinTokenTTLSeconds, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp.KeptSettings = append(gcp.Kept, kept...)
+	resp.GCPHostSet = gcp.Applied
+	return resp, nil
+}
+
+// issueJoinToken mints and stores a join token for brokerID and builds the
+// registration response. When the token cannot be stored, a row this
+// registration just created (reregistered false) is deleted again.
+// ttlSeconds is the request's join token lifetime (0: the configured
+// default; validated by the caller). target is the stored descriptor of a
+// flat row (the activation acknowledgement), nil for a legacy row.
+func (s *BrokerAuthService) issueJoinToken(ctx context.Context, brokerID, createdBy string, reregistered bool, ttlSeconds int, target *api.RuntimeTargetDescriptor) (*CreateBrokerRegistrationResponse, error) {
 	// Generate join token
 	tokenBytes := make([]byte, s.config.JoinTokenLength)
 	if _, err := rand.Read(tokenBytes); err != nil {
@@ -324,7 +657,11 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 	tokenHash := sha256Hash(joinToken)
 
 	// Calculate expiry
-	expiresAt := time.Now().Add(s.config.JoinTokenExpiry)
+	ttl := s.config.JoinTokenExpiry
+	if ttlSeconds > 0 {
+		ttl = time.Duration(ttlSeconds) * time.Second
+	}
+	expiresAt := time.Now().Add(ttl)
 
 	// Store the join token
 	joinTokenRecord := &store.BrokerJoinToken{
@@ -335,7 +672,10 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		CreatedBy: createdBy,
 	}
 
-	if err := s.store.CreateJoinToken(ctx, joinTokenRecord); err != nil {
+	// One token per broker: issuing a new one replaces any earlier token
+	// that has not been used yet.
+	reissued, err := s.store.UpsertJoinToken(ctx, joinTokenRecord)
+	if err != nil {
 		// Clean up the broker record on failure (only if we just created it)
 		if !reregistered {
 			_ = s.store.DeleteRuntimeBroker(ctx, brokerID)
@@ -343,17 +683,25 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		return nil, fmt.Errorf("failed to create join token: %w", err)
 	}
 
+	// The stored expiry: the store bounds a token minted by a test identity
+	// with an admin role by the identity's expiry (admin tier A3).
 	return &CreateBrokerRegistrationResponse{
-		BrokerID:     brokerID,
-		JoinToken:    joinToken,
-		ExpiresAt:    expiresAt,
-		Reregistered: reregistered,
+		BrokerID:      brokerID,
+		JoinToken:     joinToken,
+		ExpiresAt:     joinTokenRecord.ExpiresAt,
+		Reregistered:  reregistered,
+		Reissued:      reissued,
+		JoinTokenTTL:  ttl,
+		RuntimeTarget: copyRuntimeTarget(target),
 	}, nil
 }
 
 // CompleteBrokerJoin completes broker registration with join token exchange.
 // Returns the shared secret for HMAC authentication.
 func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJoinRequest, hubEndpoint string) (*BrokerJoinResponse, error) {
+	if err := s.admitBroker(ctx, req.BrokerID); err != nil {
+		return nil, err
+	}
 	if req.BrokerID == "" {
 		return nil, errors.New("brokerId is required")
 	}
@@ -364,82 +712,209 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	// Hash the provided token
 	tokenHash := sha256Hash(req.JoinToken)
 
-	// Look up the join token
-	joinToken, err := s.store.GetJoinToken(ctx, tokenHash)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("invalid join token")
-		}
-		return nil, fmt.Errorf("failed to validate join token: %w", err)
-	}
-
-	// Verify broker ID matches
-	if joinToken.BrokerID != req.BrokerID {
-		return nil, fmt.Errorf("join token does not match broker")
-	}
-
-	// Check expiry
-	if time.Now().After(joinToken.ExpiresAt) {
-		// Delete expired token
-		_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
-		return nil, fmt.Errorf("join token has expired")
-	}
-
 	// Generate shared secret
 	secretKey := make([]byte, s.config.SecretKeyLength)
 	if _, err := rand.Read(secretKey); err != nil {
 		return nil, fmt.Errorf("failed to generate secret key: %w", err)
 	}
 
-	// Delete any existing secret for this broker (re-registration case)
-	_ = s.store.DeleteBrokerSecret(ctx, req.BrokerID)
+	// Consume the token and install the secret in one transaction. The
+	// token is deleted by a single conditional statement, so only one of
+	// several concurrent joins with the same token gets past it. If any
+	// later step fails the transaction rolls back and the token is still
+	// usable, so a failed join can be retried.
+	now := time.Now()
+	var joined *store.RuntimeBroker
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.ConsumeJoinToken(ctx, tokenHash, req.BrokerID, now); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errJoinTokenNotConsumed
+			}
+			return fmt.Errorf("failed to validate join token: %w", err)
+		}
 
-	// Store the broker secret
-	brokerSecret := &store.BrokerSecret{
-		BrokerID:  req.BrokerID,
-		SecretKey: secretKey,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		CreatedAt: time.Now(),
-		Status:    store.BrokerSecretStatusActive,
+		// Flat Runtime Broker descriptor check (contract section 6), after
+		// the token is validated and before the secret is replaced: a flat
+		// row must be joined with its stored descriptor, and a legacy row
+		// without one. A refusal rolls the transaction back, so the token
+		// stays unconsumed and the existing secret untouched.
+		broker, err := tx.GetRuntimeBroker(ctx, req.BrokerID)
+		if err != nil {
+			return fmt.Errorf("failed to get runtime broker: %w", err)
+		}
+		if err := joinRuntimeTargetRefusal(broker, req); err != nil {
+			return err
+		}
+
+		// Delete any existing secret for this broker (re-registration case)
+		if err := tx.DeleteBrokerSecret(ctx, req.BrokerID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to replace broker secret: %w", err)
+		}
+
+		// Store the broker secret
+		brokerSecret := &store.BrokerSecret{
+			BrokerID:  req.BrokerID,
+			SecretKey: secretKey,
+			Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+			CreatedAt: now,
+			Status:    store.BrokerSecretStatusActive,
+		}
+		if err := tx.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+			return fmt.Errorf("failed to store broker secret: %w", err)
+		}
+
+		// Update the runtime broker (read above) with connection info
+		applyBrokerJoinRequest(broker, req, now)
+		if err := tx.UpdateRuntimeBroker(ctx, broker); err != nil {
+			return fmt.Errorf("failed to update runtime broker: %w", err)
+		}
+		joined = broker
+		return nil
+	})
+	if errors.Is(err, errJoinTokenNotConsumed) {
+		return nil, s.classifyUnconsumedJoinToken(ctx, tokenHash, req.BrokerID, now)
 	}
-
-	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
-		return nil, fmt.Errorf("failed to store broker secret: %w", err)
-	}
-
-	// Update the runtime broker with connection info
-	broker, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get runtime broker: %w", err)
+		return nil, err
 	}
-
-	broker.Version = req.Version
-	broker.Status = store.BrokerStatusOnline
-	broker.ConnectionState = "connected"
-	broker.LastHeartbeat = time.Now()
-	broker.Updated = time.Now()
-
-	// Update profiles if provided in the join request
-	if len(req.Profiles) > 0 {
-		broker.Profiles = req.Profiles
-	}
-
-	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-		return nil, fmt.Errorf("failed to update runtime broker: %w", err)
-	}
-
-	// Delete the used join token
-	_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
 
 	return &BrokerJoinResponse{
-		SecretKey:   base64.StdEncoding.EncodeToString(secretKey),
-		HubEndpoint: hubEndpoint,
-		BrokerID:    req.BrokerID,
+		SecretKey:     base64.StdEncoding.EncodeToString(secretKey),
+		HubEndpoint:   hubEndpoint,
+		BrokerID:      req.BrokerID,
+		RuntimeTarget: copyRuntimeTarget(joined.RuntimeTarget),
 	}, nil
 }
 
-// GenerateAndStoreSecret generates a new HMAC secret for an existing broker.
-// This is used for simplified registration flows where a join token is not required.
+// joinRuntimeTargetRefusal is the join-time descriptor check (flat Runtime
+// Brokers contract, section 6): a flat row must be joined with its stored
+// descriptor, and a legacy row without one. Nil when the join may proceed.
+func joinRuntimeTargetRefusal(joining *store.RuntimeBroker, req BrokerJoinRequest) error {
+	if !joining.IsFlat() && req.RuntimeTarget == nil {
+		return nil
+	}
+	if joining.IsFlat() && sameRuntimeTarget(joining.RuntimeTarget, req.RuntimeTarget) {
+		return nil
+	}
+	stored, reported := "", ""
+	if joining.IsFlat() {
+		stored = joining.RuntimeTarget.ID
+	}
+	if req.RuntimeTarget != nil {
+		reported = req.RuntimeTarget.ID
+	}
+	return runtimeTargetChangedRefusal(req.BrokerID, stored, reported)
+}
+
+// Join token errors returned by CompleteBrokerJoin. The handler maps the
+// first two to 401 invalid_join_token and the third to 401
+// expired_join_token.
+var (
+	ErrJoinTokenInvalid        = errors.New("invalid join token")
+	ErrJoinTokenBrokerMismatch = errors.New("join token does not match broker")
+	ErrJoinTokenExpired        = errors.New("join token has expired")
+)
+
+// errJoinTokenNotConsumed aborts the CompleteBrokerJoin transaction when no
+// token was consumed; the reason is worked out afterwards.
+var errJoinTokenNotConsumed = errors.New("join token not consumed")
+
+// RevokeExposedJoinToken consumes the pending join token of brokerID when
+// joinToken is that token (same hash, same broker, not expired), and does
+// nothing otherwise. A join refused because it arrived unencrypted over the
+// network calls it: the token has crossed the network in the clear, so it
+// must not stay usable for a later join over TLS. A token that does not
+// match is left alone, so a request with a wrong token cannot revoke the
+// broker's real one. It reports whether a token was revoked.
+func (s *BrokerAuthService) RevokeExposedJoinToken(ctx context.Context, brokerID, joinToken string) (bool, error) {
+	if brokerID == "" || joinToken == "" {
+		return false, nil
+	}
+	err := s.store.ConsumeJoinToken(ctx, sha256Hash(joinToken), brokerID, time.Now())
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to revoke join token: %w", err)
+	}
+	return true, nil
+}
+
+// classifyUnconsumedJoinToken explains why ConsumeJoinToken matched no row,
+// with a read outside the join transaction. The read only selects the error
+// returned; a concurrent change can at most change which of the three join
+// token errors the caller sees.
+func (s *BrokerAuthService) classifyUnconsumedJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error {
+	joinToken, err := s.store.GetJoinToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrJoinTokenInvalid
+		}
+		return fmt.Errorf("failed to validate join token: %w", err)
+	}
+	if joinToken.BrokerID != brokerID {
+		return ErrJoinTokenBrokerMismatch
+	}
+	if !joinToken.ExpiresAt.After(now) {
+		// Best effort, and only this token while it is still expired: a
+		// token re-issued for the broker in the meantime has another hash
+		// and is kept. The cleanup job removes it otherwise.
+		_ = s.store.DeleteExpiredJoinToken(ctx, tokenHash, now)
+		return ErrJoinTokenExpired
+	}
+	// The token exists and is valid now, so another join consumed a token
+	// with this hash concurrently and has not finished, or this token
+	// replaced it in the meantime. Either way this request did not use it.
+	return ErrJoinTokenInvalid
+}
+
+// applyBrokerJoinRequest records the connection details a joining broker
+// reports on its broker record.
+func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, now time.Time) {
+	// Always stored, even when empty: an older broker sends "" on an
+	// untagged build, which must show as unknown rather than keep a stale
+	// token from an earlier join (ptone/scion#5972).
+	broker.Version = brokerVersionToken(req.Version)
+	broker.Status = store.BrokerStatusOnline
+	broker.ConnectionState = "connected"
+	broker.LastHeartbeat = now
+	broker.Updated = now
+
+	// Update profiles if provided in the join request. A flat row never
+	// stores profiles.
+	if len(req.Profiles) > 0 && !broker.IsFlat() {
+		broker.Profiles = req.Profiles
+	}
+
+	// Update capabilities if provided in the join request. This was
+	// previously accepted but silently discarded (the join handshake is the
+	// only point at which a broker reports what it supports — there is no
+	// separate heartbeat-time capability refresh). `scion reincarnate`'s
+	// broker-capability gate (design §5) needs Reprovision here to
+	// distinguish an upgraded broker from an old one.
+	if len(req.Capabilities) > 0 {
+		broker.Capabilities = capabilitiesFromStrings(req.Capabilities)
+	}
+
+	// An omitted descriptor keeps the stored one, as on heartbeat (see the
+	// heartbeat handler for why a stale descriptor is safe).
+	if req.WorkspaceStorage != nil {
+		broker.WorkspaceStorage = req.WorkspaceStorage
+	}
+	if req.DefaultProfile != nil && !broker.IsFlat() {
+		broker.DefaultProfile = *req.DefaultProfile
+	}
+	if broker.IsFlat() {
+		broker.Profiles, broker.DefaultProfile = nil, ""
+	}
+}
+
+// GenerateAndStoreSecret returns the broker's stored HMAC secret, or
+// generates and stores one when there is none. Its callers are in-process
+// (the co-located and plugin brokers), which share one key across
+// restarts and instances; the co-located flat Runtime Broker activation
+// uses ReplaceBrokerSecret instead, and a response to a remote caller uses
+// MintSecretIfAbsent, which never returns a stored secret.
 // Returns the base64-encoded secret key.
 func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID string) (string, error) {
 	if brokerID == "" {
@@ -475,6 +950,86 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 	return base64.StdEncoding.EncodeToString(secretKey), nil
 }
 
+// ReplaceBrokerSecret generates a new HMAC secret for brokerID and installs
+// it in place of any stored one, in one transaction: before the commit only
+// the prior secret verifies, after it only the new one, and a failed
+// replacement rolls back and leaves the prior secret as it was. Unlike
+// GenerateAndStoreSecret it never returns a stored secret. The co-located
+// flat Runtime Broker calls it on every activation, so a secret saved
+// earlier stops verifying from the first co-located start.
+// Returns the base64-encoded new secret key.
+func (s *BrokerAuthService) ReplaceBrokerSecret(ctx context.Context, brokerID string) (string, error) {
+	if brokerID == "" {
+		return "", errors.New("brokerId is required")
+	}
+
+	secretKey := make([]byte, s.config.SecretKeyLength)
+	if _, err := rand.Read(secretKey); err != nil {
+		return "", fmt.Errorf("failed to generate secret key: %w", err)
+	}
+
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.DeleteBrokerSecret(ctx, brokerID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to remove prior broker secret: %w", err)
+		}
+		return tx.CreateBrokerSecret(ctx, &store.BrokerSecret{
+			BrokerID:  brokerID,
+			SecretKey: secretKey,
+			Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+			CreatedAt: time.Now(),
+			Status:    store.BrokerSecretStatusActive,
+		})
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to replace broker secret: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(secretKey), nil
+}
+
+// MintSecretIfAbsent generates and stores a new HMAC secret for brokerID
+// only when the broker has no stored secret. It returns the new
+// base64-encoded secret and minted=true when it stored one, or "" and
+// minted=false when a secret already exists: unlike GenerateAndStoreSecret,
+// it never returns a stored secret. A secret created concurrently between
+// the check and the insert makes the insert fail with store.ErrAlreadyExists,
+// which is reported the same way as an existing secret ("" and
+// minted=false): the stored secret is not read and never returned.
+func (s *BrokerAuthService) MintSecretIfAbsent(ctx context.Context, brokerID string) (string, bool, error) {
+	if brokerID == "" {
+		return "", false, errors.New("brokerId is required")
+	}
+
+	existingSecret, err := s.store.GetBrokerSecret(ctx, brokerID)
+	if err == nil && existingSecret != nil {
+		return "", false, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", false, fmt.Errorf("failed to look up broker secret: %w", err)
+	}
+
+	secretKey := make([]byte, s.config.SecretKeyLength)
+	if _, err := rand.Read(secretKey); err != nil {
+		return "", false, fmt.Errorf("failed to generate secret key: %w", err)
+	}
+
+	brokerSecret := &store.BrokerSecret{
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		CreatedAt: time.Now(),
+		Status:    store.BrokerSecretStatusActive,
+	}
+	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("failed to store broker secret: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(secretKey), true, nil
+}
+
 // =============================================================================
 // HMAC Signature Validation
 // =============================================================================
@@ -493,33 +1048,105 @@ const (
 	HeaderOnBehalfOf = "X-Scion-On-Behalf-Of"
 )
 
+// Broker signature validation errors. Each is a mechanical, unexported
+// sentinel so the auth_failure audit event can classify a failure without
+// matching error text (brokerAuthFailureCode). Error() text is
+// byte-identical to the strings these replace, because
+// writeBrokerAuthError sends err.Error() to the client; wrapping sites add
+// the same detail as before, with %w.
+var (
+	errBrokerAuthMissingBrokerID    = errors.New("missing X-Scion-Broker-ID header")
+	errBrokerAuthMissingTimestamp   = errors.New("missing X-Scion-Timestamp header")
+	errBrokerAuthMissingSignature   = errors.New("missing X-Scion-Signature header")
+	errBrokerAuthMissingNonce       = errors.New("missing X-Scion-Nonce header")
+	errBrokerAuthMalformedTimestamp = errors.New("invalid timestamp format")
+	errBrokerAuthClockSkew          = errors.New("timestamp outside acceptable range")
+	errBrokerAuthNonceCheck         = errors.New("nonce cache check failed")
+	errBrokerAuthReplay             = errors.New("nonce already used (possible replay attack)")
+	errBrokerAuthUnknownBroker      = errors.New("unknown broker")
+	errBrokerAuthSecretLookup       = errors.New("failed to get broker secret")
+	errBrokerAuthSecretsLookup      = errors.New("failed to get broker secrets")
+	// errBrokerAuthSecretInactive is a fragment: it is only ever returned
+	// wrapped with the secret status ("%w %s" gives "broker secret is <status>").
+	errBrokerAuthSecretInactive   = errors.New("broker secret is")
+	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
+	errBrokerAuthInvalidSignature = errors.New("invalid signature")
+	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+	errBrokerAuthBrokerLookup     = errors.New("failed to get runtime broker")
+	// errBrokerAuthBodyTooLarge reports a body over
+	// apiclient.MaxSignedRequestBodyBytes. Callers answer it with 413
+	// (writeBrokerAuthFailure), not 401.
+	errBrokerAuthBodyTooLarge = errors.New(apiclient.SignedBodyTooLargeMessage)
+)
+
+// requireLiveBroker refuses a request whose signature verified against a
+// stored secret when the broker's runtime_brokers row does not exist: a
+// secret authenticates only the live broker row with its ID, never an ID
+// whose row was deleted. It runs after the signature check, so a caller
+// without the secret learns nothing from it. A lookup failure is refused
+// (fail closed).
+func (s *BrokerAuthService) requireLiveBroker(ctx context.Context, brokerID string) error {
+	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
+		}
+		return fmt.Errorf("%w: %w", errBrokerAuthBrokerLookup, err)
+	}
+	return nil
+}
+
+// limitBrokerAuthBody bounds r's body before the verifier reads it to build
+// the canonical string. The verifiers have no response writer, so the cap is
+// installed with a nil writer; an over-cap declared length is refused
+// without reading a byte.
+func limitBrokerAuthBody(r *http.Request) error {
+	if err := apiclient.LimitSignedRequestBody(nil, r); err != nil {
+		return errBrokerAuthBodyTooLarge
+	}
+	return nil
+}
+
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.
 func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http.Request) (BrokerIdentity, error) {
 	// Extract required headers
 	brokerID := r.Header.Get(HeaderBrokerID)
 	if brokerID == "" {
-		return nil, errors.New("missing X-Scion-Broker-ID header")
+		return nil, errBrokerAuthMissingBrokerID
+	}
+	if err := s.admitBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	timestamp := r.Header.Get(HeaderTimestamp)
 	if timestamp == "" {
-		return nil, errors.New("missing X-Scion-Timestamp header")
+		return nil, errBrokerAuthMissingTimestamp
 	}
 
 	signature := r.Header.Get(HeaderSignature)
 	if signature == "" {
-		return nil, errors.New("missing X-Scion-Signature header")
+		return nil, errBrokerAuthMissingSignature
 	}
 
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
-		return nil, errors.New("missing X-Scion-Nonce header")
+		return nil, errBrokerAuthMissingNonce
+	}
+
+	// Bound the body before anything reads it (the canonical string hashes
+	// it before the signature is compared).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
+	}
+
+	// A signed body must declare its length (before the nonce is recorded).
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		return nil, err
 	}
 
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
 	requestTime := time.Unix(ts, 0)
@@ -528,46 +1155,26 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		clockSkew = -clockSkew
 	}
 	if clockSkew > s.config.MaxClockSkew {
-		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
-	}
-
-	// Validate nonce if enabled — use DB-backed store for multi-instance
-	// replay protection when configured; otherwise use in-memory cache.
-	// DB errors are fail-closed (request is rejected, not silently passed).
-	// Defence-in-depth: guard against empty nonce reaching the DB store.
-	if s.config.EnableNonceCache && nonce != "" {
-		if s.nonceStore != nil {
-			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
-			if err != nil {
-				return nil, fmt.Errorf("nonce cache check failed: %w", err)
-			}
-			if !isNew {
-				return nil, errors.New("nonce already used (possible replay attack)")
-			}
-		} else if s.nonces != nil {
-			if !s.nonces.Add(nonce) {
-				return nil, errors.New("nonce already used (possible replay attack)")
-			}
-		}
+		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
 	}
 
 	// Get the broker's secret
 	brokerSecret, err := s.store.GetBrokerSecret(ctx, brokerID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("unknown broker: %s", brokerID)
+			return nil, fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
 		}
-		return nil, fmt.Errorf("failed to get broker secret: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthSecretLookup, err)
 	}
 
 	// Check if secret is active
 	if brokerSecret.Status != store.BrokerSecretStatusActive {
-		return nil, fmt.Errorf("broker secret is %s", brokerSecret.Status)
+		return nil, fmt.Errorf("%w %s", errBrokerAuthSecretInactive, brokerSecret.Status)
 	}
 
 	// Check expiry
 	if !brokerSecret.ExpiresAt.IsZero() && time.Now().After(brokerSecret.ExpiresAt) {
-		return nil, errors.New("broker secret has expired")
+		return nil, errBrokerAuthSecretExpired
 	}
 
 	// Build canonical string and verify signature
@@ -576,91 +1183,60 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	expectedSigB64 := base64.StdEncoding.EncodeToString(expectedSig)
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
-		return nil, errors.New("invalid signature")
+		return nil, errBrokerAuthInvalidSignature
+	}
+
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, so only a request that authenticates as
+	// a live broker records its nonce.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
+	}
+
+	// Record the nonce only for a request whose signature verified, so a
+	// request with a valid nonce and a bad signature leaves the nonce
+	// unused. A request deferNonce selects is verified here and has its
+	// nonce recorded by the hop that admits it.
+	if !s.defersNonce(r) {
+		if err := s.recordNonce(ctx, nonce); err != nil {
+			return nil, err
+		}
 	}
 
 	return NewBrokerIdentity(brokerID), nil
 }
 
-// buildCanonicalString builds the canonical string for HMAC signing.
-// Format: METHOD\nPATH\nQUERY\nTIMESTAMP\nNONCE\nSIGNED_HEADERS\nBODY_HASH
-func (s *BrokerAuthService) buildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
-	var buf bytes.Buffer
-
-	// HTTP method
-	buf.WriteString(r.Method)
-	buf.WriteByte('\n')
-
-	// Request path
-	buf.WriteString(r.URL.Path)
-	buf.WriteByte('\n')
-
-	// Query string (sorted)
-	buf.WriteString(r.URL.RawQuery)
-	buf.WriteByte('\n')
-
-	// Timestamp
-	buf.WriteString(timestamp)
-	buf.WriteByte('\n')
-
-	// Nonce
-	buf.WriteString(nonce)
-	buf.WriteByte('\n')
-
-	// Signed headers (if specified)
-	signedHeaders := r.Header.Get(HeaderSignedHeaders)
-	if signedHeaders != "" {
-		// Headers are listed as semicolon-separated names
-		headerNames := strings.Split(signedHeaders, ";")
-		for _, name := range headerNames {
-			name = strings.TrimSpace(name)
-			value := r.Header.Get(name)
-			buf.WriteString(strings.ToLower(name))
-			buf.WriteByte(':')
-			buf.WriteString(strings.TrimSpace(value))
-			buf.WriteByte('\n')
-		}
+// recordNonce records nonce when the nonce cache is enabled, refusing a
+// nonce already recorded. It uses the DB-backed store for multi-instance
+// replay protection when configured, otherwise the in-memory cache. DB
+// errors are fail-closed (the request is rejected, not silently passed).
+// Defence-in-depth: an empty nonce never reaches the DB store.
+func (s *BrokerAuthService) recordNonce(ctx context.Context, nonce string) error {
+	if !s.config.EnableNonceCache || nonce == "" {
+		return nil
 	}
-
-	// Body hash (SHA-256 of request body)
-	if r.Body != nil && r.ContentLength > 0 {
-		// We need to read and restore the body
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err == nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			bodyHash := sha256.Sum256(bodyBytes)
-			buf.WriteString(base64.StdEncoding.EncodeToString(bodyHash[:]))
+	if s.nonceStore != nil {
+		isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
 		}
+		if !isNew {
+			return errBrokerAuthReplay
+		}
+		return nil
 	}
-
-	return buf.Bytes()
+	if s.nonces != nil && !s.nonces.Add(nonce) {
+		return errBrokerAuthReplay
+	}
+	return nil
 }
 
-// SignRequest signs an outgoing HTTP request with HMAC.
-// Used by Runtime Brokers when calling the Hub API.
-func (s *BrokerAuthService) SignRequest(r *http.Request, brokerID string, secret []byte) error {
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-
-	// Generate nonce
-	nonceBytes := make([]byte, 16)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return fmt.Errorf("failed to generate nonce: %w", err)
-	}
-	nonce := base64.URLEncoding.EncodeToString(nonceBytes)
-
-	// Set headers
-	r.Header.Set(HeaderBrokerID, brokerID)
-	r.Header.Set(HeaderTimestamp, timestamp)
-	r.Header.Set(HeaderNonce, nonce)
-
-	// Build canonical string and compute signature
-	canonicalString := s.buildCanonicalString(r, timestamp, nonce)
-	sig := computeHMAC(secret, canonicalString)
-	sigB64 := base64.StdEncoding.EncodeToString(sig)
-
-	r.Header.Set(HeaderSignature, sigB64)
-
-	return nil
+// buildCanonicalString builds the canonical string for HMAC signing.
+// It delegates to apiclient.BuildCanonicalString, the single implementation
+// shared with the signer and the broker verifiers, so the two sides cannot
+// drift apart.
+func (s *BrokerAuthService) buildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
+	return apiclient.BuildCanonicalString(r, timestamp, nonce)
 }
 
 // =============================================================================
@@ -730,17 +1306,26 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	// Extract required headers
 	brokerID := r.Header.Get(HeaderBrokerID)
 	if brokerID == "" {
-		return nil, errors.New("missing X-Scion-Broker-ID header")
+		return nil, errBrokerAuthMissingBrokerID
+	}
+	if err := s.admitBroker(ctx, brokerID); err != nil {
+		return nil, err
+	}
+
+	// Bound the body before the secret lookup and before anything reads
+	// it; validateWithSecret repeats this (it is idempotent).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
 	}
 
 	// Get all active secrets for this broker
 	secrets, err := s.store.GetActiveSecrets(ctx, brokerID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get broker secrets: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthSecretsLookup, err)
 	}
 
 	if len(secrets) == 0 {
-		return nil, fmt.Errorf("unknown broker: %s", brokerID)
+		return nil, fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
 	}
 
 	// Try each secret until one validates
@@ -755,36 +1340,53 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		if err == nil {
 			return identity, nil
 		}
+		// A signature that verified but whose broker row is missing (or
+		// could not be read) is refused at once, not masked by trying
+		// another secret.
+		if errors.Is(err, errBrokerAuthUnknownBroker) || errors.Is(err, errBrokerAuthBrokerLookup) {
+			return nil, err
+		}
 		lastErr = err
 	}
 
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, errors.New("no valid secrets found")
+	return nil, errBrokerAuthNoValidSecrets
 }
 
 // validateWithSecret validates a request using a specific secret key.
 func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Request, brokerID string, secretKey []byte) (BrokerIdentity, error) {
 	timestamp := r.Header.Get(HeaderTimestamp)
 	if timestamp == "" {
-		return nil, errors.New("missing X-Scion-Timestamp header")
+		return nil, errBrokerAuthMissingTimestamp
 	}
 
 	signature := r.Header.Get(HeaderSignature)
 	if signature == "" {
-		return nil, errors.New("missing X-Scion-Signature header")
+		return nil, errBrokerAuthMissingSignature
 	}
 
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
-		return nil, errors.New("missing X-Scion-Nonce header")
+		return nil, errBrokerAuthMissingNonce
+	}
+
+	// Bound the body before anything reads it (the canonical string hashes
+	// it before the signature is compared).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
+	}
+
+	// A signed body must declare its length (before the nonce is recorded).
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		return nil, err
 	}
 
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
 	requestTime := time.Unix(ts, 0)
@@ -793,7 +1395,7 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		clockSkew = -clockSkew
 	}
 	if clockSkew > s.config.MaxClockSkew {
-		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
+		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
 	}
 
 	// Build canonical string and verify signature
@@ -802,7 +1404,14 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 	expectedSigB64 := base64.StdEncoding.EncodeToString(expectedSig)
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
-		return nil, errors.New("invalid signature")
+		return nil, errBrokerAuthInvalidSignature
+	}
+
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, in the same order as
+	// ValidateBrokerSignature.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	// Only add nonce to cache after successful validation — use DB-backed
@@ -813,14 +1422,14 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
 			if err != nil {
-				return nil, fmt.Errorf("nonce cache check failed: %w", err)
+				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
 			}
 			if !isNew {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		} else if s.nonces != nil {
 			if !s.nonces.Add(nonce) {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		}
 	}
@@ -863,6 +1472,10 @@ func slugify(name string) string {
 // Middleware
 // =============================================================================
 
+// errOnBehalfOfIneligible refuses a hub test identity as an on-behalf-of
+// principal.
+var errOnBehalfOfIneligible = errors.New("on-behalf-of principal not eligible")
+
 // resolveOnBehalfOf parses the X-Scion-On-Behalf-Of header and resolves the
 // principal to a UserIdentity. Returns (nil, nil) when the header is absent.
 // Returns a non-nil error with an appropriate HTTP status when the header is
@@ -890,6 +1503,15 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 		return nil, http.StatusInternalServerError, fmt.Errorf("on-behalf-of resolver not configured")
 	}
 
+	// A hub test identity is reachable only through its own hub-issued
+	// token, whose per-request row check carries its expiry and the
+	// feature switch. On-behalf-of resolves by email without that check, so
+	// it refuses the reserved domain (before any lookup) and any
+	// test-fixture row, whether or not test identities are enabled.
+	if emailResolvedPrincipalRefused(identifier, nil) {
+		return nil, http.StatusForbidden, errOnBehalfOfIneligible
+	}
+
 	user, err := svc.onBehalfOfResolver.GetUserByEmail(ctx, identifier)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -908,6 +1530,9 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	if user.Status != store.UserStatusActive {
 		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal is not active (status: %s)", user.Status)
 	}
+	if emailResolvedPrincipalRefused(identifier, user) {
+		return nil, http.StatusForbidden, errOnBehalfOfIneligible
+	}
 
 	// Construct an AuthenticatedUser with "integration" client type,
 	// matching the precedent from handlers_broker_inbound.go.
@@ -915,13 +1540,32 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	return authenticatedUser, 0, nil
 }
 
-// applyOnBehalfOf resolves the delegated requestor identity and returns the
-// updated context plus the resolved UserIdentity (nil when the header is
-// absent). If the X-Scion-On-Behalf-Of header is present and valid, both
-// broker and user identities are set in the context. If absent, the broker
-// is set as the sole identity. On error it writes the HTTP error response
-// and returns (nil, nil, false).
+// applyOnBehalfOf is the single shared helper that installs the authenticated
+// broker/on-behalf-of context for an HMAC-verified request (ptone/scion#2123).
+// Both BrokerAuthMiddleware and AuditableBrokerAuthMiddleware call it instead
+// of each wiring their own copy, so the two configurations always agree on
+// the request's ctx credential.
+//
+// Callers must pass brokerIdent only after ValidateBrokerSignature succeeds:
+// this function does not itself verify the HMAC. On success ctx carries:
+//   - the broker identity (contextWithBrokerIdentity), unconditionally;
+//   - when the X-Scion-On-Behalf-Of header resolves to an active local user,
+//     that user as the request identity, the BrokerOnBehalfOf marker
+//     (contextWithBrokerOnBehalfOf) binding Credential.ID to this broker, and
+//     a broker CredentialContext;
+//   - otherwise, the broker itself as the request identity and a broker
+//     CredentialContext, with no marker set — so a broker acting for itself,
+//     with no on-behalf-of header, is never mistaken for an authorized
+//     narrowing of a local user (it stays broker/broker and is denied by
+//     Decide's unsupported-principal switch).
+//
+// A missing header resolves userIdent == nil, which takes the broker-only
+// branch below and never calls contextWithBrokerOnBehalfOf. An invalid or
+// unresolvable header returns ok=false before either branch runs: neither
+// path installs the marker in that case, and the caller must not proceed.
 func (svc *BrokerAuthService) applyOnBehalfOf(ctx context.Context, w http.ResponseWriter, r *http.Request, brokerIdent BrokerIdentity) (context.Context, UserIdentity, bool) {
+	ctx = contextWithBrokerIdentity(ctx, brokerIdent)
+
 	userIdent, statusCode, oboErr := svc.resolveOnBehalfOf(ctx, r)
 	if oboErr != nil {
 		errCode := ErrCodeForbidden
@@ -935,9 +1579,11 @@ func (svc *BrokerAuthService) applyOnBehalfOf(ctx context.Context, w http.Respon
 	if userIdent != nil {
 		ctx = context.WithValue(ctx, userContextKey{}, userIdent)
 		ctx = contextWithIdentity(ctx, userIdent)
+		ctx = contextWithBrokerOnBehalfOf(ctx, BrokerOnBehalfOf{Broker: brokerIdent, BrokerID: brokerIdent.ID()})
 	} else {
 		ctx = contextWithIdentity(ctx, brokerIdent)
 	}
+	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindBroker, ID: brokerIdent.ID(), Type: brokerIdent.Type()})
 	return ctx, userIdent, true
 }
 
@@ -964,19 +1610,19 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 			// Validate HMAC signature
 			identity, err := svc.ValidateBrokerSignature(r.Context(), r)
 			if err != nil {
-				writeBrokerAuthError(w, err.Error())
+				writeBrokerAuthFailure(w, err)
 				return
 			}
 
-			// Set broker-specific identity context and resolve on-behalf-of
-			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx, _, ok := svc.applyOnBehalfOf(ctx, w, r, identity)
+			// Install the authenticated broker/on-behalf-of context: broker
+			// identity, effective user (when OBO resolves), the OBO marker,
+			// and the broker credential — all from the one shared helper.
+			ctx, _, ok := svc.applyOnBehalfOf(r.Context(), w, r, identity)
 			if !ok {
 				return
 			}
-			ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindBroker, ID: identity.ID(), Type: identity.Type()})
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }
@@ -984,4 +1630,63 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 // writeBrokerAuthError writes a broker authentication error response.
 func writeBrokerAuthError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, message, nil)
+}
+
+// writeBrokerAuthFailure answers a failed broker signature check: 413 for a
+// body over apiclient.MaxSignedRequestBodyBytes, otherwise the 401 of
+// writeBrokerAuthError.
+// The HTTP error code "payload_too_large" follows the hub's existing 413
+// responses; the audit failure code for the same refusal is "malformed"
+// (brokerAuthFailureCode). The two namespaces differ on purpose.
+func writeBrokerAuthFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, errBrokerAuthBodyTooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", err.Error(), nil)
+		return
+	}
+	writeBrokerAuthError(w, err.Error())
+}
+
+// registrationLabels returns a copy of a registration request's labels with
+// the default scion.io/broker-type ("external") added when the request sets
+// none, as the legacy registration path does in place.
+func registrationLabels(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in)+1)
+	for k, v := range stripReservedBrokerLabels(in) {
+		out[k] = v
+	}
+	if _, exists := out["scion.io/broker-type"]; !exists {
+		out["scion.io/broker-type"] = "external"
+	}
+	return out
+}
+
+// reservedBrokerLabels are the Hub-managed label keys: only hub-internal
+// code sets them, and a client-supplied value is dropped on registration
+// and update.
+var reservedBrokerLabels = []string{pluginBrokerLabel, store.BrokerRoleLabel}
+
+// isReservedBrokerLabel reports whether key is Hub-managed.
+func isReservedBrokerLabel(key string) bool {
+	for _, k := range reservedBrokerLabels {
+		if key == k {
+			return true
+		}
+	}
+	return false
+}
+
+// stripReservedBrokerLabels returns labels without the hub-reserved keys
+// (reservedBrokerLabels). nil stays nil.
+func stripReservedBrokerLabels(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if isReservedBrokerLabel(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }

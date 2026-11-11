@@ -258,6 +258,106 @@ func (_u *BrokerDispatchUpdate) ClearDeadlineAt() *BrokerDispatchUpdate {
 	return _u
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_u *BrokerDispatchUpdate) SetInitiatorPrincipalKind(v string) *BrokerDispatchUpdate {
+	_u.mutation.SetInitiatorPrincipalKind(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_u *BrokerDispatchUpdate) SetNillableInitiatorPrincipalKind(v *string) *BrokerDispatchUpdate {
+	if v != nil {
+		_u.SetInitiatorPrincipalKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (_u *BrokerDispatchUpdate) ClearInitiatorPrincipalKind() *BrokerDispatchUpdate {
+	_u.mutation.ClearInitiatorPrincipalKind()
+	return _u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_u *BrokerDispatchUpdate) SetInitiatorPrincipalID(v string) *BrokerDispatchUpdate {
+	_u.mutation.SetInitiatorPrincipalID(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_u *BrokerDispatchUpdate) SetNillableInitiatorPrincipalID(v *string) *BrokerDispatchUpdate {
+	if v != nil {
+		_u.SetInitiatorPrincipalID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (_u *BrokerDispatchUpdate) ClearInitiatorPrincipalID() *BrokerDispatchUpdate {
+	_u.mutation.ClearInitiatorPrincipalID()
+	return _u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_u *BrokerDispatchUpdate) SetInitiatorCredentialKind(v string) *BrokerDispatchUpdate {
+	_u.mutation.SetInitiatorCredentialKind(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_u *BrokerDispatchUpdate) SetNillableInitiatorCredentialKind(v *string) *BrokerDispatchUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (_u *BrokerDispatchUpdate) ClearInitiatorCredentialKind() *BrokerDispatchUpdate {
+	_u.mutation.ClearInitiatorCredentialKind()
+	return _u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_u *BrokerDispatchUpdate) SetInitiatorCredentialID(v string) *BrokerDispatchUpdate {
+	_u.mutation.SetInitiatorCredentialID(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_u *BrokerDispatchUpdate) SetNillableInitiatorCredentialID(v *string) *BrokerDispatchUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (_u *BrokerDispatchUpdate) ClearInitiatorCredentialID() *BrokerDispatchUpdate {
+	_u.mutation.ClearInitiatorCredentialID()
+	return _u
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (_u *BrokerDispatchUpdate) SetCorrelationID(v string) *BrokerDispatchUpdate {
+	_u.mutation.SetCorrelationID(v)
+	return _u
+}
+
+// SetNillableCorrelationID sets the "correlation_id" field if the given value is not nil.
+func (_u *BrokerDispatchUpdate) SetNillableCorrelationID(v *string) *BrokerDispatchUpdate {
+	if v != nil {
+		_u.SetCorrelationID(*v)
+	}
+	return _u
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (_u *BrokerDispatchUpdate) ClearCorrelationID() *BrokerDispatchUpdate {
+	_u.mutation.ClearCorrelationID()
+	return _u
+}
+
 // Mutation returns the BrokerDispatchMutation object of the builder.
 func (_u *BrokerDispatchUpdate) Mutation() *BrokerDispatchMutation {
 	return _u.mutation
@@ -386,6 +486,36 @@ func (_u *BrokerDispatchUpdate) sqlSave(ctx context.Context) (_node int, err err
 	}
 	if _u.mutation.DeadlineAtCleared() {
 		_spec.ClearField(brokerdispatch.FieldDeadlineAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorPrincipalKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalKindCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorPrincipalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorPrincipalID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalIDCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorPrincipalID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorCredentialKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialKindCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorCredentialKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialIDCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CorrelationID(); ok {
+		_spec.SetField(brokerdispatch.FieldCorrelationID, field.TypeString, value)
+	}
+	if _u.mutation.CorrelationIDCleared() {
+		_spec.ClearField(brokerdispatch.FieldCorrelationID, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -636,6 +766,106 @@ func (_u *BrokerDispatchUpdateOne) ClearDeadlineAt() *BrokerDispatchUpdateOne {
 	return _u
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_u *BrokerDispatchUpdateOne) SetInitiatorPrincipalKind(v string) *BrokerDispatchUpdateOne {
+	_u.mutation.SetInitiatorPrincipalKind(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_u *BrokerDispatchUpdateOne) SetNillableInitiatorPrincipalKind(v *string) *BrokerDispatchUpdateOne {
+	if v != nil {
+		_u.SetInitiatorPrincipalKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (_u *BrokerDispatchUpdateOne) ClearInitiatorPrincipalKind() *BrokerDispatchUpdateOne {
+	_u.mutation.ClearInitiatorPrincipalKind()
+	return _u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_u *BrokerDispatchUpdateOne) SetInitiatorPrincipalID(v string) *BrokerDispatchUpdateOne {
+	_u.mutation.SetInitiatorPrincipalID(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_u *BrokerDispatchUpdateOne) SetNillableInitiatorPrincipalID(v *string) *BrokerDispatchUpdateOne {
+	if v != nil {
+		_u.SetInitiatorPrincipalID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (_u *BrokerDispatchUpdateOne) ClearInitiatorPrincipalID() *BrokerDispatchUpdateOne {
+	_u.mutation.ClearInitiatorPrincipalID()
+	return _u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_u *BrokerDispatchUpdateOne) SetInitiatorCredentialKind(v string) *BrokerDispatchUpdateOne {
+	_u.mutation.SetInitiatorCredentialKind(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_u *BrokerDispatchUpdateOne) SetNillableInitiatorCredentialKind(v *string) *BrokerDispatchUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (_u *BrokerDispatchUpdateOne) ClearInitiatorCredentialKind() *BrokerDispatchUpdateOne {
+	_u.mutation.ClearInitiatorCredentialKind()
+	return _u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_u *BrokerDispatchUpdateOne) SetInitiatorCredentialID(v string) *BrokerDispatchUpdateOne {
+	_u.mutation.SetInitiatorCredentialID(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_u *BrokerDispatchUpdateOne) SetNillableInitiatorCredentialID(v *string) *BrokerDispatchUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (_u *BrokerDispatchUpdateOne) ClearInitiatorCredentialID() *BrokerDispatchUpdateOne {
+	_u.mutation.ClearInitiatorCredentialID()
+	return _u
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (_u *BrokerDispatchUpdateOne) SetCorrelationID(v string) *BrokerDispatchUpdateOne {
+	_u.mutation.SetCorrelationID(v)
+	return _u
+}
+
+// SetNillableCorrelationID sets the "correlation_id" field if the given value is not nil.
+func (_u *BrokerDispatchUpdateOne) SetNillableCorrelationID(v *string) *BrokerDispatchUpdateOne {
+	if v != nil {
+		_u.SetCorrelationID(*v)
+	}
+	return _u
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (_u *BrokerDispatchUpdateOne) ClearCorrelationID() *BrokerDispatchUpdateOne {
+	_u.mutation.ClearCorrelationID()
+	return _u
+}
+
 // Mutation returns the BrokerDispatchMutation object of the builder.
 func (_u *BrokerDispatchUpdateOne) Mutation() *BrokerDispatchMutation {
 	return _u.mutation
@@ -794,6 +1024,36 @@ func (_u *BrokerDispatchUpdateOne) sqlSave(ctx context.Context) (_node *BrokerDi
 	}
 	if _u.mutation.DeadlineAtCleared() {
 		_spec.ClearField(brokerdispatch.FieldDeadlineAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorPrincipalKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalKindCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorPrincipalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorPrincipalID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalIDCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorPrincipalID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorCredentialKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialKindCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorCredentialKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialIDCleared() {
+		_spec.ClearField(brokerdispatch.FieldInitiatorCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CorrelationID(); ok {
+		_spec.SetField(brokerdispatch.FieldCorrelationID, field.TypeString, value)
+	}
+	if _u.mutation.CorrelationIDCleared() {
+		_spec.ClearField(brokerdispatch.FieldCorrelationID, field.TypeString)
 	}
 	_node = &BrokerDispatch{config: _u.config}
 	_spec.Assign = _node.assignValues

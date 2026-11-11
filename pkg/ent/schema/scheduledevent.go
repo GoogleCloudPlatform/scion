@@ -36,6 +36,21 @@ type ScheduledEvent struct {
 	ent.Schema
 }
 
+// Mixin of the ScheduledEvent. InitiatorAttributionMixin is shared verbatim
+// with Schedule (E.2b) so the two schemas expose an identical attribution
+// column set, and recurrence propagation is a single struct assignment.
+//
+// EffectCeilingMixin with the "authority_" prefix holds the frozen effect
+// ceiling of the authorization revision (store.EffectCeiling). It is written
+// together with the attribution and revision, and its zero value is
+// unrecorded.
+func (ScheduledEvent) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		InitiatorAttributionMixin{},
+		EffectCeilingMixin{Prefix: "authority_"},
+	}
+}
+
 // Fields of the ScheduledEvent.
 func (ScheduledEvent) Fields() []ent.Field {
 	return []ent.Field{

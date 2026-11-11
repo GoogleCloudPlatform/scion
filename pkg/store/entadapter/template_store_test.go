@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -47,16 +49,9 @@ func TestCreateAndGetTemplate(t *testing.T) {
 		Name:        "claude",
 		Slug:        "claude",
 		Harness:     "claude",
-		Image:       "img:latest",
 		Scope:       store.TemplateScopeGlobal,
-		Visibility:  "public",
 		ContentHash: "abc123",
-		Config: &store.TemplateConfig{
-			Harness: "claude",
-			Image:   "img:latest",
-			Env:     map[string]string{"FOO": "bar"},
-		},
-		Files: []store.TemplateFile{{Path: "home/.bashrc", Size: 10, Hash: "h"}},
+		Files:       []store.TemplateFile{{Path: "home/.bashrc", Size: 10, Hash: "h"}},
 	}
 	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
 	assert.Equal(t, store.TemplateStatusActive, tmpl.Status, "empty status defaults to active")
@@ -66,8 +61,6 @@ func TestCreateAndGetTemplate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "claude", got.Name)
 	assert.Equal(t, "abc123", got.ContentHash)
-	require.NotNil(t, got.Config)
-	assert.Equal(t, "bar", got.Config.Env["FOO"])
 	require.Len(t, got.Files, 1)
 	assert.Equal(t, "home/.bashrc", got.Files[0].Path)
 }
@@ -187,15 +180,255 @@ func TestUpdateTemplate(t *testing.T) {
 
 	tmpl.Name = "new"
 	tmpl.Status = store.TemplateStatusArchived
-	tmpl.Config = &store.TemplateConfig{Model: "opus"}
 	require.NoError(t, ts.UpdateTemplate(ctx, tmpl))
 
 	got, err := ts.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "new", got.Name)
-	assert.Equal(t, store.TemplateStatusArchived, got.Status)
-	require.NotNil(t, got.Config)
-	assert.Equal(t, "opus", got.Config.Model)
+	// Status is written by the commit path (UpdateTemplateContent), not by
+	// the metadata update (ptone/scion#4967).
+	assert.Equal(t, store.TemplateStatusActive, got.Status)
+}
+
+// TestTemplateMetadataUpdate_KeepsSourceURLAndStatus: a metadata write from
+// a stale read does not revert a concurrent commit's source URL or status
+// (ptone/scion#4967).
+func TestTemplateMetadataUpdate_KeepsSourceURLAndStatus(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "src", Slug: "src", Harness: "claude", Scope: "global",
+		Status: store.TemplateStatusPending, SourceURL: "https://example.com/source/v1",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	stale := *tmpl
+
+	content := *tmpl
+	content.SourceURL = "https://example.com/source/v2"
+	content.Status = store.TemplateStatusActive
+	content.ContentHash = "sha256:h1"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &content, store.TemplateContentPrecondition{}))
+
+	stale.Name = "renamed"
+	require.NoError(t, ts.UpdateTemplate(ctx, &stale))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", got.Name)
+	assert.Equal(t, "https://example.com/source/v2", got.SourceURL, "metadata write must not revert the commit's source URL")
+	assert.Equal(t, store.TemplateStatusActive, got.Status, "metadata write must not revert the commit's status")
+}
+
+// TestTemplateAgentConfigRoundTrip covers the derived agent_config column
+// (ptone/scion#4217): a snapshot survives create, get, update and list, and a
+// nil snapshot reads back as nil (not an empty config) and clears the column.
+func TestTemplateAgentConfigRoundTrip(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	detached := false
+	snap := &api.ScionConfig{
+		Harness:              "claude",
+		DefaultHarnessConfig: "claude-web",
+		Model:                "opus",
+		Detached:             &detached,
+		Env:                  map[string]string{"FOO": "bar"},
+		Skills:               []api.SkillReference{{URI: "hub:review"}},
+	}
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "snap", Slug: "snap", Harness: "claude",
+		DefaultHarnessConfig: "claude-web", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, AgentConfig: snap,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, snap, got.AgentConfig, "create/get round trip")
+
+	got.AgentConfig.Model = "sonnet"
+	got.AgentConfig.HarnessConfig = "claude-alt"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, got, store.TemplateContentPrecondition{ContentHash: got.ContentHash}))
+	again, err := ts.GetTemplateBySlug(ctx, "snap", store.TemplateScopeGlobal, "")
+	require.NoError(t, err)
+	require.NotNil(t, again.AgentConfig)
+	assert.Equal(t, "sonnet", again.AgentConfig.Model)
+	assert.Equal(t, "claude-alt", again.AgentConfig.HarnessConfig)
+
+	list, err := ts.ListTemplates(ctx, store.TemplateFilter{Scope: store.TemplateScopeGlobal}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.NotNil(t, list.Items[0].AgentConfig)
+	assert.Equal(t, "sonnet", list.Items[0].AgentConfig.Model)
+
+	again.AgentConfig = nil
+	require.NoError(t, ts.UpdateTemplateContent(ctx, again, store.TemplateContentPrecondition{ContentHash: again.ContentHash}))
+	cleared, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Nil(t, cleared.AgentConfig, "nil snapshot clears the column")
+
+	// A row created without a snapshot reads back nil.
+	plain := &store.Template{ID: uuid.New().String(), Name: "plain", Slug: "plain", Harness: "claude", Scope: store.TemplateScopeGlobal}
+	require.NoError(t, ts.CreateTemplate(ctx, plain))
+	gotPlain, err := ts.GetTemplate(ctx, plain.ID)
+	require.NoError(t, err)
+	assert.Nil(t, gotPlain.AgentConfig)
+}
+
+// TestSetTemplateAgentConfig: the snapshot backfill writes only agent_config,
+// only while the row has none and still matches the content hash and
+// layout, and leaves every other column (Updated, Status) as stored
+// (ptone/scion#4222).
+func TestSetTemplateAgentConfig(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "bf", Slug: "bf", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+		ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	before, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	want := store.TemplateContentPrecondition{ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs}
+
+	ok, err := ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"}, store.TemplateContentPrecondition{ContentHash: "other", Layout: store.TemplateLayoutBlobs})
+	require.NoError(t, err)
+	assert.False(t, ok, "a content hash mismatch writes nothing")
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"}, store.TemplateContentPrecondition{ContentHash: "hash-1"})
+	require.NoError(t, err)
+	assert.False(t, ok, "a layout mismatch writes nothing")
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, nil, want)
+	require.NoError(t, err)
+	assert.False(t, ok, "a nil snapshot writes nothing")
+
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"}, want)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AgentConfig)
+	assert.Equal(t, "snap", got.AgentConfig.Model)
+	assert.True(t, before.Updated.Equal(got.Updated), "Updated is kept")
+	assert.Equal(t, before.Status, got.Status)
+	assert.Equal(t, before.ContentHash, got.ContentHash)
+
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "second"}, want)
+	require.NoError(t, err)
+	assert.False(t, ok, "a row that has a snapshot is not overwritten")
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "snap", got.AgentConfig.Model)
+
+	ok, err = ts.SetTemplateAgentConfig(ctx, uuid.New().String(), &api.ScionConfig{Model: "x"}, want)
+	require.NoError(t, err)
+	assert.False(t, ok, "a missing row writes nothing")
+}
+
+// TestSetTemplateAgentConfigLosesToRacingMetadataEdit: a metadata edit that
+// commits after SetTemplateAgentConfig read the row, and before its
+// conditional UPDATE runs, wins. The snapshot is not written and the row
+// keeps the edit's Updated time instead of the older one the store read
+// (ptone/scion#4674). TestSetTemplateAgentConfig and
+// TestSetTemplateAgentConfigNonCanonicalUpdatedText cover the other side: an
+// unchanged row still matches the Updated precondition.
+func TestSetTemplateAgentConfigLosesToRacingMetadataEdit(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "race", Slug: "race", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+		ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	before, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	uid, err := uuid.Parse(tmpl.ID)
+	require.NoError(t, err)
+	// A fixed later time, so the racing value differs from the stored one
+	// at any storage precision.
+	raced := before.Updated.Add(time.Second)
+
+	// The snapshot write is the only bulk Update in this test; the racing
+	// edit (an UpdateOne, as UpdateTemplate issues) runs once, just before
+	// it, after SetTemplateAgentConfig has read the row.
+	racedOnce := false
+	ts.client.Template.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op() == ent.OpUpdate && !racedOnce {
+				racedOnce = true
+				if err := ts.client.Template.UpdateOneID(uid).
+					SetDescription("raced edit").
+					SetUpdated(raced).
+					Exec(ctx); err != nil {
+					return nil, err
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	ok, err := ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"},
+		store.TemplateContentPrecondition{ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs})
+	require.NoError(t, err)
+	require.True(t, racedOnce, "the racing edit ran")
+	assert.False(t, ok, "a row whose Updated time changed after the read is not written")
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.True(t, raced.Equal(got.Updated), "the racing edit's Updated time is kept: got %v, want %v", got.Updated, raced)
+	assert.Equal(t, "raced edit", got.Description)
+	assert.Nil(t, got.AgentConfig, "the snapshot is not written")
+}
+
+// TestSetTemplateAgentConfigNonCanonicalUpdatedText: on SQLite, a row whose
+// stored updated text is in any of the forms below, including non-canonical
+// ones, and names the same instant still matches the Updated precondition:
+// the snapshot is written and updated still names that instant
+// (ptone/scion#4674). The non-canonical forms are what the raw-text compare
+// is for; see rawStoredText.
+func TestSetTemplateAgentConfigNonCanonicalUpdatedText(t *testing.T) {
+	enttest.SkipOnPostgres(t, "writes non-canonical SQLite TEXT timestamps; Postgres stores timestamptz")
+	for name, form := range nonCanonicalUpdatedForms {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestTemplateStore(t)
+			ctx := context.Background()
+			tmpl := &store.Template{
+				ID: uuid.New().String(), Name: "nc", Slug: "nc", Harness: "claude",
+				Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+				ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs,
+			}
+			require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+			uid, err := uuid.Parse(tmpl.ID)
+			require.NoError(t, err)
+			before, err := ts.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			inst := before.Updated
+			require.NoError(t, ts.client.Driver().Exec(ctx,
+				"UPDATE templates SET updated = ? WHERE id = ?", []any{form(inst), uid}, nil))
+			raw, found, err := rawStoredText(ctx, ts.client.Driver(), "templates", "id", "updated", uid)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, form(inst), raw, "the non-canonical text is what is stored")
+			reread, err := ts.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			require.True(t, inst.Equal(reread.Updated), "the driver reads the same instant back")
+
+			ok, err := ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"},
+				store.TemplateContentPrecondition{ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs})
+			require.NoError(t, err)
+			assert.True(t, ok, "an unchanged row with non-canonical updated text is written")
+
+			got, err := ts.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.AgentConfig)
+			assert.Equal(t, "snap", got.AgentConfig.Model)
+			assert.True(t, inst.Equal(got.Updated), "updated still names the same instant")
+		})
+	}
 }
 
 func TestUpdateTemplateNotFound(t *testing.T) {
@@ -362,8 +595,9 @@ func TestUpdateHarnessConfig(t *testing.T) {
 	got, err := ts.GetHarnessConfig(ctx, hc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "new", got.Name)
-	require.NotNil(t, got.Config)
-	assert.Equal(t, "haiku", got.Config.Model)
+	// Config is a content column: the metadata update leaves it alone
+	// (ptone/scion#4219).
+	assert.Nil(t, got.Config)
 }
 
 func TestUpdateHarnessConfigNotFound(t *testing.T) {
@@ -419,4 +653,242 @@ func TestListHarnessConfigsPaginationAndFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gemini.Items, 1)
 	assert.Equal(t, "gemini", gemini.Items[0].Harness)
+}
+
+// TestUpdateTemplate_LeavesContentColumns: a metadata update written from a
+// stale read cannot revert a concurrent commit's content (ptone/scion#4221).
+func TestUpdateTemplate_LeavesContentColumns(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "meta", Slug: "meta", Harness: "claude", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, ContentHash: "sha256:h0",
+		Files: []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}},
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	stale, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+
+	committed, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	committed.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}, {Path: "b.md", Size: 1, Hash: "sha256:b"}}
+	committed.ContentHash = "sha256:h1"
+	committed.Harness = "gemini"
+	committed.DefaultHarnessConfig = "gemini-web"
+	committed.AgentConfig = &api.ScionConfig{Model: "opus"}
+	require.NoError(t, ts.UpdateTemplateContent(ctx, committed, store.TemplateContentPrecondition{ContentHash: "sha256:h0"}))
+
+	stale.Name = "meta-renamed"
+	stale.Harness = "stale-harness"
+	require.NoError(t, ts.UpdateTemplate(ctx, stale))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "meta-renamed", got.Name, "metadata is written")
+	assert.Equal(t, committed.Files, got.Files)
+	assert.Equal(t, "sha256:h1", got.ContentHash)
+	assert.Equal(t, "gemini", got.Harness)
+	assert.Equal(t, "gemini-web", got.DefaultHarnessConfig)
+	require.NotNil(t, got.AgentConfig)
+	assert.Equal(t, "opus", got.AgentConfig.Model)
+}
+
+// TestUpdateTemplateContent_CompareAndSwap covers the commit CAS: a matching
+// precondition writes every column, a stale one returns ErrTemplateConflict
+// and writes nothing, an empty one matches a never-committed row, and a
+// missing row is ErrNotFound.
+func TestUpdateTemplateContent_CompareAndSwap(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{ID: uuid.New().String(), Name: "cas", Slug: "cas", Harness: "claude", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusPending}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+
+	// Empty precondition matches a row that was never committed.
+	first := *tmpl
+	first.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}}
+	first.ContentHash = "sha256:h1"
+	first.Status = store.TemplateStatusActive
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &first, store.TemplateContentPrecondition{}))
+
+	// A second writer that also read the uncommitted row loses.
+	second := *tmpl
+	second.Files = []store.TemplateFile{{Path: "b.md", Size: 1, Hash: "sha256:b"}}
+	second.ContentHash = "sha256:h2"
+	err := ts.UpdateTemplateContent(ctx, &second, store.TemplateContentPrecondition{})
+	assert.ErrorIs(t, err, store.ErrTemplateConflict)
+	assert.ErrorIs(t, err, store.ErrVersionConflict)
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:h1", got.ContentHash, "the losing write changed nothing")
+	assert.Equal(t, first.Files, got.Files)
+	assert.Equal(t, store.TemplateStatusActive, got.Status)
+
+	// Against the current hash it succeeds.
+	second.ContentHash = "sha256:h2"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &second, store.TemplateContentPrecondition{ContentHash: "sha256:h1"}))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:h2", got.ContentHash)
+	assert.Equal(t, second.Files, got.Files)
+
+	ghost := store.Template{ID: uuid.New().String(), Name: "ghost", Slug: "ghost", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive}
+	assert.ErrorIs(t, ts.UpdateTemplateContent(ctx, &ghost, store.TemplateContentPrecondition{}), store.ErrNotFound)
+}
+
+// TestTemplateLayout_RoundTrip: Layout and the storage columns are written by
+// CreateTemplate and UpdateTemplateContent and read back, and a metadata
+// UpdateTemplate from a stale read leaves them alone (ptone/scion#4221).
+func TestTemplateLayout_RoundTrip(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "layout", Slug: "layout", Harness: "claude", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, ContentHash: "sha256:h0", StoragePath: "templates/global/layout",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Layout, "a row created without a layout is legacy")
+
+	stale := *got
+
+	migrated := *got
+	migrated.Layout = store.TemplateLayoutBlobs
+	migrated.StoragePath = "templates/global/layout." + tmpl.ID
+	migrated.StorageURI = "gs://b/templates/global/layout." + tmpl.ID + "/"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &migrated, store.TemplateContentPrecondition{ContentHash: "sha256:h0"}))
+
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout)
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+
+	// A metadata PUT/PATCH written from the pre-migration read keeps the
+	// migrated layout and storage path.
+	stale.Name = "layout-renamed"
+	require.NoError(t, ts.UpdateTemplate(ctx, &stale))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "layout-renamed", got.Name)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout)
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+	assert.Equal(t, migrated.StorageURI, got.StorageURI)
+
+	blob := &store.Template{
+		ID: uuid.New().String(), Name: "born-blob", Slug: "born-blob", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusPending, Layout: store.TemplateLayoutBlobs, StoragePath: "templates/global/born-blob.x",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, blob))
+	got, err = ts.GetTemplate(ctx, blob.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout)
+
+	// The StoragePath filter finds exactly the rows on that path.
+	list, err := ts.ListTemplates(ctx, store.TemplateFilter{StoragePath: migrated.StoragePath}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, tmpl.ID, list.Items[0].ID)
+
+	// The StoragePathPrefix filter finds rows nested under a path.
+	list, err = ts.ListTemplates(ctx, store.TemplateFilter{StoragePathPrefix: "templates/global/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, list.Items, 2)
+	list, err = ts.ListTemplates(ctx, store.TemplateFilter{StoragePathPrefix: "templates/global/layout/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
+}
+
+// TestUpdateTemplateContent_LayoutInPredicate is acceptance 10 of
+// ptone/scion#4221 at the store: a commit that read the legacy row loses to
+// a concurrent migration to blobs that kept the same content hash (the ABA
+// case across layouts), and a commit that read the migrated row wins.
+func TestUpdateTemplateContent_LayoutInPredicate(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "aba", Slug: "aba", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, ContentHash: "sha256:h1", StoragePath: "templates/global/aba",
+		Files: []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}},
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	legacyRead, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+
+	// A concurrent commit migrates the row without changing its content.
+	migrated := *legacyRead
+	migrated.Layout = store.TemplateLayoutBlobs
+	migrated.StoragePath = "templates/global/aba." + tmpl.ID
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &migrated,
+		store.TemplateContentPrecondition{ContentHash: "sha256:h1", Layout: ""}))
+
+	// The writer that read the legacy row has the right hash but the wrong
+	// layout: it must lose rather than write the legacy layout back.
+	stale := *legacyRead
+	stale.SourceURL = "stale writer"
+	err = ts.UpdateTemplateContent(ctx, &stale, store.TemplateContentPrecondition{ContentHash: "sha256:h1", Layout: ""})
+	assert.ErrorIs(t, err, store.ErrTemplateConflict)
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout, "the losing write changed nothing")
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+	assert.Empty(t, got.SourceURL)
+
+	// A writer that read the migrated row commits.
+	fresh := *got
+	fresh.SourceURL = "fresh writer"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &fresh,
+		store.TemplateContentPrecondition{ContentHash: "sha256:h1", Layout: store.TemplateLayoutBlobs}))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh writer", got.SourceURL)
+}
+
+// TestUpdateTemplateContent_LeavesMetadataColumns is the mirror of
+// TestUpdateTemplate_LeavesContentColumns: a content commit computed from a
+// read taken before a metadata update does not revert that update, because
+// the two writers own disjoint columns (ptone/scion#4221).
+func TestUpdateTemplateContent_LeavesMetadataColumns(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	ownerID := uuid.New().String()
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "orig", Slug: "orig", DisplayName: "Orig", Description: "orig desc",
+		BaseTemplate: "base-1", OwnerID: ownerID, Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, ContentHash: "sha256:h0",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	commitRead, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+
+	meta, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	meta.Name, meta.Slug, meta.DisplayName, meta.Description = "renamed", "renamed", "Renamed", "new desc"
+	meta.BaseTemplate = "base-2"
+	require.NoError(t, ts.UpdateTemplate(ctx, meta))
+
+	commitRead.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}}
+	commitRead.ContentHash = "sha256:h1"
+	commitRead.Harness = "gemini"
+	commitRead.SourceURL = "https://example.com/src"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, commitRead, store.TemplateContentPrecondition{ContentHash: "sha256:h0"}))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:h1", got.ContentHash, "the commit is written")
+	assert.Equal(t, commitRead.Files, got.Files)
+	assert.Equal(t, "gemini", got.Harness)
+	assert.Equal(t, "https://example.com/src", got.SourceURL)
+	assert.Equal(t, "renamed", got.Name, "the metadata update survives")
+	assert.Equal(t, "renamed", got.Slug)
+	assert.Equal(t, "Renamed", got.DisplayName)
+	assert.Equal(t, "new desc", got.Description)
+	assert.Equal(t, "base-2", got.BaseTemplate)
+	assert.Equal(t, ownerID, got.OwnerID)
 }

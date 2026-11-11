@@ -430,3 +430,60 @@ func TestDivergenceDetector_ReportsConsistencyMismatch_DEF139(t *testing.T) {
 		t.Fatalf("expected ConsistencyMismatches()=0, got %d", got)
 	}
 }
+
+// countingQueryStore records whether each ListMessages call asked the store
+// for a total count.
+type countingQueryStore struct {
+	mockQueryStore
+	calls        int
+	countedCalls int
+}
+
+func (c *countingQueryStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
+	c.calls++
+	if !opts.SkipTotalCount {
+		c.countedCalls++
+	}
+	return c.mockQueryStore.ListMessages(ctx, filter, opts)
+}
+
+// TestCheckConversationConsistency_NoTotalCount checks that the consistency
+// check's lookups (by thread, and both directions of a DM pair) do not ask
+// the store for a total count. They read only Items, and the store runs a
+// COUNT of the matching messages for each counted call.
+func TestCheckConversationConsistency_NoTotalCount(t *testing.T) {
+	// The check bumps the package-level counters; keep this test's calls out of them.
+	saved := DivergenceMetrics
+	DivergenceMetrics = &DivergenceCounter{}
+	t.Cleanup(func() { DivergenceMetrics = saved })
+
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	userID, agentID := uuid.NewString(), uuid.NewString()
+	ctx := context.Background()
+
+	thread := &countingQueryStore{mockQueryStore: mockQueryStore{messages: []store.Message{
+		{ID: "prior-thread", ThreadID: "t1", ConversationID: "conv-1"},
+	}}}
+	if !CheckConversationConsistency(ctx, thread, "new-1", "conv-1", "t1", userID, agentID, logger) {
+		t.Fatal("thread lookup: expected consistent")
+	}
+	if thread.calls != 1 {
+		t.Fatalf("thread lookup: %d ListMessages calls, want 1", thread.calls)
+	}
+	if thread.countedCalls != 0 {
+		t.Errorf("thread lookup: %d calls requested a total count, want 0", thread.countedCalls)
+	}
+
+	dm := &countingQueryStore{mockQueryStore: mockQueryStore{messages: []store.Message{
+		{ID: "prior-dm", SenderID: userID, RecipientID: agentID, ConversationID: "conv-2"},
+	}}}
+	if !CheckConversationConsistency(ctx, dm, "new-2", "conv-2", "", userID, agentID, logger) {
+		t.Fatal("DM lookup: expected consistent")
+	}
+	if dm.calls != 2 {
+		t.Fatalf("DM lookup: %d ListMessages calls, want 2 (both directions)", dm.calls)
+	}
+	if dm.countedCalls != 0 {
+		t.Errorf("DM lookup: %d calls requested a total count, want 0", dm.countedCalls)
+	}
+}

@@ -15,14 +15,16 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
@@ -142,7 +144,8 @@ to list secrets at different scopes.
 Examples:
   scion hub secret list                    # List all user secrets
   scion hub secret list --project          # List project secrets
-  scion hub secret list --json             # Output as JSON`,
+  scion hub secret list --json             # Output as JSON (metadata only)
+  scion hub secret list --format json      # Same, via the global flag`,
 	Args: cobra.NoArgs,
 	RunE: runSecretList,
 }
@@ -162,7 +165,7 @@ Examples:
   scion hub secret update API_KEY --type variable
   scion hub secret update API_KEY --allow-progeny
   scion hub secret update --project API_KEY --description "Project key"`,
-	Args: cobra.ExactArgs(1),
+	Args: secretUpdateArgs,
 	RunE: runSecretUpdate,
 }
 
@@ -197,11 +200,6 @@ func init() {
 		cmd.Flags().StringVar(&secretProjectScope, "project", "", "Project scope (bare flag infers current project, or use --project=<name|id>)")
 		cmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 
-		cmd.Flags().StringVar(&secretProjectScope, "grove", "", "Deprecated alias for --project")
-		cmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
-		_ = cmd.Flags().MarkDeprecated("grove", "use --project instead")
-		_ = cmd.Flags().MarkHidden("grove")
-
 		cmd.Flags().StringVar(&secretBrokerScope, "broker", "", "Broker scope (bare flag infers current broker, or use --broker=<name|id>)")
 		cmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 	}
@@ -223,13 +221,13 @@ func init() {
 }
 
 // resolveSecretScope determines the scope and scopeID based on flags.
-// When --project or --broker is used bare (no value), scopeID is inferred from settings.
+// When --project is used bare (no value), the project is inferred (see
+// inferScopeProject); a bare --broker infers the broker from settings.
 // When a value is provided, it is returned as-is and may need further resolution
 // (name/slug to UUID) via resolveScopeID.
-func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
+func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (hubScopeTarget, error) {
 	scopeSet := cmd.Flags().Changed("scope")
 	projectSet := cmd.Flags().Changed("project")
-	projectAliasSet := cmd.Flags().Changed("grove")
 	brokerSet := cmd.Flags().Changed("broker")
 
 	// Enforce mutual exclusivity
@@ -237,51 +235,45 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 	if scopeSet {
 		setCount++
 	}
-	if projectSet || projectAliasSet {
+	if projectSet {
 		setCount++
 	}
 	if brokerSet {
 		setCount++
 	}
 	if setCount > 1 {
-		return "", "", fmt.Errorf("cannot specify more than one of --scope, --project, and --broker")
+		return hubScopeTarget{}, newUsageError("cannot specify more than one of --scope, --project, and --broker")
 	}
 
 	if scopeSet {
 		switch secretScope {
 		case "hub":
-			return "hub", "", nil
+			return hubScopeTarget{scope: "hub"}, nil
 		case "user", "":
-			return "user", "", nil
+			return hubScopeTarget{scope: "user"}, nil
 		default:
-			return "", "", fmt.Errorf("invalid --scope value %q: must be 'hub' or 'user'", secretScope)
+			return hubScopeTarget{}, newUsageError("invalid --scope value %q: must be 'hub' or 'user'", secretScope)
 		}
 	}
 
-	if projectSet || projectAliasSet {
-		scope = "project"
+	if projectSet {
 		projectVal := secretProjectScope
 		if projectVal == scopeInferSentinel {
 			projectVal = ""
 		}
 		if projectVal != "" {
 			// Explicit value — may be a name, slug, or UUID (resolved later)
-			scopeID = projectVal
-		} else {
-			// Infer from settings: try explicit hub link first, then local project ID
-			if settings.Hub != nil && settings.Hub.ProjectID != "" {
-				scopeID = settings.Hub.ProjectID
-			} else if settings.ProjectID != "" {
-				scopeID = settings.ProjectID
-			} else {
-				return "", "", fmt.Errorf("cannot infer project ID: not linked with Hub. Use 'scion hub link' first or provide explicit project ID")
-			}
+			return hubScopeTarget{scope: "project", id: projectVal, source: scopeSourceFlag}, nil
 		}
-		return scope, scopeID, nil
+		id, source, err := inferScopeProject(settings)
+		if err != nil {
+			return hubScopeTarget{}, err
+		}
+		return hubScopeTarget{scope: "project", id: id, source: source}, nil
 	}
 
 	if brokerSet {
-		scope = "runtime_broker"
+		scope, scopeID := "runtime_broker", ""
 		brokerVal := secretBrokerScope
 		if brokerVal == scopeInferSentinel {
 			brokerVal = ""
@@ -294,14 +286,14 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 			if settings.Hub != nil && settings.Hub.BrokerID != "" {
 				scopeID = settings.Hub.BrokerID
 			} else {
-				return "", "", fmt.Errorf("cannot infer broker ID: not linked with Hub. Use 'scion hub link' first or provide explicit broker ID")
+				return hubScopeTarget{}, fmt.Errorf("cannot infer broker ID: not linked with Hub. Use 'scion hub link' first or provide explicit broker ID")
 			}
 		}
-		return scope, scopeID, nil
+		return hubScopeTarget{scope: scope, id: scopeID}, nil
 	}
 
 	// Default to user scope
-	return "user", "", nil
+	return hubScopeTarget{scope: "user"}, nil
 }
 
 func runSecretSet(cmd *cobra.Command, args []string) error {
@@ -310,10 +302,10 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 
 	// Validate key
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return newUsageError("key cannot be empty")
 	}
 	if strings.ContainsAny(key, "= \t\n") {
-		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
+		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
 	// Handle @filename prefix for file secrets: read file content and base64-encode
@@ -354,7 +346,7 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScopeForWrite(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
@@ -419,10 +411,8 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
 
-	if secretOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(secret)
+	if wantJSON(secretOutputJSON) {
+		return outputJSON(secret)
 	}
 
 	fmt.Printf("Secret: %s\n", secret.Key)
@@ -439,12 +429,135 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Ref:     %s\n", secret.SecretRef)
 	}
 	fmt.Printf("  Version: %d\n", secret.Version)
-	fmt.Printf("  Created: %s\n", secret.Created.Format(time.RFC3339))
-	fmt.Printf("  Updated: %s\n", secret.Updated.Format(time.RFC3339))
+	fmt.Printf("  Created: %s\n", clitime.Format(secret.Created, clitime.Full))
+	fmt.Printf("  Updated: %s\n", clitime.Format(secret.Updated, clitime.Full))
 	if secret.Description != "" {
 		fmt.Printf("  Description: %s\n", secret.Description)
 	}
 	return nil
+}
+
+// secretListItem is the JSON shape of one row of "scion hub secret list".
+// It carries the same metadata the table shows and never a secret value.
+// State is "approved" or "pending" at user scope and empty at other
+// scopes; a pending row carries its PendingID and no Version.
+type secretListItem struct {
+	Key          string    `json:"key"`
+	State        string    `json:"state,omitempty"`
+	Type         string    `json:"type"`
+	AllowProgeny bool      `json:"allowProgeny"`
+	Version      int       `json:"version"`
+	Updated      time.Time `json:"updated"`
+	PendingID    string    `json:"pendingId,omitempty"`
+}
+
+// secretListOutput is the JSON shape of "scion hub secret list".
+type secretListOutput struct {
+	Scope   string           `json:"scope"`
+	Secrets []secretListItem `json:"secrets"`
+}
+
+func newSecretListOutput(scope string, secrets []hubclient.Secret) secretListOutput {
+	out := secretListOutput{Scope: scope, Secrets: make([]secretListItem, 0, len(secrets))}
+	for _, s := range secrets {
+		out.Secrets = append(out.Secrets, secretListItem{
+			Key:          s.Key,
+			Type:         secretTypeLabel(s.SecretType),
+			AllowProgeny: s.AllowProgeny,
+			Version:      s.Version,
+			Updated:      s.Updated,
+		})
+	}
+	return out
+}
+
+// secretTypeLabel returns the displayed secret type, defaulting to
+// "environment" when the Hub leaves it empty.
+func secretTypeLabel(t string) string {
+	if t == "" {
+		return "environment"
+	}
+	return t
+}
+
+// newSecretListOutputWithPending is the user-scope list output: approved
+// and pending secrets with a state each, in the Hub's order (by key,
+// approved before pending).
+func newSecretListOutputWithPending(items []hubclient.SecretListItem) secretListOutput {
+	out := secretListOutput{Scope: "user", Secrets: make([]secretListItem, 0, len(items))}
+	for _, it := range items {
+		switch {
+		case it.Secret != nil:
+			out.Secrets = append(out.Secrets, secretListItem{
+				Key:          it.Secret.Key,
+				State:        it.State,
+				Type:         secretTypeLabel(it.Secret.SecretType),
+				AllowProgeny: it.Secret.AllowProgeny,
+				Version:      it.Secret.Version,
+				Updated:      it.Secret.Updated,
+			})
+		case it.Pending != nil:
+			out.Secrets = append(out.Secrets, secretListItem{
+				Key:          it.Pending.Key,
+				State:        it.State,
+				Type:         secretTypeLabel(it.Pending.Type),
+				AllowProgeny: it.Pending.AllowProgeny,
+				Updated:      it.Pending.Updated,
+				PendingID:    it.Pending.ID,
+			})
+		}
+	}
+	return out
+}
+
+// runUserSecretList lists the caller's user secrets with a STATE column:
+// approved secrets and the pending secrets agents saved that wait for
+// approval. It returns handled=false when the Hub refuses the merged list
+// (a credential the pending endpoints do not serve), so the caller falls
+// back to the approved list.
+func runUserSecretList(ctx context.Context, client hubclient.Client) (handled bool, err error) {
+	resp, err := client.Secrets().ListWithPending(ctx)
+	if err != nil {
+		if apiclient.IsForbiddenError(err) {
+			return false, nil
+		}
+		return true, fmt.Errorf("failed to list secrets: %w", err)
+	}
+	if resp.Items == nil {
+		// A Hub without the merged list answers with the approved list only.
+		resp.Items = make([]hubclient.SecretListItem, 0, len(resp.Secrets))
+		for i := range resp.Secrets {
+			resp.Items = append(resp.Items, hubclient.SecretListItem{State: "approved", Key: resp.Secrets[i].Key, Secret: &resp.Secrets[i]})
+		}
+	}
+	out := newSecretListOutputWithPending(resp.Items)
+	if wantJSON(secretOutputJSON) {
+		return true, outputJSON(out)
+	}
+	if len(out.Secrets) == 0 {
+		fmt.Println("No secrets found (scope: user)")
+		return true, nil
+	}
+	fmt.Println("Secrets (scope: user):")
+	fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "KEY", "STATE", "TYPE", "PROGENY", "VERSION", "UPDATED")
+	fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "--------", "------------", "--------", "--------", "-----------------------")
+	pending := 0
+	for _, s := range out.Secrets {
+		progenyLabel := "-"
+		if s.AllowProgeny {
+			progenyLabel = "\u2713"
+		}
+		version := fmt.Sprintf("v%d", s.Version)
+		if s.State == "pending" {
+			version = "-"
+			pending++
+		}
+		fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", truncate(terminalText(s.Key), 30), s.State, terminalText(s.Type), progenyLabel, version, clitime.Format(s.Updated, clitime.Full))
+	}
+	if pending > 0 {
+		fmt.Println("\nPending secrets are not delivered until you approve them: scion hub secret pending list")
+	}
+	return true, nil
 }
 
 func runSecretList(cmd *cobra.Command, _ []string) error {
@@ -453,6 +566,12 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer cancel()
+
+	if scope == "user" {
+		if handled, err := runUserSecretList(ctx, client); handled {
+			return err
+		}
+	}
 
 	opts := &hubclient.ListSecretOptions{
 		Scope:   scope,
@@ -464,10 +583,8 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to list secrets: %w", err)
 	}
 
-	if secretOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(resp)
+	if wantJSON(secretOutputJSON) {
+		return outputJSON(newSecretListOutput(scope, resp.Secrets))
 	}
 
 	if len(resp.Secrets) == 0 {
@@ -477,50 +594,46 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("Secrets (scope: %s):\n", scope)
 	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "KEY", "TYPE", "PROGENY", "VERSION", "UPDATED")
-	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-------------------")
+	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-----------------------")
 	for _, s := range resp.Secrets {
-		typeLabel := s.SecretType
-		if typeLabel == "" {
-			typeLabel = "environment"
-		}
+		typeLabel := secretTypeLabel(s.SecretType)
 		progenyLabel := "-"
 		if s.AllowProgeny {
 			progenyLabel = "\u2713"
 		}
-		fmt.Printf("%-30s  %-12s  %-8s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, progenyLabel, s.Version, s.Updated.Format("2006-01-02 15:04:05"))
+		fmt.Printf("%-30s  %-12s  %-8s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, progenyLabel, s.Version, clitime.Format(s.Updated, clitime.Full))
 	}
 
 	return nil
 }
 
-func runSecretUpdate(cmd *cobra.Command, args []string) error {
-	key := args[0]
-
-	// Validate key
-	if key == "" {
+// secretUpdateArgs is hub secret update's Args validator: exactly one
+// non-empty KEY, at least one metadata flag, and valid --injection-mode /
+// --type values. It runs before root's PersistentPreRunE, so these errors
+// keep the usage block (ptone/scion#2859).
+func secretUpdateArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	if args[0] == "" {
 		return fmt.Errorf("key cannot be empty")
 	}
 
 	// Check that at least one metadata flag is provided
-	descChanged := cmd.Flags().Changed("description")
-	injectionChanged := cmd.Flags().Changed("injection-mode")
-	typeChanged := cmd.Flags().Changed("type")
-	targetChanged := cmd.Flags().Changed("target")
-	progenyChanged := cmd.Flags().Changed("allow-progeny")
-
-	if !descChanged && !injectionChanged && !typeChanged && !targetChanged && !progenyChanged {
+	if !cmd.Flags().Changed("description") && !cmd.Flags().Changed("injection-mode") &&
+		!cmd.Flags().Changed("type") && !cmd.Flags().Changed("target") && !cmd.Flags().Changed("allow-progeny") {
 		return fmt.Errorf("at least one metadata flag must be provided (--description, --injection-mode, --type, --target, --allow-progeny)")
 	}
 
 	// Validate injection-mode if provided
 	injectionMode, _ := cmd.Flags().GetString("injection-mode")
-	if injectionChanged && injectionMode != "always" && injectionMode != "as_needed" {
+	if cmd.Flags().Changed("injection-mode") && injectionMode != "always" && injectionMode != "as_needed" {
 		return fmt.Errorf("injection-mode must be \"always\" or \"as_needed\"")
 	}
 
 	// Validate type if provided
-	secretTypeVal, _ := cmd.Flags().GetString("type")
-	if typeChanged {
+	if cmd.Flags().Changed("type") {
+		secretTypeVal, _ := cmd.Flags().GetString("type")
 		switch secretTypeVal {
 		case "environment", "variable", "file":
 			// valid
@@ -528,8 +641,22 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("type must be one of: environment, variable, file")
 		}
 	}
+	return nil
+}
 
-	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
+func runSecretUpdate(cmd *cobra.Command, args []string) error {
+	key := args[0]
+
+	// Arguments and flags were validated by secretUpdateArgs.
+	descChanged := cmd.Flags().Changed("description")
+	injectionChanged := cmd.Flags().Changed("injection-mode")
+	typeChanged := cmd.Flags().Changed("type")
+	targetChanged := cmd.Flags().Changed("target")
+	progenyChanged := cmd.Flags().Changed("allow-progeny")
+	injectionMode, _ := cmd.Flags().GetString("injection-mode")
+	secretTypeVal, _ := cmd.Flags().GetString("type")
+
+	client, scope, scopeID, ctx, cancel, err := resolveHubScopeForWrite(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
@@ -576,7 +703,7 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 func runSecretClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScopeForWrite(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}

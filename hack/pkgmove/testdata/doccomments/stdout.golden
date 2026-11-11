@@ -1,0 +1,79 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (8):
+  type   job -> Job  (hub/move.go:20)
+  const  maxRetries -> MaxRetries  (hub/move.go:15)
+  func   newJob -> NewJob  (hub/move.go:35)
+  func   run -> Run  (hub/move.go:10)
+  func   writeError -> WriteError  (hub/move.go:7)
+  method handler.handle -> Handle  (hub/stay.go:8)
+  method job.handle -> Handle  (hub/move.go:26)
+  method stayJob.handle -> Handle  (hub/stay.go:15)
+
+Alias entries (5):
+  var   Helper = sub.Helper
+  const maxRetries = sub.MaxRetries
+  func  newJob = sub.NewJob
+  func  run = sub.Run
+  func  writeError = sub.WriteError
+
+Alias files (1):
+  hub/zz_alias_sub.go (29 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Comment rewrites (renamed identifiers) (19):
+  hub/move.go:5: writeError -> WriteError
+  hub/move.go:5: writeError -> WriteError
+  hub/move.go:9: run -> Run
+  hub/move.go:9: run -> Run
+  hub/move.go:9: run -> Run
+  hub/move.go:14: maxRetries -> MaxRetries
+  hub/move.go:19: job -> Job
+  hub/move.go:19: job -> Job
+  hub/move.go:19: handle -> Handle
+  hub/move.go:25: handle -> Handle
+  hub/move.go:25: handle -> Handle
+  hub/move.go:26: writeError -> WriteError
+  hub/move.go:30: writeError -> WriteError
+  hub/move.go:34: newJob -> NewJob
+  hub/move.go:34: newJob -> NewJob
+  hub/move.go:34: newJob -> NewJob
+  hub/stay.go:7: handle -> Handle
+  hub/stay.go:13: handle -> Handle
+  hub/stay.go:14: handle -> Handle
+
+Remaining source files edited (1):
+  hub/stay.go
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 6. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: exported method (may newly satisfy interfaces) ==
+  hub/move.go:26: job.handle -> Handle: check dynamic interface assertions that could now match; types in other packages that embed job are not checked for shadowing or newly promoted methods
+  hub/stay.go:8: handler.handle -> Handle: check dynamic interface assertions that could now match; types in other packages that embed handler are not checked for shadowing or newly promoted methods
+  hub/stay.go:15: stayJob.handle -> Handle: check dynamic interface assertions that could now match; types in other packages that embed stayJob are not checked for shadowing or newly promoted methods
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:32: example.com/fx/hub.Helper is now example.com/fx/hub/sub.Helper for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: go:generate directive ==
+  hub/move.go:28: //go:generate echo writeError (runs in the new directory)
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:20: hub.job becomes sub.Job for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

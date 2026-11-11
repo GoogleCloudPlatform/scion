@@ -68,6 +68,21 @@ func TestChecker_ValidRemote(t *testing.T) {
 	}
 }
 
+// parseImageRef rejects only the empty reference, and CheckRemoteOnly treats
+// that as a bare name, so its parse-error branch is not reached. A malformed
+// registry-qualified reference parses and maps to invalid through the
+// registry's 404.
+func TestCheckRemoteOnly_MalformedReference(t *testing.T) {
+	c := NewChecker(WithHTTPClient(newMockHTTPClient(http.StatusNotFound, nil)))
+
+	if res := c.CheckRemoteOnly(context.Background(), "registry.example.com/Team/Agent:dev"); res.Status != "invalid" {
+		t.Errorf("malformed qualified reference: status %q, want invalid", res.Status)
+	}
+	if res := c.CheckRemoteOnly(context.Background(), ""); res.Status != "unknown" {
+		t.Errorf("empty reference: status %q, want unknown", res.Status)
+	}
+}
+
 func TestChecker_Invalid404(t *testing.T) {
 	c := NewChecker(
 		WithLocalChecker(&mockLocalChecker{exists: false}),
@@ -326,5 +341,54 @@ func TestChecker_Check_BareImageLocalError(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "daemon unreachable") {
 		t.Errorf("expected error to contain runtime failure detail, got %s", result.Error)
+	}
+}
+
+// TestChecker_SetLocalConcurrentWithChecks swaps the local exister while
+// Check and CheckAll run (the hub does this after it has started serving).
+// Each call must use one exister throughout: with one exister that reports
+// every image present and one that reports none, CheckAll's short and long
+// results must agree. Under -race this also reports an unguarded read of the
+// exister.
+func TestChecker_SetLocalConcurrentWithChecks(t *testing.T) {
+	present := &mockLocalChecker{exists: true}
+	absent := &mockLocalChecker{exists: false}
+	c := NewChecker(
+		WithLocalChecker(present),
+		WithHTTPClient(newMockHTTPClient(http.StatusNotFound, nil)),
+	)
+
+	const iterations = 500
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			switch i % 3 {
+			case 0:
+				c.SetLocal(absent)
+			case 1:
+				c.SetLocal(nil)
+			default:
+				c.SetLocal(present)
+			}
+		}
+	}()
+
+	ctx := context.Background()
+	for i := 0; i < iterations; i++ {
+		all := c.CheckAll(ctx, "myimage:latest", "ghcr.io/myorg/myimage:latest")
+		if all.LocalShort.Exists != all.LocalLong.Exists {
+			t.Fatalf("CheckAll mixed two local existers: short=%v long=%v", all.LocalShort.Exists, all.LocalLong.Exists)
+		}
+		res := c.Check(ctx, "scion-claude:latest")
+		if res.Status != "valid" && res.Status != "unknown" {
+			t.Fatalf("Check returned unexpected status %q", res.Status)
+		}
+	}
+	<-done
+
+	c.SetLocal(present)
+	if res := c.Check(ctx, "scion-claude:latest"); res.Status != "valid" || res.Source != "local" {
+		t.Fatalf("after SetLocal(present): status=%q source=%q, want valid/local", res.Status, res.Source)
 	}
 }

@@ -1,6 +1,8 @@
 
 ### Schema Sketch (v1)
 
+> Note: `server.log_format` is now accepted but ignored and has no environment variable; `SCION_SERVER_LOG_FORMAT` below is historical (ptone/scion#4103).
+
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -113,7 +115,7 @@
         "autohelp": {
           "type": "boolean",
           "default": true,
-          "description": "Print usage help on errors.",
+          "description": "Print the usage block after an argument or flag error.",
           "x-env-var": "SCION_CLI_AUTOHELP",
           "x-since": "1"
         },
@@ -335,7 +337,7 @@
         "port": { "type": "integer", "default": 9800, "x-env-var": "SCION_SERVER_BROKER_PORT" },
         "host": { "type": "string", "default": "0.0.0.0", "x-env-var": "SCION_SERVER_BROKER_HOST" },
         "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_BROKER_READTIMEOUT" },
-        "write_timeout": { "type": "string", "default": "120s", "x-env-var": "SCION_SERVER_BROKER_WRITETIMEOUT" },
+        "write_timeout": { "type": "string", "default": "210s", "x-env-var": "SCION_SERVER_BROKER_WRITETIMEOUT" },
         "hub_endpoint": {
           "type": "string",
           "format": "uri",

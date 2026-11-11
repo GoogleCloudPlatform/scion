@@ -29,6 +29,263 @@ func (_u *ScheduleUpdate) Where(ps ...predicate.Schedule) *ScheduleUpdate {
 	return _u
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_u *ScheduleUpdate) SetInitiatorPrincipalKind(v string) *ScheduleUpdate {
+	_u.mutation.SetInitiatorPrincipalKind(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableInitiatorPrincipalKind(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetInitiatorPrincipalKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (_u *ScheduleUpdate) ClearInitiatorPrincipalKind() *ScheduleUpdate {
+	_u.mutation.ClearInitiatorPrincipalKind()
+	return _u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_u *ScheduleUpdate) SetInitiatorPrincipalID(v string) *ScheduleUpdate {
+	_u.mutation.SetInitiatorPrincipalID(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableInitiatorPrincipalID(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetInitiatorPrincipalID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (_u *ScheduleUpdate) ClearInitiatorPrincipalID() *ScheduleUpdate {
+	_u.mutation.ClearInitiatorPrincipalID()
+	return _u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_u *ScheduleUpdate) SetInitiatorCredentialKind(v string) *ScheduleUpdate {
+	_u.mutation.SetInitiatorCredentialKind(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableInitiatorCredentialKind(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (_u *ScheduleUpdate) ClearInitiatorCredentialKind() *ScheduleUpdate {
+	_u.mutation.ClearInitiatorCredentialKind()
+	return _u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_u *ScheduleUpdate) SetInitiatorCredentialID(v string) *ScheduleUpdate {
+	_u.mutation.SetInitiatorCredentialID(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableInitiatorCredentialID(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (_u *ScheduleUpdate) ClearInitiatorCredentialID() *ScheduleUpdate {
+	_u.mutation.ClearInitiatorCredentialID()
+	return _u
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (_u *ScheduleUpdate) SetInitiatorCredentialSnapshot(v string) *ScheduleUpdate {
+	_u.mutation.SetInitiatorCredentialSnapshot(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableInitiatorCredentialSnapshot(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialSnapshot(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (_u *ScheduleUpdate) ClearInitiatorCredentialSnapshot() *ScheduleUpdate {
+	_u.mutation.ClearInitiatorCredentialSnapshot()
+	return _u
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (_u *ScheduleUpdate) SetAttributionVersion(v int) *ScheduleUpdate {
+	_u.mutation.ResetAttributionVersion()
+	_u.mutation.SetAttributionVersion(v)
+	return _u
+}
+
+// SetNillableAttributionVersion sets the "attribution_version" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAttributionVersion(v *int) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAttributionVersion(*v)
+	}
+	return _u
+}
+
+// AddAttributionVersion adds value to the "attribution_version" field.
+func (_u *ScheduleUpdate) AddAttributionVersion(v int) *ScheduleUpdate {
+	_u.mutation.AddAttributionVersion(v)
+	return _u
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (_u *ScheduleUpdate) ClearAttributionVersion() *ScheduleUpdate {
+	_u.mutation.ClearAttributionVersion()
+	return _u
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (_u *ScheduleUpdate) SetAuthorizationRevision(v int) *ScheduleUpdate {
+	_u.mutation.ResetAuthorizationRevision()
+	_u.mutation.SetAuthorizationRevision(v)
+	return _u
+}
+
+// SetNillableAuthorizationRevision sets the "authorization_revision" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAuthorizationRevision(v *int) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAuthorizationRevision(*v)
+	}
+	return _u
+}
+
+// AddAuthorizationRevision adds value to the "authorization_revision" field.
+func (_u *ScheduleUpdate) AddAuthorizationRevision(v int) *ScheduleUpdate {
+	_u.mutation.AddAuthorizationRevision(v)
+	return _u
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (_u *ScheduleUpdate) ClearAuthorizationRevision() *ScheduleUpdate {
+	_u.mutation.ClearAuthorizationRevision()
+	return _u
+}
+
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (_u *ScheduleUpdate) SetAuthorityCeilingKind(v string) *ScheduleUpdate {
+	_u.mutation.SetAuthorityCeilingKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingKind sets the "authority_ceiling_kind" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAuthorityCeilingKind(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (_u *ScheduleUpdate) SetAuthorityCeilingVersion(v int32) *ScheduleUpdate {
+	_u.mutation.ResetAuthorityCeilingVersion()
+	_u.mutation.SetAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingVersion sets the "authority_ceiling_version" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAuthorityCeilingVersion(v *int32) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddAuthorityCeilingVersion adds value to the "authority_ceiling_version" field.
+func (_u *ScheduleUpdate) AddAuthorityCeilingVersion(v int32) *ScheduleUpdate {
+	_u.mutation.AddAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (_u *ScheduleUpdate) SetAuthorityCeilingPermissionIds(v string) *ScheduleUpdate {
+	_u.mutation.SetAuthorityCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAuthorityCeilingPermissionIds(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (_u *ScheduleUpdate) ClearAuthorityCeilingPermissionIds() *ScheduleUpdate {
+	_u.mutation.ClearAuthorityCeilingPermissionIds()
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (_u *ScheduleUpdate) SetAuthorityCeilingBoundaryKind(v string) *ScheduleUpdate {
+	_u.mutation.SetAuthorityCeilingBoundaryKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAuthorityCeilingBoundaryKind(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (_u *ScheduleUpdate) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduleUpdate {
+	_u.mutation.SetAuthorityCeilingBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAuthorityCeilingBoundaryProjectID(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduleUpdate) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduleUpdate {
+	_u.mutation.SetAuthorityCeilingSourceExpiresAt(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableAuthorityCeilingSourceExpiresAt(v *time.Time) *ScheduleUpdate {
+	if v != nil {
+		_u.SetAuthorityCeilingSourceExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduleUpdate) ClearAuthorityCeilingSourceExpiresAt() *ScheduleUpdate {
+	_u.mutation.ClearAuthorityCeilingSourceExpiresAt()
+	return _u
+}
+
 // SetProjectID sets the "project_id" field.
 func (_u *ScheduleUpdate) SetProjectID(v uuid.UUID) *ScheduleUpdate {
 	_u.mutation.SetProjectID(v)
@@ -67,6 +324,20 @@ func (_u *ScheduleUpdate) SetCronExpr(v string) *ScheduleUpdate {
 func (_u *ScheduleUpdate) SetNillableCronExpr(v *string) *ScheduleUpdate {
 	if v != nil {
 		_u.SetCronExpr(*v)
+	}
+	return _u
+}
+
+// SetTimeZone sets the "time_zone" field.
+func (_u *ScheduleUpdate) SetTimeZone(v string) *ScheduleUpdate {
+	_u.mutation.SetTimeZone(v)
+	return _u
+}
+
+// SetNillableTimeZone sets the "time_zone" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableTimeZone(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetTimeZone(*v)
 	}
 	return _u
 }
@@ -110,6 +381,26 @@ func (_u *ScheduleUpdate) SetNillableStatus(v *string) *ScheduleUpdate {
 	if v != nil {
 		_u.SetStatus(*v)
 	}
+	return _u
+}
+
+// SetStatusReason sets the "status_reason" field.
+func (_u *ScheduleUpdate) SetStatusReason(v string) *ScheduleUpdate {
+	_u.mutation.SetStatusReason(v)
+	return _u
+}
+
+// SetNillableStatusReason sets the "status_reason" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableStatusReason(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetStatusReason(*v)
+	}
+	return _u
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (_u *ScheduleUpdate) ClearStatusReason() *ScheduleUpdate {
+	_u.mutation.ClearStatusReason()
 	return _u
 }
 
@@ -334,6 +625,87 @@ func (_u *ScheduleUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			}
 		}
 	}
+	if value, ok := _u.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(schedule.FieldInitiatorPrincipalKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalKindCleared() {
+		_spec.ClearField(schedule.FieldInitiatorPrincipalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(schedule.FieldInitiatorPrincipalID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalIDCleared() {
+		_spec.ClearField(schedule.FieldInitiatorPrincipalID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialKindCleared() {
+		_spec.ClearField(schedule.FieldInitiatorCredentialKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialIDCleared() {
+		_spec.ClearField(schedule.FieldInitiatorCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialSnapshot(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialSnapshot, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialSnapshotCleared() {
+		_spec.ClearField(schedule.FieldInitiatorCredentialSnapshot, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttributionVersion(); ok {
+		_spec.SetField(schedule.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttributionVersion(); ok {
+		_spec.AddField(schedule.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if _u.mutation.AttributionVersionCleared() {
+		_spec.ClearField(schedule.FieldAttributionVersion, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AuthorizationRevision(); ok {
+		_spec.SetField(schedule.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorizationRevision(); ok {
+		_spec.AddField(schedule.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if _u.mutation.AuthorizationRevisionCleared() {
+		_spec.ClearField(schedule.FieldAuthorizationRevision, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingKind(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingVersion(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorityCeilingVersion(); ok {
+		_spec.AddField(schedule.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingPermissionIds(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.AuthorityCeilingPermissionIdsCleared() {
+		_spec.ClearField(schedule.FieldAuthorityCeilingPermissionIds, field.TypeString)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryKind(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingBoundaryKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryProjectID(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingBoundaryProjectID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingSourceExpiresAt(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.AuthorityCeilingSourceExpiresAtCleared() {
+		_spec.ClearField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(schedule.FieldProjectID, field.TypeUUID, value)
 	}
@@ -343,6 +715,9 @@ func (_u *ScheduleUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.CronExpr(); ok {
 		_spec.SetField(schedule.FieldCronExpr, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.TimeZone(); ok {
+		_spec.SetField(schedule.FieldTimeZone, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.EventType(); ok {
 		_spec.SetField(schedule.FieldEventType, field.TypeString, value)
 	}
@@ -351,6 +726,12 @@ func (_u *ScheduleUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(schedule.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.StatusReason(); ok {
+		_spec.SetField(schedule.FieldStatusReason, field.TypeString, value)
+	}
+	if _u.mutation.StatusReasonCleared() {
+		_spec.ClearField(schedule.FieldStatusReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.NextRunAt(); ok {
 		_spec.SetField(schedule.FieldNextRunAt, field.TypeTime, value)
@@ -417,6 +798,263 @@ type ScheduleUpdateOne struct {
 	mutation *ScheduleMutation
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_u *ScheduleUpdateOne) SetInitiatorPrincipalKind(v string) *ScheduleUpdateOne {
+	_u.mutation.SetInitiatorPrincipalKind(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableInitiatorPrincipalKind(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetInitiatorPrincipalKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (_u *ScheduleUpdateOne) ClearInitiatorPrincipalKind() *ScheduleUpdateOne {
+	_u.mutation.ClearInitiatorPrincipalKind()
+	return _u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_u *ScheduleUpdateOne) SetInitiatorPrincipalID(v string) *ScheduleUpdateOne {
+	_u.mutation.SetInitiatorPrincipalID(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableInitiatorPrincipalID(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetInitiatorPrincipalID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (_u *ScheduleUpdateOne) ClearInitiatorPrincipalID() *ScheduleUpdateOne {
+	_u.mutation.ClearInitiatorPrincipalID()
+	return _u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_u *ScheduleUpdateOne) SetInitiatorCredentialKind(v string) *ScheduleUpdateOne {
+	_u.mutation.SetInitiatorCredentialKind(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableInitiatorCredentialKind(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (_u *ScheduleUpdateOne) ClearInitiatorCredentialKind() *ScheduleUpdateOne {
+	_u.mutation.ClearInitiatorCredentialKind()
+	return _u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_u *ScheduleUpdateOne) SetInitiatorCredentialID(v string) *ScheduleUpdateOne {
+	_u.mutation.SetInitiatorCredentialID(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableInitiatorCredentialID(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (_u *ScheduleUpdateOne) ClearInitiatorCredentialID() *ScheduleUpdateOne {
+	_u.mutation.ClearInitiatorCredentialID()
+	return _u
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (_u *ScheduleUpdateOne) SetInitiatorCredentialSnapshot(v string) *ScheduleUpdateOne {
+	_u.mutation.SetInitiatorCredentialSnapshot(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableInitiatorCredentialSnapshot(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialSnapshot(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (_u *ScheduleUpdateOne) ClearInitiatorCredentialSnapshot() *ScheduleUpdateOne {
+	_u.mutation.ClearInitiatorCredentialSnapshot()
+	return _u
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (_u *ScheduleUpdateOne) SetAttributionVersion(v int) *ScheduleUpdateOne {
+	_u.mutation.ResetAttributionVersion()
+	_u.mutation.SetAttributionVersion(v)
+	return _u
+}
+
+// SetNillableAttributionVersion sets the "attribution_version" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAttributionVersion(v *int) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAttributionVersion(*v)
+	}
+	return _u
+}
+
+// AddAttributionVersion adds value to the "attribution_version" field.
+func (_u *ScheduleUpdateOne) AddAttributionVersion(v int) *ScheduleUpdateOne {
+	_u.mutation.AddAttributionVersion(v)
+	return _u
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (_u *ScheduleUpdateOne) ClearAttributionVersion() *ScheduleUpdateOne {
+	_u.mutation.ClearAttributionVersion()
+	return _u
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (_u *ScheduleUpdateOne) SetAuthorizationRevision(v int) *ScheduleUpdateOne {
+	_u.mutation.ResetAuthorizationRevision()
+	_u.mutation.SetAuthorizationRevision(v)
+	return _u
+}
+
+// SetNillableAuthorizationRevision sets the "authorization_revision" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAuthorizationRevision(v *int) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAuthorizationRevision(*v)
+	}
+	return _u
+}
+
+// AddAuthorizationRevision adds value to the "authorization_revision" field.
+func (_u *ScheduleUpdateOne) AddAuthorizationRevision(v int) *ScheduleUpdateOne {
+	_u.mutation.AddAuthorizationRevision(v)
+	return _u
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (_u *ScheduleUpdateOne) ClearAuthorizationRevision() *ScheduleUpdateOne {
+	_u.mutation.ClearAuthorizationRevision()
+	return _u
+}
+
+// SetAuthorityCeilingKind sets the "authority_ceiling_kind" field.
+func (_u *ScheduleUpdateOne) SetAuthorityCeilingKind(v string) *ScheduleUpdateOne {
+	_u.mutation.SetAuthorityCeilingKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingKind sets the "authority_ceiling_kind" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAuthorityCeilingKind(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingVersion sets the "authority_ceiling_version" field.
+func (_u *ScheduleUpdateOne) SetAuthorityCeilingVersion(v int32) *ScheduleUpdateOne {
+	_u.mutation.ResetAuthorityCeilingVersion()
+	_u.mutation.SetAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingVersion sets the "authority_ceiling_version" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAuthorityCeilingVersion(v *int32) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddAuthorityCeilingVersion adds value to the "authority_ceiling_version" field.
+func (_u *ScheduleUpdateOne) AddAuthorityCeilingVersion(v int32) *ScheduleUpdateOne {
+	_u.mutation.AddAuthorityCeilingVersion(v)
+	return _u
+}
+
+// SetAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field.
+func (_u *ScheduleUpdateOne) SetAuthorityCeilingPermissionIds(v string) *ScheduleUpdateOne {
+	_u.mutation.SetAuthorityCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingPermissionIds sets the "authority_ceiling_permission_ids" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAuthorityCeilingPermissionIds(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingPermissionIds clears the value of the "authority_ceiling_permission_ids" field.
+func (_u *ScheduleUpdateOne) ClearAuthorityCeilingPermissionIds() *ScheduleUpdateOne {
+	_u.mutation.ClearAuthorityCeilingPermissionIds()
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field.
+func (_u *ScheduleUpdateOne) SetAuthorityCeilingBoundaryKind(v string) *ScheduleUpdateOne {
+	_u.mutation.SetAuthorityCeilingBoundaryKind(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryKind sets the "authority_ceiling_boundary_kind" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAuthorityCeilingBoundaryKind(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryKind(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field.
+func (_u *ScheduleUpdateOne) SetAuthorityCeilingBoundaryProjectID(v string) *ScheduleUpdateOne {
+	_u.mutation.SetAuthorityCeilingBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingBoundaryProjectID sets the "authority_ceiling_boundary_project_id" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAuthorityCeilingBoundaryProjectID(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// SetAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduleUpdateOne) SetAuthorityCeilingSourceExpiresAt(v time.Time) *ScheduleUpdateOne {
+	_u.mutation.SetAuthorityCeilingSourceExpiresAt(v)
+	return _u
+}
+
+// SetNillableAuthorityCeilingSourceExpiresAt sets the "authority_ceiling_source_expires_at" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableAuthorityCeilingSourceExpiresAt(v *time.Time) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetAuthorityCeilingSourceExpiresAt(*v)
+	}
+	return _u
+}
+
+// ClearAuthorityCeilingSourceExpiresAt clears the value of the "authority_ceiling_source_expires_at" field.
+func (_u *ScheduleUpdateOne) ClearAuthorityCeilingSourceExpiresAt() *ScheduleUpdateOne {
+	_u.mutation.ClearAuthorityCeilingSourceExpiresAt()
+	return _u
+}
+
 // SetProjectID sets the "project_id" field.
 func (_u *ScheduleUpdateOne) SetProjectID(v uuid.UUID) *ScheduleUpdateOne {
 	_u.mutation.SetProjectID(v)
@@ -455,6 +1093,20 @@ func (_u *ScheduleUpdateOne) SetCronExpr(v string) *ScheduleUpdateOne {
 func (_u *ScheduleUpdateOne) SetNillableCronExpr(v *string) *ScheduleUpdateOne {
 	if v != nil {
 		_u.SetCronExpr(*v)
+	}
+	return _u
+}
+
+// SetTimeZone sets the "time_zone" field.
+func (_u *ScheduleUpdateOne) SetTimeZone(v string) *ScheduleUpdateOne {
+	_u.mutation.SetTimeZone(v)
+	return _u
+}
+
+// SetNillableTimeZone sets the "time_zone" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableTimeZone(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetTimeZone(*v)
 	}
 	return _u
 }
@@ -498,6 +1150,26 @@ func (_u *ScheduleUpdateOne) SetNillableStatus(v *string) *ScheduleUpdateOne {
 	if v != nil {
 		_u.SetStatus(*v)
 	}
+	return _u
+}
+
+// SetStatusReason sets the "status_reason" field.
+func (_u *ScheduleUpdateOne) SetStatusReason(v string) *ScheduleUpdateOne {
+	_u.mutation.SetStatusReason(v)
+	return _u
+}
+
+// SetNillableStatusReason sets the "status_reason" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableStatusReason(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetStatusReason(*v)
+	}
+	return _u
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (_u *ScheduleUpdateOne) ClearStatusReason() *ScheduleUpdateOne {
+	_u.mutation.ClearStatusReason()
 	return _u
 }
 
@@ -752,6 +1424,87 @@ func (_u *ScheduleUpdateOne) sqlSave(ctx context.Context) (_node *Schedule, err 
 			}
 		}
 	}
+	if value, ok := _u.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(schedule.FieldInitiatorPrincipalKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalKindCleared() {
+		_spec.ClearField(schedule.FieldInitiatorPrincipalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(schedule.FieldInitiatorPrincipalID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalIDCleared() {
+		_spec.ClearField(schedule.FieldInitiatorPrincipalID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialKindCleared() {
+		_spec.ClearField(schedule.FieldInitiatorCredentialKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialIDCleared() {
+		_spec.ClearField(schedule.FieldInitiatorCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialSnapshot(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialSnapshot, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialSnapshotCleared() {
+		_spec.ClearField(schedule.FieldInitiatorCredentialSnapshot, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttributionVersion(); ok {
+		_spec.SetField(schedule.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttributionVersion(); ok {
+		_spec.AddField(schedule.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if _u.mutation.AttributionVersionCleared() {
+		_spec.ClearField(schedule.FieldAttributionVersion, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AuthorizationRevision(); ok {
+		_spec.SetField(schedule.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorizationRevision(); ok {
+		_spec.AddField(schedule.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if _u.mutation.AuthorizationRevisionCleared() {
+		_spec.ClearField(schedule.FieldAuthorizationRevision, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingKind(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingVersion(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorityCeilingVersion(); ok {
+		_spec.AddField(schedule.FieldAuthorityCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingPermissionIds(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.AuthorityCeilingPermissionIdsCleared() {
+		_spec.ClearField(schedule.FieldAuthorityCeilingPermissionIds, field.TypeString)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryKind(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingBoundaryKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingBoundaryProjectID(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingBoundaryProjectID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AuthorityCeilingSourceExpiresAt(); ok {
+		_spec.SetField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime, value)
+	}
+	if _u.mutation.AuthorityCeilingSourceExpiresAtCleared() {
+		_spec.ClearField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(schedule.FieldProjectID, field.TypeUUID, value)
 	}
@@ -761,6 +1514,9 @@ func (_u *ScheduleUpdateOne) sqlSave(ctx context.Context) (_node *Schedule, err 
 	if value, ok := _u.mutation.CronExpr(); ok {
 		_spec.SetField(schedule.FieldCronExpr, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.TimeZone(); ok {
+		_spec.SetField(schedule.FieldTimeZone, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.EventType(); ok {
 		_spec.SetField(schedule.FieldEventType, field.TypeString, value)
 	}
@@ -769,6 +1525,12 @@ func (_u *ScheduleUpdateOne) sqlSave(ctx context.Context) (_node *Schedule, err 
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(schedule.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.StatusReason(); ok {
+		_spec.SetField(schedule.FieldStatusReason, field.TypeString, value)
+	}
+	if _u.mutation.StatusReasonCleared() {
+		_spec.ClearField(schedule.FieldStatusReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.NextRunAt(); ok {
 		_spec.SetField(schedule.FieldNextRunAt, field.TypeTime, value)

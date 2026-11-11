@@ -74,7 +74,10 @@ func TestParseTopicComponents(t *testing.T) {
 		agentSlug string
 	}{
 		{"scion.project.proj123.agent.myagent", "proj123", "myagent"},
-		{"scion.grove.proj123.agent.myagent", "proj123", "myagent"},
+		// A grove-prefixed topic is not a project topic: the project ID
+		// falls back to the whole topic string, and the agent segment is
+		// still extracted.
+		{"scion.grove.proj123.agent.myagent", "scion.grove.proj123.agent.myagent", "myagent"},
 		{"some-topic", "some-topic", ""},
 	}
 
@@ -218,7 +221,7 @@ func TestHubErrorUserFacingMessage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			he := &hubError{Code: tt.code}
-			assert.Contains(t, he.userFacingMessage(), tt.expected)
+			assert.Contains(t, he.userFacingMessage(""), tt.expected)
 		})
 	}
 }

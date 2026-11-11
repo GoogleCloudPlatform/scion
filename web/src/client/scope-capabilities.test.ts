@@ -28,8 +28,6 @@
  * never returns what was written for another.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 import type { Capabilities } from '../shared/types.js';
@@ -135,45 +133,5 @@ describe('scope capabilities are keyed by resource', () => {
 
     expect(sm.getScopeCapabilities('agent')).toBeUndefined();
     expect(sm.getScopeCapabilities('project')).toBeUndefined();
-  });
-});
-
-describe('SSR hydrate attributes capabilities to the prefetched list', () => {
-  it('attributes them to agents when the payload carries agents', () => {
-    const sm = new StateManager();
-
-    sm.hydrate({ agents: [] }, caps('create'));
-
-    expect(sm.getScopeCapabilities('agent')).toEqual(caps('create'));
-    expect(sm.getScopeCapabilities('project')).toBeUndefined();
-  });
-
-  it('attributes them to projects when the payload carries projects', () => {
-    const sm = new StateManager();
-
-    sm.hydrate({ projects: [] }, caps('create'));
-
-    expect(sm.getScopeCapabilities('project')).toEqual(caps('create'));
-    expect(sm.getScopeCapabilities('agent')).toBeUndefined();
-  });
-
-  it('drops them when the payload carries both lists, rather than guessing', () => {
-    const sm = new StateManager();
-
-    // One capability set cannot describe both resources. Attributing it to
-    // both would reintroduce the defect, so neither is seeded and each page
-    // fetches its own.
-    sm.hydrate({ agents: [], projects: [] }, caps('create'));
-
-    expect(sm.getScopeCapabilities('agent')).toBeUndefined();
-    expect(sm.getScopeCapabilities('project')).toBeUndefined();
-  });
-
-  it('seeds nothing when the payload has no capabilities', () => {
-    const sm = new StateManager();
-
-    sm.hydrate({ agents: [] });
-
-    expect(sm.getScopeCapabilities('agent')).toBeUndefined();
   });
 });

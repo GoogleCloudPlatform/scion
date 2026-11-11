@@ -17,7 +17,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
 
@@ -283,6 +285,44 @@ func (_u *UserUpdate) AddExternalIdentities(v ...*ExternalIdentity) *UserUpdate 
 	return _u.AddExternalIdentityIDs(ids...)
 }
 
+// SetTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID.
+func (_u *UserUpdate) SetTerminalWorkspaceID(id uuid.UUID) *UserUpdate {
+	_u.mutation.SetTerminalWorkspaceID(id)
+	return _u
+}
+
+// SetNillableTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID if the given value is not nil.
+func (_u *UserUpdate) SetNillableTerminalWorkspaceID(id *uuid.UUID) *UserUpdate {
+	if id != nil {
+		_u = _u.SetTerminalWorkspaceID(*id)
+	}
+	return _u
+}
+
+// SetTerminalWorkspace sets the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpdate {
+	return _u.SetTerminalWorkspaceID(v.ID)
+}
+
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
+func (_u *UserUpdate) SetTestIdentityLoginCodeID(id uuid.UUID) *UserUpdate {
+	_u.mutation.SetTestIdentityLoginCodeID(id)
+	return _u
+}
+
+// SetNillableTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID if the given value is not nil.
+func (_u *UserUpdate) SetNillableTestIdentityLoginCodeID(id *uuid.UUID) *UserUpdate {
+	if id != nil {
+		_u = _u.SetTestIdentityLoginCodeID(*id)
+	}
+	return _u
+}
+
+// SetTestIdentityLoginCode sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdate) SetTestIdentityLoginCode(v *TestIdentityLoginCode) *UserUpdate {
+	return _u.SetTestIdentityLoginCodeID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_u *UserUpdate) Mutation() *UserMutation {
 	return _u.mutation
@@ -370,6 +410,18 @@ func (_u *UserUpdate) RemoveExternalIdentities(v ...*ExternalIdentity) *UserUpda
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveExternalIdentityIDs(ids...)
+}
+
+// ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdate) ClearTerminalWorkspace() *UserUpdate {
+	_u.mutation.ClearTerminalWorkspace()
+	return _u
+}
+
+// ClearTestIdentityLoginCode clears the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdate) ClearTestIdentityLoginCode() *UserUpdate {
+	_u.mutation.ClearTestIdentityLoginCode()
+	return _u
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -484,6 +536,30 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
 		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(user.FieldExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.IssuedByCleared() {
+		_spec.ClearField(user.FieldIssuedBy, field.TypeString)
+	}
+	if _u.mutation.PurposeCleared() {
+		_spec.ClearField(user.FieldPurpose, field.TypeString)
+	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(user.FieldIssuanceID, field.TypeString)
+	}
+	if _u.mutation.IssuerCredentialIDCleared() {
+		_spec.ClearField(user.FieldIssuerCredentialID, field.TypeString)
+	}
+	if _u.mutation.FederatedEmailCleared() {
+		_spec.ClearField(user.FieldFederatedEmail, field.TypeString)
+	}
+	if _u.mutation.HomeIssuerCleared() {
+		_spec.ClearField(user.FieldHomeIssuer, field.TypeString)
+	}
+	if _u.mutation.IssuerDelegationIDCleared() {
+		_spec.ClearField(user.FieldIssuerDelegationID, field.TypeString)
 	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -658,6 +734,64 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.TerminalWorkspaceCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TerminalWorkspaceIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.TestIdentityLoginCodeCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TestIdentityLoginCodeIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -934,6 +1068,44 @@ func (_u *UserUpdateOne) AddExternalIdentities(v ...*ExternalIdentity) *UserUpda
 	return _u.AddExternalIdentityIDs(ids...)
 }
 
+// SetTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID.
+func (_u *UserUpdateOne) SetTerminalWorkspaceID(id uuid.UUID) *UserUpdateOne {
+	_u.mutation.SetTerminalWorkspaceID(id)
+	return _u
+}
+
+// SetNillableTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTerminalWorkspaceID(id *uuid.UUID) *UserUpdateOne {
+	if id != nil {
+		_u = _u.SetTerminalWorkspaceID(*id)
+	}
+	return _u
+}
+
+// SetTerminalWorkspace sets the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdateOne) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpdateOne {
+	return _u.SetTerminalWorkspaceID(v.ID)
+}
+
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
+func (_u *UserUpdateOne) SetTestIdentityLoginCodeID(id uuid.UUID) *UserUpdateOne {
+	_u.mutation.SetTestIdentityLoginCodeID(id)
+	return _u
+}
+
+// SetNillableTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTestIdentityLoginCodeID(id *uuid.UUID) *UserUpdateOne {
+	if id != nil {
+		_u = _u.SetTestIdentityLoginCodeID(*id)
+	}
+	return _u
+}
+
+// SetTestIdentityLoginCode sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdateOne) SetTestIdentityLoginCode(v *TestIdentityLoginCode) *UserUpdateOne {
+	return _u.SetTestIdentityLoginCodeID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_u *UserUpdateOne) Mutation() *UserMutation {
 	return _u.mutation
@@ -1021,6 +1193,18 @@ func (_u *UserUpdateOne) RemoveExternalIdentities(v ...*ExternalIdentity) *UserU
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveExternalIdentityIDs(ids...)
+}
+
+// ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdateOne) ClearTerminalWorkspace() *UserUpdateOne {
+	_u.mutation.ClearTerminalWorkspace()
+	return _u
+}
+
+// ClearTestIdentityLoginCode clears the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdateOne) ClearTestIdentityLoginCode() *UserUpdateOne {
+	_u.mutation.ClearTestIdentityLoginCode()
+	return _u
 }
 
 // Where appends a list predicates to the UserUpdate builder.
@@ -1165,6 +1349,30 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
 		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(user.FieldExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.IssuedByCleared() {
+		_spec.ClearField(user.FieldIssuedBy, field.TypeString)
+	}
+	if _u.mutation.PurposeCleared() {
+		_spec.ClearField(user.FieldPurpose, field.TypeString)
+	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(user.FieldIssuanceID, field.TypeString)
+	}
+	if _u.mutation.IssuerCredentialIDCleared() {
+		_spec.ClearField(user.FieldIssuerCredentialID, field.TypeString)
+	}
+	if _u.mutation.FederatedEmailCleared() {
+		_spec.ClearField(user.FieldFederatedEmail, field.TypeString)
+	}
+	if _u.mutation.HomeIssuerCleared() {
+		_spec.ClearField(user.FieldHomeIssuer, field.TypeString)
+	}
+	if _u.mutation.IssuerDelegationIDCleared() {
+		_spec.ClearField(user.FieldIssuerDelegationID, field.TypeString)
 	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -1339,6 +1547,64 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.TerminalWorkspaceCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TerminalWorkspaceIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.TestIdentityLoginCodeCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TestIdentityLoginCodeIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

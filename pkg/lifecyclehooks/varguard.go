@@ -69,6 +69,10 @@ var UntrustedVars = map[string]VarTrust{
 	"TASK_SUMMARY": Untrusted,
 	"AGENT_STATUS": Untrusted,
 	"ERROR_MSG":    Untrusted,
+	// EXIT_REASON is a value from a closed set (state.ExitReason), but it
+	// is classified with the agent-derived values so it is only ever a
+	// JSON-encoded body value an admin opted in to.
+	"EXIT_REASON": Untrusted,
 }
 
 // ClassifyVar returns the trust class for a variable name. Unknown variables

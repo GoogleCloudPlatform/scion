@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -54,13 +55,22 @@ func boolPtr(b bool) *bool { return &b }
 
 // mockAgentService implements hubclient.AgentService for testing.
 type mockAgentService struct {
-	sendFn func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error)
-	listFn func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error)
+	sendFn   func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error)
+	listFn   func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error)
+	createFn func(ctx context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error)
+	getFn    func(ctx context.Context, agentID string) (*hubclient.Agent, error)
 }
 
 func (m *mockAgentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 	if m.sendFn != nil {
 		return m.sendFn(ctx, agentID, msg, interrupt, notify, wake)
+	}
+	return nil, nil
+}
+
+func (m *mockAgentService) SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts hubclient.SendMessageOptions) (*hubclient.MessageResponse, error) {
+	if m.sendFn != nil {
+		return m.sendFn(ctx, agentID, msg, opts.Interrupt, opts.Notify, opts.Wake)
 	}
 	return nil, nil
 }
@@ -73,9 +83,15 @@ func (m *mockAgentService) List(ctx context.Context, opts *hubclient.ListAgentsO
 }
 
 func (m *mockAgentService) Get(ctx context.Context, agentID string) (*hubclient.Agent, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, agentID)
+	}
 	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) Create(ctx context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+	if m.createFn != nil {
+		return m.createFn(ctx, req)
+	}
 	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) Update(ctx context.Context, agentID string, req *hubclient.UpdateAgentRequest) (*hubclient.Agent, error) {
@@ -87,17 +103,17 @@ func (m *mockAgentService) ResetAuth(ctx context.Context, agentID string) error 
 func (m *mockAgentService) Delete(ctx context.Context, agentID string, opts *hubclient.DeleteAgentOptions) error {
 	return fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Start(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Start(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Stop(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Stop(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Suspend(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Suspend(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Restart(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Restart(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) StopAll(ctx context.Context) (*hubclient.StopAllResponse, error) {
 	return nil, fmt.Errorf("not implemented")
@@ -120,8 +136,8 @@ func (m *mockAgentService) Exec(ctx context.Context, agentID string, command []s
 func (m *mockAgentService) GetLogs(ctx context.Context, agentID string, opts *hubclient.GetLogsOptions) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) (*hubclient.OutboundMessageResult, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) GetCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions) (*hubclient.CloudLogsResponse, error) {
 	return nil, fmt.Errorf("not implemented")
@@ -130,6 +146,12 @@ func (m *mockAgentService) StreamCloudLogs(ctx context.Context, agentID string, 
 	return fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) SetMessageMode(ctx context.Context, agentID string, req *hubclient.SetMessageModeRequest, opts *hubclient.SetMessageModeOptions) (*hubclient.SetMessageModeResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockAgentService) Reincarnate(ctx context.Context, agentID string, req *hubclient.ReincarnateAgentRequest) (*hubclient.ReincarnateAgentResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockAgentService) SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
@@ -158,9 +180,11 @@ func (m *mockHubClient) Schedules(string) hubclient.ScheduleService             
 func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService       { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService                           { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                 { return nil }
+func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                   { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                        { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                             { return nil }
 func (m *mockHubClient) Messaging() hubclient.MessagingService                        { return nil }
+func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService                { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                               { return nil }
 func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService              { return nil }
 func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
@@ -170,9 +194,21 @@ func (m *mockHubClient) UserInjectedSkills() hubclient.InjectedSkillsService { r
 func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
 	return nil
 }
+func (m *mockHubClient) ProjectVisitors(projectID string) hubclient.ProjectVisitorService {
+	return nil
+}
 func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
+func (m *mockHubClient) Artifacts() hubclient.ArtifactService               { return nil }
+func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
+func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
+	return nil
+}
+func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
+}
+func (m *mockHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummary, error) {
+	return nil, nil
 }
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil

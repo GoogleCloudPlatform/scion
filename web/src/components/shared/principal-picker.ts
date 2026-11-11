@@ -31,6 +31,26 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
+import { isProjectMembersGroup } from '../../shared/groups.js';
+
+/** Group fields the picker reads from the group search API. */
+export interface PickerGroup {
+  id: string;
+  name: string;
+  slug: string;
+  projectId?: string;
+  annotations?: Record<string, string>;
+}
+
+/**
+ * Removes system project members groups from group search results. These
+ * groups are system-managed: they cannot be granted roles or nested in another
+ * group, so the picker never offers them as a principal or subject. The server
+ * enforces the role-binding and nesting rule.
+ */
+export function selectableGroups(groups: PickerGroup[]): PickerGroup[] {
+  return groups.filter((g) => !isProjectMembersGroup(g));
+}
 
 /** Event detail emitted when a principal is selected. */
 export interface PrincipalChangeDetail {
@@ -38,6 +58,12 @@ export interface PrincipalChangeDetail {
   principalId: string;
   displayLabel: string;
 }
+
+/**
+ * Page size for group search. It leaves headroom so that results
+ * selectableGroups filters out do not leave the list short or empty.
+ */
+export const GROUP_SEARCH_LIMIT = 25;
 
 @customElement('scion-principal-picker')
 export class ScionPrincipalPicker extends LitElement {
@@ -55,6 +81,15 @@ export class ScionPrincipalPicker extends LitElement {
 
   /** Disabled state. */
   @property({ type: Boolean }) disabled = false;
+
+  /**
+   * Help text shown under the input. It is forwarded to the inner sl-input's
+   * help-text, which Shoelace wires to the native input's aria-describedby,
+   * so it becomes the control's accessible description. An aria-describedby
+   * on the picker host cannot do this: ID references do not cross shadow
+   * boundaries (ptone/scion#2963).
+   */
+  @property() helpText = '';
 
   // User search autocomplete state
   @state() private searchQuery = '';
@@ -278,6 +313,7 @@ export class ScionPrincipalPicker extends LitElement {
           value=${this.searchQuery}
           type="text"
           autocomplete="off"
+          help-text=${this.helpText}
           ?disabled=${this.disabled}
           @sl-input=${this.handleSearchInput}
           @sl-focus=${() => {
@@ -361,14 +397,14 @@ export class ScionPrincipalPicker extends LitElement {
     this.groupSearchOpen = true;
     try {
       const response = await apiFetch(
-        `/api/v1/groups?search=${encodeURIComponent(query)}&limit=10`
+        `/api/v1/groups?search=${encodeURIComponent(query)}&limit=${GROUP_SEARCH_LIMIT}`
       );
       if (requestId !== this.groupSearchRequestId) return;
       if (response.ok) {
         const data = (await response.json()) as {
-          groups?: Array<{ id: string; name: string; slug: string }>;
+          groups?: PickerGroup[];
         };
-        this.groupSearchResults = data.groups || [];
+        this.groupSearchResults = selectableGroups(data.groups || []);
       }
     } catch (err) {
       if (requestId !== this.groupSearchRequestId) return;
@@ -398,6 +434,7 @@ export class ScionPrincipalPicker extends LitElement {
           value=${this.groupSearchQuery}
           type="text"
           autocomplete="off"
+          help-text=${this.helpText}
           ?disabled=${this.disabled}
           @sl-input=${this.handleGroupSearchInput}
           @sl-focus=${() => {
@@ -449,6 +486,7 @@ export class ScionPrincipalPicker extends LitElement {
         placeholder=${this.resolvedPlaceholder}
         value=${this.value}
         type="text"
+        help-text=${this.helpText}
         ?disabled=${this.disabled}
         @sl-input=${this.handleAgentInput}
       ></sl-input>

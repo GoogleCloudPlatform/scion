@@ -17,87 +17,102 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrTemplateNotFound marks a template resolution failure where the named
+// template does not exist in any searched location (project or global
+// template directories). Wrapped into the returned error so callers (e.g.
+// the runtime broker's create/provision handlers) can classify an
+// unresolvable name as a client-facing 4xx naming the resource, instead of
+// folding it into a generic 5xx (ptone/scion#1316 fault 3).
+var ErrTemplateNotFound = errors.New("template not found")
+
+// TemplateNotFoundError is the typed form of ErrTemplateNotFound
+// (errors.Is(err, ErrTemplateNotFound) still matches). Error() keeps the
+// full diagnostic text, which can name broker filesystem paths; Name is the
+// display-safe template name for client-facing messages (ptone/scion#3113).
+type TemplateNotFoundError struct {
+	// Name is FriendlyTemplateName of the reference that did not resolve:
+	// a plain name, an absolute path's base name, or "" when the only
+	// identifier is a content hash.
+	Name string
+	msg  string
+}
+
+// NewTemplateNotFoundError returns a TemplateNotFoundError for ref whose
+// Error() is msg (the caller's full diagnostic text, without the
+// sentinel's own text, which Error() appends).
+func NewTemplateNotFoundError(ref, msg string) *TemplateNotFoundError {
+	return &TemplateNotFoundError{Name: FriendlyTemplateName(ref), msg: msg}
+}
+
+func (e *TemplateNotFoundError) Error() string { return e.msg + ": " + ErrTemplateNotFound.Error() }
+func (e *TemplateNotFoundError) Unwrap() error { return ErrTemplateNotFound }
 
 type Template struct {
 	Name  string
 	Path  string
 	Scope string // "global" or "project"
+
+	// root and rel, when set (templateBelow), record the trusted directory
+	// the template was found from and the template's path below it
+	// (Path == filepath.Join(root, rel)); content files are then read
+	// through a walk from root that follows no link (openDir).
+	root, rel string
 }
 
-// ResolveContent resolves a template field value to its content bytes.
-// If field is empty, returns nil, nil.
-// If a file at t.Path/field exists, reads and returns its content.
-// Otherwise, returns field as inline content bytes.
+// ResolveContent resolves a template content field value (agent_instructions
+// or system_prompt) in this template alone, with the rules of
+// ResolveContentInChain.
 func (t *Template) ResolveContent(field string) ([]byte, error) {
-	if field == "" {
-		return nil, nil
-	}
-
-	filePath := filepath.Join(t.Path, field)
-	if _, err := os.Stat(filePath); err == nil {
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-		}
-		return data, nil
-	}
-
-	return []byte(field), nil
+	return resolveContentInTemplates([]*Template{t}, field)
 }
 
-// ResolveContentInChain resolves a template field value by searching the
-// template chain in reverse order (most specific first). This ensures that
-// when a custom template inherits a file reference like "agents.md" from a
-// parent template's config, the file is found in the parent template even
-// if it doesn't exist in the custom template's directory. Only falls back
-// to treating the field as inline content if no template in the chain
-// contains the file.
+// ResolveContentInChain resolves a template content field value
+// (agent_instructions or system_prompt) by searching the template chain in
+// reverse order (most specific first), so a custom template that inherits a
+// file reference like "agents.md" from a parent's config finds the file in
+// the parent. A value with a line break is inline content. A single-line
+// value must be a relative path inside the template directory; the file is
+// read only from inside a template directory, without following a symbolic
+// link, and a file that exists but is refused is an error
+// (ErrTemplateContentRefused). Only when no template in the chain holds the
+// file is the value treated as inline content.
 func ResolveContentInChain(chain []*Template, field string) ([]byte, error) {
-	if field == "" {
-		return nil, nil
-	}
-
-	// Walk chain in reverse (most specific first) looking for the file
-	for i := len(chain) - 1; i >= 0; i-- {
-		filePath := filepath.Join(chain[i].Path, field)
-		if _, err := os.Stat(filePath); err == nil {
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-			}
-			return data, nil
-		}
-	}
-
-	// No template had the file; treat as inline content
-	return []byte(field), nil
+	return resolveContentInTemplates(chain, field)
 }
 
+// LoadConfig loads the template's (or agent directory's) scion-agent config
+// file: scion-agent.yaml, then .yml, then .json. The directory is opened
+// without following a symbolic link (from the trusted directory the
+// template was found from, or below its parent), and the file is read
+// without following one either: a config file that is a link, sits below
+// one, is not a plain single-link regular file or is larger than 4 MiB is
+// refused with an error wrapping ErrAgentConfigRefused, never read and never
+// treated as "no config". A missing directory or file is an empty config.
 func (t *Template) LoadConfig() (*api.ScionConfig, error) {
-	// Try YAML first, then JSON
-	configPath := GetScionAgentConfigPath(t.Path)
+	configPath, data, err := t.readAgentConfigFile()
+	if err != nil {
+		return nil, err
+	}
 	if configPath == "" {
 		// No config file found, return empty config
 		return &api.ScionConfig{}, nil
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &api.ScionConfig{}, nil
-		}
-		return nil, err
 	}
 
 	var cfg api.ScionConfig
@@ -124,12 +139,40 @@ func (t *Template) LoadConfig() (*api.ScionConfig, error) {
 		return nil, fmt.Errorf("invalid mcp_servers config in %s: %w", configPath, err)
 	}
 
+	if err := cfg.CloneDepth.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
+	}
+
+	if err := api.ValidateMessageMode(cfg.MessageMode); err != nil {
+		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
+	}
+
 	return &cfg, nil
 }
 
 // unmarshalYAMLNormalized parses YAML into a ScionConfig, normalizing
 // top-level hyphenated keys to underscored keys. This allows template
 // authors to use either `harness-config` or `harness_config` style keys.
+// ParseScionAgentConfig decodes scion-agent config bytes the same way
+// Template.LoadConfig does (hyphenated top-level YAML keys normalized), without
+// running LoadConfig's volume/service validation. name selects the format:
+// ".yaml"/".yml" suffixes are parsed as YAML, anything else as JSON. Used by
+// the Hub to read template configs straight from storage.
+func ParseScionAgentConfig(name string, data []byte) (*api.ScionConfig, error) {
+	var cfg api.ScionConfig
+	ext := filepath.Ext(name)
+	if ext == ".yaml" || ext == ".yml" {
+		if err := unmarshalYAMLNormalized(data, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML config %s: %w", name, err)
+		}
+		return &cfg, nil
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON config %s: %w", name, err)
+	}
+	return &cfg, nil
+}
+
 func unmarshalYAMLNormalized(data []byte, cfg *api.ScionConfig) error {
 	var node yaml.Node
 	if err := yaml.Unmarshal(data, &node); err != nil {
@@ -160,13 +203,26 @@ func normalizeYAMLMappingKeys(node *yaml.Node) {
 	}
 }
 
+// templateLookupName returns the template name a lookup resolves. The empty
+// name means the default template, so no lookup joins an empty name under a
+// templates directory and resolves that directory itself as a template.
+func templateLookupName(name string) string {
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
 func FindTemplate(name string) (*Template, error) {
 	return FindTemplateWithContext(context.Background(), name)
 }
 
 // FindTemplateWithContext finds a template by name, supporting remote URIs.
 // Remote templates are fetched and cached locally before being returned.
+// The empty name resolves the default template.
 func FindTemplateWithContext(ctx context.Context, name string) (*Template, error) {
+	name = templateLookupName(name)
+
 	// 0. Check if name is a remote URI (URL or rclone connection string)
 	if IsRemoteURI(name) {
 		// Validate the URI format
@@ -188,10 +244,13 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
-		}
-		return nil, fmt.Errorf("template path %s not found or not a directory", name)
+		return TemplateFromDir(name)
+	}
+
+	// Any other name is a template name: one path component, joined under
+	// a templates directory.
+	if err := checkLookupName(name); err != nil {
+		return nil, err
 	}
 
 	// 2. Check project-local templates
@@ -199,7 +258,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	if err == nil {
 		path := filepath.Join(projectTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path}, nil
+			return templateBelow(name, filepath.Dir(projectTemplatesDir), filepath.Join(filepath.Base(projectTemplatesDir), name), ""), nil
 		}
 	}
 
@@ -208,7 +267,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	if err == nil {
 		path := filepath.Join(globalTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path}, nil
+			return templateBelow(name, globalTemplatesDir, name, ""), nil
 		}
 	}
 
@@ -221,15 +280,21 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 }
 
 // FindTemplateInScope finds a template by name in a specific scope only.
-// Scope must be "global" or "project". Returns nil if not found in that scope.
+// Scope must be "global" or "project". Returns nil if not found in that scope,
+// or when name is not a single path component (checkLookupName). The empty
+// name resolves the default template.
 func FindTemplateInScope(name, scope string) *Template {
+	name = templateLookupName(name)
+	if checkLookupName(name) != nil {
+		return nil
+	}
 	var dir string
 	var err error
 
 	switch scope {
 	case "global":
 		dir, err = GetGlobalTemplatesDir()
-	case "project", "grove":
+	case "project":
 		dir, err = GetProjectTemplatesDir()
 	default:
 		return nil
@@ -241,15 +306,59 @@ func FindTemplateInScope(name, scope string) *Template {
 
 	path := filepath.Join(dir, name)
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return &Template{Name: name, Path: path, Scope: scope}
+		if scope == "project" {
+			return templateBelow(name, filepath.Dir(dir), filepath.Join(filepath.Base(dir), name), scope)
+		}
+		return templateBelow(name, dir, name, scope)
 	}
 
 	return nil
 }
 
+// TemplateFromDir returns the template stored in dir, an absolute directory
+// path. The directory must exist. The template's name is derived from the
+// directory's base name with templateNameFromDir, so it is "" for a
+// content-addressed cache directory.
+func TemplateFromDir(dir string) (*Template, error) {
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return &Template{Name: templateNameFromDir(dir), Path: dir}, nil
+	}
+	return nil, fmt.Errorf("template path %s not found or not a directory", dir)
+}
+
+// templateNameFromDir derives a template name from a template directory path.
+// A content-addressed cache directory is named after the template's content
+// hash, which is not a template name, so it yields "".
+func templateNameFromDir(dir string) string {
+	base := filepath.Base(dir)
+	if isTemplateHashName(base) {
+		return ""
+	}
+	return base
+}
+
+// templateHashPattern matches a content hash in any letter case, with or
+// without the "sha256:" prefix. transfer.IsContentHash only accepts the
+// lowercase, prefixed form the cache writes today; this broader match is
+// local to display-name derivation so an unprefixed or uppercase digest (a
+// legacy or externally produced hash) is never shown as a template name
+// either (ptone/scion#3113).
+var templateHashPattern = regexp.MustCompile(`(?i)^(sha256:)?[0-9a-f]{64}$`)
+
+// isTemplateHashName reports whether s is a content hash rather than a
+// template name: the prefixed form cache directories use today, or any
+// other letter case or the bare 64-hex digest (templateHashPattern).
+// transfer.IsContentHash is a strict subset of templateHashPattern; it is
+// kept on purpose, only to tie this check to the cache's canonical hash
+// form, so a change to that form is reflected here too.
+func isTemplateHashName(s string) bool {
+	return transfer.IsContentHash(s) || templateHashPattern.MatchString(s)
+}
+
 // FriendlyTemplateName converts a raw template reference (cache path, URI, or
 // simple name) to a human-friendly short name suitable for display.
-// Simple names pass through unchanged; absolute paths return filepath.Base;
+// Simple names pass through unchanged; absolute paths return filepath.Base,
+// except that a content-hash cache directory or a bare content hash yields "";
 // remote URIs are handled by DeriveTemplateName.
 func FriendlyTemplateName(ref string) string {
 	if ref == "" {
@@ -259,7 +368,10 @@ func FriendlyTemplateName(ref string) string {
 		return DeriveTemplateName(ref)
 	}
 	if filepath.IsAbs(ref) {
-		return filepath.Base(ref)
+		return templateNameFromDir(ref)
+	}
+	if isTemplateHashName(ref) {
+		return ""
 	}
 	return ref
 }
@@ -278,16 +390,33 @@ func DeriveTemplateName(uri string) string {
 		return parts.Repo
 	}
 
-	// For archive URLs, extract filename without extension
-	if isArchiveURL(uri) {
-		base := filepath.Base(uri)
-		// Remove common extensions
-		for _, ext := range []string{".tar.gz", ".tgz", ".zip"} {
-			if len(base) > len(ext) && base[len(base)-len(ext):] == ext {
-				return base[:len(base)-len(ext)]
-			}
+	// For HTTP(S) URLs, use the last element of the URL path only: the
+	// query (e.g. a signed-URL token) and any userinfo never become part of
+	// the name, since it is shown to users (ptone/scion#3113).
+	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+		u, err := url.Parse(uri)
+		if err != nil {
+			return "remote"
 		}
-		return base
+		if u.Path == "" {
+			if host := u.Hostname(); host != "" {
+				return host
+			}
+			return "remote"
+		}
+		// EscapedPath, not Path: the name keeps the reference's own
+		// percent-encoding, so an encoded "/" or control character
+		// (a%2Fb, a%0Ab) is never decoded into the displayed name.
+		base := path.Base(u.EscapedPath())
+		if base == "/" || base == "." || base == ".." {
+			return "remote"
+		}
+		return trimArchiveExt(base)
+	}
+
+	// For archive paths, extract filename without extension
+	if isArchiveURL(uri) {
+		return trimArchiveExt(filepath.Base(uri))
 	}
 
 	// For rclone paths, use the last path component
@@ -307,10 +436,22 @@ func DeriveTemplateName(uri string) string {
 	return "remote"
 }
 
+// trimArchiveExt removes a .tar.gz, .tgz or .zip extension from base.
+func trimArchiveExt(base string) string {
+	for _, ext := range []string{".tar.gz", ".tgz", ".zip"} {
+		if len(base) > len(ext) && base[len(base)-len(ext):] == ext {
+			return base[:len(base)-len(ext)]
+		}
+	}
+	return base
+}
+
 // GetTemplateChain returns a list of templates in inheritance order (base first).
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
+// The empty name is the default template.
 func GetTemplateChain(name string) ([]*Template, error) {
+	name = templateLookupName(name)
 	var chain []*Template
 
 	// For non-default templates, prepend the default template as a base layer
@@ -336,28 +477,36 @@ func GetTemplateChain(name string) ([]*Template, error) {
 
 // FindTemplateInProjectPath finds a template by name, using a specific project path
 // for project-scoped template resolution instead of relying on CWD.
-// When projectPath is empty, it falls back to FindTemplate (CWD-based resolution).
-func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
+// When projectPath is empty, it falls back to FindTemplateWithContext (CWD-based resolution).
+// The empty name resolves the default template.
+func FindTemplateInProjectPath(ctx context.Context, name, projectPath string) (*Template, error) {
+	name = templateLookupName(name)
 	if projectPath == "" {
-		return FindTemplate(name)
+		return FindTemplateWithContext(ctx, name)
 	}
 
-	// Remote URIs and absolute paths bypass project resolution
+	// A project-scoped lookup runs on a Runtime Broker for a template value
+	// that came with a request (or from an agent's records). It never fetches
+	// a remote source (those come only from operator settings, through
+	// FindOperatorTemplateInProjectPath), and accepts an absolute directory
+	// only below a registered hydration root: a directory the broker wrote
+	// itself.
 	if IsRemoteURI(name) {
-		return FindTemplateWithContext(context.Background(), name)
+		return nil, templateRefNotAllowed("a remote template source is not accepted from a request")
 	}
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
-		}
-		return nil, fmt.Errorf("template path %s not found or not a directory", name)
+		return hydratedTemplateDir(name)
+	}
+	if err := checkLookupName(name); err != nil {
+		return nil, err
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
-	projectTemplatesDir := filepath.Join(projectPath, "templates")
-	path := filepath.Join(projectTemplatesDir, name)
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return &Template{Name: name, Path: path, Scope: "project"}, nil
+	if root := projectTemplatesRoot(projectPath); root != "" {
+		path := filepath.Join(root, "templates", name)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return templateBelow(name, root, filepath.Join("templates", name), "project"), nil
+		}
 	}
 
 	// Fall back to global templates
@@ -365,11 +514,108 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	if err == nil {
 		path := filepath.Join(globalTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path, Scope: "global"}, nil
+			return templateBelow(name, globalTemplatesDir, name, "global"), nil
 		}
 	}
 
-	return nil, fmt.Errorf("template %s not found", name)
+	return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template %s not found", name))
+}
+
+// FindOperatorTemplateInProjectPath is FindTemplateInProjectPath for a
+// template reference from operator configuration (a settings
+// default_template): a remote source is fetched as FindTemplateWithContext
+// does. Every other reference resolves as FindTemplateInProjectPath.
+func FindOperatorTemplateInProjectPath(ctx context.Context, name, projectPath string) (*Template, error) {
+	if projectPath != "" && IsRemoteURI(name) {
+		return FindTemplateWithContext(ctx, name)
+	}
+	return FindTemplateInProjectPath(ctx, name, projectPath)
+}
+
+// projectTemplatesRoot returns the directory whose templates/ subdirectory
+// is the project template tier for projectPath. A project path that is a
+// workspace root holding a .scion entry (the broker's path for a
+// hub-managed project, ~/.scion/projects/<slug>) resolves to the project's
+// .scion directory, or the external directory a .scion marker file names,
+// as ResolveProjectPath does; the workspace root's own templates/ directory
+// is ordinary workspace content and never a template source; such a root
+// with no .scion entry at all, below the hub projects directory, has no
+// project tier ("" is returned). Any other path, including a .scion
+// directory itself, is used as given.
+func projectTemplatesRoot(projectPath string) string {
+	if filepath.Base(projectPath) == DotScion {
+		return projectPath
+	}
+	if _, err := os.Lstat(filepath.Join(projectPath, DotScion)); err != nil {
+		if isHubWorkspaceRootWithoutScion(projectPath) {
+			// A hub-managed workspace root without a .scion entry has no
+			// project template tier.
+			return ""
+		}
+		return projectPath
+	}
+	resolved, _, err := ResolveProjectPath(projectPath)
+	if err != nil {
+		return projectPath
+	}
+	return resolved
+}
+
+// isHubWorkspaceRootWithoutScion reports whether p is a hub-managed
+// workspace root (below the hub projects directory, not a .scion path)
+// that has no .scion entry: it then has no project configuration tier.
+//
+// "Below the hub projects directory" is isUnderHubProjectsDir
+// (hub_projects_dir_other.go and hub_projects_dir_windows.go): p lies below
+// the global directory's projects/ directory, where hub-managed workspaces
+// live. It is the only containment decision for the project layer of a hub
+// workspace root: settings, project templates and harness-configs all read
+// it through this function.
+func isHubWorkspaceRootWithoutScion(p string) bool {
+	if p == "" || filepath.Base(p) == DotScion {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(p, DotScion)); err == nil {
+		return false
+	}
+	return isUnderHubProjectsDir(p)
+}
+
+// LegacyProjectTemplatesWarning returns a start warning when projectPath is
+// a workspace root (see projectTemplatesRoot) with templates under its own
+// templates/ directory, which was the project template tier for
+// hub-managed projects before it moved to <project>/.scion/templates. Only
+// subdirectories that hold a scion-agent config count, so an unrelated
+// templates/ directory in the repository does not warn. It returns "" when
+// there is nothing to report.
+func LegacyProjectTemplatesWarning(projectPath string) string {
+	if projectPath == "" {
+		return ""
+	}
+	root := projectTemplatesRoot(projectPath)
+	if root == projectPath {
+		return ""
+	}
+	newDir := filepath.Join(root, "templates")
+	if root == "" {
+		newDir = filepath.Join(projectPath, DotScion, "templates")
+	}
+	legacyDir := filepath.Join(projectPath, "templates")
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && GetScionAgentConfigPath(filepath.Join(legacyDir, e.Name())) != "" {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Warning: templates in %s (%s) are no longer used; project templates are read from %s. Move them there, or upload them to the hub",
+		legacyDir, strings.Join(names, ", "), newDir)
 }
 
 // findOrHydrateDefaultTemplate resolves the default template, seeding it from the
@@ -386,8 +632,8 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 // directory plus rename covers cross-process races.
 var defaultHydrationMu sync.Mutex
 
-func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
-	tpl, err := FindTemplateInProjectPath("default", projectPath)
+func findOrHydrateDefaultTemplate(ctx context.Context, projectPath string) (*Template, error) {
+	tpl, err := FindTemplateInProjectPath(ctx, "default", projectPath)
 	if err == nil {
 		return tpl, nil
 	}
@@ -401,7 +647,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	defer defaultHydrationMu.Unlock()
 
 	// Another goroutine may have hydrated while we waited.
-	if tpl, rErr := FindTemplateInProjectPath("default", projectPath); rErr == nil {
+	if tpl, rErr := FindTemplateInProjectPath(ctx, "default", projectPath); rErr == nil {
 		return tpl, nil
 	}
 
@@ -426,7 +672,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
 	// existing dir, so without this the published default diverges from every other
 	// seeding path, which yields 0755.
-	_ = os.Chmod(staging, 0755)
+	_ = os.Chmod(staging, 0755) //winsec:not-protection mode 0755 is not a privacy mode
 
 	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)
@@ -438,16 +684,31 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 		util.Debugf("failed to publish hydrated default template: %v", rErr)
 	}
 
-	return FindTemplateInProjectPath("default", projectPath)
+	return FindTemplateInProjectPath(ctx, "default", projectPath)
 }
 
 // GetTemplateChainInProject returns a list of templates in inheritance order,
 // using a specific project path for template resolution instead of CWD.
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
-func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+// The empty name is the default template: the chain holds the default
+// template only.
+func GetTemplateChainInProject(ctx context.Context, name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(ctx, name, projectPath, FindTemplateInProjectPath)
+}
+
+// GetOperatorTemplateChainInProject is GetTemplateChainInProject for a
+// template reference from operator configuration (a settings
+// default_template), which may be a remote source
+// (FindOperatorTemplateInProjectPath).
+func GetOperatorTemplateChainInProject(ctx context.Context, name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(ctx, name, projectPath, FindOperatorTemplateInProjectPath)
+}
+
+func templateChainInProject(ctx context.Context, name, projectPath string, find func(ctx context.Context, name, projectPath string) (*Template, error)) ([]*Template, error) {
+	name = templateLookupName(name)
 	if name == "default" {
-		tpl, err := findOrHydrateDefaultTemplate(projectPath)
+		tpl, err := findOrHydrateDefaultTemplate(ctx, projectPath)
 		if err != nil {
 			// When the default template cannot be resolved, proceed without it
 			// (e.g. hub-dispatched agents on brokers with no local templates)
@@ -459,13 +720,13 @@ func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 	var chain []*Template
 
 	// For non-default templates, prepend the default template as a base layer
-	defaultTpl, err := findOrHydrateDefaultTemplate(projectPath)
+	defaultTpl, err := findOrHydrateDefaultTemplate(ctx, projectPath)
 	if err == nil {
 		chain = append(chain, defaultTpl)
 	}
 	// If the default template cannot be resolved, proceed without it
 
-	tpl, err := FindTemplateInProjectPath(name, projectPath)
+	tpl, err := find(ctx, name, projectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -725,6 +986,18 @@ func NormalizeModelAlias(model string) string {
 	return model
 }
 
+// ModelSizeAlias returns the canonical size alias (small, medium, large or
+// extra-large) that model names, accepting the short forms s, m, l and xl
+// in any case. It returns "" for an empty model or a concrete model ID.
+// It recognizes exactly the values ResolveModelAlias treats as aliases.
+func ModelSizeAlias(model string) string {
+	alias := NormalizeModelAlias(model)
+	if !KnownModelAliases[alias] {
+		return ""
+	}
+	return alias
+}
+
 // ResolveModelAlias resolves a model size alias to a concrete model name
 // using the given alias map. If the model is not a known alias or the alias
 // map does not contain a mapping, the model string is returned unchanged.
@@ -789,6 +1062,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Model != "" {
 		result.Model = override.Model
 	}
+	if override.MessageMode != "" {
+		result.MessageMode = override.MessageMode
+	}
 	// ThinkingLevel is a *int: nil means "unset", so a nil override never
 	// clobbers a base value. Copy the pointee rather than the pointer — the
 	// merge's shallow copy above already aliases base's fields, and adding a
@@ -827,11 +1103,17 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 		}
 		result.MCPServers = merged
 	}
-	if override.MaxTurns > 0 {
-		result.MaxTurns = override.MaxTurns
+	// Count limits are *int (ptone/scion#5605): a set override wins, 0
+	// ("no limit") included, so an explicit Unlimited overrides an
+	// inherited limit. Copy the pointee, as for ThinkingLevel.
+	if override.MaxTurns != nil {
+		result.MaxTurns = api.CloneIntPtr(override.MaxTurns)
 	}
 	if override.MaxDuration != "" {
 		result.MaxDuration = override.MaxDuration
+	}
+	if override.CloneDepth != "" {
+		result.CloneDepth = override.CloneDepth
 	}
 	if override.Hub != nil {
 		if result.Hub == nil {
@@ -862,11 +1144,14 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.ExplicitWorkspace {
 		result.ExplicitWorkspace = true
 	}
+	if override.EmptyPerAgentWorkspace {
+		result.EmptyPerAgentWorkspace = true
+	}
 	if override.Branch != "" {
 		result.Branch = override.Branch
 	}
-	if override.MaxModelCalls > 0 {
-		result.MaxModelCalls = override.MaxModelCalls
+	if override.MaxModelCalls != nil {
+		result.MaxModelCalls = api.CloneIntPtr(override.MaxModelCalls)
 	}
 	if override.Info != nil {
 		if result.Info == nil {
@@ -926,7 +1211,45 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 		result.Skills = append(result.Skills, annotated...)
 	}
 
+	// AgentPlugins: append, annotate "template" scope, then dedupe by path
+	// (last one wins). GetAgent re-merges the persisted scion-agent.json over
+	// the template chain, so a plain append would grow the persisted list on
+	// every re-provision. The merged list is informational, not the
+	// effective set: the persisted copy of an entry keeps its old fields
+	// after a template edits them, and entries a template dropped stay in
+	// it. Provisioning resolves each template's own entries against its own
+	// directory.
+	if len(override.AgentPlugins) > 0 {
+		merged := make([]api.AgentPluginReference, 0, len(base.AgentPlugins)+len(override.AgentPlugins))
+		merged = append(merged, base.AgentPlugins...)
+		for _, ref := range override.AgentPlugins {
+			if ref.Scope == "" {
+				ref.Scope = "template"
+			}
+			merged = append(merged, ref)
+		}
+		result.AgentPlugins = dedupeAgentPluginRefs(merged)
+	}
+
 	return &result
+}
+
+// dedupeAgentPluginRefs drops every entry whose path (ignoring a leading
+// "./" and redundant separators) recurs later in refs, so the last
+// declaration of a path wins and keeps its position.
+func dedupeAgentPluginRefs(refs []api.AgentPluginReference) []api.AgentPluginReference {
+	key := func(p string) string { return filepath.Clean(strings.TrimPrefix(p, "./")) }
+	last := make(map[string]int, len(refs))
+	for i, r := range refs {
+		last[key(r.Path)] = i
+	}
+	out := make([]api.AgentPluginReference, 0, len(last))
+	for i, r := range refs {
+		if last[key(r.Path)] == i {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func mergeKubernetesConfig(base, override *api.KubernetesConfig) *api.KubernetesConfig {
@@ -952,6 +1275,9 @@ func mergeKubernetesConfig(base, override *api.KubernetesConfig) *api.Kubernetes
 	if override.ServiceAccountName != "" {
 		result.ServiceAccountName = override.ServiceAccountName
 	}
+	if override.PriorityClassName != "" {
+		result.PriorityClassName = override.PriorityClassName
+	}
 	if override.Resources != nil {
 		if result.Resources == nil {
 			result.Resources = &api.K8sResources{}
@@ -975,6 +1301,10 @@ func mergeKubernetesConfig(base, override *api.KubernetesConfig) *api.Kubernetes
 	}
 	if override.SharedDirSize != "" {
 		result.SharedDirSize = override.SharedDirSize
+	}
+	if override.SafeToEvict != nil {
+		v := *override.SafeToEvict
+		result.SafeToEvict = &v
 	}
 
 	return &result
@@ -1026,6 +1356,14 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			}
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
+			}
+			// The client certificate and its key are one setting: a layer
+			// that sets either replaces both, so the pair never mixes
+			// files from different layers. A layer that sets only one
+			// leaves the other empty, which ValidateTelemetryTLS reports.
+			if override.Cloud.TLS.CertFile != "" || override.Cloud.TLS.KeyFile != "" {
+				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
+				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
 			}
 		}
 		if override.Cloud.Batch != nil {
@@ -1135,12 +1473,18 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 				result.Filter.Sampling.Default = override.Filter.Sampling.Default
 			}
 			if override.Filter.Sampling.Rates != nil {
-				if result.Filter.Sampling.Rates == nil {
-					result.Filter.Sampling.Rates = make(map[string]float64)
+				// Build a fresh map: result.Filter.Sampling is only a
+				// shallow copy of base, so writing into its Rates would
+				// mutate the base config (for example a shared settings or
+				// hub default object) and leak rates between agents.
+				rates := make(map[string]float64, len(result.Filter.Sampling.Rates)+len(override.Filter.Sampling.Rates))
+				for k, v := range result.Filter.Sampling.Rates {
+					rates[k] = v
 				}
 				for k, v := range override.Filter.Sampling.Rates {
-					result.Filter.Sampling.Rates[k] = v
+					rates[k] = v
 				}
+				result.Filter.Sampling.Rates = rates
 			}
 		}
 	}

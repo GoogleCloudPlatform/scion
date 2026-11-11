@@ -22,111 +22,22 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 )
 
-// setupConvTestData creates a project, agent, and conversation for testing.
-func setupConvTestData(t *testing.T, s store.Store) (project *store.Project, agent *store.Agent, conv *store.Conversation) {
+// projectReaderAgentContext is an agent caller that can read its project
+// (project-read scope and a project role), as the conversation list and
+// add-participant require of their callers.
+func projectReaderAgentContext(t *testing.T, s store.Store, agentID, projectID string) context.Context {
 	t.Helper()
-	ctx := context.Background()
-
-	project = &store.Project{
-		ID:   api.NewUUID(),
-		Name: "conv-test-project",
-		Slug: "conv-test-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	agent = &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "conv-test-agent",
-		Slug:       "conv-test-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	now := time.Now().UTC()
-	conv = &store.Conversation{
-		ID:             api.NewUUID(),
-		ProjectID:      &project.ID,
-		Kind:           "group",
-		Surface:        "native",
-		DisplayName:    "Test Conversation",
-		DriftState:     "active",
-		LastActivityAt: now,
-		CreatedAt:      now,
-	}
-	require.NoError(t, s.CreateConversation(ctx, conv))
-
-	return project, agent, conv
-}
-
-// addConvParticipant adds a participant to a conversation for testing.
-func addConvParticipant(t *testing.T, s store.Store, convID, principalKind, principalID string) {
-	t.Helper()
-	p := &store.ConversationParticipant{
-		ID:             api.NewUUID(),
-		ConversationID: convID,
-		PrincipalKind:  principalKind,
-		PrincipalID:    principalID,
-		Role:           "member",
-		JoinedAt:       time.Now().UTC(),
-	}
-	require.NoError(t, s.AddParticipant(context.Background(), p))
-}
-
-// agentContext returns a context with an agent identity set.
-func agentContext(agentID, projectID string) context.Context {
-	return contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}})
-}
-
-// agentContextWithScopes returns a context with an agent identity that includes
-// the given JWT scopes. Use this when calling endpoints that check authorization
-// via s.authorize (e.g., project-level authz in handleCreateConversation).
-func agentContextWithScopes(agentID, projectID string, scopes []AgentTokenScope) context.Context {
-	return contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-		Scopes:    scopes,
-	}})
-}
-
-// convProjectID extracts the project ID from a conversation, returning empty if nil.
-func convProjectID(c *store.Conversation) string {
-	if c.ProjectID != nil {
-		return *c.ProjectID
-	}
-	return ""
-}
-
-// grantAgentProjectAccess grants an agent a project-member role binding,
-// giving it read access to the project. This is needed after the BOLA fix
-// added an authorize check in handleCreateConversation.
-func grantAgentProjectAccess(t *testing.T, s store.Store, agentID, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err, "project-member role definition not found")
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    "agent",
-		PrincipalID:      agentID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
+	grantAgentProjectAccess(t, s, agentID, projectID)
+	return agentContextWithScopes(agentID, projectID, []AgentTokenScope{ScopeProjectRead})
 }
 
 // ---- Tests ----
@@ -137,7 +48,7 @@ func TestListConversations_HappyPath(t *testing.T) {
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -173,9 +84,11 @@ func TestListConversations_WithFilters(t *testing.T) {
 	require.NoError(t, s.CreateConversation(context.Background(), conv2))
 	addConvParticipant(t, s, conv2.ID, "agent", agent.ID)
 
+	readerCtx := projectReaderAgentContext(t, s, agent.ID, project.ID)
+
 	// Filter by surface=native — should only return the first conversation.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?surface=native", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(readerCtx)
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -187,7 +100,7 @@ func TestListConversations_WithFilters(t *testing.T) {
 
 	// Filter by surface=discord — should only return the second conversation.
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/conversations?surface=discord", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(readerCtx)
 	rr = httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -226,7 +139,7 @@ func TestListConversations_WithLimit(t *testing.T) {
 	require.Len(t, convs, 3) // agent was only added to 3 new ones
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=2", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, project.ID))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -260,11 +173,12 @@ func TestListConversations_MethodNotAllowed(t *testing.T) {
 
 func TestGetConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversation(rr, req, conv.ID)
 
@@ -309,6 +223,7 @@ func TestConvListMessages_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create a test message in the conversation.
 	recipientID := api.NewUUID()
@@ -328,7 +243,7 @@ func TestConvListMessages_HappyPath(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleConvListMessages(rr, req, conv.ID)
 
@@ -357,6 +272,7 @@ func TestGetConversationMessage_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	msg := &store.Message{
 		ID:             api.NewUUID(),
@@ -374,7 +290,7 @@ func TestGetConversationMessage_HappyPath(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleConversationRoutes(rr, req)
 
@@ -390,12 +306,11 @@ func TestGetConversationMessage_DMAuth(t *testing.T) {
 	srv, s := testServer(t)
 	project, agentA, _ := setupConvTestData(t, s)
 	agentB := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "get-message-dm-agent-b",
-		Slug:       "get-message-dm-agent-b",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "get-message-dm-agent-b",
+		Slug:      "get-message-dm-agent-b",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agentB))
 
@@ -457,6 +372,7 @@ func TestGetConversationMessage_WrongConversation(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	otherConv := &store.Conversation{
 		ID:             api.NewUUID(),
@@ -485,7 +401,7 @@ func TestGetConversationMessage_WrongConversation(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversationMessage(rr, req, conv.ID, msg.ID)
 
@@ -496,10 +412,11 @@ func TestGetConversationMessage_NotFound(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	messageID := api.NewUUID()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+messageID, nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversationMessage(rr, req, conv.ID, messageID)
 
@@ -520,6 +437,7 @@ func TestConvListMessages_WithPagination(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create multiple messages.
 	recipientID := api.NewUUID()
@@ -542,7 +460,7 @@ func TestConvListMessages_WithPagination(t *testing.T) {
 
 	// Request with limit=2.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages?limit=2", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleConvListMessages(rr, req, conv.ID)
 
@@ -554,6 +472,7 @@ func TestConvListMessages_WithPagination(t *testing.T) {
 
 func TestCreateConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
+	wireSharedWebChatStore(t, srv, s)
 	project, agent, _ := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
@@ -602,14 +521,18 @@ func TestCreateConversation_MissingName(t *testing.T) {
 
 func TestCreateConversation_DefaultsToGroup(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, _ := setupConvTestData(t, s)
+	wireSharedWebChatStore(t, srv, s)
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
+	// projectId comes from the agent's own token (§3.2 step 2), not the body —
+	// this test is about kind defaulting, not project resolution.
 	body := createConversationRequest{DisplayName: "No Kind Specified"}
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, ""))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleCreateConversation(rr, req)
 
@@ -628,12 +551,11 @@ func TestSetDefaultAgent_HappyPath(t *testing.T) {
 
 	// Create a second agent to set as the default (must exist in the store per N-1 validation).
 	newAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "new-default-agent",
-		Slug:       "new-default-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "new-default-agent",
+		Slug:      "new-default-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), newAgent))
 
@@ -656,10 +578,17 @@ func TestSetDefaultAgent_HappyPath(t *testing.T) {
 	require.Equal(t, newAgent.ID, *updated.DefaultAgentID)
 }
 
-func TestSetDefaultAgent_NotParticipant(t *testing.T) {
+// TestSetDefaultAgent_NoProjectAccess is review round 1 finding #8: renamed
+// from TestSetDefaultAgent_NotParticipant. It still passes, but for a
+// different reason since Phase 3 — the gate is project membership
+// (authorizeGroupConversationAccess), not the participant table, so a
+// caller with no role binding on the conversation's project is denied
+// regardless of whether it is a participant.
+func TestSetDefaultAgent_NoProjectAccess(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent, conv := setupConvTestData(t, s)
-	// Don't add the agent as a participant.
+	// Don't grant the agent project access (and don't add it as a
+	// participant either — that table no longer gates this endpoint).
 
 	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
 	bodyBytes, _ := json.Marshal(body)
@@ -675,15 +604,16 @@ func TestSetDefaultAgent_NotParticipant(t *testing.T) {
 
 func TestSetDefaultAgent_MissingAgentID(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	body := setDefaultAgentRequest{} // empty agent ID
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 
@@ -692,12 +622,13 @@ func TestSetDefaultAgent_MissingAgentID(t *testing.T) {
 
 func TestConversationRoutes_MethodNotAllowed(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// GET on get conversation endpoint works.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversation(rr, req, conv.ID)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -719,10 +650,14 @@ func TestConversationRoutes_MethodNotAllowed(t *testing.T) {
 
 func TestListConversations_AsUser(t *testing.T) {
 	srv, s := testServer(t)
-	_, _, conv := setupConvTestData(t, s)
+	project, _, conv := setupConvTestData(t, s)
 
-	// Create a user identity and add as participant.
+	// Create a user who can read the project and add them as participant.
 	userID := api.NewUUID()
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{
+		ID: userID, Email: "testuser@example.com", DisplayName: "Test User", Role: "member", Status: "active",
+	}))
+	grantUserProjectAccess(t, s, userID, project.ID)
 	addConvParticipant(t, s, conv.ID, "user", userID)
 
 	// Use user identity directly
@@ -745,8 +680,9 @@ func TestListConversations_AsUser(t *testing.T) {
 
 func TestSetDefaultAgent_AgentNotFound(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Use a non-existent agent ID.
 	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
@@ -754,11 +690,231 @@ func TestSetDefaultAgent_AgentNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 
-	require.Equal(t, http.StatusNotFound, rr.Code)
+	// Review round 1 finding #7: conv is project-scoped, so this now
+	// resolves through validateDefaultAgent (DEF-31, the single source of
+	// truth also used by the topic PATCH and thread-create writers), which
+	// reports every resolution failure — not found, wrong project, or
+	// soft-deleted — as one 400, not a 404.
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// TestSetDefaultAgent_TooLongAgentID_MessageNamesAgentIdField is review
+// round 4 finding #1: validateDefaultAgent now takes a field parameter
+// instead of the handler string-editing its "defaultAgent"-worded message
+// with strings.Replace. Pins both halves of that contract for the
+// too-long-identifier case: 400, and a message containing "agentId" and
+// "too long" (not the validator's internal "defaultAgent" wording).
+func TestSetDefaultAgent_TooLongAgentID_MessageNamesAgentIdField(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	body := setDefaultAgentRequest{AgentID: strings.Repeat("a", 201)}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Contains(t, errResp.Error.Message, "agentId")
+	require.Contains(t, errResp.Error.Message, "too long")
+}
+
+// TestSetDefaultAgent_NotFound_MessageNamesAgentIdField is review round 4
+// finding #1's second pinned case: a nonexistent agentId on a
+// project-scoped group must produce a message naming "agentId", not
+// validateDefaultAgent's internal "defaultAgent" wording.
+func TestSetDefaultAgent_NotFound_MessageNamesAgentIdField(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Contains(t, errResp.Error.Message, "agentId")
+	require.NotContains(t, errResp.Error.Message, "defaultAgent")
+}
+
+// TestSetDefaultAgent_SoftDeletedAgentRejected is review round 1 finding #7:
+// a soft-deleted agent must not be set as a group's default agent — it
+// would drive web routing after ClearTopicDefaultAgent has already run for
+// it, since ClearTopicDefaultAgent only fires on the deletion event itself.
+func TestSetDefaultAgent_SoftDeletedAgentRejected(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	deletedAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "soft-deleted-agent",
+		Slug:      "soft-deleted-agent",
+		ProjectID: project.ID,
+		Phase:     "terminated",
+		DeletedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), deletedAgent))
+
+	body := setDefaultAgentRequest{AgentID: deletedAgent.ID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"a soft-deleted agent must be rejected; body: %s", rr.Body.String())
+}
+
+// TestSetDefaultAgent_ProjectlessGroup_AgentNotFound_ReturnsValidationError is
+// review round 3 finding #3: pin the round-2 #6 behavior for the *projectless*
+// branch of handleSetDefaultAgent (conv.ProjectID == nil, a legacy group with
+// no validateDefaultAgent to delegate to) — a nonexistent agentId must come
+// back as 400 validation_error, not 404. Round-2 #6 fixed the status code;
+// round-3 #4 then split this branch further so only store.ErrNotFound and
+// soft-delete map to 400, with any other store error going to 500 instead.
+// This test's mutation coverage is for the not-found case specifically:
+// reverting the round-2 #6 fix (mapping ErrNotFound to NotFound(w, ...)
+// instead of ValidationError) makes this fail, without touching the
+// project-scoped tests above.
+func TestSetDefaultAgent_ProjectlessGroup_AgentNotFound_ReturnsValidationError(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	legacyConv := &store.Conversation{
+		ID:             api.NewUUID(),
+		Kind:           "group",
+		Surface:        "native",
+		DisplayName:    "Legacy Projectless Group",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, legacyConv))
+
+	project := &store.Project{ID: api.NewUUID(), Name: "phase3-legacy-def-agent-project", Slug: "phase3-legacy-def-agent-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	participant := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-legacy-def-agent-participant", Slug: "phase3-legacy-def-agent-participant",
+		ProjectID: project.ID, Phase: "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, participant))
+	addConvParticipant(t, s, legacyConv.ID, "agent", participant.ID)
+
+	body := setDefaultAgentRequest{AgentID: api.NewUUID()} // non-existent agent
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+legacyConv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(participant.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, legacyConv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"a nonexistent agentId on a projectless group must be a validation error, not a 404; body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+}
+
+// nilAgentStore wraps a real store and forces GetAgent to return (nil, nil)
+// for one specific ID. No real store.Store implementation does this — a
+// successful lookup always returns a non-nil agent — but the handler must
+// not rely on that invariant when err == nil.
+type nilAgentStore struct {
+	store.Store
+	nilForID string
+}
+
+func (s *nilAgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.nilForID {
+		return nil, nil
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestSetDefaultAgent_ProjectlessGroup_NilAgentNoPanic is the upstream
+// review fix for GoogleCloudPlatform/scion#1864 (gemini-code-assist,
+// medium): handleSetDefaultAgent's projectless branch dereferenced
+// agent.DeletedAt right after a nil-error GetAgent call, assuming err == nil
+// implies agent != nil — a nil, nil result would panic instead of reporting
+// not-found. Forces exactly that response via nilAgentStore and asserts a
+// clean 400 validation_error, not a panic.
+func TestSetDefaultAgent_ProjectlessGroup_NilAgentNoPanic(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	legacyConv := &store.Conversation{
+		ID:             api.NewUUID(),
+		Kind:           "group",
+		Surface:        "native",
+		DisplayName:    "Legacy Projectless Group Nil Agent",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, legacyConv))
+
+	project := &store.Project{ID: api.NewUUID(), Name: "phase3-legacy-nil-agent-project", Slug: "phase3-legacy-nil-agent-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	participant := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-legacy-nil-agent-participant", Slug: "phase3-legacy-nil-agent-participant",
+		ProjectID: project.ID, Phase: "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, participant))
+	addConvParticipant(t, s, legacyConv.ID, "agent", participant.ID)
+
+	nilForID := api.NewUUID()
+	srv.store = &nilAgentStore{Store: s, nilForID: nilForID}
+
+	body := setDefaultAgentRequest{AgentID: nilForID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+legacyConv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(participant.ID, project.ID))
+	rr := httptest.NewRecorder()
+
+	require.NotPanics(t, func() {
+		srv.handleSetDefaultAgent(rr, req, legacyConv.ID)
+	})
+
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"a nil agent from GetAgent must be reported as not-found, not panic; body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Equal(t, ErrCodeValidationError, errResp.Error.Code)
 }
 
 func TestCreateConversation_ProjectNotFound(t *testing.T) {
@@ -789,6 +945,7 @@ func TestCreateConversation_ProjectNotFound(t *testing.T) {
 
 func TestMux_CreateConversation(t *testing.T) {
 	srv, s := testServer(t)
+	wireSharedWebChatStore(t, srv, s)
 	project, agent, _ := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
@@ -821,7 +978,7 @@ func TestMux_ListConversations(t *testing.T) {
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -835,11 +992,12 @@ func TestMux_ListConversations(t *testing.T) {
 
 func TestMux_GetConversation(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -857,6 +1015,7 @@ func TestMux_ListMessages(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create a test message.
 	msg := &store.Message{
@@ -875,7 +1034,7 @@ func TestMux_ListMessages(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -916,6 +1075,7 @@ func TestMux_SetDefaultAgent(t *testing.T) {
 
 func TestCreateConversation_DefaultsToAgentProject(t *testing.T) {
 	srv, s := testServer(t)
+	wireSharedWebChatStore(t, srv, s)
 	project, agent, _ := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
@@ -947,12 +1107,11 @@ func TestAddParticipant_HappyPath(t *testing.T) {
 
 	// Create another agent to add.
 	newAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "new-participant",
-		Slug:       "new-participant",
-		ProjectID:  *conv.ProjectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "new-participant",
+		Slug:      "new-participant",
+		ProjectID: *conv.ProjectID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), newAgent))
 
@@ -964,7 +1123,7 @@ func TestAddParticipant_HappyPath(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, convProjectID(conv), []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
@@ -994,7 +1153,9 @@ func TestAddParticipant_NotParticipant(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
-	require.Equal(t, http.StatusForbidden, rr.Code)
+	// A non-participant gets the same answer as for an unknown conversation.
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "Conversation not found")
 }
 
 func TestAddParticipant_AlreadyExists(t *testing.T) {
@@ -1011,7 +1172,7 @@ func TestAddParticipant_AlreadyExists(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, convProjectID(conv), []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
@@ -1031,7 +1192,7 @@ func TestAddParticipant_InvalidPrincipalKind(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
@@ -1052,12 +1213,11 @@ func TestAddParticipant_CrossProjectAgent(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), otherProject))
 
 	crossProjectAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "cross-project-agent",
-		Slug:       "cross-project-agent",
-		ProjectID:  otherProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "cross-project-agent",
+		Slug:      "cross-project-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), crossProjectAgent))
 
@@ -1069,11 +1229,13 @@ func TestAddParticipant_CrossProjectAgent(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, convProjectID(conv), []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
-	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+	// An agent of another project gets the same answer as an unknown agent.
+	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "agent not found")
 }
 
 func TestAddParticipant_AgentNotFound(t *testing.T) {
@@ -1089,11 +1251,49 @@ func TestAddParticipant_AgentNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, convProjectID(conv), []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
 	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+// TestAddParticipant_SoftDeletedAgentRefused: adding a soft-deleted agent
+// of the conversation's own project is refused like an unknown agent, and
+// no participant row is written.
+func TestAddParticipant_SoftDeletedAgentRefused(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	deletedAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "soft-deleted-participant",
+		Slug:      "soft-deleted-participant",
+		ProjectID: *conv.ProjectID,
+		Phase:     "terminated",
+		DeletedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), deletedAgent))
+
+	body := addParticipantRequest{
+		PrincipalKind: "agent",
+		PrincipalID:   deletedAgent.ID,
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, convProjectID(conv), []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleAddParticipant(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "agent not found")
+
+	isParticipant, err := isConversationParticipant(context.Background(), s, conv.ID, "agent", deletedAgent.ID)
+	require.NoError(t, err)
+	require.False(t, isParticipant, "a soft-deleted agent must not become a participant")
 }
 
 func TestLeaveConversation_HappyPath(t *testing.T) {
@@ -1142,12 +1342,11 @@ func TestHandleCreateConversation_ProjectAuthorizationDenied(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), otherProject))
 
 	otherAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "other-agent",
-		Slug:       "other-agent",
-		ProjectID:  otherProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "other-agent",
+		Slug:      "other-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), otherAgent))
 
@@ -1194,12 +1393,11 @@ func TestHandleSetDefaultAgent_AgentProjectUnauthorized(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, participantProject))
 
 	participantAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "participant-agent",
-		Slug:       "participant-agent",
-		ProjectID:  participantProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "participant-agent",
+		Slug:      "participant-agent",
+		ProjectID: participantProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, participantAgent))
 	addConvParticipant(t, s, globalConv.ID, "agent", participantAgent.ID)
@@ -1213,12 +1411,11 @@ func TestHandleSetDefaultAgent_AgentProjectUnauthorized(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, restrictedProject))
 
 	restrictedAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "restricted-agent",
-		Slug:       "restricted-agent",
-		ProjectID:  restrictedProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "restricted-agent",
+		Slug:      "restricted-agent",
+		ProjectID: restrictedProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, restrictedAgent))
 
@@ -1240,6 +1437,7 @@ func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create an agent in a DIFFERENT project.
 	otherProject := &store.Project{
@@ -1250,12 +1448,11 @@ func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), otherProject))
 
 	crossAgent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "cross-project-agent",
-		Slug:       "cross-project-agent",
-		ProjectID:  otherProject.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "cross-project-agent",
+		Slug:      "cross-project-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), crossAgent))
 
@@ -1264,7 +1461,7 @@ func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 

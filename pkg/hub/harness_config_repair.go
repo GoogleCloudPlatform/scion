@@ -131,27 +131,89 @@ func (s *Server) syncResourceFromStorage(
 		return nil, "", false, nil
 	}
 
-	contentHash = computeContentHash(updated)
+	contentHash = s.computeContentHash(updated)
 	return updated, contentHash, true, nil
 }
 
-// syncHarnessConfigFromStorage syncs a single harness-config's DB manifest
-// from actual GCS content. Concurrent calls for the same config are
-// deduplicated via singleflight.
-func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, hcName string) error {
-	_, err, _ := repairFlight.Do("hc:"+hcName, func() (interface{}, error) {
-		return nil, s.syncHarnessConfigFromStorageInner(context.WithoutCancel(ctx), hcName)
-	})
-	return err
+// HarnessConfigRepairRef identifies the harness-config record a repair
+// should target. ID is authoritative when set (an agent's
+// AppliedConfig.HarnessConfigID, or the record already in hand during
+// sync-all); a stale ID is "not found", never re-targeted by name.
+// Name/ProjectID are used only for agents dispatched without a stamped ID:
+// the name is resolved project-scope first (ProjectID), then global — the
+// same rule resolveDerivedConfig uses when it stamps the ID — never "newest
+// record with that name anywhere" (ptone/scion#2898).
+type HarnessConfigRepairRef struct {
+	ID        string
+	Name      string
+	ProjectID string
 }
 
-func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, hcName string) error {
-	hc, err := s.findHarnessConfigByName(ctx, hcName)
+func (r HarnessConfigRepairRef) String() string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Name
+}
+
+// syncHarnessConfigFromStorage syncs a single harness-config's DB manifest
+// from actual GCS content. The target record is resolved first, and
+// concurrent calls for the same record are deduplicated via singleflight
+// keyed by record ID, so same-named configs in different scopes never share
+// (or block) each other's repair.
+func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, ref HarnessConfigRepairRef) error {
+	hc, err := s.resolveHarnessConfigForRepair(ctx, ref)
 	if err != nil {
 		return err
 	}
 	if hc == nil {
-		return fmt.Errorf("harness-config %q not found", hcName)
+		return fmt.Errorf("harness-config %q not found", ref.String())
+	}
+	id := hc.ID
+	_, err, _ = repairFlight.Do("hc:"+id, func() (interface{}, error) {
+		return nil, s.syncHarnessConfigFromStorageRetrying(context.WithoutCancel(ctx), id)
+	})
+	return err
+}
+
+// syncHarnessConfigFromStorageRetrying runs the repair, and runs it once
+// more (re-reading the row and re-deriving from storage) when its commit
+// loses the compare-and-swap to a concurrent commit. A second conflict is
+// logged and skipped: the row was just written by another commit, which is
+// newer than anything the repair would write (ptone/scion#4219).
+func (s *Server) syncHarnessConfigFromStorageRetrying(ctx context.Context, id string) error {
+	err := s.syncHarnessConfigFromStorageInner(ctx, id)
+	if !errors.Is(err, store.ErrHarnessConfigConflict) {
+		return err
+	}
+	s.resourceLog.Warn("harness-config repair: harness-config changed during repair; retrying once", "id", id)
+	err = s.syncHarnessConfigFromStorageInner(ctx, id)
+	if errors.Is(err, store.ErrHarnessConfigConflict) {
+		s.resourceLog.Warn("harness-config repair: harness-config changed again during repair; skipping", "id", id)
+		return nil
+	}
+	return err
+}
+
+func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id string) error {
+	// Re-read inside the flight so the update is applied to the current row,
+	// not to a copy read by whichever caller happened to win the flight.
+	hc, err := s.store.GetHarnessConfig(ctx, id)
+	if err != nil {
+		return fmt.Errorf("lookup harness-config %q: %w", id, err)
+	}
+	if hc == nil {
+		return fmt.Errorf("harness-config %q not found", id)
+	}
+
+	// A blob row's content cannot drift: each blob is named by its hash and
+	// never overwritten. The shared repair below reads <StoragePath>/<path>,
+	// which a blob row never has, and would drop every entry as "missing",
+	// so blob rows only check and log; they never lose manifest entries
+	// (ptone/scion#4219).
+	if isHarnessConfigBlobLayout(hc) {
+		s.checkHarnessConfigBlobs(ctx, hc)
+		return nil
 	}
 
 	updated, contentHash, changed, err := s.syncResourceFromStorage(
@@ -164,33 +226,107 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, hcName s
 		return nil
 	}
 
-	hc.Files = updated
-	hc.ContentHash = contentHash
-	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
+	// Refuse an unusable stored config.yaml before the commit copies
+	// anything into blobs, so a refused repair changes no storage
+	// (ptone/scion#4219). The commit runs the same check again.
+	if err := s.checkLegacyHarnessConfigYAML(ctx, hc, updated); err != nil {
 		return fmt.Errorf("harness-config repair: update DB: %w", err)
 	}
+
+	// Commit the manifest rebuilt from storage. The commit migrates the
+	// legacy row to the blob layout (copying its files from the legacy
+	// path, the computed one for a row without a storage path, which is
+	// where syncResourceFromStorage read them), re-derives Harness and
+	// Config from the stored config.yaml, and writes against the row as
+	// read. A refused commit (an unusable provisioner) leaves the row
+	// unchanged and is returned for the caller to log.
+	if err := s.commitHarnessConfigFiles(ctx, hc, updated, harnessConfigCommitOpts{}); err != nil {
+		return fmt.Errorf("harness-config repair: update DB: %w", err)
+	}
+	contentHash = hc.ContentHash
 	s.resourceLog.Info("harness-config repair: synced DB manifest from storage",
-		"config", hc.Name, "contentHash", contentHash)
+		"config", hc.Name, "id", hc.ID, "scope", hc.Scope, "scopeId", hc.ScopeID,
+		"contentHash", contentHash)
 	return nil
 }
 
-// syncTemplateFromStorage syncs a single template's DB manifest from actual
-// GCS content. Concurrent calls for the same template are deduplicated via
-// singleflight.
-func (s *Server) syncTemplateFromStorage(ctx context.Context, templateRef string) error {
-	_, err, _ := repairFlight.Do("tmpl:"+templateRef, func() (interface{}, error) {
-		return nil, s.syncTemplateFromStorageInner(context.WithoutCancel(ctx), templateRef)
-	})
-	return err
+// TemplateRepairRef identifies the template record a repair should target.
+// It mirrors HarnessConfigRepairRef: ID is authoritative when set (an
+// agent's AppliedConfig.TemplateID, or the record already in hand during
+// sync-all), and a stale ID is "not found", never re-targeted by name.
+// Name/ProjectID are used only when no ID was stamped: the reference is
+// resolved the same way agent create resolves it (ID, then slug in the
+// agent's project scope, then global), never "any template with that name".
+type TemplateRepairRef struct {
+	ID        string
+	Name      string
+	ProjectID string
 }
 
-func (s *Server) syncTemplateFromStorageInner(ctx context.Context, templateRef string) error {
-	tmpl, err := s.findTemplateByRef(ctx, templateRef)
+func (r TemplateRepairRef) String() string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Name
+}
+
+// syncTemplateFromStorage syncs a single template's DB manifest from actual
+// GCS content. The target record is resolved first, and concurrent calls for
+// the same record are deduplicated via singleflight keyed by record ID, so
+// same-named templates in different scopes never share (or block) each
+// other's repair.
+func (s *Server) syncTemplateFromStorage(ctx context.Context, ref TemplateRepairRef) error {
+	tmpl, err := s.resolveTemplateForRepair(ctx, ref)
 	if err != nil {
 		return err
 	}
 	if tmpl == nil {
-		return fmt.Errorf("template %q not found", templateRef)
+		return fmt.Errorf("template %q not found", ref.String())
+	}
+	id := tmpl.ID
+	_, err, _ = repairFlight.Do("tmpl:"+id, func() (interface{}, error) {
+		return nil, s.syncTemplateFromStorageRetrying(context.WithoutCancel(ctx), id)
+	})
+	return err
+}
+
+// syncTemplateFromStorageRetrying runs the repair, and runs it once more
+// (re-reading the row and re-deriving from storage) when its commit loses
+// the compare-and-swap to a concurrent commit. A second conflict is logged
+// and skipped: the row was just written by another commit, which is newer
+// than anything the repair would write (ptone/scion#4221).
+func (s *Server) syncTemplateFromStorageRetrying(ctx context.Context, id string) error {
+	err := s.syncTemplateFromStorageInner(ctx, id)
+	if !errors.Is(err, store.ErrTemplateConflict) {
+		return err
+	}
+	s.resourceLog.Warn("template repair: template changed during repair; retrying once", "id", id)
+	err = s.syncTemplateFromStorageInner(ctx, id)
+	if errors.Is(err, store.ErrTemplateConflict) {
+		s.resourceLog.Warn("template repair: template changed again during repair; skipping", "id", id)
+		return nil
+	}
+	return err
+}
+
+func (s *Server) syncTemplateFromStorageInner(ctx context.Context, id string) error {
+	// Re-read inside the flight so the update is applied to the current row.
+	tmpl, err := s.store.GetTemplate(ctx, id)
+	if err != nil {
+		return fmt.Errorf("lookup template %q: %w", id, err)
+	}
+	if tmpl == nil {
+		return fmt.Errorf("template %q not found", id)
+	}
+
+	// A blob row's content cannot drift: each blob is named by its hash and
+	// never overwritten. The shared repair below reads <StoragePath>/<path>,
+	// which a blob row never has, and would drop every entry as "missing",
+	// so blob rows only check and log; they never lose manifest entries
+	// (ptone/scion#4221).
+	if isBlobLayout(tmpl) {
+		s.checkTemplateBlobs(ctx, tmpl)
+		return nil
 	}
 
 	updated, contentHash, changed, err := s.syncResourceFromStorage(
@@ -203,14 +339,50 @@ func (s *Server) syncTemplateFromStorageInner(ctx context.Context, templateRef s
 		return nil
 	}
 
-	tmpl.Files = updated
-	tmpl.ContentHash = contentHash
-	if err := s.store.UpdateTemplate(ctx, tmpl); err != nil {
+	// syncResourceFromStorage read a legacy row without a storage path from
+	// the computed path; commit against, and record, that same path.
+	if tmpl.StoragePath == "" {
+		tmpl.StoragePath = storage.ResourceStoragePath(s.HubID(), storage.ResourceKindTemplate, tmpl.Scope, tmpl.ScopeID, tmpl.Slug)
+	}
+	// Commit the manifest rebuilt from storage. The commit re-derives the
+	// index from the stored scion-agent.yaml; a refused commit (an unusable
+	// bundled harness-config) leaves the row unchanged and is returned for
+	// the caller to log.
+	if err := s.commitTemplateFiles(ctx, tmpl, updated, commitOpts{}); err != nil {
 		return fmt.Errorf("template repair: update DB: %w", err)
 	}
+	contentHash = tmpl.ContentHash
 	s.resourceLog.Info("template repair: synced DB manifest from storage",
-		"template", tmpl.Name, "contentHash", contentHash)
+		"template", tmpl.Name, "id", tmpl.ID, "scope", tmpl.Scope, "scopeId", tmpl.ScopeID,
+		"contentHash", contentHash)
 	return nil
+}
+
+// checkTemplateBlobs logs every manifest entry of a blob row whose blob is
+// missing. It changes nothing: a missing blob needs a new push of that file.
+func (s *Server) checkTemplateBlobs(ctx context.Context, tmpl *store.Template) {
+	stor := s.GetStorage()
+	if stor == nil {
+		return
+	}
+	for _, f := range tmpl.Files {
+		hex, ok := templateBlobHex(f.Hash)
+		if !ok {
+			s.resourceLog.Warn("template repair: manifest entry has no content hash",
+				"template", tmpl.Name, "id", tmpl.ID, "file", f.Path)
+			continue
+		}
+		exists, err := stor.Exists(ctx, templateBlobPath(tmpl.StoragePath, hex))
+		if err != nil {
+			s.resourceLog.Warn("template repair: cannot check blob",
+				"template", tmpl.Name, "id", tmpl.ID, "file", f.Path, "error", err)
+			continue
+		}
+		if !exists {
+			s.resourceLog.Warn("template repair: blob missing from storage; push the file again",
+				"template", tmpl.Name, "id", tmpl.ID, "file", f.Path, "hash", f.Hash)
+		}
+	}
 }
 
 // SyncAllHarnessConfigsFromStorage reconciles DB manifest hashes against
@@ -226,8 +398,13 @@ func (s *Server) SyncAllHarnessConfigsFromStorage(ctx context.Context) {
 // GCS content for all active templates. With hub-namespaced storage paths,
 // cross-hub interference is eliminated; this sync handles legitimate
 // single-hub mismatches only (interrupted uploads, manual edits, etc.).
+//
+// It then backfills the AgentConfig snapshot of rows that have none
+// (BackfillTemplateAgentConfigs, ptone/scion#4222), after the repair so a
+// row the repair just rewrote is read as rewritten.
 func (s *Server) SyncAllTemplatesFromStorage(ctx context.Context) {
 	s.syncAllResourcesFromStorage(ctx, storage.ResourceKindTemplate)
+	s.BackfillTemplateAgentConfigs(ctx)
 }
 
 func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.ResourceKind) {
@@ -322,9 +499,17 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 					var syncErr error
 					switch kind {
 					case storage.ResourceKindHarnessConfig:
-						syncErr = s.syncHarnessConfigFromStorage(gctx, e.name)
+						// ID only: the record is in hand, and if it was
+						// deleted since the list a name fallback could
+						// resolve a different (e.g. global) record.
+						syncErr = s.syncHarnessConfigFromStorage(gctx, HarnessConfigRepairRef{
+							ID: e.rec.ID,
+						})
 					case storage.ResourceKindTemplate:
-						syncErr = s.syncTemplateFromStorage(gctx, e.name)
+						// ID only, for the same reason as harness-configs.
+						syncErr = s.syncTemplateFromStorage(gctx, TemplateRepairRef{
+							ID: e.rec.ID,
+						})
 					}
 					if syncErr != nil {
 						s.resourceLog.Warn(label+" sync: repair failed",
@@ -339,36 +524,94 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 	_ = g.Wait()
 }
 
-// findHarnessConfigByName looks up an active harness-config by its display name.
-func (s *Server) findHarnessConfigByName(ctx context.Context, name string) (*store.HarnessConfig, error) {
-	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-		Name:   name,
-		Status: store.HarnessConfigStatusActive,
-	}, store.ListOptions{Limit: 1})
-	if err != nil {
-		return nil, fmt.Errorf("lookup harness-config %q: %w", name, err)
+// resolveHarnessConfigForRepair finds the harness-config record a repair
+// should act on. When an ID is given it is authoritative: a missing record
+// is "not found", with no name fallback — the dispatch retry still carries
+// the stale ID and hash, so repairing some other same-named row could not
+// make it succeed and would only touch an unrelated record. The name is
+// used only when no ID was stamped, looked up by slug in the agent's project
+// scope, then global scope. Returns (nil, nil) when nothing matches.
+//
+// There is deliberately no Status filter (the old name lookup required
+// "active"): resolveDerivedConfig stamps the ID via the same unfiltered
+// GetHarnessConfigBySlug lookup, so repair targets exactly the record
+// dispatch uses. Do not "restore" the filter without changing both.
+func (s *Server) resolveHarnessConfigForRepair(ctx context.Context, ref HarnessConfigRepairRef) (*store.HarnessConfig, error) {
+	if ref.ID != "" {
+		hc, err := s.store.GetHarnessConfig(ctx, ref.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("lookup harness-config %q: %w", ref.ID, err)
+		}
+		return hc, nil
 	}
-	if result == nil || len(result.Items) == 0 {
+	if ref.Name == "" {
 		return nil, nil
 	}
-	return &result.Items[0], nil
+	if ref.ProjectID != "" {
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, ref.Name, store.HarnessConfigScopeProject, ref.ProjectID)
+		if err == nil && hc != nil {
+			return hc, nil
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("lookup project harness-config %q: %w", ref.Name, err)
+		}
+	}
+	hc, err := s.store.GetHarnessConfigBySlug(ctx, ref.Name, store.HarnessConfigScopeGlobal, "")
+	if err == nil && hc != nil {
+		return hc, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("lookup global harness-config %q: %w", ref.Name, err)
+	}
+	return nil, nil
 }
 
-// findTemplateByRef looks up an active template by ID or name.
-func (s *Server) findTemplateByRef(ctx context.Context, ref string) (*store.Template, error) {
-	tmpl, err := s.store.GetTemplate(ctx, ref)
-	if err == nil && tmpl != nil {
+// resolveTemplateForRepair finds the template record a repair should act
+// on. When an ID is given it is authoritative: a missing record is "not
+// found", with no name fallback. Otherwise the name is resolved with
+// resolveTemplateRef (the rule agent create uses): by ID, then by slug in the
+// agent's project scope, then global. Returns (nil, nil) when nothing
+// matches.
+func (s *Server) resolveTemplateForRepair(ctx context.Context, ref TemplateRepairRef) (*store.Template, error) {
+	if ref.ID != "" {
+		tmpl, err := s.store.GetTemplate(ctx, ref.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("lookup template %q: %w", ref.ID, err)
+		}
 		return tmpl, nil
 	}
-	result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
-		Name:   ref,
-		Status: store.TemplateStatusActive,
-	}, store.ListOptions{Limit: 1})
-	if err != nil {
-		return nil, fmt.Errorf("lookup template %q: %w", ref, err)
-	}
-	if result == nil || len(result.Items) == 0 {
+	if ref.Name == "" {
 		return nil, nil
 	}
-	return &result.Items[0], nil
+	tmpl, err := resolveTemplateRef(ctx, s.store, ref.Name, ref.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("lookup template %q: %w", ref.Name, err)
+	}
+	return tmpl, nil
+}
+
+// checkLegacyHarnessConfigYAML applies the one content check
+// (unusableProvisionerInYAML) to the config.yaml a legacy row stores at its
+// legacy path, for the manifest files. A manifest without config.yaml, or an
+// object that cannot be read, is left to the commit.
+func (s *Server) checkLegacyHarnessConfigYAML(ctx context.Context, hc *store.HarnessConfig, files []store.TemplateFile) error {
+	stor := s.GetStorage()
+	f, ok := templateFileByPath(files, harnessConfigYAMLPath)
+	if stor == nil || !ok {
+		return nil
+	}
+	data, err := readTemplateObject(ctx, stor, s.harnessConfigLegacyPath(hc)+"/"+f.Path, maxHarnessConfigFileSize)
+	if err != nil {
+		return nil
+	}
+	if perr := unusableProvisionerInYAML(hc.Name, data); perr != nil {
+		return &unusableHarnessConfigError{perr: perr}
+	}
+	return nil
 }

@@ -17,13 +17,16 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -55,7 +58,9 @@ var notificationsCmd = &cobra.Command{
 	Short:   "Manage notifications and subscriptions",
 	Long: `Manage notifications and notification subscriptions.
 
-Notifications require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Notifications go through the hub (start the local one with 'scion server start',
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>').
 
 Commands:
   scion notifications                         List your notifications
@@ -162,17 +167,11 @@ func init() {
 	// Subscribe flags
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeAgent, "agent", "", "Agent name or ID to subscribe to")
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "project", "", "Project to subscribe in (inferred from context if omitted)")
-	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "grove", "", "Deprecated alias for --project")
-	_ = notificationsSubscribeCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = notificationsSubscribeCmd.Flags().MarkHidden("grove")
 	notificationsSubscribeCmd.Flags().StringArrayVar(&subscribeTriggers, "triggers", nil, "Trigger activity (repeatable; also accepts a comma-separated list) (default: COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED)")
 
 	// Unsubscribe flags
 	notificationsUnsubscribeCmd.Flags().BoolVar(&unsubscribeAll, "all", false, "Remove all subscriptions in the project")
 	notificationsUnsubscribeCmd.Flags().StringVar(&unsubscribeProject, "project", "", "Project to unsubscribe from (used with --all)")
-	notificationsUnsubscribeCmd.Flags().StringVar(&unsubscribeProject, "grove", "", "Deprecated alias for --project")
-	_ = notificationsUnsubscribeCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = notificationsUnsubscribeCmd.Flags().MarkHidden("grove")
 
 	// Update flags
 	notificationsUpdateCmd.Flags().StringArrayVar(&updateTriggers, "triggers", nil, "Trigger activity (required, repeatable; also accepts a comma-separated list)")
@@ -180,26 +179,29 @@ func init() {
 
 	// Subscriptions list flags
 	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsProject, "project", "", "Filter by project")
-	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsProject, "grove", "", "Deprecated alias for --project")
-	_ = notificationsSubscriptionsCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = notificationsSubscriptionsCmd.Flags().MarkHidden("grove")
 	notificationsSubscriptionsCmd.Flags().BoolVar(&subscriptionsJSON, "json", false, "Output in JSON format")
 }
 
-// requireHubClient resolves settings and returns a hub client, or errors if hub is not enabled.
+// requireHubClient resolves settings and returns a hub client, or
+// errHubNotConfigured when no hub is selected. The endpoint comes from
+// invocationHub (--hub, SCION_HUB_ENDPOINT/SCION_HUB_URL, a link entry or the
+// current hub), so inside a hub-connected agent container the container's
+// hub env vars are enough. This does not widen
+// access: callers still need valid credentials for getHubClient to
+// authenticate.
 func requireHubClient() (*config.Settings, hubclient.Client, error) {
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
+	settings, err := loadSettingsForTarget(resolvedPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	if !settings.IsHubEnabled() {
-		return nil, nil, fmt.Errorf("notifications require Hub mode. Enable with 'scion hub enable <endpoint>'")
+	if !hubConfigured() {
+		return nil, nil, errHubNotConfigured
 	}
 
 	client, err := getHubClient(settings)
@@ -270,30 +272,71 @@ func runNotificationsList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(notifs) == 0 {
-		fmt.Println("No notifications")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No notifications")
 		return nil
 	}
 
-	fmt.Printf("%-12s  %-14s  %-20s  %-20s  %s\n", "ID", "AGENT", "STATUS", "TIME", "MESSAGE")
-	fmt.Printf("%-12s  %-14s  %-20s  %-20s  %s\n", "------------", "--------------", "--------------------", "--------------------", "-------")
+	writeNotificationsTable(cmd.OutOrStdout(), notifs)
+	return nil
+}
+
+// notificationMessageWidth is the width, in runes, at which the table cuts
+// the message of a notification that has no Kind.
+const notificationMessageWidth = 60
+
+// writeNotificationsTable writes notifs as the table runNotificationsList
+// prints. Message and status text can come from other principals (a user's
+// display name in an artifact grant notice), so both go through safeText.
+// The message of a notification with a Kind is printed whole, and one about
+// an artifact gets a second line with its scion://artifact/ reference,
+// built from ResourceID, so the reference is never cut off. Other messages
+// are cut at notificationMessageWidth runes. The AGENT column shows "-"
+// for a notification that names no agent (the nil UUID). A review summary
+// notification (ptone/scion#6853) gets its excerpt, the reviewer's own
+// words, on a line of its own in quotes under the message that attributes
+// it, also through safeText; no other kind prints an excerpt.
+func writeNotificationsTable(w io.Writer, notifs []hubclient.Notification) {
+	_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "ID", "AGENT", "STATUS", "TIME", "MESSAGE")
+	_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "------------", "--------------", "--------------------", "----------------------", "-------")
 	for _, n := range notifs {
 		shortID := n.ID
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
 		}
 		agentDisplay := n.AgentID
-		if len(agentDisplay) > 14 {
+		if agentDisplay == "" || agentDisplay == uuid.Nil.String() {
+			agentDisplay = "-"
+		} else if len(agentDisplay) > 14 {
 			agentDisplay = agentDisplay[:11] + "..."
 		}
-		timeStr := n.CreatedAt.Format("2006-01-02 15:04")
-		msg := n.Message
-		if len(msg) > 60 {
-			msg = msg[:57] + "..."
+		timeStr := clitime.Format(n.CreatedAt, clitime.Minute)
+		msg := safeText(n.Message)
+		if n.Kind == "" {
+			msg = truncateRunes(msg, notificationMessageWidth, true)
 		}
-		fmt.Printf("%-12s  %-14s  %-20s  %-20s  %s\n", shortID, agentDisplay, truncate(n.Status, 20), timeStr, msg)
+		status := truncateRunes(safeText(n.Status), 20, true)
+		_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", shortID, agentDisplay, status, timeStr, msg)
+		if n.Kind == store.NotificationKindArtifactReviewSummary && n.Excerpt != "" {
+			_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "", "", "", "", "“"+safeText(n.Excerpt)+"”")
+		}
+		if ref := notificationArtifactRef(n); ref != "" {
+			_, _ = fmt.Fprintf(w, "%-12s  %-14s  %-20s  %-22s  %s\n", "", "", "", "", ref)
+		}
 	}
+}
 
-	return nil
+// notificationArtifactRef returns the scion://artifact/ reference of a
+// notification about an artifact whose ResourceID is a canonical UUID, or
+// "" for any other notification.
+func notificationArtifactRef(n hubclient.Notification) string {
+	if n.Kind == "" || n.ResourceType != store.NotificationResourceArtifact {
+		return ""
+	}
+	id, err := uuid.Parse(n.ResourceID)
+	if err != nil || id.String() != n.ResourceID {
+		return ""
+	}
+	return "scion://artifact/" + n.ResourceID
 }
 
 func runNotificationsAck(cmd *cobra.Command, args []string) error {
@@ -390,7 +433,7 @@ func runNotificationsUpdate(cmd *cobra.Command, args []string) error {
 
 	triggers := splitCommaList(updateTriggers)
 	if len(triggers) == 0 {
-		return fmt.Errorf("--triggers must specify at least one trigger activity")
+		return newUsageError("--triggers must specify at least one trigger activity")
 	}
 
 	req := &hubclient.UpdateSubscriptionRequest{
@@ -415,10 +458,10 @@ func runNotificationsUnsubscribe(cmd *cobra.Command, args []string) error {
 	hasID := len(args) > 0
 
 	if !hasID && !unsubscribeAll {
-		return fmt.Errorf("provide a subscription ID or use --all with --project to remove all subscriptions")
+		return newUsageError("provide a subscription ID or use --all with --project to remove all subscriptions")
 	}
 	if hasID && unsubscribeAll {
-		return fmt.Errorf("provide either a subscription ID or --all, not both")
+		return newUsageError("provide either a subscription ID or --all, not both")
 	}
 
 	settings, client, err := requireHubClient()
@@ -507,7 +550,7 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "ID", "SCOPE", "TARGET", "PROJECT", "TRIGGERS", "CREATED")
-	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "------------", "------", "----------------", "----------------", "----------------------------------------", "----------")
+	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "------------", "------", "----------------", "----------------", "----------------------------------------", "--------------")
 	for _, s := range subs {
 		shortID := s.ID
 		if len(shortID) > 12 {
@@ -528,7 +571,7 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 		if len(triggersStr) > 40 {
 			triggersStr = triggersStr[:37] + "..."
 		}
-		dateStr := s.CreatedAt.Format("2006-01-02")
+		dateStr := clitime.Format(s.CreatedAt, clitime.Date)
 		fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", shortID, s.Scope, target, projectDisplay, triggersStr, dateStr)
 	}
 

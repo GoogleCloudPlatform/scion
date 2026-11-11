@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <title>Terminal owner fixture</title>
+  <h1>Terminal owner fixture — no live agents</h1>
+  <label>Agent ID <input id="agent" value="fixture-agent" /></label>
+  <label>Request ID <input id="request" value="first-open" /></label>
+  <button id="open">Open terminal</button>
+  <button id="inspect">Inspect local ownership</button>
+  <button id="chat">Show simulated Chat</button>
+  <pre id="result" aria-live="polite">Loading fixture</pre>
+  <script type="module">
+    import { createCoordinator } from './coordinator.js';
+    window.fixture = createCoordinator();
+    document.querySelector('#inspect').onclick = () => {
+      document.querySelector('#result').textContent = JSON.stringify(
+        window.fixture.snapshot(),
+        null,
+        2
+      );
+    };
+    document.querySelector('#chat').onclick = () => {
+      document.querySelector('h1').textContent = 'Simulated Chat — owner document retained';
+    };
+    document.querySelector('#result').textContent = JSON.stringify(
+      window.fixture.snapshot(),
+      null,
+      2
+    );
+    document.querySelector('#open').onclick = async () => {
+      const result = await window.fixture.open(
+        document.querySelector('#agent').value,
+        document.querySelector('#request').value
+      );
+      document.querySelector('#result').textContent = JSON.stringify(result, null, 2);
+    };
+  </script>
+</html>

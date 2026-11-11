@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -81,7 +82,7 @@ runtimes:
 		t.Fatal(err)
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
@@ -90,7 +91,7 @@ runtimes:
 	mgr := &provisionCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
 
-	return New(cfg, mgr, rt), mgr, globalScion
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, globalScion
 }
 
 // writeHarnessConfig writes a minimal harness-config dir under .scion/harness-configs/<name>.
@@ -176,6 +177,7 @@ image: scion-claude:test
 provisioner:
   type: container-script
   interface_version: 1
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
 `)
 
 	code, body := dispatchAgent(t, srv, "scripted-envelope")
@@ -276,7 +278,7 @@ auth:
 			HarnessConfig: "custom-auth",
 		},
 	}
-	required, _, _ := srv.extractRequiredEnvKeys(req)
+	required, _, _, _ := srv.extractRequiredEnvKeys(req, "")
 
 	// Build a set for stable lookup.
 	got := make(map[string]bool)
@@ -314,7 +316,7 @@ auth:
 			HarnessConfig: "claude-legacy",
 		},
 	}
-	required, _, _ := srv.extractRequiredEnvKeys(req)
+	required, _, _, _ := srv.extractRequiredEnvKeys(req, "")
 
 	got := make(map[string]bool)
 	for _, k := range required {
@@ -336,8 +338,12 @@ func TestAgentResponseHarnessConfigRevision(t *testing.T) {
 		Name:                  "x",
 		HarnessConfig:         "claude",
 		HarnessConfigRevision: "sha256:deadbeef",
+		HarnessConfigSource:   "broker-local",
 	})
 	if resp.HarnessConfigRevision != "sha256:deadbeef" {
 		t.Errorf("HarnessConfigRevision lost in response conversion: got %q", resp.HarnessConfigRevision)
+	}
+	if resp.HarnessConfigSource != "broker-local" {
+		t.Errorf("HarnessConfigSource lost in response conversion: got %q", resp.HarnessConfigSource)
 	}
 }

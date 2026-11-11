@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -33,200 +34,6 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 )
-
-// testDevToken is the development token used for testing.
-const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
-
-// testServer creates a test server with an in-memory SQLite store.
-// The server is configured with dev auth enabled using testDevToken.
-func testServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
-	// Remove the delegation edge backfill marker. Migrate() sets it (the
-	// backfill processes zero agents and writes the completion marker).
-	// Tests that create agents directly via the store bypass the HTTP handler
-	// which normally creates delegation edges, so they would fail the
-	// post-backfill no-edge check. Tests that specifically exercise
-	// post-backfill behavior re-create the marker explicitly.
-	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
-	cfg.DevUserConfig = DevUserConfig{
-		Username:    "dev",
-		DisplayName: "Development User",
-		Email:       "dev@localhost",
-	}
-	srv, err := New(cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() {
-		_ = srv.Shutdown(context.Background())
-		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
-	})
-	return srv, s
-}
-
-// doRequest performs an HTTP request against the test server.
-// It automatically includes the dev auth token for authenticated endpoints.
-func doRequest(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		if err != nil {
-			t.Fatalf("failed to marshal body: %v", err)
-		}
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	// Add dev auth token for authenticated endpoints
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// doRequestNoAuth performs an HTTP request without authentication.
-// Use this for testing unauthenticated access or auth endpoints themselves.
-func doRequestNoAuth(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		if err != nil {
-			t.Fatalf("failed to marshal body: %v", err)
-		}
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// doRequestRaw performs an HTTP request with raw bytes as the body.
-// Useful for testing malformed request bodies.
-func doRequestRaw(t *testing.T, srv *Server, method, path string, body []byte, contentType string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, path, bytes.NewReader(body))
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// grantDevUserRuntimeBrokerAccess creates a custom role with runtime_broker.*
-// permissions and binds it to the dev user. This is needed because the
-// inline authz checks in getRuntimeBroker, handleBrokerHeartbeat, and
-// handleBrokerSecretByKey use Resource{Type: "runtime_broker"} which does not
-// match the canonical "broker.*" permissions in the registry. The dev user's
-// super-admin role only includes registry permissions.
-func grantDevUserRuntimeBrokerAccess(t *testing.T, s store.Store) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:      "runtime-broker-compat",
-		ScopeType: store.RoleScopeSystem,
-		Permissions: []string{
-			"runtime_broker.read",
-			"runtime_broker.update",
-			"runtime_broker.delete",
-			"runtime_broker.list",
-		},
-	})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      DevUserID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
-// grantUserRuntimeBrokerAccess creates a custom role with runtime_broker.*
-// permissions and binds it to the specified user.
-func grantUserRuntimeBrokerAccess(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	// Re-use existing definition if already created in this store instance.
-	rd, err := s.GetRoleDefinitionByName(ctx, "runtime-broker-compat", store.RoleScopeSystem)
-	if err != nil {
-		rd, err = s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-			Name:      "runtime-broker-compat",
-			ScopeType: store.RoleScopeSystem,
-			Permissions: []string{
-				"runtime_broker.read",
-				"runtime_broker.update",
-				"runtime_broker.delete",
-				"runtime_broker.list",
-			},
-		})
-		require.NoError(t, err)
-	}
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create runtime-broker-compat role binding: %v", err)
-	}
-}
-
-// grantSuperAdminRole binds the seeded super-admin role definition to the
-// given user. Under the CO1 authorization cutover the AK1 kernel only
-// evaluates role bindings, so User.Role = "admin" alone is insufficient.
-func grantSuperAdminRole(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err, "super-admin role definition must exist")
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create super-admin role binding: %v", err)
-	}
-}
 
 // ============================================================================
 // Health Endpoint Tests
@@ -2140,33 +1947,6 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 // Two-Phase Broker Registration Tests
 // ============================================================================
 
-// testServerWithBrokerAuth creates a test server with broker auth enabled.
-func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
-	srv, err := New(cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() {
-		_ = srv.Shutdown(context.Background())
-		_ = s.Close()
-	})
-	return srv, s
-}
-
 func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 	srv, _ := testServerWithBrokerAuth(t)
 
@@ -2176,7 +1956,7 @@ func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 		"capabilities": []string{"sync", "attach"},
 	}
 
-	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
+	rec1 := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
 	if rec1.Code != http.StatusCreated {
 		t.Errorf("Phase 1: expected status 201, got %d: %s", rec1.Code, rec1.Body.String())
 	}
@@ -2205,7 +1985,7 @@ func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 		"capabilities": []string{"sync", "attach"},
 	}
 
-	rec2 := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
+	rec2 := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
 	if rec2.Code != http.StatusOK {
 		t.Errorf("Phase 2: expected status 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
@@ -2262,7 +2042,7 @@ func TestBrokerJoinWithInvalidToken(t *testing.T) {
 		"name": "invalid-token-host",
 	}
 
-	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
+	rec1 := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
 	if rec1.Code != http.StatusCreated {
 		t.Fatalf("failed to create broker: %s", rec1.Body.String())
 	}
@@ -2279,7 +2059,7 @@ func TestBrokerJoinWithInvalidToken(t *testing.T) {
 		"hostname":  "test-machine",
 	}
 
-	rec2 := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
+	rec2 := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
 	if rec2.Code != http.StatusUnauthorized {
 		t.Errorf("expected status 401 for invalid token, got %d: %s", rec2.Code, rec2.Body.String())
 	}
@@ -2294,14 +2074,13 @@ func TestTemplateList(t *testing.T) {
 	ctx := context.Background()
 
 	template := &store.Template{
-		ID:         tid("tmpl_test1"),
-		Slug:       "test-template",
-		Name:       "Test Template",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_test1"),
+		Slug:    "test-template",
+		Name:    "Test Template",
+		Harness: "claude",
+		Scope:   "global",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, template); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -2332,7 +2111,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_global1"), Slug: "global-tmpl", Name: "Global Template",
 		Harness: "claude", Scope: "global",
-		Visibility: store.VisibilityPublic, Status: "active",
+		Status:  "active",
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create global template: %v", err)
@@ -2342,7 +2121,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_project1"), Slug: "project-tmpl", Name: "Project Template",
 		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
-		Visibility: store.VisibilityPublic, Status: "active",
+		Status:  "active",
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create project template: %v", err)
@@ -2352,7 +2131,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_project2"), Slug: "other-project-tmpl", Name: "Other Project Template",
 		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
-		Visibility: store.VisibilityPublic, Status: "active",
+		Status:  "active",
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create other project template: %v", err)
@@ -2393,11 +2172,10 @@ func TestTemplateCreate(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]interface{}{
-		"slug":       "new-template",
-		"name":       "New Template",
-		"harness":    "claude",
-		"scope":      "global",
-		"visibility": "private",
+		"slug":    "new-template",
+		"name":    "New Template",
+		"harness": "claude",
+		"scope":   "global",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
@@ -2417,10 +2195,6 @@ func TestTemplateCreate(t *testing.T) {
 
 	if resp.Template.Slug != "new-template" {
 		t.Errorf("expected slug 'new-template', got %q", resp.Template.Slug)
-	}
-
-	if resp.Template.Visibility != store.VisibilityPrivate {
-		t.Errorf("expected visibility 'private', got %q", resp.Template.Visibility)
 	}
 }
 
@@ -2461,8 +2235,17 @@ func TestUserList(t *testing.T) {
 	}
 }
 
-func TestUserCreate_Forbidden(t *testing.T) {
-	srv, _ := testServer(t)
+// TestUserCreate_RoleRefusedAndNonAdminForbidden pins POST /api/v1/users
+// (user.admin.provision) for its main refusals: an authorized session
+// caller (a super-admin) that names the admin role gets 422
+// privileged_role_not_provisionable (design §8 row 12); a caller without
+// user.invite gets 403 before any body check (row 8); and on a hub in
+// dev-auth mode every caller gets 403 dev_auth_not_supported, because dev
+// auth is single-user local mode (row 4a). The full outcome table is in
+// handlers_users_provision_test.go.
+func TestUserCreate_RoleRefusedAndNonAdminForbidden(t *testing.T) {
+	srv, s := testServerNoDevAuth(t)
+	ctx := context.Background()
 
 	body := map[string]interface{}{
 		"email":       "newuser@example.com",
@@ -2470,10 +2253,40 @@ func TestUserCreate_Forbidden(t *testing.T) {
 		"role":        "admin",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/users", body)
+	adminID := tid("usercreate-super")
+	createTestUserWithRole(t, s, adminID, "usercreate-super@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, adminID)
+	if err != nil {
+		t.Fatalf("get super-admin: %v", err)
+	}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("authorized caller with role admin: expected status 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "privileged_role_not_provisionable") {
+		t.Errorf("expected reason privileged_role_not_provisionable: %s", rec.Body.String())
+	}
 
+	member := &store.User{ID: tid("usercreate-member"), Email: "usercreate-member@example.com", DisplayName: "Member", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	rec = doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/users", body)
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("caller without user.invite: expected status 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("no user record may be created, got err=%v", err)
+	}
+
+	devSrv, devStore := testServer(t)
+	rec = doRequest(t, devSrv, http.MethodPost, "/api/v1/users", body)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "dev_auth_not_supported") {
+		t.Errorf("dev-auth hub: expected 403 dev_auth_not_supported, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := devStore.GetUserByEmail(ctx, "newuser@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("no user record may be created on the dev-auth hub, got err=%v", err)
 	}
 }
 
@@ -2778,7 +2591,7 @@ func TestProjectRenameSlugOnly(t *testing.T) {
 	}
 }
 
-func TestProjectRenameSlugSanitized(t *testing.T) {
+func TestProjectRenameSlugMustMatchSlugFormat(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -2793,24 +2606,23 @@ func TestProjectRenameSlugSanitized(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Slug with spaces and uppercase should be sanitized
+	// A slug with spaces and uppercase is refused, not rewritten.
 	body := map[string]interface{}{
 		"slug": "My New Project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_san")), body)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp store.Project
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+	stored, err := s.GetProject(ctx, tid("project_rename_san"))
+	if err != nil {
+		t.Fatalf("failed to get project: %v", err)
 	}
-
-	if resp.Slug != "my-new-project" {
-		t.Errorf("expected sanitized slug %q, got %q", "my-new-project", resp.Slug)
+	if stored.Slug != "sanitize-test" {
+		t.Errorf("expected slug to stay %q, got %q", "sanitize-test", stored.Slug)
 	}
 }
 
@@ -2869,22 +2681,27 @@ func TestProjectRenameGroupMigration(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Create associated groups (mimicking what createProject does)
+	// Create associated groups (mimicking what createProjectGroup and
+	// createProjectMembersGroup write, including the system group markers).
+	// Overlaps TestProjectRenameSlugMigratesSystemGroups, which also checks
+	// the groups keep their IDs; this one also checks the old slugs are gone.
 	agentsGroup := &store.Group{
-		ID:        api.NewUUID(),
-		Name:      "Group Test Agents",
-		Slug:      "project:grp-old:agents",
-		GroupType: store.GroupTypeProjectAgents,
-		ProjectID: tid("project_rename_grp"),
-		CreatedBy: "test-user",
+		ID:          api.NewUUID(),
+		Name:        "Group Test Agents",
+		Slug:        "project:grp-old:agents",
+		GroupType:   store.GroupTypeProjectAgents,
+		ProjectID:   tid("project_rename_grp"),
+		CreatedBy:   "test-user",
+		Annotations: map[string]string{store.AnnotationProjectAgentsGroup: "true"},
 	}
 	membersGroup := &store.Group{
-		ID:        api.NewUUID(),
-		Name:      "Group Test Members",
-		Slug:      "project:grp-old:members",
-		GroupType: store.GroupTypeExplicit,
-		ProjectID: tid("project_rename_grp"),
-		CreatedBy: "test-user",
+		ID:          api.NewUUID(),
+		Name:        "Group Test Members",
+		Slug:        "project:grp-old:members",
+		GroupType:   store.GroupTypeExplicit,
+		ProjectID:   tid("project_rename_grp"),
+		CreatedBy:   "test-user",
+		Annotations: map[string]string{store.AnnotationProjectMembersGroup: "true"},
 	}
 	if err := s.CreateGroup(ctx, agentsGroup); err != nil {
 		t.Fatalf("failed to create agents group: %v", err)
@@ -2985,7 +2802,6 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 		Name:        "My Claude Template",
 		Harness:     "claude",
 		Scope:       "global",
-		Visibility:  store.VisibilityPublic,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "abc123",
 		Files:       []store.TemplateFile{{Path: "CLAUDE.md", Size: 100, Hash: "deadbeef"}},
@@ -3129,14 +2945,13 @@ func TestEnrichAgents_ResolvesTemplateSlug(t *testing.T) {
 
 	// Create a template
 	tmpl := &store.Template{
-		ID:         tid("tmpl_enrich_123"),
-		Slug:       "enriched-template",
-		Name:       "Enriched Template",
-		Harness:    "gemini",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_enrich_123"),
+		Slug:    "enriched-template",
+		Name:    "Enriched Template",
+		Harness: "gemini",
+		Scope:   "global",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -3170,14 +2985,13 @@ func TestEnrichAgent_ResolvesTemplateSlug(t *testing.T) {
 
 	// Create a template
 	tmpl := &store.Template{
-		ID:         tid("tmpl_enrich_single"),
-		Slug:       "single-enriched",
-		Name:       "Single Enriched",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("tmpl_enrich_single"),
+		Slug:    "single-enriched",
+		Name:    "Single Enriched",
+		Harness: "claude",
+		Scope:   "global",
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)
@@ -3197,6 +3011,381 @@ func TestEnrichAgent_ResolvesTemplateSlug(t *testing.T) {
 
 	if agent.Template != "single-enriched" {
 		t.Errorf("expected enriched Template %q, got %q", "single-enriched", agent.Template)
+	}
+}
+
+// TestEnrichAgent_RuntimeMatchesAppliedProfile verifies that enrichAgent sets
+// Runtime from the broker profile the agent actually applied (matched by
+// name), not from whichever available profile happens to be listed first on
+// the broker (ptone/scion#2262).
+func TestEnrichAgent_RuntimeMatchesAppliedProfile(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-mixed"),
+		Name: "Mixed Broker",
+		Slug: "mixed-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_k8s_profile",
+		Slug:            "k8s-agent",
+		Name:            "K8s Agent",
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			Profile: "k8s-prod",
+		},
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "kubernetes" {
+		t.Errorf("expected Runtime %q (agent's own kubernetes profile), got %q", "kubernetes", agent.Runtime)
+	}
+}
+
+// TestEnrichAgent_RuntimeUnresolvedProfileStaysEmpty verifies that enrichAgent
+// leaves Runtime empty when the agent's applied profile name doesn't match
+// any profile the broker advertises, rather than guessing from an unrelated
+// (e.g. docker) profile (ptone/scion#2262).
+func TestEnrichAgent_RuntimeUnresolvedProfileStaysEmpty(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-unresolved"),
+		Name: "Unresolved Broker",
+		Slug: "unresolved-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_unresolved_profile",
+		Slug:            "unresolved-agent",
+		Name:            "Unresolved Agent",
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			Profile: "some-other-profile",
+		},
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "" {
+		t.Errorf("expected Runtime to stay empty for an unresolved profile, got %q", agent.Runtime)
+	}
+}
+
+// TestEnrichAgents_RuntimeMatchesAppliedProfile is the batch-enrichment
+// counterpart of TestEnrichAgent_RuntimeMatchesAppliedProfile, exercising the
+// same resolveAgentRuntime helper used by enrichAgents.
+func TestEnrichAgents_RuntimeMatchesAppliedProfile(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-batch"),
+		Name: "Batch Broker",
+		Slug: "batch-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agents := []store.Agent{
+		{
+			ID:              "agent_batch_k8s",
+			Slug:            "batch-k8s-agent",
+			Name:            "Batch K8s Agent",
+			RuntimeBrokerID: broker.ID,
+			AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+		},
+		{
+			ID:              "agent_batch_unresolved",
+			Slug:            "batch-unresolved-agent",
+			Name:            "Batch Unresolved Agent",
+			RuntimeBrokerID: broker.ID,
+			AppliedConfig:   &store.AgentAppliedConfig{Profile: "does-not-exist"},
+		},
+	}
+
+	srv.enrichAgents(ctx, agents)
+
+	if agents[0].Runtime != "kubernetes" {
+		t.Errorf("expected Runtime %q for agent on the kubernetes profile, got %q", "kubernetes", agents[0].Runtime)
+	}
+	if agents[1].Runtime != "" {
+		t.Errorf("expected Runtime to stay empty for an unresolved profile, got %q", agents[1].Runtime)
+	}
+}
+
+// TestResolveAgentRuntime is a direct table test of the helper, covering the
+// edge cases display enrichment and the heartbeat backfill both rely on:
+// nil inputs, a matched profile (including one that's currently
+// unavailable, since availability doesn't change which runtime an already
+// -applied profile used), an unmatched/empty profile on a single-type
+// broker (ptone/scion#2262 — the runtime is unambiguous there even without a
+// name match), an unmatched/empty profile on a mixed-type broker (must stay
+// "", not guess), and a broker with an empty-Type profile mixed in (must
+// stay "", not guess from the other profile's type either).
+func TestResolveAgentRuntime(t *testing.T) {
+	mixedBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	singleTypeBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "default", Type: "kubernetes", Available: true},
+		},
+	}
+	multiSameTypeBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "k8s-a", Type: "kubernetes", Available: true},
+			{Name: "k8s-b", Type: "kubernetes", Available: false},
+		},
+	}
+	unavailableMatchBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: false},
+		},
+	}
+	emptyProfilesBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{},
+	}
+	mixedEmptyTypeBroker := &store.RuntimeBroker{
+		Profiles: []store.BrokerProfile{
+			{Name: "a", Type: ""},
+			{Name: "b", Type: "docker"},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		agent  *store.Agent
+		broker *store.RuntimeBroker
+		want   string
+	}{
+		{
+			name:   "nil agent",
+			agent:  nil,
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "nil broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "k8s-prod"}},
+			broker: nil,
+			want:   "",
+		},
+		{
+			name:   "nil AppliedConfig on mixed-type broker",
+			agent:  &store.Agent{},
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "nil AppliedConfig on single-type broker",
+			agent:  &store.Agent{},
+			broker: singleTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "empty Profile on mixed-type broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}},
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "empty Profile on single-type broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}},
+			broker: singleTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "unmatched Profile on mixed-type broker stays empty",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: mixedBroker,
+			want:   "",
+		},
+		{
+			name:   "unmatched Profile on single-type broker resolves to the shared type",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: singleTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "unmatched Profile on a broker with multiple same-type profiles",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: multiSameTypeBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "matched Profile wins even when Available is false",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "k8s-prod"}},
+			broker: unavailableMatchBroker,
+			want:   "kubernetes",
+		},
+		{
+			name:   "matched Profile on mixed-type broker",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "docker-default"}},
+			broker: mixedBroker,
+			want:   "docker",
+		},
+		{
+			name:   "empty Profiles list stays empty",
+			agent:  &store.Agent{},
+			broker: emptyProfilesBroker,
+			want:   "",
+		},
+		{
+			name:   "unmatched Profile on a broker with an empty-Type profile stays empty",
+			agent:  &store.Agent{AppliedConfig: &store.AgentAppliedConfig{Profile: "does-not-exist"}},
+			broker: mixedEmptyTypeBroker,
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveAgentRuntime(tt.agent, tt.broker)
+			if got != tt.want {
+				t.Errorf("resolveAgentRuntime() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnrichAgent_RuntimeResolvesUnambiguousSingleTypeBroker covers the
+// enrichAgent path for a broker whose advertised profiles all share one
+// runtime type: an agent with no applied profile on record still resolves
+// to that type instead of regressing to an empty Runtime.
+func TestEnrichAgent_RuntimeResolvesUnambiguousSingleTypeBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-single-type"),
+		Name: "Single Type Broker",
+		Slug: "single-type-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "default", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_no_profile",
+		Slug:            "no-profile-agent",
+		Name:            "No Profile Agent",
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig:   nil,
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "kubernetes" {
+		t.Errorf("expected Runtime %q for an unambiguous single-type broker, got %q", "kubernetes", agent.Runtime)
+	}
+}
+
+// TestEnrichAgent_RuntimeNeverOverwritesExplicitValue verifies that an agent
+// that already carries a Runtime is never overwritten by enrichment, even
+// when the broker would resolve a different value from the applied profile.
+func TestEnrichAgent_RuntimeNeverOverwritesExplicitValue(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-no-overwrite"),
+		Name: "No Overwrite Broker",
+		Slug: "no-overwrite-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID:              "agent_explicit_runtime",
+		Slug:            "explicit-runtime-agent",
+		Name:            "Explicit Runtime Agent",
+		RuntimeBrokerID: broker.ID,
+		Runtime:         "docker",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+	}
+
+	srv.enrichAgent(ctx, agent, nil, nil)
+
+	if agent.Runtime != "docker" {
+		t.Errorf("expected the pre-existing Runtime %q to be left alone, got %q", "docker", agent.Runtime)
+	}
+
+	// Same assertion via the passed-broker branch (broker looked up by the
+	// caller and passed in directly, rather than loaded by RuntimeBrokerID).
+	agent2 := &store.Agent{
+		ID:              "agent_explicit_runtime_passed_broker",
+		Slug:            "explicit-runtime-agent-passed-broker",
+		Name:            "Explicit Runtime Agent Passed Broker",
+		RuntimeBrokerID: broker.ID,
+		Runtime:         "docker",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+	}
+
+	srv.enrichAgent(ctx, agent2, nil, broker)
+
+	if agent2.Runtime != "docker" {
+		t.Errorf("expected the pre-existing Runtime %q to be left alone via the passed-broker branch, got %q", "docker", agent2.Runtime)
+	}
+}
+
+// TestEnrichAgents_RuntimeNeverOverwritesExplicitValue is the batch
+// counterpart of TestEnrichAgent_RuntimeNeverOverwritesExplicitValue.
+func TestEnrichAgents_RuntimeNeverOverwritesExplicitValue(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:   tid("runtime-broker-batch-no-overwrite"),
+		Name: "Batch No Overwrite Broker",
+		Slug: "batch-no-overwrite-broker",
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agents := []store.Agent{
+		{
+			ID:              "agent_batch_explicit_runtime",
+			Slug:            "batch-explicit-runtime-agent",
+			Name:            "Batch Explicit Runtime Agent",
+			RuntimeBrokerID: broker.ID,
+			Runtime:         "docker",
+			AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+		},
+	}
+
+	srv.enrichAgents(ctx, agents)
+
+	if agents[0].Runtime != "docker" {
+		t.Errorf("expected the pre-existing Runtime %q to be left alone, got %q", "docker", agents[0].Runtime)
 	}
 }
 
@@ -3231,7 +3420,6 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: tid("broker-msg"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatal(err)

@@ -248,6 +248,9 @@ func (_u *InviteCodeUpdate) sqlSave(ctx context.Context) (_node int, err error) 
 	if value, ok := _u.mutation.Note(); ok {
 		_spec.SetField(invitecode.FieldNote, field.TypeString, value)
 	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(invitecode.FieldIssuanceID, field.TypeString)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{invitecode.Label}
@@ -517,6 +520,9 @@ func (_u *InviteCodeUpdateOne) sqlSave(ctx context.Context) (_node *InviteCode, 
 	}
 	if value, ok := _u.mutation.Note(); ok {
 		_spec.SetField(invitecode.FieldNote, field.TypeString, value)
+	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(invitecode.FieldIssuanceID, field.TypeString)
 	}
 	_node = &InviteCode{config: _u.config}
 	_spec.Assign = _node.assignValues

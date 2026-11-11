@@ -1,0 +1,726 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+)
+
+// Waiting for a Hub agent launch to finish (`scion start` / `scion resume`
+// through the Hub). A Hub with asynchronous launch enabled answers the create as
+// soon as the broker accepts it, with the agent in a pre-running phase and
+// an active launch; the CLI then polls GET agent until the agent is running
+// or the launch has failed.
+
+// The wait timings are variables so tests can shorten them.
+var (
+	// launchPollInterval is how often the agent is fetched while waiting.
+	launchPollInterval = 2 * time.Second
+	// launchWaitSlack is added to the Hub-advertised remaining launch budget
+	// to form the default wait. It covers the Hub's reaper interval, the
+	// poll interval and clock skew, so the wait outlasts the Hub's own
+	// deadline handling.
+	launchWaitSlack = 30 * time.Second
+	// launchWaitFallback is the default wait when the Hub does not advertise
+	// a launch budget (older Hub, async launch disabled, no active launch).
+	launchWaitFallback = 5 * time.Minute
+	// launchUnreadableGrace is how long an accepted launch whose status
+	// read is refused or answered not-found, before any read has succeeded,
+	// is retried before the wait reports the status as not readable. It is
+	// the whole retry window, measured from the first failed read: the last
+	// delay is cut short so the final retry falls at its end. Right after
+	// the accept the read can fail briefly; a few seconds covers that
+	// without holding a launcher that can never read the status for long.
+	launchUnreadableGrace = 5 * time.Second
+	// launchUnreadableBackoff is the first retry delay within
+	// launchUnreadableGrace; it doubles up to launchUnreadableBackoffMax.
+	// With the defaults the retries come after 250ms, 500ms, 1s, 2s and
+	// the remaining 1.25s.
+	launchUnreadableBackoff    = 250 * time.Millisecond
+	launchUnreadableBackoffMax = 2 * time.Second
+)
+
+// launchNow and launchAfter are the clock used by the unreadable-status
+// retry; tests replace them.
+var (
+	launchNow   = time.Now
+	launchAfter = time.After
+)
+
+const (
+	// launchFetchTimeout bounds one GET agent while waiting.
+	launchFetchTimeout = 30 * time.Second
+
+	// errCodeAgentCreateIncomplete is the Hub's 409 code for a start of an
+	// agent whose create launch stopped or failed before the agent ran.
+	errCodeAgentCreateIncomplete = "agent_create_incomplete"
+
+	// exitCodeInterrupted and exitCodeTerminated are the conventional exit
+	// statuses after SIGINT and SIGTERM (128 + signal number).
+	exitCodeInterrupted = 130
+	exitCodeTerminated  = 143
+)
+
+// Flags shared by `scion start` and `scion resume`.
+var (
+	startNoWait      bool
+	startWaitTimeout time.Duration
+)
+
+// validateLaunchWaitFlags rejects invalid --no-wait / --wait-timeout values.
+func validateLaunchWaitFlags() error {
+	if startWaitTimeout < 0 {
+		return fmt.Errorf("--wait-timeout must not be negative (got %s)", startWaitTimeout)
+	}
+	return nil
+}
+
+// exitCoder is implemented by errors that request a specific process exit
+// status. Execute uses it; every other error exits 1.
+type exitCoder interface {
+	ExitCode() int
+}
+
+// launchActive reports whether the Hub reports an in-flight launch for a.
+func launchActive(a *hubclient.Agent) bool {
+	return a != nil && a.Launch != nil && a.Launch.Active
+}
+
+// launchWaitBudget returns how long to wait for a launch. An explicit
+// --wait-timeout wins. Otherwise the Hub-advertised remaining launch budget
+// plus launchWaitSlack is used, and launchWaitFallback when the Hub does not
+// advertise one.
+func launchWaitBudget(explicit time.Duration, a *hubclient.Agent) time.Duration {
+	if explicit > 0 {
+		return explicit
+	}
+	if a != nil && a.Launch != nil && a.Launch.RemainingSeconds != nil {
+		remaining := *a.Launch.RemainingSeconds
+		if remaining < 0 {
+			remaining = 0
+		}
+		return time.Duration(remaining)*time.Second + launchWaitSlack
+	}
+	return launchWaitFallback
+}
+
+// launchWaitOptions configures waitForAgentLaunch.
+type launchWaitOptions struct {
+	// AgentName is the name used in messages and hints.
+	AgentName string
+	// BudgetFrom is the agent from the create response, used to derive the
+	// default wait. It may be nil; the first fetched agent is then used.
+	BudgetFrom *hubclient.Agent
+	// Accepted reports that the Hub accepted the start being waited for:
+	// the create answer shows an active launch, or a workspace finalize
+	// dispatched the start. Then a status read that is refused or answered
+	// not-found before any read has succeeded is retried briefly and, for
+	// an agent caller, reported as not readable
+	// (*launchStatusUnreadableError) rather than as a deletion. An agent
+	// caller's not-found is reported as not readable even when Accepted is
+	// false (before any read, only without the retry), and also after a
+	// read, once the not-found has lasted through launchUnreadableGrace.
+	Accepted bool
+	// LaunchID is the accepted launch's ID, when the client holds one; it
+	// only names the launch in the not-readable message.
+	LaunchID string
+	// PriorLaunchID is the ID of a launch that had already ended when the
+	// wait began (the create answer showed it ended). Its error belongs to
+	// an earlier attempt, so it does not end the wait; "" when none.
+	PriorLaunchID string
+	// Get fetches the agent.
+	Get func(ctx context.Context) (*hubclient.Agent, error)
+	// Timeout is an explicit wait (--wait-timeout); 0 derives it.
+	Timeout time.Duration
+	// PollInterval defaults to launchPollInterval.
+	PollInterval time.Duration
+	// Progress receives one line per phase or step change; nil is silent.
+	Progress io.Writer
+}
+
+// waitForAgentLaunch fetches the agent immediately and then every poll
+// interval until it is running (returned with a nil error), reaches error or
+// stopped (*launchFailedError), is deleted, the wait budget runs out
+// (*launchWaitTimeoutError), or ctx is cancelled (*launchWaitInterruptedError).
+// Transient fetch errors (network, 5xx, 408, 429) are retried; other 4xx
+// answers end the wait with the Hub's error. The agent is reported deleted
+// only to a user caller: on a not-found after it has been read in this wait
+// that persists for launchUnreadableGrace, or on a not-found before any
+// read (after launchUnreadableGrace when Accepted). An agent caller's
+// not-found is reported as a status that is not readable
+// (*launchStatusUnreadableError), before or after a read; see Accepted. It
+// never changes the agent.
+func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Agent, error) {
+	interval := o.PollInterval
+	if interval <= 0 {
+		interval = launchPollInterval
+	}
+
+	var last *hubclient.Agent
+	var progress launchProgress
+	var waitCtx context.Context
+	var cancel context.CancelFunc
+
+	// check fetches once and reports whether the wait is over.
+	check := func(fetchCtx context.Context) (bool, error) {
+		getCtx, getCancel := context.WithTimeout(fetchCtx, launchFetchTimeout)
+		a, err := o.Get(getCtx)
+		getCancel()
+		if err != nil && last == nil && o.Accepted && isUnreadableStatusError(err) {
+			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
+			// When the retry is cut short, the wait loop reports the
+			// interrupt or timeout, except for a user caller whose wait
+			// budget ran out: its 403 or 404 is a definite answer and is
+			// reported below, not as a launch still in progress.
+			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil &&
+				(ctx.Err() != nil || config.IsHubManagedAgent()) {
+				return false, nil
+			}
+		}
+		// A not-found after the agent has been read in this wait ends the
+		// wait: for a user caller as a deletion, which fails the start, and
+		// for an agent caller as a status that is not readable (below). A
+		// single not-found is not enough for either: it is confirmed by
+		// retrying for launchUnreadableGrace, and any successful read in
+		// that window means the agent is still readable and the wait goes
+		// on. If the wait budget runs out first, the not-found that lasted
+		// to the end of the wait is reported below, not as a launch still
+		// in progress; only an interrupt is left to the wait loop.
+		if err != nil && last != nil && apiclient.IsNotFoundError(err) {
+			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
+			if err != nil && isUnreadableStatusError(err) && ctx.Err() != nil {
+				return false, nil // the wait loop reports the interrupt
+			}
+		}
+		// An agent caller gets the same 404 for an agent it may not read as
+		// for a missing one, so its 404 does not mean the agent is gone:
+		// not before any read has succeeded, whether or not the start shows
+		// an accepted launch (Accepted only decides the retry above), and
+		// not after a read either, since the Hub can refuse a later read
+		// that an earlier one passed (for example an authorization lookup
+		// that fails closed). After a read, the report says the agent may
+		// have been deleted (AfterRead). Before any read, after an
+		// accepted launch, an agent caller's 403 is reported the same way;
+		// after a read, its 403 keeps the Hub's refusal below.
+		// A user caller is refused with 403, so a user's 404 is a definite
+		// not-found and a user's 403 keeps the login hint below. This
+		// follows the Hub's read check: authorizeSingleAgentRead and
+		// writeAgentNotFound in pkg/hub/handlers_agents_core.go.
+		if err != nil && config.IsHubManagedAgent() &&
+			(apiclient.IsNotFoundError(err) || (last == nil && o.Accepted && apiclient.IsForbiddenError(err))) {
+			return true, &launchStatusUnreadableError{Agent: o.AgentName, LaunchID: o.LaunchID, AfterRead: last != nil, Err: err}
+		}
+		if err != nil {
+			if apiclient.IsNotFoundError(err) {
+				return true, fmt.Errorf("agent '%s' no longer exists; it was deleted while launching", o.AgentName)
+			}
+			if isTerminalFetchError(err) {
+				return true, launchFetchRejectedError(o.AgentName, err)
+			}
+			return false, nil // transient: retry on the next tick
+		}
+		if a == nil {
+			return false, nil
+		}
+		last = a
+		progress.report(o.Progress, o.AgentName, a)
+		return launchOutcome(o.AgentName, a, o.PriorLaunchID)
+	}
+
+	start := func(budgetAgent *hubclient.Agent) {
+		waitCtx, cancel = context.WithTimeout(ctx, launchWaitBudget(o.Timeout, budgetAgent))
+	}
+
+	// An explicit --wait-timeout starts before the first fetch, so it also
+	// bounds the unreadable-status retry.
+	if o.Timeout > 0 || (o.BudgetFrom != nil && o.BudgetFrom.Launch != nil && o.BudgetFrom.Launch.RemainingSeconds != nil) {
+		start(o.BudgetFrom)
+		defer cancel()
+		if done, err := check(waitCtx); done {
+			return last, err
+		}
+	} else {
+		// Fetch first so the budget can come from the Hub's current view.
+		done, err := check(ctx)
+		budgetAgent := last
+		if budgetAgent == nil {
+			budgetAgent = o.BudgetFrom
+		}
+		start(budgetAgent)
+		defer cancel()
+		if done {
+			return last, err
+		}
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return last, &launchWaitInterruptedError{Agent: o.AgentName, Deadline: launchDeadline(last), Signal: waitSignalOf(ctx)}
+			}
+			return last, &launchWaitTimeoutError{Agent: o.AgentName, Deadline: launchDeadline(last)}
+		case <-ticker.C:
+			if done, err := check(waitCtx); done {
+				return last, err
+			}
+		}
+	}
+}
+
+// launchOutcome maps an agent to the end of the wait: the phase rule of
+// launchPhaseOutcome, and also a launch that has ended with an error code
+// or a failed end reason, whatever the phase (design wave 3 D-g): a failed start can leave the agent
+// in any phase its start path restores. priorLaunchID names a launch that
+// had already ended before this wait (the create answer showed it ended);
+// its error is an earlier attempt's, so it does not end the wait.
+func launchOutcome(name string, a *hubclient.Agent, priorLaunchID string) (bool, error) {
+	if done, err := launchPhaseOutcome(name, a); done {
+		return done, err
+	}
+	if l := a.Launch; l != nil && !l.Active && l.ID != priorLaunchID && (l.Error != "" || failedLaunchEndReason(l.EndReason)) {
+		return true, newLaunchFailedError(name, a)
+	}
+	return false, nil
+}
+
+// failedLaunchEndReason reports whether an ended launch's end reason means
+// it did not bring the agent up, even without an error code. It is
+// pkg/hubclient's rule: not_launched is not one of them, because the Hub
+// also ends a launch not_launched when a broker without async launch
+// answered the start synchronously (pkg/hub/launch_dispatch.go), and that
+// start goes on, so it must not end the wait. The Hub's not_launched
+// failures carry the code dispatch_failed, which ends the wait.
+func failedLaunchEndReason(reason string) bool {
+	switch reason {
+	case "failed", "timed_out", "lost":
+		return true
+	}
+	return false
+}
+
+// launchPhaseOutcome is the phase-only end of the wait, which is all that
+// CLIs released before the ended-launch rule check: running is success;
+// error, stopped and halted are failures; every other phase keeps waiting.
+func launchPhaseOutcome(name string, a *hubclient.Agent) (bool, error) {
+	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
+	switch phase {
+	case string(state.PhaseRunning):
+		return true, nil
+	case string(state.PhaseError), string(state.PhaseStopped), string(state.PhaseHalted):
+		return true, newLaunchFailedError(name, a)
+	}
+	return false, nil
+}
+
+// launchDeadline returns the active launch's deadline, or nil.
+func launchDeadline(a *hubclient.Agent) *time.Time {
+	if a == nil || a.Launch == nil {
+		return nil
+	}
+	return a.Launch.Deadline
+}
+
+// launchProgress prints a line whenever the phase or launch step changes.
+type launchProgress struct {
+	printed   bool
+	lastPhase string
+	lastStep  string
+}
+
+func (p *launchProgress) report(w io.Writer, name string, a *hubclient.Agent) {
+	if w == nil {
+		return
+	}
+	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
+	step := ""
+	if a.Launch != nil {
+		step = a.Launch.Step
+	}
+	if p.printed && phase == p.lastPhase && step == p.lastStep {
+		return
+	}
+	p.printed, p.lastPhase, p.lastStep = true, phase, step
+	if step != "" {
+		_, _ = fmt.Fprintf(w, "  %s: %s (%s)\n", name, phase, launchStepLabel(step))
+	} else {
+		_, _ = fmt.Fprintf(w, "  %s: %s\n", name, phase)
+	}
+}
+
+// launchFailedError is returned when the agent ends in error or stopped
+// instead of running, and for a Hub 409 agent_create_incomplete.
+type launchFailedError struct {
+	Agent string
+	Phase string
+	// Incomplete is true when the agent's create did not complete. The
+	// record stays on the Hub; it can only be recreated (delete, then start).
+	Incomplete bool
+	// Reason is the first line of the message.
+	Reason string
+	// HubOwnsHint is true when Reason is the Hub's agent_create_incomplete
+	// message, which carries the recovery instruction itself.
+	HubOwnsHint bool
+	Template    string
+	Task        string
+}
+
+// recreateHint is the recovery instruction for an incomplete create. It
+// follows the Hub's wording: with soft-delete retention a plain delete keeps
+// the name reserved.
+func recreateHint(name string) string {
+	return fmt.Sprintf("The create did not complete. Delete the agent and create it again with the same template and task:\n"+
+		"  scion delete %s\n"+
+		"  scion start %s ...\n"+
+		"If soft-delete retention is enabled on the Hub, the name stays reserved until the agent is deleted with force=true or purged; until then, use a new name.",
+		name, name)
+}
+
+func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
+	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
+	e := &launchFailedError{Agent: name, Phase: phase}
+	if a.Launch != nil && a.Launch.Error != "" {
+		e.Incomplete = a.Launch.Kind == "" || a.Launch.Kind == "create"
+		// The raw code stays first and its label follows, unless the
+		// message already carries the label: the broker's fixed failure
+		// text for a typed failure is the label (the Hub prefixes the
+		// step), and it is not printed twice.
+		code := a.Launch.Error
+		if label := launchCodeLabel(a.Launch.Error); !strings.Contains(a.Message, label) {
+			code += ": " + label
+		}
+		if a.Launch.Cause != "" {
+			// The fixed runtime cause code (ptone/scion#4666), such as
+			// runtime_forbidden: the runtime refused the start.
+			code += ", cause " + a.Launch.Cause
+		}
+		reason := fmt.Sprintf("agent '%s' did not start (%s)", name, code)
+		if e.Incomplete {
+			reason = fmt.Sprintf("agent '%s' create did not complete (%s)", name, code)
+		}
+		switch {
+		case a.Launch.Error == api.LaunchCodeLaunchStopped && e.Incomplete:
+			// A launch someone stopped did not fail: the text says so
+			// without the failure framing (the exit status stays 1, the
+			// start did not happen).
+			reason = fmt.Sprintf("agent '%s' create did not complete: the create was stopped (%s)", name, a.Launch.Error)
+		case a.Launch.Error == api.LaunchCodeLaunchStopped:
+			reason = fmt.Sprintf("agent '%s' did not start: the start was stopped (%s)", name, a.Launch.Error)
+		case a.Launch.Step != "":
+			reason += " while " + launchStepLabel(a.Launch.Step)
+		}
+		if a.Message != "" {
+			reason += ": " + a.Message
+		}
+		e.Reason = reason
+		e.Template = a.Template
+		if a.AppliedConfig != nil {
+			e.Task = a.AppliedConfig.Task
+		}
+		return e
+	}
+	info := phase
+	if a.ContainerStatus != "" {
+		info += ", container: " + a.ContainerStatus
+	}
+	e.Reason = fmt.Sprintf("agent '%s' failed to start (phase: %s)", name, info)
+	if a.Message != "" {
+		e.Reason += ": " + a.Message
+	}
+	return e
+}
+
+// isTerminalFetchError reports whether a status fetch failed with a client
+// error that a retry will not fix: any 4xx except 408 and 429.
+func isTerminalFetchError(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	code := apiErr.StatusCode
+	if code < 400 || code >= 500 {
+		return false
+	}
+	return code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+}
+
+// isUnreadableStatusError reports whether a status fetch was refused (403)
+// or answered not-found (404): for an agent this client just launched,
+// either can mean the status is not readable with the caller's scope.
+func isUnreadableStatusError(err error) bool {
+	return apiclient.IsNotFoundError(err) || apiclient.IsForbiddenError(err)
+}
+
+// retryUnreadableStatus retries a status fetch that failed with an
+// unreadable-status error (a refusal or a not-found that may be transient
+// or may mean the status is not readable or the agent is gone), with
+// backoff, for launchUnreadableGrace; the last delay is shortened to end
+// at the grace. It returns the first success, the first other error, or
+// the last unreadable-status error when the grace runs out or ctx ends
+// (also when ctx ends during a read).
+func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubclient.Agent, error), err error) (*hubclient.Agent, error) {
+	deadline := launchNow().Add(launchUnreadableGrace)
+	delay := launchUnreadableBackoff
+	for {
+		remaining := deadline.Sub(launchNow())
+		if remaining <= 0 {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-launchAfter(min(delay, remaining)):
+		}
+		getCtx, getCancel := context.WithTimeout(ctx, launchFetchTimeout)
+		a, getErr := get(getCtx)
+		getCancel()
+		if getErr != nil && ctx.Err() != nil {
+			return nil, err // a read cut short by ctx says nothing new
+		}
+		if getErr == nil || !isUnreadableStatusError(getErr) {
+			return a, getErr
+		}
+		err = getErr
+		delay = min(delay*2, launchUnreadableBackoffMax)
+	}
+}
+
+// launchStatusUnreadableError is returned when the Hub accepted the launch
+// but the new agent's status could not be read with the caller's
+// credential. The launch itself is not affected. finishHubStart reports it
+// as an accepted launch (exit 0), like a wait timeout, unless --attach
+// needs the running agent.
+type launchStatusUnreadableError struct {
+	Agent    string
+	LaunchID string
+	// AfterRead is true when the status was read earlier in the wait and
+	// then stopped being readable. That can also mean the agent was
+	// deleted, so the message does not say the launch continues.
+	AfterRead bool
+	Err       error
+}
+
+func (e *launchStatusUnreadableError) Error() string {
+	launch := ""
+	if e.LaunchID != "" {
+		launch = fmt.Sprintf(" (launch %s)", e.LaunchID)
+	}
+	if e.AfterRead {
+		return fmt.Sprintf("agent '%s': status no longer readable with this credential's scope%s; it may have been deleted, or the Hub refused the read",
+			e.Agent, launch)
+	}
+	return fmt.Sprintf("agent '%s': launch accepted; status not readable with this credential's scope%s; the launch continues on the Hub",
+		e.Agent, launch)
+}
+
+func (e *launchStatusUnreadableError) Unwrap() error { return e.Err }
+
+// launchFetchRejectedError reports a status fetch the Hub refused. The launch
+// itself is not affected.
+func launchFetchRejectedError(name string, err error) error {
+	hint := ""
+	if (apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err)) && !config.IsHubManagedAgent() {
+		hint = "; check your Hub login with 'scion hub auth login'"
+	}
+	return fmt.Errorf("stopped waiting for agent '%s': the Hub refused the status request%s; the launch continues on the Hub: %w", name, hint, err)
+}
+
+// incompleteCreateError builds the error for a Hub 409
+// agent_create_incomplete answer to a start.
+func incompleteCreateError(name string, apiErr *apiclient.APIError) *launchFailedError {
+	e := &launchFailedError{Agent: name, Incomplete: true, Reason: apiErr.Message, HubOwnsHint: apiErr.Message != ""}
+	if e.Reason == "" {
+		e.Reason = fmt.Sprintf("agent '%s' create did not complete", name)
+	}
+	if apiErr.Details != nil {
+		e.Template, _ = apiErr.Details["template"].(string)
+		e.Task, _ = apiErr.Details["task"].(string)
+	}
+	return e
+}
+
+func (e *launchFailedError) Error() string {
+	var b strings.Builder
+	b.WriteString(e.Reason)
+	if !e.Incomplete {
+		fmt.Fprintf(&b, "\n\nCheck the agent logs with: scion logs %s", e.Agent)
+		return b.String()
+	}
+	if e.Template != "" || e.Task != "" {
+		b.WriteString("\n")
+		if e.Template != "" {
+			fmt.Fprintf(&b, "\nTemplate: %s", e.Template)
+		}
+		if e.Task != "" {
+			fmt.Fprintf(&b, "\nTask: %s", e.Task)
+		}
+	}
+	if e.HubOwnsHint {
+		return b.String()
+	}
+	b.WriteString("\n\n")
+	b.WriteString(recreateHint(e.Agent))
+	return b.String()
+}
+
+// launchWaitTimeoutError is returned when the wait budget runs out while the
+// agent is still launching. The launch itself is not affected. finishHubStart
+// reports it for an accepted launch as accepted (exit 0), unless --attach
+// needs the running agent.
+type launchWaitTimeoutError struct {
+	Agent    string
+	Deadline *time.Time
+}
+
+func (e *launchWaitTimeoutError) Error() string {
+	return fmt.Sprintf("agent '%s' is still launching%s; re-run scion start %s to keep waiting",
+		e.Agent, deadlineSuffix(e.Deadline), e.Agent)
+}
+
+// launchWaitInterruptedError is returned when the wait is stopped by a
+// signal (Ctrl-C or SIGTERM) or a cancelled context. Only the wait stops;
+// the launch continues on the Hub.
+type launchWaitInterruptedError struct {
+	Agent    string
+	Deadline *time.Time
+	// Signal is the signal that stopped the wait; nil means SIGINT or a
+	// plain cancellation.
+	Signal os.Signal
+}
+
+func (e *launchWaitInterruptedError) Error() string {
+	what := "stopped waiting"
+	if e.Signal == syscall.SIGTERM {
+		what = "terminated while waiting"
+	}
+	return fmt.Sprintf("%s; agent '%s' is still launching%s; re-run scion start %s to keep waiting",
+		what, e.Agent, deadlineSuffix(e.Deadline), e.Agent)
+}
+
+func (e *launchWaitInterruptedError) ExitCode() int {
+	if e.Signal == syscall.SIGTERM {
+		return exitCodeTerminated
+	}
+	return exitCodeInterrupted
+}
+
+// waitSignalCause is the cancellation cause recorded by signalWaitContext.
+type waitSignalCause struct{ sig os.Signal }
+
+func (c waitSignalCause) Error() string { return "received " + c.sig.String() }
+
+// waitSignalOf returns the signal that cancelled ctx, or nil.
+func waitSignalOf(ctx context.Context) os.Signal {
+	var c waitSignalCause
+	if errors.As(context.Cause(ctx), &c) {
+		return c.sig
+	}
+	return nil
+}
+
+// signalNotify and signalStop are the signal registration functions used by
+// signalWaitContext; tests replace them to observe registration.
+var (
+	signalNotify = signal.Notify
+	signalStop   = signal.Stop
+)
+
+// waitForAgentLaunchWithSignals runs waitForAgentLaunch under a context
+// cancelled by SIGINT or SIGTERM, and releases the signal handler when the
+// wait ends on any path.
+func waitForAgentLaunchWithSignals(o launchWaitOptions) (*hubclient.Agent, error) {
+	ctx, stop := signalWaitContext()
+	defer stop()
+	return waitForAgentLaunch(ctx, o)
+}
+
+// signalWaitContext returns a context cancelled by SIGINT or SIGTERM, with
+// the signal recorded as the cause. stop releases the signal handler.
+func signalWaitContext() (ctx context.Context, stop func()) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	ch := make(chan os.Signal, 1)
+	signalNotify(ch, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-ch:
+			cancel(waitSignalCause{sig: sig})
+		case <-done:
+		}
+	}()
+	return ctx, func() {
+		signalStop(ch)
+		close(done)
+		cancel(nil)
+	}
+}
+
+func deadlineSuffix(d *time.Time) string {
+	if d == nil || d.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf(" (deadline %s)", d.UTC().Format(time.RFC3339))
+}
+
+// acceptedLaunchNotFollowed reports whether a launch wait error leaves an
+// accepted launch running on the Hub with an outcome the wait could not
+// see: the status was not readable with this credential, or the launch was
+// still in progress when the wait budget ran out. It returns the line that
+// explains why the wait did not follow the launch to running.
+func acceptedLaunchNotFollowed(err error) (string, bool) {
+	var unreadable *launchStatusUnreadableError
+	if errors.As(err, &unreadable) {
+		launch := ""
+		if unreadable.LaunchID != "" {
+			launch = fmt.Sprintf(" (launch %s)", unreadable.LaunchID)
+		}
+		if unreadable.AfterRead {
+			return fmt.Sprintf("Its status is no longer readable with this credential's scope%s; it may have been deleted, or the Hub refused the read.", launch), true
+		}
+		return fmt.Sprintf("Its status is not readable with this credential's scope%s; the launch continues on the Hub.", launch), true
+	}
+	var timeout *launchWaitTimeoutError
+	if errors.As(err, &timeout) {
+		return fmt.Sprintf("It was still launching when the wait ended%s; the launch continues on the Hub.", deadlineSuffix(timeout.Deadline)), true
+	}
+	return "", false
+}
+
+// asIncompleteCreate returns the Hub's agent_create_incomplete error, if err
+// is one.
+func asIncompleteCreate(err error) (*apiclient.APIError, bool) {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == errCodeAgentCreateIncomplete {
+		return apiErr, true
+	}
+	return nil, false
+}

@@ -75,7 +75,7 @@ func (s *inviteService) Create(ctx context.Context, req *InviteCreateRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[InviteCreateResponse](resp)
+	return apiclient.DecodeRequired[InviteCreateResponse](resp)
 }
 
 func (s *inviteService) List(ctx context.Context, cursor string) (*InviteListResponse, error) {
@@ -87,7 +87,7 @@ func (s *inviteService) List(ctx context.Context, cursor string) (*InviteListRes
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[InviteListResponse](resp)
+	return apiclient.DecodeRequired[InviteListResponse](resp)
 }
 
 func (s *inviteService) Get(ctx context.Context, id string) (*InviteCode, error) {
@@ -95,7 +95,7 @@ func (s *inviteService) Get(ctx context.Context, id string) (*InviteCode, error)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[InviteCode](resp)
+	return apiclient.DecodeRequired[InviteCode](resp)
 }
 
 func (s *inviteService) Revoke(ctx context.Context, id string) error {

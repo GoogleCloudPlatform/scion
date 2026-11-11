@@ -15,11 +15,25 @@
 package config
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,6 +84,37 @@ func TestDetectRemoteType(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := DetectRemoteType(tt.uri)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestGitHubRepoForURL verifies that only GitHub folder URLs yield an
+// owner/repo for credential lookup; archives (even on github.com), rclone and
+// other hosts do not.
+func TestGitHubRepoForURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		uri       string
+		wantOwner string
+		wantRepo  string
+		wantOK    bool
+	}{
+		{"tree URL", "https://github.com/acme-corp/templates/tree/main/.scion/templates", "acme-corp", "templates", true},
+		{"repo root", "https://github.com/acme-corp/templates", "acme-corp", "templates", true},
+		{"direct path", "https://github.com/acme-corp/templates/harnesses/claude", "acme-corp", "templates", true},
+		{"clone URL keeps .git (ghauth.RepoKey drops it)", "https://github.com/acme-corp/templates.git", "acme-corp", "templates.git", true},
+		{"github archive", "https://github.com/acme-corp/templates/archive/main.tar.gz", "", "", false},
+		{"owner only", "https://github.com/acme-corp", "", "", false},
+		{"other host", "https://example.com/acme-corp/templates", "", "", false},
+		{"archive elsewhere", "https://example.com/template.tgz", "", "", false},
+		{"rclone", ":gcs:bucket/path", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo, ok := GitHubRepoForURL(tt.uri)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantOwner, owner)
+			assert.Equal(t, tt.wantRepo, repo)
 		})
 	}
 }
@@ -501,57 +546,485 @@ func TestGenerateCacheKey(t *testing.T) {
 	assert.Len(t, key1, 16) // 8 bytes = 16 hex chars
 }
 
-func TestFetchGitHubTarball_AuthToken(t *testing.T) {
-	var receivedAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusNotFound)
+// githubTarballFixture builds a gzipped tarball shaped like a GitHub archive
+// download: a leading pax global header followed by entries under a single
+// "<repo>-<ref>/" root directory.
+func githubTarballFixture(t *testing.T, root string, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Typeflag:   tar.TypeXGlobalHeader,
+		Name:       "pax_global_header",
+		PAXRecords: map[string]string{"comment": "0123456789abcdef"},
 	}))
-	defer srv.Close()
-
-	// Override the tarball URL by using the test server URL parts.
-	// fetchGitHubTarball constructs the URL from parts, but we can't redirect it
-	// to our test server. Instead, test the variadic signature and that the
-	// function accepts tokens without panicking.
-
-	t.Run("no token is backward compatible", func(t *testing.T) {
-		parts := &GitHubURLParts{Owner: "test", Repo: "repo", Branch: "main"}
-		dest := t.TempDir()
-		// Will fail (can't reach github.com in test), but should not panic
-		_ = fetchGitHubTarball(context.Background(), parts, dest, "")
-	})
-
-	t.Run("token is accepted", func(t *testing.T) {
-		parts := &GitHubURLParts{Owner: "test", Repo: "repo", Branch: "main"}
-		dest := t.TempDir()
-		_ = fetchGitHubTarball(context.Background(), parts, dest, "ghs_test_token_123")
-	})
-
-	_ = srv
-	_ = receivedAuth
+	require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: root + "/", Mode: 0o755}))
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	dirs := map[string]bool{}
+	for _, name := range names {
+		for d := filepath.Dir(name); d != "."; d = filepath.Dir(d) {
+			if !dirs[d] {
+				dirs[d] = true
+				require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: root + "/" + d + "/", Mode: 0o755}))
+			}
+		}
+		body := files[name]
+		require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: root + "/" + name, Mode: 0o644, Size: int64(len(body))}))
+		_, err := tw.Write([]byte(body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+	return buf.Bytes()
 }
 
-func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
-	// sparseGitCheckout embeds the token in the remote URL when provided.
-	// With a token, GitHub responds with "Authentication failed" rather than
-	// "could not read Username" — confirming the token was sent.
-	parts := &GitHubURLParts{Owner: "test", Repo: "nonexistent-repo-12345", Branch: "main"}
+// readTree returns every regular file under dir keyed by slash-separated
+// relative path.
+func readTree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		got[filepath.ToSlash(rel)] = string(b)
+		return nil
+	}))
+	return got
+}
 
-	t.Run("without token prompts for credentials", func(t *testing.T) {
-		dest := t.TempDir()
-		err := sparseGitCheckout(context.Background(), parts, dest, "")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "git fetch failed")
+// TestFetchGitHubTarball pins the GitHub archive download without network
+// access (ptone/scion#3812): http.DefaultClient's transport is replaced so the
+// request aimed at github.com is served by a local httptest server. It asserts
+// the request that was sent (method, host, archive path for the ref, auth
+// header) and the outcome (extracted files, sub-path selection, and errors for
+// non-200 responses and missing sub-paths).
+func TestFetchGitHubTarball(t *testing.T) {
+	type seenRequest struct {
+		method, scheme, host, path, auth string
+	}
+	// The handler runs on the server's goroutine, so all state shared with
+	// the test goroutine is guarded by mu and only accessed under it.
+	var (
+		mu     sync.Mutex
+		seen   []seenRequest
+		status int
+		body   []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		// The round tripper records method and scheme first; if it somehow
+		// did not, record the request here rather than indexing an empty slice.
+		if len(seen) == 0 {
+			seen = append(seen, seenRequest{})
+		}
+		last := &seen[len(seen)-1]
+		last.host = r.Host
+		last.path = r.URL.Path
+		last.auth = r.Header.Get("Authorization")
+		respStatus, respBody := status, body
+		mu.Unlock()
+		w.WriteHeader(respStatus)
+		_, _ = w.Write(respBody)
+	}))
+	t.Cleanup(srv.Close)
+	srvURL, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	oldTransport := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
+	http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		seen = append(seen, seenRequest{method: r.Method, scheme: r.URL.Scheme})
+		mu.Unlock()
+		// Redirect to the local server; r.Host stays "github.com", so the
+		// server still sees the host the production code targeted.
+		out := r.Clone(r.Context())
+		out.URL.Scheme = srvURL.Scheme
+		out.URL.Host = srvURL.Host
+		return srv.Client().Transport.RoundTrip(out)
 	})
 
-	t.Run("with token attempts authentication", func(t *testing.T) {
-		dest := t.TempDir()
-		err := sparseGitCheckout(context.Background(), parts, dest, "ghs_test_token")
-		require.Error(t, err)
-		// With a token embedded in the URL, git attempts auth and gets
-		// "Authentication failed" instead of "could not read Username"
-		assert.Contains(t, err.Error(), "Authentication failed")
+	files := map[string]string{
+		"README.md":                      "# repo\n",
+		"templates/foo/scion-agent.yaml": "schema_version: \"1\"\n",
+		"templates/foo/home/.bashrc":     "export FOO=1\n",
+		"templates/bar/scion-agent.yaml": "schema_version: \"2\"\n",
+	}
+
+	tests := []struct {
+		name      string
+		parts     GitHubURLParts
+		token     string
+		status    int
+		root      string
+		wantPath  string
+		wantAuth  string
+		wantFiles map[string]string
+		wantErr   string
+	}{
+		{
+			name:      "no token, default branch, whole repo",
+			parts:     GitHubURLParts{Owner: "acme", Repo: "repo"},
+			status:    http.StatusOK,
+			root:      "repo-main",
+			wantPath:  "/acme/repo/archive/refs/heads/main.tar.gz",
+			wantFiles: files,
+		},
+		{
+			name:     "token, explicit branch, sub-path",
+			parts:    GitHubURLParts{Owner: "acme", Repo: "repo", Branch: "dev", Path: "templates/foo/"},
+			token:    "ghs_test_token_123",
+			status:   http.StatusOK,
+			root:     "repo-dev",
+			wantPath: "/acme/repo/archive/refs/heads/dev.tar.gz",
+			wantAuth: "Bearer ghs_test_token_123",
+			wantFiles: map[string]string{
+				"scion-agent.yaml": "schema_version: \"1\"\n",
+				"home/.bashrc":     "export FOO=1\n",
+			},
+		},
+		{
+			name:     "non-200 response is an error",
+			parts:    GitHubURLParts{Owner: "acme", Repo: "private", Branch: "main"},
+			token:    "ghs_test_token_123",
+			status:   http.StatusNotFound,
+			root:     "private-main",
+			wantPath: "/acme/private/archive/refs/heads/main.tar.gz",
+			wantAuth: "Bearer ghs_test_token_123",
+			wantErr:  "tarball download failed: HTTP 404",
+		},
+		{
+			name:     "missing sub-path is an error",
+			parts:    GitHubURLParts{Owner: "acme", Repo: "repo", Branch: "main", Path: "templates/missing"},
+			status:   http.StatusOK,
+			root:     "repo-main",
+			wantPath: "/acme/repo/archive/refs/heads/main.tar.gz",
+			wantErr:  "path templates/missing not found in repository",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			respBody := githubTarballFixture(t, tt.root, files)
+			if tt.status != http.StatusOK {
+				respBody = []byte("Not Found")
+			}
+			mu.Lock()
+			seen = nil
+			status = tt.status
+			body = respBody
+			mu.Unlock()
+			dest := t.TempDir()
+			parts := tt.parts
+
+			err := fetchGitHubTarball(context.Background(), &parts, dest, tt.token)
+
+			mu.Lock()
+			gotSeen := append([]seenRequest(nil), seen...)
+			mu.Unlock()
+			require.Len(t, gotSeen, 1, "exactly one HTTP request")
+			assert.Equal(t, seenRequest{
+				method: http.MethodGet,
+				scheme: "https",
+				host:   "github.com",
+				path:   tt.wantPath,
+				auth:   tt.wantAuth,
+			}, gotSeen[0])
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Empty(t, readTree(t, dest), "nothing is extracted on error")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantFiles, readTree(t, dest))
+		})
+	}
+}
+
+// installFakeGit puts a fake `git` first (and only) on PATH for the rest of
+// the test. It appends each invocation's argv to a log file, succeeds for
+// every subcommand except `fetch`, which fails with an auth-style error, so
+// execSparseGitCheckout runs end to end without touching the network
+// (ptone/scion#3750). It returns a func that reads the logged invocations.
+// When SCION_FAKE_GIT_ENV_LOG is set (see fakeGitConfigEnv), each invocation
+// also logs its GIT_CONFIG_* entries there, and a CRED= entry with the value
+// of the scoped credential helper's environment variable (scopedCredentialVar)
+// or "<unset>".
+func installFakeGit(t *testing.T) (calls, rawCalls func() []string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git shell script requires a POSIX shell")
+	}
+	binDir := t.TempDir()
+	logDir := t.TempDir()
+	logPath := filepath.Join(logDir, "git-calls.log")
+	rawPath := filepath.Join(logDir, "git-calls-raw.log")
+	// Record the full argv of every call (raw), then strip ONLY the leading
+	// host-side pins ('-c key=value' pairs) and record the remainder — so a
+	// caller sees the real command exactly as before, and can also assert the
+	// exact set of pins that was prefixed.
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$SCION_FAKE_GIT_RAW"
+while [ "$1" = "-c" ]; do shift 2; done
+printf '%s\n' "$*" >> "$SCION_FAKE_GIT_LOG"
+if [ -n "$SCION_FAKE_GIT_ENV_LOG" ]; then
+  n=${GIT_CONFIG_COUNT:-0}
+  i=0
+  printf '%s\n' "$1" >> "$SCION_FAKE_GIT_ENV_LOG"
+  while [ "$i" -lt "$n" ]; do
+    eval "k=\${GIT_CONFIG_KEY_$i-}; v=\${GIT_CONFIG_VALUE_$i-}"
+    printf '%s %s=%s\n' "$1" "$k" "$v" >> "$SCION_FAKE_GIT_ENV_LOG"
+    i=$((i+1))
+  done
+  printf '%s CRED=%s\n' "$1" "${SCION_SCOPED_GIT_CREDENTIAL-<unset>}" >> "$SCION_FAKE_GIT_ENV_LOG"
+fi
+if [ "$1" = "fetch" ]; then
+  echo "fatal: Authentication failed (fake git)" >&2
+  exit 128
+fi
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+	t.Setenv("SCION_FAKE_GIT_LOG", logPath)
+	t.Setenv("SCION_FAKE_GIT_RAW", rawPath)
+	read := func(p string) []string {
+		data, err := os.ReadFile(p)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		require.NoError(t, err)
+		return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	}
+	calls = func() []string { return read(logPath) }
+	rawCalls = func() []string { return read(rawPath) }
+	return calls, rawCalls
+}
+
+// fakeGitConfigEnv makes the fake git from installFakeGit log the
+// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n entries of each invocation's
+// environment. It returns a func that reads them as subcommand ->
+// "key=value" entries, in order; every invocation has an entry, possibly
+// empty.
+func fakeGitConfigEnv(t *testing.T) func() map[string][]string {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "git-config-env.log")
+	t.Setenv("SCION_FAKE_GIT_ENV_LOG", logPath)
+	return func() map[string][]string {
+		data, err := os.ReadFile(logPath)
+		require.NoError(t, err)
+		out := map[string][]string{}
+		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			sub, entry, hasEntry := strings.Cut(line, " ")
+			if !hasEntry {
+				out[sub] = []string{}
+				continue
+			}
+			out[sub] = append(out[sub], entry)
+		}
+		return out
+	}
+}
+
+// scopedCredentialVar is the environment variable util.ScopedCredentialHelperEnv
+// sets for the git command and its constant helper reads at run time.
+const scopedCredentialVar = "SCION_SCOPED_GIT_CREDENTIAL"
+
+// credentialVarEntry returns the CRED= entry the fake git logged for a call.
+func credentialVarEntry(entries []string) string {
+	for _, e := range entries {
+		if strings.HasPrefix(e, "CRED=") {
+			return e
+		}
+	}
+	return ""
+}
+
+// effectiveCredentialHelpers returns the credential helpers in effect after
+// the credential.*helper entries of a "key=value" list, in order: an empty
+// value clears the helpers collected so far, as git does.
+func effectiveCredentialHelpers(entries []string) []string {
+	var out []string
+	for _, e := range entries {
+		k, v, _ := strings.Cut(e, "=")
+		if !strings.HasPrefix(k, "credential.") || !strings.HasSuffix(k, ".helper") {
+			continue
+		}
+		if v == "" {
+			out = nil
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// credentialEntries returns the credential.* entries of a "key=value" list.
+func credentialEntries(entries []string) []string {
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e, "credential.") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestSparseGitCheckout_TokenFromScopedCredentialHelper(t *testing.T) {
+	// execSparseGitCheckout uses the plain remote URL and authenticates
+	// through the credential helper scoped to https://github.com
+	// (util.HostGitRemoteEnv), or not at all without a token. A fake git on PATH records argv,
+	// GIT_CONFIG_* entries and the helper's credential variable, so this runs
+	// offline.
+	parts := &GitHubURLParts{Owner: "test", Repo: "nonexistent-repo-12345", Branch: "main", Path: "templates"}
+	const anonRemote = "remote add origin https://github.com/test/nonexistent-repo-12345.git"
+
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"without token uses anonymous URL and no credential helper", ""},
+		{"with token uses anonymous URL and the scoped credential helper", "ghs_test_token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls, rawCalls := installFakeGit(t)
+			configEnv := fakeGitConfigEnv(t)
+			err := execSparseGitCheckout(context.Background(), parts, t.TempDir(), tt.token)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "git fetch failed")
+			assert.Contains(t, err.Error(), "Authentication failed")
+			want := []string{
+				"init",
+				anonRemote,
+				"config core.sparseCheckout true",
+				"fetch --depth=1 origin main",
+			}
+			// The real command, after the host-side pins are stripped, is
+			// exactly as before.
+			assert.Equal(t, want, calls())
+			// Every call is prefixed with EXACTLY the host-side pins
+			// (util.HostGitArgs): none missing, none extra, exact values. The
+			// raw argv must equal "<pins> <stripped command>".
+			pins := strings.Join(util.HostGitArgs(), " ")
+			raw := rawCalls()
+			require.Len(t, raw, len(want))
+			for i := range want {
+				assert.Equal(t, pins+" "+want[i], raw[i], "call %d must carry exactly the host-side pins", i)
+			}
+
+			env := configEnv()
+			require.Len(t, env, len(want), "every git call must be logged")
+			for _, sub := range []string{"init", "remote", "config", "fetch"} {
+				creds := effectiveCredentialHelpers(env[sub])
+				if tt.token == "" {
+					assert.Empty(t, creds, "%s: no credential helper without a token", sub)
+					assert.Equal(t, "CRED=<unset>", credentialVarEntry(env[sub]), "%s: no credential variable without a token", sub)
+					continue
+				}
+				// After the credential.helper resets (so no configured helper
+				// runs or stores the token), the one helper scoped to the
+				// remote's host is in effect. The helper value is the constant
+				// that reads the credential variable at run time; the token is
+				// in the git command's environment only.
+				all := credentialEntries(env[sub])
+				require.NotEmpty(t, all, "%s: the credential.helper resets must be present", sub)
+				assert.Equal(t, "credential.helper=", all[0], sub)
+				require.Len(t, creds, 1, "%s: %v", sub, creds)
+				assert.True(t, strings.HasPrefix(creds[0], "credential.https://github.com.helper="), "%s: %s", sub, creds[0])
+				assert.Contains(t, creds[0], "${"+scopedCredentialVar+"}", sub)
+				assert.NotContains(t, creds[0], tt.token, "%s: git config values contain no secret values", sub)
+				assert.Equal(t, "CRED="+tt.token, credentialVarEntry(env[sub]), sub)
+			}
+
+			if tt.token != "" {
+				assert.NotContains(t, err.Error(), tt.token, "error text contains no secret values")
+				for _, r := range raw {
+					assert.NotContains(t, r, tt.token, "git arguments contain no secret values")
+				}
+			}
+		})
+	}
+}
+
+type remoteTemplatesRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f remoteTemplatesRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+// TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam pins that the git
+// fallback goes through the sparseGitCheckout seam (so tests in other
+// packages can stub it via SetGitSparseCheckoutForTest) with the parsed ref
+// and the auth token, and that its result is returned as-is.
+func TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam(t *testing.T) {
+	calls, _ := installFakeGit(t) // any real git exec would be recorded here
+	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
+		return nil, errors.New("ls-remote disabled in test")
+	}))
+
+	oldTransport := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
+	http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 	})
+
+	var gotParts GitHubURLParts
+	var gotDest, gotToken string
+	n := 0
+	t.Cleanup(SetGitSparseCheckoutForTest(func(_ context.Context, parts *GitHubURLParts, destPath, token string) error {
+		n++
+		gotParts, gotDest, gotToken = *parts, destPath, token
+		return os.WriteFile(filepath.Join(destPath, "scion-agent.yaml"), []byte("schema_version: \"1\"\n"), 0o644)
+	}))
+
+	dest := t.TempDir()
+	err := fetchGitHubFolder(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo", dest, "ghs_tok")
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, GitHubURLParts{Owner: "acme", Repo: "repo", Branch: "main", Path: "templates/foo"}, gotParts)
+	assert.Equal(t, dest, gotDest)
+	assert.Equal(t, "ghs_tok", gotToken)
+	assert.FileExists(t, filepath.Join(dest, "scion-agent.yaml"))
+	assert.Empty(t, calls(), "no real git may be executed")
+
+	// Errors from the seam propagate unchanged.
+	wantErr := errors.New("stub checkout failed")
+	t.Cleanup(SetGitSparseCheckoutForTest(func(context.Context, *GitHubURLParts, string, string) error { return wantErr }))
+	err = fetchGitHubFolder(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo", t.TempDir(), "")
+	assert.ErrorIs(t, err, wantErr)
+}
+
+// TestSetGitSparseCheckoutForTest_Restores pins that the sparse-checkout seam
+// defaults to the production runner, installs the given stub, and that the
+// returned restore func puts the production runner back (ptone/scion#3750).
+func TestSetGitSparseCheckoutForTest_Restores(t *testing.T) {
+	before := sparseGitCheckout
+	// The default runner must be the production implementation.
+	assert.Equal(t, reflect.ValueOf(execSparseGitCheckout).Pointer(), reflect.ValueOf(before).Pointer())
+	stub := GitSparseCheckoutFunc(func(context.Context, *GitHubURLParts, string, string) error { return nil })
+	restore := SetGitSparseCheckoutForTest(stub)
+	// The stub must be the runner actually installed.
+	assert.Equal(t, reflect.ValueOf(stub).Pointer(), reflect.ValueOf(sparseGitCheckout).Pointer())
+	restore()
+	// The production runner must be back in place.
+	assert.Equal(t, reflect.ValueOf(before).Pointer(), reflect.ValueOf(sparseGitCheckout).Pointer())
+	assert.Equal(t, reflect.ValueOf(execSparseGitCheckout).Pointer(), reflect.ValueOf(sparseGitCheckout).Pointer())
 }
 
 func TestIsArchiveURL(t *testing.T) {

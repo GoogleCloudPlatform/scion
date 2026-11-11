@@ -423,6 +423,8 @@ CREATE INDEX idx_session_metrics_time ON agent_session_metrics(started_at);
 
 In debug mode or when cloud forwarding is disabled, sciontool can output telemetry locally for troubleshooting.
 
+> **Status:** not implemented. No component reads `telemetry.local.*` today; the keys are accepted but ignored (ptone/scion#4103).
+
 | Output | Trigger | Format |
 |--------|---------|--------|
 | Console (stderr) | `SCION_LOG_LEVEL=debug` | Structured text |
@@ -772,8 +774,7 @@ To facilitate debugging across distributed components, the following fields shou
 | `SCION_TELEMETRY_ENABLED` | Enable telemetry collection | `true` |
 | `SCION_TELEMETRY_CLOUD_ENABLED` | Forward to cloud backend | `true` |
 | `SCION_TELEMETRY_HUB_ENABLED` | Report to Hub | `true` (if hosted mode) |
-| `SCION_TELEMETRY_DEBUG` | Local debug output | `false` |
-| `SCION_LOG_LEVEL` | Logging verbosity | `info` |
+| `SCION_DEBUG` | Debug logging in sciontool (any non-empty value); `SCION_LOG_LEVEL` is not read by sciontool | unset |
 
 ### 10.2 Full Configuration File
 
@@ -886,10 +887,9 @@ Telemetry env vars map to settings paths via `versionedEnvKeyMapper`:
 | `SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE`         | `telemetry.cloud.batch.max_size`             |
 | `SCION_TELEMETRY_HUB_ENABLED`                  | `telemetry.hub.enabled`                      |
 | `SCION_TELEMETRY_HUB_REPORT_INTERVAL`          | `telemetry.hub.report_interval`              |
-| `SCION_TELEMETRY_LOCAL_ENABLED`                 | `telemetry.local.enabled`                    |
+| `SCION_TELEMETRY_LOCAL_ENABLED`                 | `telemetry.local.enabled` (ignored)          |
 | `SCION_TELEMETRY_FILTER_ENABLED`                | `telemetry.filter.enabled`                   |
-| `SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE`     | `telemetry.filter.respect_debug_mode`        |
-| `SCION_TELEMETRY_DEBUG`                         | `telemetry.local.enabled`                    |
+| `SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE`     | `telemetry.filter.respect_debug_mode` (ignored) |
 
 The `SCION_OTEL_*` variables from section 10.1 are aliased into the
 `telemetry.cloud` sub-tree:

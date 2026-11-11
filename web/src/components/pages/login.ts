@@ -23,6 +23,13 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  standaloneTestHubBannerStyles,
+  testHubBannerStyles,
+} from '../shared/test-hub-banner.js';
+
 /**
  * OAuth provider configuration
  */
@@ -60,6 +67,13 @@ export class ScionLoginPage extends LitElement {
   private _proxyMode = false;
 
   /**
+   * Whether the server signs browsers in from a dev sign-in link
+   * (a local workstation server)
+   */
+  @state()
+  private _devSignIn = false;
+
+  /**
    * Whether provider config is still loading
    */
   @state()
@@ -71,7 +85,13 @@ export class ScionLoginPage extends LitElement {
   @state()
   private _loading = false;
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this, { standalone: true });
+
   static override styles = css`
+    ${testHubBannerStyles}
+    ${standaloneTestHubBannerStyles}
+
     :host {
       display: flex;
       align-items: center;
@@ -79,6 +99,16 @@ export class ScionLoginPage extends LitElement {
       min-height: 100vh;
       background: var(--scion-bg, #f8fafc);
       padding: 1rem;
+    }
+
+    /* The test-hub banner runs edge to edge across the top of the page
+       (cancelling the host's padding), in normal flow above the card. */
+    :host([test-hub]) {
+      padding-top: 0;
+    }
+
+    :host([test-hub]) > sl-alert.test-hub-banner {
+      margin: 0 -1rem 1rem;
     }
 
     .login-container {
@@ -324,11 +354,16 @@ export class ScionLoginPage extends LitElement {
 
   private async fetchProviders(): Promise<void> {
     try {
+      // The sign-in bootstrap runs before a session exists, so it stays a
+      // plain request (the browser's default credentials mode) rather than
+      // the helper, whose 401 handling would redirect back to this page.
+      // eslint-disable-next-line no-restricted-globals -- sign-in bootstrap, no session yet
       const resp = await fetch('/auth/providers');
       if (resp.ok) {
         const data = (await resp.json()) as {
           providers?: { id: string; name: string; enabled: boolean }[];
           authMode?: string;
+          devSignIn?: boolean;
           google?: boolean;
           github?: boolean;
         };
@@ -353,6 +388,7 @@ export class ScionLoginPage extends LitElement {
         }
 
         this._proxyMode = data.authMode === 'proxy';
+        this._devSignIn = data.devSignIn === true;
       }
     } catch {
       // If the fetch fails, leave providers empty
@@ -362,6 +398,10 @@ export class ScionLoginPage extends LitElement {
   }
 
   override render() {
+    return html`${renderTestHubBanner(this._testHubBanner.status)}${this.renderPage()}`;
+  }
+
+  private renderPage() {
     if (this._providersLoading) {
       return this.renderLoading();
     }
@@ -412,12 +452,7 @@ export class ScionLoginPage extends LitElement {
               `
             : hasProviders
               ? providers.map((provider) => this.renderProvider(provider))
-              : html`
-                  <div class="no-providers">
-                    <p>No authentication providers configured.</p>
-                    <p>Please configure OAuth credentials in the server settings.</p>
-                  </div>
-                `}
+              : this.renderNoProviders()}
         </div>
 
         <div class="footer">
@@ -426,6 +461,23 @@ export class ScionLoginPage extends LitElement {
             <a href="/terms">Terms of Service</a> and <a href="/privacy">Privacy Policy</a>.
           </p>
         </div>
+      </div>
+    `;
+  }
+
+  private renderNoProviders() {
+    if (this._devSignIn) {
+      return html`
+        <div class="no-providers dev-sign-in">
+          <p>This workstation server signs you in from a sign-in link.</p>
+          <p>Run <code>scion server open</code> in a terminal to open a new one.</p>
+        </div>
+      `;
+    }
+    return html`
+      <div class="no-providers">
+        <p>No authentication providers configured.</p>
+        <p>Please configure OAuth credentials in the server settings.</p>
       </div>
     `;
   }
@@ -439,6 +491,7 @@ export class ScionLoginPage extends LitElement {
       state_mismatch: 'Login verification failed. Please try signing in again.',
       exchange_failed: 'Could not complete sign-in with the provider. Please try again.',
       unauthorized_domain: 'Your email domain is not authorized to access this application.',
+      invite_only: 'This hub is invite-only. Ask an administrator for an invite.',
       user_create_failed: 'Could not create your account. Please contact an administrator.',
     };
     return messages[this.error] ?? this.error;

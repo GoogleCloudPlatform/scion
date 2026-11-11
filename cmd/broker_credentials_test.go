@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -26,12 +28,15 @@ import (
 func TestMigrateLegacyBrokerCredentials(t *testing.T) {
 	dir := t.TempDir()
 	multiStore := brokercredentials.NewMultiStore(filepath.Join(dir, "hub-credentials"))
-	legacyStore := brokercredentials.NewStore(filepath.Join(dir, "broker-credentials.json"))
-	require.NoError(t, legacyStore.Save(&brokercredentials.BrokerCredentials{
+	legacyPath := filepath.Join(dir, "broker-credentials.json")
+	legacyStore := brokercredentials.NewStore(legacyPath)
+	legacyJSON, err := json.Marshal(&brokercredentials.BrokerCredentials{
 		BrokerID:    "broker-1",
 		SecretKey:   base64.StdEncoding.EncodeToString([]byte("secret")),
 		HubEndpoint: "https://hub.example.com",
-	}))
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(legacyPath, legacyJSON, brokercredentials.FileMode))
 
 	migrated, err := migrateLegacyBrokerCredentials(multiStore, legacyStore)
 	require.NoError(t, err)

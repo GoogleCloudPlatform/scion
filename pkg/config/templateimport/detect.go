@@ -45,13 +45,14 @@ func DetectHarness(path string) (string, error) {
 	return detectFromFrontMatter(fm), nil
 }
 
-// detectFromPath checks if the file path contains .claude/agents/ or .gemini/agents/.
+// detectFromPath checks for .claude/agents/ or .gemini/agents/ directory components.
 func detectFromPath(path string) string {
-	normalized := strings.ReplaceAll(path, "\\", "/")
-	if strings.Contains(normalized, ".claude/agents/") {
+	// Prepend a separator so relative paths use the same boundary check.
+	normalized := "/" + strings.ReplaceAll(path, "\\", "/")
+	if strings.Contains(normalized, "/.claude/agents/") {
 		return "claude"
 	}
-	if strings.Contains(normalized, ".gemini/agents/") {
+	if strings.Contains(normalized, "/.gemini/agents/") {
 		return "gemini"
 	}
 	return ""

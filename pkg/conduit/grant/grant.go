@@ -1,0 +1,601 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package grant mints and verifies Conduit stream grants (design §3.5,
+// "Grants (trust boundary)").
+//
+// The hub authorizes a stream, then mints a short-lived grant that travels in
+// StreamOpen.grant. The target (sciontool or a broker) verifies it before it
+// acts; relays never inspect it. A grant is a compact JWS signed with a
+// dedicated Ed25519 key. It is never signed with the hub's HS256 agent/user
+// token secret, which has no public half.
+//
+// This package is a pure library. It has no hub, store or proto imports, and
+// it shares only the canonical lowercase strings of the Conduit contract
+// (stream kinds, principal kinds) with the other Conduit packages.
+//
+// Token format: base64url(header) "." base64url(payload) "." base64url(sig),
+// unpadded. The header is exactly {"alg":"EdDSA","typ":"conduit-grant+jwt",
+// "kid":"..."}. The algorithm is pinned: any other alg value, an unknown
+// header field or an unknown kid fails closed.
+package grant
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"strings"
+	"time"
+)
+
+const (
+	// Audience is the only accepted aud value.
+	Audience = "conduit-target"
+	// Algorithm is the only accepted JWS alg value.
+	Algorithm = "EdDSA"
+	// TokenType is the only accepted JWS typ value. It keeps a grant from
+	// being confused with any other JWT the hub issues.
+	TokenType = "conduit-grant+jwt"
+	// MaxValidity bounds exp−nbf. Mint and Verify both enforce it.
+	MaxValidity = 60 * time.Second
+	// MaxClockSkew caps Expectation.ClockSkew.
+	MaxClockSkew = 10 * time.Second
+	// maxTokenSize bounds the input Verify will parse.
+	maxTokenSize = 16 << 10
+)
+
+// Canonical stream kinds (contracts.md §2).
+const (
+	StreamKindTCP    = "tcp"
+	StreamKindPTY    = "pty"
+	StreamKindSSH    = "ssh"
+	StreamKindLogs   = "logs"
+	StreamKindEvents = "events"
+)
+
+// Canonical target principal kinds (contracts.md §2). Only brokers and agents
+// accept streams.
+const (
+	TargetKindBroker = "broker"
+	TargetKindAgent  = "agent"
+)
+
+// SubjectUserPrefix starts the sub of every grant the hub mints for a
+// stream a user opened ("user:<user id>").
+const SubjectUserPrefix = "user:"
+
+// Origins (the via claim): the request path that admitted a user stream
+// (design v2.21.29 §3.5, Origin claim via). The hub sets it from the endpoint
+// that served the request.
+const (
+	ViaTunnel = "tunnel" // POST /v1/tunnels
+	ViaProxy  = "proxy"  // the hub port proxy
+	ViaPTY    = "pty"    // hub PTY attach
+)
+
+// IsVia reports whether via is one of the origins.
+func IsVia(via string) bool {
+	switch via {
+	case ViaTunnel, ViaProxy, ViaPTY:
+		return true
+	}
+	return false
+}
+
+// ViaAllows reports whether a stream of kind may have origin via: the one
+// table of origin and kind pairs (design v2.21.29 §3.5, Origin claim via).
+// The tunnel path carries tcp, ssh and pty streams, the port proxy tcp, and
+// PTY attach pty. The hub derives a stream's actions only for a pair in this
+// table, and a grant naming any other pair is refused.
+func ViaAllows(via, kind string) bool {
+	switch via {
+	case ViaTunnel:
+		return kind == StreamKindTCP || kind == StreamKindSSH || kind == StreamKindPTY
+	case ViaProxy:
+		return kind == StreamKindTCP
+	case ViaPTY:
+		return kind == StreamKindPTY
+	}
+	return false
+}
+
+// Stream params. A tcp grant names exactly one agent-local target with
+// ParamHost and ParamPort. ParamAgentID is reserved: the hub sets it on every
+// grant for a broker target to the agent the stream was authorized for, and
+// the broker must route the stream only to that agent.
+const (
+	ParamHost    = "host"
+	ParamPort    = "port"
+	ParamAgentID = "agent_id"
+)
+
+// PTY stream params: the initial terminal size and the tmux session to
+// attach to. All three are part of the signed stream header like any
+// other param.
+const (
+	ParamCols    = "cols"
+	ParamRows    = "rows"
+	ParamSession = "session"
+)
+
+// IsStreamKind reports whether kind is one of the canonical stream kinds.
+func IsStreamKind(kind string) bool {
+	switch kind {
+	case StreamKindTCP, StreamKindPTY, StreamKindSSH, StreamKindLogs, StreamKindEvents:
+		return true
+	}
+	return false
+}
+
+// Errors returned by Mint and Verify. Verify wraps one of these, so callers
+// can map them to close codes with errors.Is. Every failure is a refusal.
+var (
+	ErrMalformed      = errors.New("grant: malformed token")
+	ErrAlgorithm      = errors.New("grant: algorithm not allowed")
+	ErrUnknownKey     = errors.New("grant: unknown key id")
+	ErrKeyExpired     = errors.New("grant: signing key past not_after")
+	ErrSignature      = errors.New("grant: invalid signature")
+	ErrAudience       = errors.New("grant: wrong audience")
+	ErrIssuer         = errors.New("grant: wrong issuer")
+	ErrNotYetValid    = errors.New("grant: not yet valid")
+	ErrExpired        = errors.New("grant: expired")
+	ErrValidityWindow = errors.New("grant: validity window exceeds maximum")
+	ErrProject        = errors.New("grant: wrong project")
+	ErrTarget         = errors.New("grant: wrong target")
+	ErrStream         = errors.New("grant: stream does not match grant")
+	ErrReplay         = errors.New("grant: jti already used")
+	ErrExpectation    = errors.New("grant: incomplete verification expectation")
+	ErrInvalidClaims  = errors.New("grant: invalid claims")
+	// ErrSubject and ErrStreamBinding refuse renewal grants (renewal.go).
+	// ErrAuthzUntil refuses a renewal whose authz_until is out of range, or
+	// a stream grant without one when the expectation requires it.
+	ErrSubject       = errors.New("grant: wrong subject")
+	ErrStreamBinding = errors.New("grant: renewal is for another stream")
+	ErrAuthzUntil    = errors.New("grant: authz_until missing or out of range")
+	// ErrVia refuses a missing, unknown or mismatched via claim.
+	ErrVia = errors.New("grant: via missing or does not match")
+)
+
+// StreamHeader is the authority-bearing part of a StreamOpen: its kind and
+// params. stream_id, initial_window and open_timeout are deliberately not
+// part of it: they are assigned after minting and carry no authority.
+type StreamHeader struct {
+	Kind   string            `json:"kind"`
+	Params map[string]string `json:"params,omitempty"`
+}
+
+// Equal reports whether h and o have the same kind and the same params as a
+// key→value map. A nil map equals an empty one.
+func (h StreamHeader) Equal(o StreamHeader) bool {
+	return h.Kind == o.Kind && maps.Equal(h.Params, o.Params)
+}
+
+// Target is the session the grant is aimed at. A target accepts the grant
+// only if every field equals its own values (ID and incarnation from its
+// identity, session_id and connection_epoch from its Welcome).
+type Target struct {
+	Kind                string `json:"kind"`
+	ID                  string `json:"id"`
+	EndpointIncarnation string `json:"endpoint_incarnation"`
+	SessionID           string `json:"session_id"`
+	ConnectionEpoch     int64  `json:"connection_epoch"`
+}
+
+func (t Target) complete() bool {
+	return (t.Kind == TargetKindAgent || t.Kind == TargetKindBroker) &&
+		t.ID != "" && t.EndpointIncarnation != "" && t.SessionID != "" && t.ConnectionEpoch > 0
+}
+
+// Claims is the grant payload (design v2.1 §3.5).
+type Claims struct {
+	Issuer    string
+	Audience  string
+	KeyID     string
+	JTI       string
+	Subject   string
+	ProjectID string
+	Target    Target
+	Stream    StreamHeader
+	NotBefore time.Time
+	Expiry    time.Time
+	// AuthzUntil and AuthzInterval are set together or not at all
+	// (design v2.21.16 §3.5 "Target-side deadlines"). AuthzUntil is the
+	// stream's authorization deadline: the target closes the stream at
+	// AuthzUntil (plus its grace) unless a renewal grant moves it
+	// (renewal.go). AuthzInterval is the stream's authorization interval,
+	// which caps each renewal. Zero values are omitted from the token, so
+	// a grant without a deadline encodes exactly as before.
+	AuthzUntil    time.Time
+	AuthzInterval time.Duration
+	// Via is the stream's origin (ViaTunnel, ViaProxy or ViaPTY), set on
+	// user-stream grants to stream_renewal.v2 targets; empty otherwise and
+	// then omitted from the token.
+	Via string
+	// Scope is the credential context of a stream opened with a scoped
+	// token (scope.go), set only alongside Via; nil otherwise and then
+	// omitted from the token.
+	Scope *Scope
+}
+
+// wireClaims is the JSON form of Claims. Times are Unix seconds.
+type wireClaims struct {
+	Issuer    string       `json:"iss"`
+	Audience  string       `json:"aud"`
+	KeyID     string       `json:"kid"`
+	JTI       string       `json:"jti"`
+	Subject   string       `json:"sub"`
+	ProjectID string       `json:"project_id"`
+	Target    Target       `json:"target"`
+	Stream    StreamHeader `json:"stream"`
+	NotBefore int64        `json:"nbf"`
+	Expiry    int64        `json:"exp"`
+	// AuthzUntil (Unix seconds) and AuthzInterval (seconds) are omitted
+	// when zero, so a grant without a deadline encodes exactly as before.
+	AuthzUntil    int64  `json:"authz_until,omitempty"`
+	AuthzInterval int64  `json:"authz_interval,omitempty"`
+	Via           string `json:"via,omitempty"`
+	Scope         *Scope `json:"scope,omitempty"`
+}
+
+type header struct {
+	Alg string `json:"alg"`
+	Typ string `json:"typ"`
+	Kid string `json:"kid"`
+}
+
+var b64 = base64.RawURLEncoding.Strict()
+
+// validate checks the claim invariants shared by Mint and Verify.
+func (c *Claims) validate() error {
+	switch {
+	case c.Issuer == "":
+		return fmt.Errorf("%w: missing iss", ErrInvalidClaims)
+	case c.JTI == "":
+		return fmt.Errorf("%w: missing jti", ErrInvalidClaims)
+	case c.Subject == "":
+		return fmt.Errorf("%w: missing sub", ErrInvalidClaims)
+	case c.ProjectID == "":
+		return fmt.Errorf("%w: missing project_id", ErrInvalidClaims)
+	case !c.Target.complete():
+		return fmt.Errorf("%w: incomplete target", ErrInvalidClaims)
+	case !IsStreamKind(c.Stream.Kind):
+		return fmt.Errorf("%w: unknown stream kind %q", ErrInvalidClaims, c.Stream.Kind)
+	case c.NotBefore.IsZero() || c.Expiry.IsZero():
+		return fmt.Errorf("%w: missing nbf or exp", ErrInvalidClaims)
+	case !c.Expiry.After(c.NotBefore):
+		return fmt.Errorf("%w: exp must be after nbf", ErrInvalidClaims)
+	case c.Expiry.Sub(c.NotBefore) > MaxValidity:
+		return fmt.Errorf("%w: exp-nbf %s > %s", ErrValidityWindow, c.Expiry.Sub(c.NotBefore), MaxValidity)
+	case c.AuthzUntil.IsZero() != (c.AuthzInterval == 0):
+		return fmt.Errorf("%w: authz_until and authz_interval go together", ErrInvalidClaims)
+	case !c.AuthzUntil.IsZero() && !c.AuthzUntil.After(c.NotBefore):
+		return fmt.Errorf("%w: authz_until must be after nbf", ErrInvalidClaims)
+	case c.AuthzInterval < 0 || c.AuthzInterval%time.Second != 0:
+		return fmt.Errorf("%w: authz_interval must be whole positive seconds", ErrInvalidClaims)
+	case c.Via != "" && !IsVia(c.Via):
+		return fmt.Errorf("%w: unknown via %q", ErrInvalidClaims, c.Via)
+	case c.Via != "" && !ViaAllows(c.Via, c.Stream.Kind):
+		return fmt.Errorf("%w: via %q does not carry stream kind %q", ErrVia, c.Via, c.Stream.Kind)
+	case c.Scope != nil && c.Via == "":
+		return fmt.Errorf("%w: scope without via", ErrInvalidClaims)
+	case c.Scope != nil:
+		return c.Scope.validate()
+	}
+	return nil
+}
+
+// NewJTI returns a random 128-bit grant ID.
+func NewJTI() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// Mint signs claims with signer. It fills Audience (when empty) and KeyID
+// from the signer, a random JTI when empty, and rejects any claims Verify
+// would refuse on shape alone, including exp−nbf > MaxValidity. Times are
+// truncated to whole seconds before the window is checked.
+func Mint(signer *Signer, c Claims) ([]byte, error) {
+	if signer == nil || signer.KeyID == "" || len(signer.Key) != ed25519.PrivateKeySize {
+		return nil, errors.New("grant: invalid signer")
+	}
+	if c.Audience == "" {
+		c.Audience = Audience
+	}
+	if c.Audience != Audience {
+		return nil, fmt.Errorf("%w: aud must be %q", ErrAudience, Audience)
+	}
+	if c.KeyID != "" && c.KeyID != signer.KeyID {
+		return nil, fmt.Errorf("%w: kid does not match signer", ErrInvalidClaims)
+	}
+	c.KeyID = signer.KeyID
+	if c.JTI == "" {
+		jti, err := NewJTI()
+		if err != nil {
+			return nil, fmt.Errorf("grant: generate jti: %w", err)
+		}
+		c.JTI = jti
+	}
+	c.NotBefore = c.NotBefore.Truncate(time.Second)
+	c.Expiry = c.Expiry.Truncate(time.Second)
+	c.AuthzUntil = c.AuthzUntil.Truncate(time.Second)
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	return sign(signer, TokenType, wireClaims{
+		Issuer: c.Issuer, Audience: c.Audience, KeyID: c.KeyID, JTI: c.JTI,
+		Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target, Stream: c.Stream,
+		NotBefore: c.NotBefore.Unix(), Expiry: c.Expiry.Unix(),
+		AuthzUntil: unixOrZero(c.AuthzUntil), AuthzInterval: int64(c.AuthzInterval / time.Second),
+		Via: c.Via, Scope: c.Scope,
+	})
+}
+
+// sign encodes payload as a compact JWS of type typ signed by signer.
+func sign(signer *Signer, typ string, payload any) ([]byte, error) {
+	hdr, err := json.Marshal(header{Alg: Algorithm, Typ: typ, Kid: signer.KeyID})
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	signingInput := b64.EncodeToString(hdr) + "." + b64.EncodeToString(body)
+	sig := ed25519.Sign(signer.Key, []byte(signingInput))
+	tok := []byte(signingInput + "." + b64.EncodeToString(sig))
+	if len(tok) > maxTokenSize {
+		return nil, fmt.Errorf("%w: %d bytes > %d", ErrTooLarge, len(tok), maxTokenSize)
+	}
+	return tok, nil
+}
+
+// unixOrZero returns t in Unix seconds, or 0 for the zero time.
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// timeOrZero is the inverse of unixOrZero.
+func timeOrZero(sec int64) time.Time {
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
+// Expectation is what the target knows independently of the grant.
+type Expectation struct {
+	// Target holds the target's own identity, incarnation, and the
+	// session_id and connection_epoch from its current Welcome. Every field
+	// is required.
+	Target Target
+	// Header is the kind and params of the StreamOpen being admitted.
+	Header StreamHeader
+	// ProjectID is the target's project. Required.
+	ProjectID string
+	// Issuer, when non-empty, must equal the grant's iss.
+	Issuer string
+	// ClockSkew tolerates that much clock difference on nbf and exp. It is
+	// capped at MaxClockSkew; zero means none.
+	ClockSkew time.Duration
+	// RequireDeadlineFor, when non-empty, is a subject prefix: a grant
+	// whose sub starts with it must carry authz_until and a valid via, or
+	// it is refused with ErrAuthzUntil or ErrVia (before its jti is
+	// consumed).
+	RequireDeadlineFor string
+}
+
+// Verify checks token against keys and expect, and on success consumes its
+// jti in replay. It returns the verified claims. The checks run in a fixed
+// order, and the jti is consumed only after every other check has passed, so
+// a refused grant never burns its jti. The caller must perform the side
+// effect (spawning a pty, dialing a port) only after Verify returns nil.
+func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, replay ReplayCache, now time.Time) (*Claims, error) {
+	if keys == nil || replay == nil {
+		return nil, fmt.Errorf("%w: nil key set or replay cache", ErrExpectation)
+	}
+	if !expect.Target.complete() || expect.ProjectID == "" || !IsStreamKind(expect.Header.Kind) {
+		return nil, ErrExpectation
+	}
+	skew := min(max(expect.ClockSkew, 0), MaxClockSkew)
+
+	payload, kid, err := verifySigned(token, keys, TokenType, now)
+	if err != nil {
+		return nil, err
+	}
+	var w wireClaims
+	if err := decodeStrict(payload, &w); err != nil {
+		return nil, ErrMalformed
+	}
+	// The payload is held to the same canonical encoding as the header, so
+	// a case-variant or duplicate claim key cannot be signed into a grant.
+	if !canonical(payload, w) {
+		return nil, ErrMalformed
+	}
+	c := &Claims{
+		Issuer: w.Issuer, Audience: w.Audience, KeyID: w.KeyID, JTI: w.JTI,
+		Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream,
+		NotBefore: time.Unix(w.NotBefore, 0), Expiry: time.Unix(w.Expiry, 0),
+		AuthzUntil: timeOrZero(w.AuthzUntil), AuthzInterval: time.Duration(w.AuthzInterval) * time.Second,
+		Via: w.Via, Scope: w.Scope,
+	}
+	if c.KeyID != kid {
+		return nil, fmt.Errorf("%w: payload kid does not match header", ErrMalformed)
+	}
+	if c.Audience != Audience {
+		return nil, ErrAudience
+	}
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	if expect.Issuer != "" && c.Issuer != expect.Issuer {
+		return nil, ErrIssuer
+	}
+	if now.Add(skew).Before(c.NotBefore) {
+		return nil, ErrNotYetValid
+	}
+	if !now.Add(-skew).Before(c.Expiry) {
+		return nil, ErrExpired
+	}
+	if c.ProjectID != expect.ProjectID {
+		return nil, ErrProject
+	}
+	if c.Target != expect.Target {
+		return nil, ErrTarget
+	}
+	if !c.Stream.Equal(expect.Header) {
+		return nil, ErrStream
+	}
+	if expect.RequireDeadlineFor != "" && strings.HasPrefix(c.Subject, expect.RequireDeadlineFor) {
+		if c.AuthzUntil.IsZero() {
+			return nil, ErrAuthzUntil
+		}
+		if !IsVia(c.Via) {
+			return nil, ErrVia
+		}
+	}
+
+	// Final step: consume the jti. Exactly one concurrent caller wins.
+	fresh, err := replay.Consume(ctx, c.JTI, c.Expiry.Add(skew))
+	if err != nil {
+		return nil, fmt.Errorf("%w: replay cache: %v", ErrReplay, err)
+	}
+	if !fresh {
+		return nil, ErrReplay
+	}
+	return c, nil
+}
+
+// verifySigned checks the compact JWS token: its charset and shape, a
+// header that is exactly {alg EdDSA, typ, kid} in canonical encoding, a kid
+// keys knows (an unknown kid fails closed) whose key is within not_after at
+// now, and the Ed25519 signature. It returns the signed payload bytes and
+// the kid. Nothing past the header is decoded before the signature holds.
+func verifySigned(token []byte, keys KeySet, typ string, now time.Time) ([]byte, string, error) {
+	payload, kid, _, err := verifySignedKey(token, keys, typ, now, false)
+	return payload, kid, err
+}
+
+// verifySignedKey is verifySigned with a choice for a key past its
+// not_after. Without allowExpiredKey (admission) such a key fails with
+// ErrKeyExpired before the signature is checked. With allowExpiredKey (the
+// re-check mode, design v2.21.36 §3.5) the signature is checked as usual and
+// keyExpired reports the key's state, so the caller can let a bad
+// signature, and every other refusal it decides, take priority over the
+// expired key.
+func verifySignedKey(token []byte, keys KeySet, typ string, now time.Time, allowExpiredKey bool) (payload []byte, kid string, keyExpired bool, err error) {
+	if len(token) == 0 || len(token) > maxTokenSize {
+		return nil, "", false, ErrMalformed
+	}
+	// Only the base64url alphabet and the segment separator are allowed.
+	// The standard decoder silently skips CR and LF even in strict mode, so
+	// this check keeps token bytes canonical.
+	if !tokenCharsetOK(token) {
+		return nil, "", false, ErrMalformed
+	}
+	parts := strings.Split(string(token), ".")
+	if len(parts) != 3 {
+		return nil, "", false, ErrMalformed
+	}
+	hdrBytes, err := b64.DecodeString(parts[0])
+	if err != nil {
+		return nil, "", false, ErrMalformed
+	}
+	var hdr header
+	if err := decodeStrict(hdrBytes, &hdr); err != nil {
+		return nil, "", false, ErrMalformed
+	}
+	// encoding/json matches keys case-insensitively and lets a duplicate
+	// key win. Requiring the header bytes to equal the canonical encoding of
+	// the parsed values rejects case variants, duplicates, reordering and
+	// whitespace: the header is exactly {"alg","typ","kid"}.
+	if !canonical(hdrBytes, hdr) {
+		return nil, "", false, ErrMalformed
+	}
+	if hdr.Alg != Algorithm {
+		return nil, "", false, ErrAlgorithm
+	}
+	if hdr.Typ != typ || hdr.Kid == "" {
+		return nil, "", false, ErrMalformed
+	}
+	pub, ok := keys.Lookup(hdr.Kid)
+	if !ok || len(pub.Key) != ed25519.PublicKeySize {
+		return nil, "", false, ErrUnknownKey
+	}
+	keyExpired = !pub.NotAfter.IsZero() && !now.Before(pub.NotAfter)
+	if keyExpired && !allowExpiredKey {
+		return nil, "", false, ErrKeyExpired
+	}
+	sig, err := b64.DecodeString(parts[2])
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return nil, "", false, ErrSignature
+	}
+	if !ed25519.Verify(pub.Key, []byte(parts[0]+"."+parts[1]), sig) {
+		return nil, "", false, ErrSignature
+	}
+
+	// Only signed bytes are decoded past this point.
+	payload, err = b64.DecodeString(parts[1])
+	if err != nil {
+		return nil, "", false, ErrMalformed
+	}
+	return payload, hdr.Kid, keyExpired, nil
+}
+
+// tokenCharsetOK reports whether token holds only base64url characters and
+// '.' separators.
+func tokenCharsetOK(token []byte) bool {
+	for _, b := range token {
+		switch {
+		case b >= 'A' && b <= 'Z', b >= 'a' && b <= 'z', b >= '0' && b <= '9', b == '-', b == '_', b == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// canonical reports whether raw is exactly the encoding Mint produces for v.
+func canonical(raw []byte, v any) bool {
+	want, err := json.Marshal(v)
+	return err == nil && bytes.Equal(raw, want)
+}
+
+// decodeStrict decodes exactly one JSON object with no unknown fields and no
+// trailing data.
+func decodeStrict(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("trailing data")
+	}
+	return nil
+}

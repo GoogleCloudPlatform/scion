@@ -1,0 +1,22 @@
+pkgmove safety report: alias rewrite in example.com/fx/hub
+References rewritten: 13. Findings: 7. Errors: 0.
+
+An alias and its target are the same type, constant or function value, so a
+direct reference behaves the same. Review each ERROR/HIGH/WARN item below.
+
+== WARN: file excluded by build constraints (not type-checked) ==
+  hub/tagged.go: names aliases (not rewritten; their entries are kept): first - rewrite them by hand under their build tags
+
+== INFO: alias entries kept ==
+  exported (importers may use it): hub/zz_alias_apierr.go: WriteJSON
+
+== INFO: alias entry kept (still referenced) ==
+  hub/zz_alias_apierr.go:16: errBox: embedded as a field
+  hub/zz_alias_apierr.go:28: first: named in tagged.go
+  hub/zz_alias_apierr.go:36: writeError: used as a func value
+
+== INFO: alias reference kept (an embedded field would be renamed) ==
+  hub/users.go:7: users.go embeds the alias errBox; referring to example.com/fx/apierr.ErrBox directly would rename the field
+
+== INFO: alias reference kept (func value of a wrapper) ==
+  hub/value.go:6: writeError is a wrapper of example.com/fx/apierr.WriteError used as a value; referring to example.com/fx/apierr.WriteError directly would change the value's identity

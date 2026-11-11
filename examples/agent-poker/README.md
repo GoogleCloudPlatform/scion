@@ -31,7 +31,7 @@ The dealer has a Python script (`deck.py`) that manages a standard 52-card deck 
 ## Setup
 
 ```bash
-# Initialize a grove for the poker game
+# Initialize a project for the poker game
 scion init poker-night
 
 # Import the templates

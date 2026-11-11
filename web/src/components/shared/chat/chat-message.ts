@@ -25,17 +25,46 @@
  * - Attachments: chip showing basename, full path on hover, NOT clickable
  * - Text/code attachments: a short read-only preview slice with expand + download
  * - Image attachments: an inline thumbnail with a hover expand + download toolbar
+ * - Artifact references: chips (title · vN · owner, or "Artifact unavailable")
+ *   and linkified scion://artifact/ URLs, both opening an in-place preview
  * - Badges: urgent, broadcasted, channel provenance
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { styleMap } from 'lit/directives/style-map.js';
 import { apiFetch } from '../../../client/api.js';
+import { peekUser, resolveUser, userDisplayName } from '../../../client/user-directory.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
+import {
+  CONTAINER_PATH_PATTERN,
+  extensionOf,
+  isRecognizedFilePath,
+  isMarkdownFileName,
+  formatFileSize,
+  GCS_URI_PATTERN,
+  buildGcsLinkElement,
+  parseGcsUri,
+  resolveGcsMatch,
+  ARTIFACT_REF_PATTERN,
+  buildArtifactLinkElement,
+} from '../../../utils/chat-file-links.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import {
+  ARTIFACTS_FLAG,
+  orderArtifactRefs,
+  type MessageArtifactRef,
+} from '../../../client/artifacts.js';
+import './chat-file-preview.js';
+import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
 
 /** Structured attachment reference from the W7 API. */
 export interface AttachmentRefInfo {
@@ -43,16 +72,72 @@ export interface AttachmentRefInfo {
   name: string;
   mime: string;
   size: number;
+  /** Pixel width of an image attachment, when the server knows it. */
+  width?: number;
+  /** Pixel height of an image attachment, when the server knows it. */
+  height?: number;
+}
+
+/**
+ * A reply preview: the message a reply quotes. `unavailable` is set when
+ * that message no longer exists (for example removed by the hub's chat
+ * retention policy); `content` is then a placeholder and `senderName` is
+ * empty.
+ */
+export interface ReplyPreviewInfo {
+  messageId: string;
+  senderName: string;
+  content: string;
+  unavailable?: boolean;
+}
+
+/** The largest box an inline image thumbnail is drawn in, in CSS px. */
+export const IMAGE_THUMB_MAX_WIDTH_PX = 320;
+export const IMAGE_THUMB_MAX_HEIGHT_PX = 240;
+
+/** Intrinsic pixel size of an image. */
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
+/** The intrinsic size of an image attachment, when its reference carries one. */
+export function knownImageSize(ref: AttachmentRefInfo): ImageSize | null {
+  if (ref.width && ref.height && ref.width > 0 && ref.height > 0) {
+    return { width: ref.width, height: ref.height };
+  }
+  return null;
+}
+
+/**
+ * The inline style that reserves an image thumbnail's box before it loads.
+ * A known size scales down to fit the thumbnail box, keeping its aspect
+ * ratio, and still narrows with the bubble (max-width: 100% in the
+ * stylesheet). An unknown size reserves the whole 4:3 thumbnail box and
+ * keeps it once the image loads, showing the image inside it at its own
+ * shape (object-fit: contain in the stylesheet), so a load never moves the
+ * thread. The box has a definite width: a percentage would resolve against
+ * the shrink-to-fit button around the image and collapse the box to
+ * nothing until the image arrives.
+ */
+export function imageThumbStyle(size: ImageSize | null): Record<string, string> {
+  if (!size) {
+    return {
+      width: `${IMAGE_THUMB_MAX_WIDTH_PX}px`,
+      aspectRatio: `${IMAGE_THUMB_MAX_WIDTH_PX} / ${IMAGE_THUMB_MAX_HEIGHT_PX}`,
+    };
+  }
+  const scale = Math.min(
+    1,
+    IMAGE_THUMB_MAX_WIDTH_PX / size.width,
+    IMAGE_THUMB_MAX_HEIGHT_PX / size.height
+  );
+  const width = Math.max(1, Math.round(size.width * scale));
+  return { width: `${width}px`, aspectRatio: `${size.width} / ${size.height}` };
 }
 
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat('en', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
 
 /** Non-`text/*` MIME types whose bytes are still text. */
 const TEXT_MIMES = new Set([
@@ -134,15 +219,95 @@ const CODE_BLOCK_LANGUAGE_MAP: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Entity link detection (#1059) — configurable patterns for deep-linking
-// entity references in agent messages to their detail pages.
+// Links in rendered markdown: scion://artifact/ references, @mentions,
+// entity references (#1059) and GitHub shortform refs.
+//
+// Each pass walks the text nodes of the sanitized markup and replaces a
+// match with nodes built through the DOM. Tags and attribute values are
+// never scanned as text, the patterns see the text itself rather than its
+// HTML-escaped form, and no link markup is assembled as a string.
 // ---------------------------------------------------------------------------
+
+/** What replaces one match: text runs and elements, in order. */
+type LinkPiece = string | Element;
+
+/** An `<a>` with the given attributes (set in this order) and text. */
+function linkElement(attrs: Record<string, string>, text: string): HTMLAnchorElement {
+  const a = document.createElement('a');
+  for (const [name, value] of Object.entries(attrs)) a.setAttribute(name, value);
+  a.textContent = text;
+  return a;
+}
+
+/**
+ * Replace each match of `pattern` in `text` with what `build` returns for
+ * it. Returns null when nothing matched, so the text node is left alone.
+ */
+function replaceMatches(
+  text: string,
+  pattern: RegExp,
+  build: (match: RegExpExecArray) => LinkPiece[]
+): LinkPiece[] | null {
+  // Built per call so the running `lastIndex` is never shared.
+  const re = new RegExp(
+    pattern.source,
+    pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g'
+  );
+  const pieces: LinkPiece[] = [];
+  let cursor = 0;
+  let matched = false;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex++;
+      continue;
+    }
+    matched = true;
+    pieces.push(text.slice(cursor, m.index), ...build(m));
+    cursor = m.index + m[0].length;
+  }
+  if (!matched) return null;
+  pieces.push(text.slice(cursor));
+  return pieces;
+}
+
+/**
+ * Run one link pass over the text nodes under `root`. An element `skip`
+ * matches is stepped over together with everything inside it. `linkify`
+ * returns the pieces that replace a text node's text, or null to leave it.
+ */
+function linkifyTextNodes(
+  root: DocumentFragment,
+  skip: (el: Element) => boolean,
+  linkify: (text: string) => LinkPiece[] | null
+): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      if (node.nodeType !== Node.ELEMENT_NODE) return NodeFilter.FILTER_ACCEPT;
+      return skip(node as Element) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+    },
+  });
+  // Collect first: replacing a node while walking would move the walker.
+  const texts: Text[] = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) texts.push(node as Text);
+  for (const node of texts) {
+    const pieces = linkify(node.data);
+    if (!pieces) continue;
+    node.replaceWith(...pieces.filter((p) => p !== ''));
+  }
+}
+
+/** A skip test for elements with any of these (lowercase) local names. */
+function elementsNamed(...names: string[]): (el: Element) => boolean {
+  const set = new Set(names);
+  return (el) => set.has(el.localName.toLowerCase());
+}
 
 interface EntityPattern {
   /** A global regex that matches one entity reference. */
   regex: RegExp;
-  /** Build the `<a>` tag for a match. Return the full `<a>…</a>` string. */
-  linkBuilder: (match: RegExpExecArray) => string;
+  /** What replaces a match: the link, with any matched text around it. */
+  linkBuilder: (match: RegExpExecArray) => LinkPiece[];
 }
 
 /**
@@ -155,7 +320,16 @@ const ENTITY_PATTERNS: EntityPattern[] = [
     regex: /\bsess_([0-9a-fA-F-]{4,36})\b/g,
     linkBuilder: (m) => {
       const id = m[0]; // full match including prefix
-      return `<a class="entity-link" href="/sessions/${encodeURIComponent(id)}" title="Open session ${id}">${id}</a>`;
+      return [
+        linkElement(
+          {
+            class: 'entity-link',
+            href: `/sessions/${encodeURIComponent(id)}`,
+            title: `Open session ${id}`,
+          },
+          id
+        ),
+      ];
     },
   },
   // Bare UUIDs preceded by "session" (case-insensitive)
@@ -164,7 +338,17 @@ const ENTITY_PATTERNS: EntityPattern[] = [
       /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
     linkBuilder: (m) => {
       const uuid = m[1];
-      return `session <a class="entity-link" href="/sessions/${encodeURIComponent(uuid)}" title="Open session ${uuid}">${uuid}</a>`;
+      return [
+        'session ',
+        linkElement(
+          {
+            class: 'entity-link',
+            href: `/sessions/${encodeURIComponent(uuid)}`,
+            title: `Open session ${uuid}`,
+          },
+          uuid
+        ),
+      ];
     },
   },
   // Commit SHAs: "commit" followed by 7-40 hex chars
@@ -172,32 +356,106 @@ const ENTITY_PATTERNS: EntityPattern[] = [
     regex: /\bcommit\s+([0-9a-fA-F]{7,40})\b/gi,
     linkBuilder: (m) => {
       const sha = m[1];
-      return `commit <a class="entity-link" href="/commits/${encodeURIComponent(sha)}" title="View commit ${sha}">${sha}</a>`;
+      return [
+        'commit ',
+        linkElement(
+          {
+            class: 'entity-link',
+            href: `/commits/${encodeURIComponent(sha)}`,
+            title: `View commit ${sha}`,
+          },
+          sha
+        ),
+      ];
     },
   },
-  // File paths: /workspace/... and /scion-volumes/... container paths
+  // File paths: /workspace/... and /scion-volumes/... container paths.
+  // The pattern and the "is this actually a file" rule are shared with the
+  // recent-files recorder (utils/chat-file-links.ts) so both agree on what
+  // counts as a recognized path.
   {
-    regex:
-      /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
+    regex: CONTAINER_PATH_PATTERN,
     linkBuilder: (m) => {
       const path = m[0];
-      return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
+      if (!isRecognizedFilePath(path)) {
+        return [path];
+      }
+      return [
+        linkElement(
+          {
+            class: 'entity-link path-link',
+            'data-file-path': path,
+            href: '#',
+            title: `Open ${path}`,
+          },
+          path
+        ),
+      ];
     },
   },
 ];
 
 /**
- * Apply entity link patterns to a text segment (outside code/HTML regions).
- * Each match is replaced by the pattern's linkBuilder output. Patterns are
- * tried left-to-right through the string; the first match at each position
- * wins. This is intentionally simple: it scans linearly and does not try to
- * handle overlapping matches from different patterns.
+ * gs:// object link pattern, appended only for a message that is eligible
+ * per the gate below (the `web.gcs_links` experiment and agent-sent) —
+ * never for a user-sent message. Leftmost-wins in `styleEntityLinksInText`
+ * means this still beats a `path-link` match starting later in the same
+ * match (e.g. `gs://bkt/workspace/x.md`, where the file-path pattern would
+ * otherwise match the `/workspace/x.md` tail): both patterns are tried and
+ * the one that starts earliest wins, and the gs:// match always starts at
+ * or before the `/workspace/...` substring it contains.
  */
-function styleEntityLinksInText(text: string): string {
-  // Collect all matches from all patterns, then sort by position.
-  const replacements: { start: number; end: number; replacement: string }[] = [];
+const GCS_ENTITY_PATTERN: EntityPattern = {
+  regex: GCS_URI_PATTERN,
+  linkBuilder: (m) => {
+    const boundary = m[1];
+    const bucket = m[2];
+    const resolved = resolveGcsMatch(m);
+    // No valid object at this occurrence (a directory-like trailing '/', or
+    // the fragment/query/param continuation rule) — leave the raw matched
+    // text unchanged rather than linking a truncated name.
+    if (!resolved) return [m[0]];
+    return [boundary, buildGcsLinkElement(bucket, resolved.object), resolved.suffix];
+  },
+};
 
-  for (const pattern of ENTITY_PATTERNS) {
+/**
+ * Turn scion://artifact/ references in one text node into links. Only run
+ * while the hub.artifacts experiment is on (otherwise there is nothing to
+ * open). The link opens the artifact preview in place; what the viewer sees
+ * is decided by the hub's read check when the preview loads. Each link
+ * built is added to `built`, so the @mention pass that follows steps over
+ * it and a version suffix (`@2`) stays part of the reference.
+ */
+function styleArtifactLinksInText(text: string, built: WeakSet<Element>): LinkPiece[] | null {
+  return replaceMatches(text, ARTIFACT_REF_PATTERN, (m) => {
+    const link = buildArtifactLinkElement(m[0], {
+      id: m[1].toLowerCase(),
+      seq: m[2] ? Number(m[2]) : 0,
+    });
+    built.add(link);
+    return [link];
+  });
+}
+
+/**
+ * Apply entity link patterns to the text of one text node. Each match is
+ * replaced by the pattern's linkBuilder output. Patterns are tried
+ * left-to-right through the string; the first match at each position wins.
+ * This is intentionally simple: it scans linearly and does not try to
+ * handle overlapping matches from different patterns.
+ *
+ * `includeGcs` appends {@link GCS_ENTITY_PATTERN} for this call only — the
+ * gate (the web.gcs_links experiment && the real sender is an agent) is
+ * evaluated once per render by the caller, not baked into a shared, mutable
+ * pattern list.
+ */
+function styleEntityLinksInText(text: string, includeGcs: boolean): LinkPiece[] | null {
+  // Collect all matches from all patterns, then sort by position.
+  const replacements: { start: number; end: number; pieces: LinkPiece[] }[] = [];
+
+  const patterns = includeGcs ? [...ENTITY_PATTERNS, GCS_ENTITY_PATTERN] : ENTITY_PATTERNS;
+  for (const pattern of patterns) {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
     // and cannot loop infinitely on a zero-width or non-advancing match.
@@ -211,7 +469,7 @@ function styleEntityLinksInText(text: string): string {
       replacements.push({
         start: m.index,
         end: m.index + m[0].length,
-        replacement: pattern.linkBuilder(m),
+        pieces: pattern.linkBuilder(m),
       });
       // Safety: if lastIndex did not advance (e.g. zero-length match or
       // missing global flag), break to avoid an infinite loop.
@@ -220,49 +478,142 @@ function styleEntityLinksInText(text: string): string {
     }
   }
 
-  if (replacements.length === 0) return text;
+  if (replacements.length === 0) return null;
 
   // Sort by start position, pick non-overlapping winners (first match wins).
   replacements.sort((a, b) => a.start - b.start);
-  let out = '';
+  const out: LinkPiece[] = [];
   let cursor = 0;
   for (const rep of replacements) {
     if (rep.start < cursor) continue; // overlaps with a prior replacement
-    out += text.slice(cursor, rep.start) + rep.replacement;
+    out.push(text.slice(cursor, rep.start), ...rep.pieces);
     cursor = rep.end;
   }
-  return out + text.slice(cursor);
+  out.push(text.slice(cursor));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub shortform issue/PR references (owner/repo#N) — auto-link to the
+// GitHub issue page. GitHub redirects /issues/N to /pull/N for PRs, so the
+// issues URL is correct for both.
+// ---------------------------------------------------------------------------
+
+/**
+ * Matches `owner/repo#123` shortform GitHub references:
+ *   - Owner: a GitHub username/org, `[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})`.
+ *   - Repo: `[A-Za-z0-9._-]+`, excluding a repo made up of only dots (`.`,
+ *     `..`, ...) — GitHub forbids those as repo names, and without the
+ *     exclusion they'd produce a wrong link that the browser silently
+ *     resolves to a different URL. A repo merely starting with a dot, like
+ *     the real `.github` repo, is unaffected: `(?!\.+#)` only rejects dots
+ *     running all the way to `#`.
+ *   - Number: one or more digits after `#`.
+ *
+ * The leading group captures the boundary before the owner instead of using
+ * a lookbehind assertion, and the replacement re-emits it unchanged (see
+ * `styleGithubRefsInText`). A captured boundary is exactly equivalent to a
+ * lookbehind here, because the boundary can never itself be part of a valid
+ * match, but it parses on every JS engine that supports `u`-flag `\p{…}`
+ * classes — lookbehind additionally needs Safari 16.4+ (Mar 2023), and this
+ * is the only regex in `web/src` that would otherwise require it. A
+ * lookbehind that an older Safari can't parse is a `SyntaxError` at parse
+ * time, which would fail the whole `chat-message` module, not just ref
+ * linking — too large a blast radius for a linkifier.
+ *
+ * The boundary must be the start of the string, or a character that is not
+ * a Unicode letter, digit, `_`, `/`, `.`, or `-`. That is what keeps
+ * `foo/bar#1` from double-linking inside a URL or file path, keeps
+ * `a/b/c#12` from also matching the shorter `b/c#12` tail (a repo can never
+ * contain `/`, so a match starting at `a` fails structurally, and a match
+ * starting at `b` or `c` is blocked by the preceding `/`), keeps a
+ * scheme-less host like `example.com/foo#12` or a dotted prefix like
+ * `user.name/repo#1` from matching (blocked by the `.` exclusion, since a
+ * GitHub owner can never follow a `.`), keeps a hyphenated prefix like
+ * `user.foo-bar/repo#1` from sliding past the `.` and matching `bar/repo#1`
+ * at the `-` instead (blocked by the `-` exclusion), and — using
+ * `\p{L}`/`\p{N}` with the `u` flag rather than ASCII `\w` — keeps a
+ * non-ASCII prefix like `äptone` from letting `ptone/scion#1` match
+ * mid-word. The trailing negative lookahead excludes a following Unicode
+ * letter, digit, or `_`, so `#2217a` and `#12é` cannot be split into a ref
+ * plus stray text.
+ */
+const GITHUB_REF_REGEX =
+  /(^|[^\p{L}\p{N}_/.-])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?!\.+#)([A-Za-z0-9._-]+)#(\d+)(?![\p{L}\p{N}_])/gu;
+
+/** Apply the GitHub-ref pattern to the text of one text node. */
+function styleGithubRefsInText(text: string): LinkPiece[] | null {
+  return replaceMatches(text, GITHUB_REF_REGEX, (m) => {
+    const [, boundary, owner, repo, number] = m;
+    const ref = `${owner}/${repo}#${number}`;
+    return [
+      boundary,
+      linkElement(
+        {
+          class: 'entity-link gh-ref-link',
+          href: `https://github.com/${owner}/${repo}/issues/${number}`,
+          target: '_blank',
+          rel: 'noopener noreferrer',
+          title: `Open ${ref} on GitHub`,
+        },
+        ref
+      ),
+    ];
+  });
 }
 
 /**
- * Post-process rendered markdown to turn entity references into clickable
- * deep links, leaving code blocks and inline code untouched — an entity ID
- * inside a fence is literal text, not a navigation target.
- *
- * Follows the exact same skip-region approach as `styleMentions()`.
+ * Wrap @mentions in one text node in styled, clickable spans. The slug is
+ * limited to `[\w.-]`, with an optional `@project` part.
  */
-function styleEntityLinks(htmlStr: string): string {
-  const skip = new RegExp(MENTION_SKIP_REGION, 'gi');
-  let out = '';
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = skip.exec(htmlStr)) !== null) {
-    out += styleEntityLinksInText(htmlStr.slice(cursor, match.index)) + match[0];
-    cursor = match.index + match[0].length;
-  }
-  return out + styleEntityLinksInText(htmlStr.slice(cursor));
+function styleMentionsInText(text: string): LinkPiece[] | null {
+  return replaceMatches(text, /@([\w.-]+(?:@[\w.-]+)?)/g, (m) => {
+    const span = document.createElement('span');
+    span.setAttribute('class', 'mention clickable');
+    span.setAttribute('data-mention', m[1]);
+    span.textContent = `@${m[1]}`;
+    return [span];
+  });
 }
 
-/** Lowercase extension including the dot, or '' when the name has none. */
-function extensionOf(name: string): string {
-  const dot = name.lastIndexOf('.');
-  return dot > 0 ? name.slice(dot).toLowerCase() : '';
+/**
+ * Turn references in rendered, sanitized markdown into links, in this
+ * order: artifact references (when `artifacts`), @mentions, entity
+ * references (gs:// objects too when `gcs`), then GitHub shortform refs.
+ * What each pass steps over:
+ *
+ * - Artifact references: code (`<pre>`, `<code>`) and existing links.
+ * - @mentions: code, and the artifact links just built. Existing links are
+ *   not stepped over, so an `@name` in a link's text is still styled.
+ * - Entity references: `<pre>` fences and existing links. Inline `<code>`
+ *   is not stepped over, so a file path inside backticks still links.
+ * - GitHub refs: code and existing links; a ref inside backticks is
+ *   literal text.
+ *
+ * Works in place on the nodes the markdown renderer returned, with DOM calls
+ * only: link text is set as text, never parsed as markup.
+ */
+function linkifyRenderedFragment(
+  root: DocumentFragment,
+  opts: { artifacts: boolean; gcs: boolean }
+): void {
+  const isCode = elementsNamed('pre', 'code');
+  const artifactLinks = new WeakSet<Element>();
+  if (opts.artifacts) {
+    linkifyTextNodes(root, elementsNamed('pre', 'code', 'a'), (text) =>
+      styleArtifactLinksInText(text, artifactLinks)
+    );
+  }
+  linkifyTextNodes(root, (el) => isCode(el) || artifactLinks.has(el), styleMentionsInText);
+  linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
+    styleEntityLinksInText(text, opts.gcs)
+  );
+  linkifyTextNodes(root, elementsNamed('pre', 'a', 'code'), styleGithubRefsInText);
 }
 
 /** True when the file is a Markdown document. */
 function isMarkdownFile(name: string): boolean {
-  const ext = extensionOf(name);
-  return ext === '.md' || ext === '.markdown';
+  return isMarkdownFileName(name);
 }
 
 /**
@@ -306,7 +657,9 @@ async function fetchAttachmentText(id: string): Promise<string> {
   let pending = contentInFlight.get(id);
   if (!pending) {
     pending = (async () => {
-      const res = await apiFetch(attachmentURL(id));
+      // stream=1: the hub serves the bytes itself instead of redirecting to
+      // object storage, which fetch() could not follow (cross-origin).
+      const res = await apiFetch(`${attachmentURL(id)}?stream=1`);
       if (!res.ok) throw new Error(`Preview unavailable (HTTP ${res.status})`);
       return res.text();
     })();
@@ -334,57 +687,15 @@ function attachmentURL(id: string): string {
   return `/api/v1/chat/attachments/${encodeURIComponent(id)}`;
 }
 
-/** Format file size for display. */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
- * Spans of rendered markdown that @mention styling must step over: code
- * regions, whose text is literal, and HTML tags, whose attributes must not be
- * mangled. `<pre>` is listed before `<code>` so a `<pre><code>` fence is
- * consumed as one region. Whatever falls *between* matches is text content.
- *
- * Tags are matched as `<[^>]+>` — safe because the input is DOMPurify output,
- * which escapes any `>` appearing inside an attribute value.
- */
-const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
-
-/**
- * Wrap @mentions in styled, clickable spans.
- *
- * The captured slug is limited to `[\w.-]` so it can never break out of the
- * `data-mention` attribute it is interpolated into.
- */
-function styleMentionsInText(text: string): string {
-  return text.replace(
-    /@([\w.-]+(?:@[\w.-]+)?)/g,
-    '<span class="mention clickable" data-mention="$1">@$1</span>'
-  );
-}
-
-/**
- * Post-process rendered markdown to make @mentions clickable, leaving code
- * blocks and inline code untouched — an `@name` inside a fence is literal
- * text, not a reference to anyone.
- */
-function styleMentions(htmlStr: string): string {
-  // Built per call so the running `lastIndex` is never shared between renders.
-  const skip = new RegExp(MENTION_SKIP_REGION, 'gi');
-  let out = '';
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = skip.exec(htmlStr)) !== null) {
-    out += styleMentionsInText(htmlStr.slice(cursor, match.index)) + match[0];
-    cursor = match.index + match[0].length;
-  }
-  return out + styleMentionsInText(htmlStr.slice(cursor));
-}
-
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
+  /**
+   * Re-renders this message when the effective display zone changes
+   * (review R2-1), so a thread already on screen when the preference
+   * loads or changes doesn't stay stuck in the browser zone.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The message body text. */
   @property()
   body = '';
@@ -397,6 +708,47 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Boolean })
   fromAgent = false;
 
+  /**
+   * Whether the viewer starred this message (web.chat_starred_messages).
+   * Shows a small, noninteractive filled star in the message meta; the
+   * Star/Unstar toggle lives in the message menu.
+   */
+  @property({ type: Boolean })
+  starred = false;
+
+  /**
+   * Show the message's More actions button (web.chat_starred_messages):
+   * the keyboard entry to the message menu. The thread makes one message's
+   * button the list's single tab stop (`actionsTabIndex` 0, the others
+   * -1) and moves it with the arrow keys. It is always visible: bare dots
+   * in the upper-right corner inside the bubble.
+   */
+  @property({ type: Boolean })
+  actionsEnabled = false;
+
+  /** The tab index of the More actions button (set by the thread). */
+  @property({ type: Number })
+  actionsTabIndex = -1;
+
+  /** The message menu is open for this message (the button's aria-expanded). */
+  @property({ type: Boolean })
+  actionsExpanded = false;
+
+  /** The More actions button, when rendered. */
+  get actionsButton(): HTMLButtonElement | null {
+    return this.renderRoot?.querySelector<HTMLButtonElement>('button.msg-actions') ?? null;
+  }
+
+  /**
+   * Whether the message's actual sender is an agent, independent of
+   * `fromAgent`. v2 chat-thread computes `fromAgent` as "not me" (any
+   * sender other than the current viewer, including another *user*) for
+   * layout purposes; gs:// linkification needs the real sender kind, since
+   * "user-sent messages never link" means any user, not just the viewer.
+   */
+  @property({ type: Boolean })
+  senderIsAgent = false;
+
   /** Whether the message is plain text (no markdown rendering). */
   @property({ type: Boolean })
   plain = false;
@@ -408,6 +760,15 @@ export class ScionChatMessage extends LitElement {
   /** Sender unique ID for avatar colour hashing (avoids collisions from similar names). */
   @property()
   senderId = '';
+
+  /**
+   * The store message id, set by chat-thread from the rendered message's
+   * `id`. Carried on a `gcs-link-click` event so the hub can derive the
+   * sender's SA from a message the viewer is authorized to read, without a
+   * client-supplied agent or SA identifier.
+   */
+  @property()
+  messageId = '';
 
   /** Sender display name for v2 multi-sender rendering. */
   @property()
@@ -446,8 +807,17 @@ export class ScionChatMessage extends LitElement {
   dispatchFailureReason = '';
 
   /**
+   * Machine-readable dispatch failure code, e.g. "agent_unreachable"
+   * (nc-delivery-unreachable). May be empty for history rows sent before this
+   * field existed; renderDeliveryState() falls back to matching the reason
+   * prefix in that case.
+   */
+  @property()
+  dispatchFailureCode = '';
+
+  /**
    * True when the DM peer's read watermark has reached this message. Replaces
-   * the single-check "Delivered" indicator with a double-check "Seen".
+   * the single-check "Accepted" indicator with a double-check "Seen".
    */
   @property({ type: Boolean })
   seen = false;
@@ -467,9 +837,16 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Array })
   attachmentRefs: AttachmentRefInfo[] = [];
 
+  /**
+   * Artifact references on this message, as the hub resolved them for the
+   * viewer (ptone/scion#3224). An unavailable one carries no title.
+   */
+  @property({ type: Array })
+  artifactRefs: MessageArtifactRef[] = [];
+
   /** Reply preview data: the message this one is replying to. */
   @property({ type: Object })
-  replyPreview: { messageId: string; senderName: string; content: string } | null = null;
+  replyPreview: ReplyPreviewInfo | null = null;
 
   /** When set, indicates the message was edited at this timestamp. */
   @property()
@@ -483,16 +860,50 @@ export class ScionChatMessage extends LitElement {
   @property()
   senderProjectSlug = '';
 
+  /**
+   * The user who authorized a message sent with an agent delegated
+   * credential (.design/agent-delegation.md §14.5). The sender stays the
+   * agent; the message shows "authorized by <user>". Empty otherwise.
+   */
+  @property()
+  authorizingUserId = '';
+
+  /** The delegation grant of a message sent with an agent delegated credential. */
+  @property()
+  delegationGrantId = '';
+
+  /** The authorizing user's display name, email or ID, once resolved. */
   @state()
-  private renderedHtml = '';
+  private authorizerName = '';
+
+  /** The signed-in user's id; the artifact preview shows their artifacts' owner as "You". */
+  @property()
+  currentUserId = '';
+
+  /**
+   * The rendered body: a `.md-content` element holding the markdown
+   * renderer's nodes, or null to show the body as plain text. Built once per
+   * body, and kept as one element so later renders move it rather than
+   * rebuild it.
+   */
+  @state()
+  private renderedContent: HTMLElement | null = null;
 
   /** Preview load state per attachment ID. Replaced, never mutated. */
   @state()
   private previews: ReadonlyMap<string, PreviewState> = new Map();
 
-  /** Attachment shown in the full-height overlay, if any. */
+  /**
+   * Target shown in the full-height overlay, if any. Built once, at open
+   * time, and kept as the same object reference across this component's
+   * re-renders — `<scion-chat-file-preview>` refetches and resets its
+   * Source/Rendered toggle whenever `.target` changes identity, so rebuilding
+   * a fresh object literal here on every render (reactions, read receipts,
+   * SSE edits, a parent re-render) would spuriously refetch and reset an
+   * overlay the user already has open.
+   */
   @state()
-  private expanded: AttachmentRefInfo | null = null;
+  private expandedTarget: PreviewTarget | null = null;
 
   /**
    * Per-attachment toggle: true = show raw source, false/absent = show
@@ -586,6 +997,13 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-text-muted, #64748b);
       font-size: var(--chat-fs-sm);
       font-weight: 400;
+    }
+
+    .authorized-by {
+      font-size: var(--chat-fs-sm);
+      font-weight: 400;
+      color: var(--scion-text-muted, #64748b);
+      margin-bottom: 0.125rem;
     }
 
     .cross-project-label {
@@ -771,11 +1189,28 @@ export class ScionChatMessage extends LitElement {
       text-decoration: underline;
     }
 
+    /* A wide table scrolls sideways inside its own box rather than
+       squashing its columns or widening the message. The wrapper is added
+       after render (wrapTables) so the table keeps its table semantics. */
+    .md-table-scroll {
+      max-width: 100%;
+      overflow-x: auto;
+      margin: 0.5em 0;
+    }
+
     .md-content table {
       border-collapse: collapse;
-      width: 100%;
-      margin: 0.5em 0;
+      min-width: 100%;
       font-size: var(--chat-fs-md);
+    }
+
+    .md-table-scroll:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 2px;
+    }
+
+    .md-table-scroll > table {
+      margin: 0;
     }
 
     .md-content th,
@@ -783,6 +1218,15 @@ export class ScionChatMessage extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       padding: 0.375em 0.5em;
       text-align: left;
+    }
+
+    /* On a phone, columns keep a readable width and the wrapper scrolls
+       past that; on wider screens tables size to their content as before. */
+    @media (max-width: 768px) {
+      .md-content th,
+      .md-content td {
+        min-width: 6em;
+      }
     }
 
     .md-content th {
@@ -860,6 +1304,8 @@ export class ScionChatMessage extends LitElement {
     .image-preview-wrapper {
       position: relative;
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
     }
 
     .image-actions {
@@ -901,6 +1347,8 @@ export class ScionChatMessage extends LitElement {
     /* The image is the button: no chrome of its own, just a focus ring. */
     .image-expand {
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
       padding: 0;
       border: none;
       background: none;
@@ -913,9 +1361,15 @@ export class ScionChatMessage extends LitElement {
       outline-offset: 2px;
     }
 
+    /* The thumbnail box comes from imageThumbStyle(): its width and aspect
+       ratio are set before the image loads and kept after, so a late load
+       doesn't shift the thread; an image of another shape is letterboxed
+       inside it. The box never runs past the bubble on a narrow screen. */
     .attachment-image {
-      max-width: 320px;
-      max-height: 240px;
+      display: block;
+      max-width: 100%;
+      height: auto;
+      box-sizing: border-box;
       border-radius: 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       cursor: pointer;
@@ -929,6 +1383,57 @@ export class ScionChatMessage extends LitElement {
     }
 
     /* W7: Download chips for non-image files */
+    .artifact-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+      margin-top: 0.375rem;
+    }
+
+    .artifact-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      max-width: 100%;
+      padding: 0.25rem 0.625rem;
+      background: var(--scion-surface, #fff);
+      border: 1px solid var(--scion-border, #cbd5e1);
+      border-radius: 0.5rem;
+      font: inherit;
+      font-size: var(--chat-fs-sm);
+      color: var(--scion-text, #0f172a);
+      cursor: pointer;
+    }
+
+    .artifact-chip:hover,
+    .artifact-chip:focus-visible {
+      border-color: var(--sl-color-primary-500, #3b82f6);
+      background: var(--sl-color-primary-50, #eff6ff);
+    }
+
+    .artifact-chip sl-icon {
+      flex: none;
+      font-size: var(--chat-fs-base);
+    }
+
+    .artifact-chip .artifact-title {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .artifact-chip .artifact-meta {
+      flex: none;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .artifact-chip.unavailable {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-style: dashed;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .download-chip {
       display: inline-flex;
       align-items: center;
@@ -1068,28 +1573,6 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
-    .full-preview::part(panel) {
-      width: 90vw;
-      max-width: 900px;
-    }
-
-    .full-preview::part(body) {
-      padding-top: 0;
-    }
-
-    .full-preview .preview-placeholder {
-      padding: 2rem;
-    }
-
-    /* Fit the whole image in the panel rather than scrolling it. */
-    .full-preview .full-image {
-      display: block;
-      margin: 0 auto;
-      max-width: 100%;
-      max-height: 75vh;
-      object-fit: contain;
-    }
-
     /* Verbose (recessed) rendering — no bubble, muted text, small label */
     .message-wrapper.verbose .bubble-content {
       background: none;
@@ -1189,56 +1672,23 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
-    /* ---- Phase-3: Message action bar ---- */
-    .message-actions {
-      position: absolute;
-      top: -12px;
-      right: 8px;
-      display: flex;
-      gap: 0.0625rem;
-      padding: 0.125rem;
-      border-radius: 0.375rem;
-      background: var(--scion-surface-100, #f1f5f9);
-      border: 1px solid var(--scion-neutral-200, #e2e8f0);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
-      transition:
-        opacity 0.15s ease,
-        visibility 0.15s ease;
-      z-index: 10;
+    /* F5 (p2a-r2 review): deferred (design agent-reincarnate §3.7) —
+       distinct from failed (not an error) and from pending (not a normal
+       in-flight send); a warning-toned, not danger-toned, indicator. */
+    .delivery-state.deferred {
+      color: var(--scion-warning-600, #d97706);
     }
 
-    .message-wrapper:hover .message-actions,
-    .message-wrapper:focus-within .message-actions,
-    .message-actions.pinned {
-      opacity: 1;
-      visibility: visible;
-      pointer-events: auto;
+    .delivery-state.deferred sl-icon {
+      color: var(--scion-warning-600, #d97706);
     }
 
-    @media (hover: none) {
-      .message-actions {
-        opacity: 0;
-        visibility: hidden;
-        pointer-events: none;
-      }
-      .message-actions.pinned {
-        opacity: 1;
-        visibility: visible;
-        pointer-events: auto;
-      }
+    .delivery-state.no-recipient {
+      color: var(--scion-warning-600, #d97706);
     }
 
-    .message-actions sl-icon-button::part(base) {
-      padding: 0.25rem;
-      font-size: var(--chat-fs-lg);
-      color: var(--scion-neutral-600, #475569);
-    }
-
-    .message-actions sl-icon-button::part(base):hover {
-      color: var(--scion-primary-600, #2563eb);
+    .delivery-state.no-recipient sl-icon {
+      color: var(--scion-warning-600, #d97706);
     }
 
     /* ---- Phase-3: Reply preview quote block ---- */
@@ -1249,22 +1699,35 @@ export class ScionChatMessage extends LitElement {
       padding: 0.25rem 0.5rem;
       margin-bottom: 0.25rem;
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
-      background: var(--scion-surface-50, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
       border-radius: 0 0.25rem 0.25rem 0;
       cursor: pointer;
       font-size: var(--chat-fs-base);
-      color: var(--scion-neutral-500, #64748b);
+      color: var(--scion-text-muted, #64748b);
       max-width: 100%;
       overflow: hidden;
     }
 
     .reply-preview:hover {
-      background: var(--scion-surface-100, #f1f5f9);
+      background: var(--scion-bg-subtle, #f1f5f9);
     }
 
+    .reply-preview.unavailable {
+      cursor: default;
+      border-left-color: var(--scion-border, #e2e8f0);
+      color: var(--scion-neutral-400, #94a3b8);
+      font-style: italic;
+    }
+
+    .reply-preview.unavailable:hover {
+      background: var(--scion-bg, #f8fafc);
+    }
+
+    /* primary-600 in the light theme and primary-300 in the dark one, so the
+       name keeps AA contrast on the reply background in both. */
     .reply-preview .reply-sender {
       font-weight: 600;
-      color: var(--scion-primary-600, #2563eb);
+      color: var(--scion-primary-hover, #2563eb);
       white-space: nowrap;
     }
 
@@ -1278,6 +1741,107 @@ export class ScionChatMessage extends LitElement {
     .deleted-message {
       font-style: italic;
       color: var(--scion-neutral-400, #94a3b8);
+    }
+
+    /* ---- More actions button: the keyboard entry to the message menu ----
+       Always visible: bare dots in the upper-right corner inside the text
+       bubble. The bubble reserves a right-hand column for them, so they
+       never sit over the message text. An attachment-only message has no
+       text bubble: its bubble reserves the same column beside the
+       attachments. */
+    .bubble-content.has-actions,
+    .bubble.actions-corner {
+      position: relative;
+      padding-right: 2rem;
+    }
+
+    .msg-actions {
+      position: absolute;
+      top: 0.25rem;
+      right: 0.25rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      /* The touch target; the glyph inside is smaller. */
+      width: 1.5rem;
+      height: 1.5rem;
+      padding: 0;
+      border: none;
+      border-radius: 0.25rem;
+      background: none;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.875rem;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    /* The reserved column counts toward the bubble's max-width, so an
+       attachment-only bubble is no wider than its text neighbours. */
+    .bubble.actions-corner {
+      box-sizing: border-box;
+    }
+
+    .bubble.actions-corner > .msg-actions {
+      top: 0;
+    }
+
+    @media (hover: hover) {
+      .msg-actions:hover {
+        color: var(--scion-text, #1e293b);
+      }
+    }
+
+    .msg-actions:focus {
+      outline: none;
+    }
+
+    .msg-actions:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 0;
+    }
+
+    /* The message whose action button has keyboard focus. */
+    .message-wrapper.actions-focused .bubble-content {
+      box-shadow: 0 0 0 2px var(--scion-primary, #3b82f6);
+    }
+
+    .actions-help {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    /* ---- Starred indicator (shape plus accent, never colour alone) ---- */
+    .star-indicator {
+      display: inline-flex;
+      align-items: center;
+      color: var(--scion-warning-500, #d97706);
+      font-size: var(--chat-fs-xs);
+      margin-left: 0.25rem;
+    }
+
+    /* Renderings without a header (grouped and dense rows, user bubbles):
+       the star sits in the gutter beside the bubble, level with its first
+       line, so a starred row is no taller than its neighbours. */
+    .star-meta {
+      position: absolute;
+      top: 0.5rem;
+      right: calc(100% + 0.25rem);
+      display: flex;
+      line-height: 1;
+    }
+
+    .from-agent .star-meta {
+      right: auto;
+      left: calc(100% + 0.25rem);
+    }
+
+    .star-meta .star-indicator {
+      margin-left: 0;
     }
 
     /* ---- Phase-3: Edited label ---- */
@@ -1419,6 +1983,27 @@ export class ScionChatMessage extends LitElement {
       padding-top: 0.25em;
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
+
+    /* The 70%-of-row cap reads as wasted space on a phone. Removing it
+       (rather than raising it) lets the bubble grow to whatever the flex
+       layout actually has left beside the avatar: .bubble is a flex child
+       of .message-wrapper alongside the fixed-width avatar and its gap, so
+       it is already bounded by the space those leave, with no separate
+       max-width needed to keep it off the avatar's column. */
+    @media (max-width: 768px) {
+      .bubble {
+        max-width: none;
+      }
+
+      .message-wrapper {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+      }
+
+      .bubble-content {
+        padding: 0.625rem 0.75rem;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -1433,11 +2018,46 @@ export class ScionChatMessage extends LitElement {
     this.observedPreviews = new WeakSet();
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    if (changed.has('authorizingUserId')) {
+      this.resolveAuthorizer();
+    }
+  }
+
+  /**
+   * Names the authorizing user: a cached user row at once, else the ID
+   * until `resolveUser` answers (display name, else email, else the ID).
+   */
+  private resolveAuthorizer(): void {
+    const id = this.authorizingUserId;
+    if (!id) {
+      this.authorizerName = '';
+      return;
+    }
+    const cached = peekUser(id);
+    this.authorizerName = cached ? userDisplayName(cached) : id;
+    if (cached) return;
+    void resolveUser(id).then((user) => {
+      if (user && this.authorizingUserId === id) {
+        this.authorizerName = userDisplayName(user);
+      }
+    });
+  }
+
+  private renderAuthorizedBy() {
+    if (!this.authorizingUserId) return nothing;
+    const name = this.authorizerName || this.authorizingUserId;
+    const title = this.delegationGrantId ? `via delegation ${this.delegationGrantId}` : nothing;
+    return html`<div class="authorized-by" title=${title}>authorized by ${name}</div>`;
+  }
+
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('body') || changed.has('plain')) {
       void this.renderContent();
     }
-    if (changed.has('renderedHtml')) {
+    if (changed.has('renderedContent')) {
+      this.wrapTables();
       this.injectCopyButtons();
       this.injectSyntaxHighlighting();
       this.injectDiffBlocks();
@@ -1507,8 +2127,28 @@ export class ScionChatMessage extends LitElement {
     this.previews = next;
   }
 
+  /** Give each rendered markdown table its own sideways scroller. */
+  private wrapTables(): void {
+    this.shadowRoot?.querySelectorAll('.md-content table').forEach((table) => {
+      if (table.parentElement?.classList.contains('md-table-scroll')) return;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'md-table-scroll';
+      // A keyboard user must be able to reach and scroll a wide table, and
+      // the scrolling region needs a name. Always focusable: whether it
+      // overflows changes with the viewport (rotation, resizing).
+      wrapper.tabIndex = 0;
+      wrapper.setAttribute('role', 'region');
+      const caption = table.querySelector('caption')?.textContent?.trim();
+      wrapper.setAttribute('aria-label', caption || 'Table');
+      table.replaceWith(wrapper);
+      wrapper.appendChild(table);
+    });
+  }
+
   /** Inject copy buttons on all code blocks inside rendered markdown. */
   private injectCopyButtons(): void {
+    /** A copy button that carries the timer that resets its label. */
+    type CopyButton = HTMLButtonElement & { _copyTimer?: ReturnType<typeof setTimeout> };
     this.shadowRoot?.querySelectorAll('.md-content pre').forEach((pre) => {
       if (pre.querySelector('.copy-btn')) return;
       const btn = document.createElement('button');
@@ -1516,14 +2156,19 @@ export class ScionChatMessage extends LitElement {
       btn.textContent = 'Copy';
       btn.addEventListener('click', () => {
         const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
-        void navigator.clipboard.writeText(code);
-        btn.textContent = 'Copied!';
-        const prev = (btn as any)._copyTimer as ReturnType<typeof setTimeout> | undefined;
-        if (prev) clearTimeout(prev);
-        (btn as any)._copyTimer = setTimeout(() => {
-          if (!this.isConnected) return;
-          btn.textContent = 'Copy';
-        }, 1500);
+        void copyToClipboard(code).then((ok) => {
+          if (!ok) {
+            showCopyFailedToast();
+            return;
+          }
+          btn.textContent = 'Copied!';
+          const prev = (btn as CopyButton)._copyTimer;
+          if (prev) clearTimeout(prev);
+          (btn as CopyButton)._copyTimer = setTimeout(() => {
+            if (!this.isConnected) return;
+            btn.textContent = 'Copy';
+          }, 1500);
+        });
       });
       pre.appendChild(btn);
     });
@@ -1560,9 +2205,7 @@ export class ScionChatMessage extends LitElement {
       pre.setAttribute('data-highlighted', 'true');
 
       // Create a readonly code editor and replace the <pre> in-place.
-      const editor = document.createElement(
-        'scion-code-editor'
-      ) as import('../code-editor.js').ScionCodeEditor;
+      const editor = document.createElement('scion-code-editor');
       editor.content = content;
       editor.language = language;
       editor.readonly = true;
@@ -1714,21 +2357,36 @@ export class ScionChatMessage extends LitElement {
 
   private async renderContent(): Promise<void> {
     if (!this.body || this.plain) {
-      this.renderedHtml = '';
+      this.renderedContent = null;
       return;
     }
     const taskId = ++this.renderTaskId;
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
-      let rendered = renderer.render(this.body);
-      rendered = styleMentions(rendered);
-      rendered = styleEntityLinks(rendered);
-      this.renderedHtml = rendered;
+      const fragment = renderer.renderFragment(this.body);
+      // gs:// links are gated on the server-reported feature flag AND the
+      // message being agent-sent — a user-sent message never links, however
+      // the body happens to be spelled.
+      linkifyRenderedFragment(fragment, {
+        artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
+        gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
+      });
+      this.renderedContent = fragment.hasChildNodes() ? this.contentElement(fragment) : null;
     } catch {
       if (taskId !== this.renderTaskId) return;
-      this.renderedHtml = '';
+      this.renderedContent = null;
     }
+  }
+
+  /** Wraps rendered nodes in the clickable `.md-content` element. */
+  private contentElement(fragment: DocumentFragment): HTMLElement {
+    const content = document.createElement('div');
+    content.className = 'md-content';
+    content.addEventListener('click', (e) => this.handleContentClick(e));
+    content.addEventListener('auxclick', (e) => this.handleContentAuxClick(e));
+    content.append(fragment);
+    return content;
   }
 
   /**
@@ -1756,11 +2414,42 @@ export class ScionChatMessage extends LitElement {
   }
 
   /**
+   * A middle-click fires auxclick, not click: keep it from opening the
+   * "#" href of an artifact, gs:// or file path link in a new tab. These
+   * links open their preview on a plain click only.
+   */
+  private handleContentAuxClick(e: MouseEvent): void {
+    if (
+      (e.target as HTMLElement | null)?.closest(
+        '.artifact-link[data-artifact-id], .gcs-link[data-gcs-uri], .path-link[data-file-path]'
+      )
+    ) {
+      e.preventDefault();
+    }
+  }
+
+  /**
    * Unified click handler for .md-content: delegates to mention or path-link
    * handlers based on the click target.
    */
   private handleContentClick(e: MouseEvent): void {
-    // Check for path-link click first (more specific selector).
+    // Check for the more specific selectors first.
+    const artifactTarget = (e.target as HTMLElement | null)?.closest(
+      '.artifact-link[data-artifact-id]'
+    ) as HTMLElement | null;
+    if (artifactTarget) {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = artifactTarget.dataset.artifactId ?? '';
+      const seq = Number(artifactTarget.dataset.artifactSeq ?? '0') || 0;
+      if (id) this.openArtifactPreview(id, seq);
+      return;
+    }
+    const gcsTarget = (e.target as HTMLElement | null)?.closest('.gcs-link[data-gcs-uri]');
+    if (gcsTarget) {
+      this.handleGcsLinkClick(e, gcsTarget as HTMLElement);
+      return;
+    }
     const pathTarget = (e.target as HTMLElement | null)?.closest('.path-link[data-file-path]');
     if (pathTarget) {
       this.handlePathLinkClick(e, pathTarget as HTMLElement);
@@ -1791,10 +2480,44 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
+  /**
+   * Clicking a gs:// link parses `data-gcs-uri` and dispatches a composed
+   * `gcs-link-click` event carrying the bucket, object and this message's
+   * id. Unlike a path-link click, there is no project resolution and no
+   * chat-thread round-trip: chat-thread only ever assigns the event detail
+   * straight onto the preview target.
+   */
+  private handleGcsLinkClick(e: MouseEvent, target: HTMLElement): void {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const uri = target.dataset.gcsUri;
+    if (!uri) return;
+    const parsed = parseGcsUri(uri);
+    if (!parsed) return;
+    const name = parsed.object.split('/').pop() || parsed.object;
+
+    this.dispatchEvent(
+      new CustomEvent('gcs-link-click', {
+        bubbles: true,
+        composed: true,
+        detail: { bucket: parsed.bucket, object: parsed.object, name, messageId: this.messageId },
+      })
+    );
+  }
+
   /** Render the reply preview block above the bubble content. */
   private renderReplyPreview() {
     if (!this.replyPreview) return nothing;
-    const { messageId, senderName, content } = this.replyPreview;
+    const { messageId, senderName, content, unavailable } = this.replyPreview;
+    if (unavailable) {
+      // The quoted message is gone: a muted quote with nothing to jump to.
+      return html`
+        <div class="reply-preview unavailable">
+          <span class="reply-content">${content || '[no longer available]'}</span>
+        </div>
+      `;
+    }
     return html`
       <div class="reply-preview" @click=${() => this.handleScrollToMessage(messageId)}>
         <span class="reply-sender">${senderName}</span>
@@ -1817,9 +2540,20 @@ export class ScionChatMessage extends LitElement {
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
+    // An attachment-only message (ptone/scion#6146) has no text: its
+    // attachments render without an empty text bubble above them.
+    const attachmentOnly =
+      !(this.body ?? '').trim() &&
+      ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
+    // The More actions dots sit inside the text bubble, in a reserved corner.
+    const contentActions = this.actionsEnabled ? ' has-actions' : '';
 
     return html`
-      <div class="message-wrapper ${dirClass}${groupClass}">
+      <div
+        class="message-wrapper ${dirClass}${groupClass}${this.actionsFocused
+          ? ' actions-focused'
+          : ''}"
+      >
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
               ${this.getInitials()}
@@ -1827,7 +2561,11 @@ export class ScionChatMessage extends LitElement {
           : this.fromAgent
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
-        <div class="bubble">
+        <div
+          class="bubble${attachmentOnly && !isDeleted && this.actionsEnabled
+            ? ' actions-corner'
+            : ''}"
+        >
           ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
@@ -1838,8 +2576,9 @@ export class ScionChatMessage extends LitElement {
                   ${this.routedTo
                     ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
                     : nothing}
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  ${this.renderStarIndicator()}
                 </div>
               `
             : nothing}
@@ -1851,24 +2590,145 @@ export class ScionChatMessage extends LitElement {
                     ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
                     : nothing}
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  ${this.renderStarIndicator()}
                 </div>
               `
             : nothing}
-          ${this.replyPreview ? this.renderReplyPreview() : nothing}
+          ${this.renderAuthorizedBy()} ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
-            ? html`<div class="bubble-content">
+            ? html`<div class="bubble-content${contentActions}">
                 <span class="deleted-message">This message was deleted</span>
+                ${this.renderActionsButton()}
               </div>`
-            : html`<div class="bubble-content">${this.renderBody()}</div>`}
-          ${isDeleted ? nothing : this.renderDeliveryState()}
-          ${isDeleted ? nothing : this.renderBadges()}
+            : attachmentOnly
+              ? nothing
+              : html`<div class="bubble-content${contentActions}">
+                  ${this.renderBody()}${this.renderActionsButton()}
+                </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
+          ${isDeleted ? nothing : this.renderArtifactChips()}
+          ${isDeleted ? nothing : this.renderBadges()}
+          ${isDeleted ? nothing : this.renderDeliveryState()}
+          ${this.showsStarMeta() ? this.renderStarMeta() : nothing}
+          ${attachmentOnly && !isDeleted ? this.renderActionsButton() : nothing}
+          ${this.renderActionsHelp()}
         </div>
       </div>
       ${this.renderFullPreview()}
     `;
+  }
+
+  /** The keys that move the message-list tab stop between messages. */
+  private static readonly NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'Home', 'End']);
+
+  @state() private actionsFocused = false;
+
+  /**
+   * The More actions button: a native button (Enter and Space open the
+   * menu) carrying the message context in its name. Up/Down/Home/End ask
+   * the thread to move the tab stop (`message-actions-nav`); activation,
+   * Shift+F10 and the ContextMenu key ask it to open the menu here
+   * (`message-actions-open`). Nothing else is intercepted.
+   */
+  private renderActionsButton(): TemplateResult | typeof nothing {
+    if (!this.actionsEnabled) return nothing;
+    const who = this.senderName || this.sender;
+    const label = `More actions, message from ${who}, ${this.formatTime()}`;
+    const active = this.actionsTabIndex === 0;
+    return html`<button
+      type="button"
+      class="msg-actions"
+      tabindex=${this.actionsTabIndex}
+      aria-label=${label}
+      aria-haspopup="menu"
+      aria-expanded=${this.actionsExpanded ? 'true' : 'false'}
+      aria-describedby=${active ? 'actions-help' : nothing}
+      @click=${this.handleActionsClick}
+      @keydown=${this.handleActionsKeydown}
+      @focus=${(): void => {
+        this.actionsFocused = true;
+      }}
+      @blur=${(): void => {
+        this.actionsFocused = false;
+      }}
+    >
+      <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
+    </button>`;
+  }
+
+  /**
+   * The tab stop's usage hint (the button's aria-describedby). It renders
+   * outside the text bubble so the bubble's text stays the message alone.
+   */
+  private renderActionsHelp(): TemplateResult | typeof nothing {
+    if (!this.actionsEnabled || this.actionsTabIndex !== 0) return nothing;
+    return html`<span class="actions-help" id="actions-help"
+      >Up and Down arrows move between messages. Shift+F10 also opens the menu. Tab leaves the
+      messages.</span
+    >`;
+  }
+
+  private handleActionsClick = (e: MouseEvent): void => {
+    e.stopPropagation();
+    this.dispatchActions('message-actions-open', {});
+  };
+
+  private handleActionsKeydown = (e: KeyboardEvent): void => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (ScionChatMessage.NAV_KEYS.has(e.key) && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dispatchActions('message-actions-nav', { key: e.key });
+      return;
+    }
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dispatchActions('message-actions-open', {});
+    }
+  };
+
+  private dispatchActions(type: string, extra: Record<string, unknown>): void {
+    this.dispatchEvent(
+      new CustomEvent(type, {
+        detail: { messageId: this.messageId, ...extra },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /** Whether the star shows in the gutter (a starred row without a header). */
+  private showsStarMeta(): boolean {
+    return this.starred && !this.deletedAt && !this.hasHeaderMeta();
+  }
+
+  /** Whether this rendering shows a header carrying the time (and the star). */
+  private hasHeaderMeta(): boolean {
+    return this.showHeader && (this.fromAgent || !!this.routedTo);
+  }
+
+  /**
+   * The private starred indicator: a filled star with the accessible name
+   * "Starred by you". It is an image, not a control, so it adds no tab stop.
+   */
+  private renderStarIndicator(): TemplateResult | typeof nothing {
+    if (!this.starred || this.deletedAt) return nothing;
+    return html`<span
+      class="star-indicator"
+      role="img"
+      aria-label="Starred by you"
+      title="Starred by you"
+      ><sl-icon name="star-fill" aria-hidden="true"></sl-icon
+    ></span>`;
+  }
+
+  /** The indicator on its own meta line, for renderings without a header. */
+  private renderStarMeta(): TemplateResult | typeof nothing {
+    if (!this.starred) return nothing;
+    return html`<div class="star-meta">${this.renderStarIndicator()}</div>`;
   }
 
   /** Render delivery state indicator for outbound (user-sent) messages. */
@@ -1884,7 +2744,20 @@ export class ScionChatMessage extends LitElement {
             Sending
           </div>
         `;
+      case 'waking':
+        // Client-only state (chat-wake.ts): the user chose "Wake and send"
+        // and the hub is resuming the suspended agent before delivery.
+        return html`
+          <div class="delivery-state pending waking">
+            <sl-icon name="hourglass-split"></sl-icon>
+            Waking agent…
+          </div>
+        `;
       case 'dispatched':
+        // ptone/scion#4480: "dispatched" means the hub handed the message
+        // to the agent's runtime, which buffered it. It is not confirmation
+        // the agent read it, so it says "Accepted"; "Seen" needs the read
+        // watermark.
         return this.seen
           ? html`
               <div class="delivery-state seen">
@@ -1895,32 +2768,65 @@ export class ScionChatMessage extends LitElement {
           : html`
               <div class="delivery-state dispatched">
                 <sl-icon name="check2"></sl-icon>
-                Delivered
+                Accepted
               </div>
             `;
-      case 'failed':
+      case 'deferred':
+        // F5 (p2a-r2 review): design agent-reincarnate §3.7 — the
+        // recipient is mid-`scion reincarnate`. The message was saved to
+        // history for catch-up, not dropped and not yet dispatched.
+        // Distinct from "failed" (no icon/wording overlap) and from
+        // "pending" (that's a normal in-flight send, this is a deliberate
+        // hold).
+        return html`
+          <sl-tooltip
+            content="Agent is reincarnating; message saved and will be seen on catch-up"
+            hoist
+          >
+            <div class="delivery-state deferred">
+              <sl-icon name="pause-circle"></sl-icon>
+              Deferred: agent is reincarnating (saved)
+            </div>
+          </sl-tooltip>
+        `;
+      case 'no_recipient':
+        // A thread message that resolved no agent recipient: it was saved
+        // to the thread, but no agent was given it.
+        return html`
+          <sl-tooltip content="Mention an agent to send it to that agent" hoist>
+            <div class="delivery-state no-recipient">
+              <sl-icon name="info-circle"></sl-icon>
+              Not delivered to any agent, mention an agent to send it
+            </div>
+          </sl-tooltip>
+        `;
+      case 'failed': {
+        // nc-delivery-unreachable: distinguish "the agent can't receive this
+        // at all" from a generic dispatch failure. Prefer the machine-readable
+        // code; history rows sent before that field existed fall back to
+        // matching the reason prefix.
+        const isUnreachable =
+          this.dispatchFailureCode === 'agent_unreachable' ||
+          (!this.dispatchFailureCode && this.dispatchFailureReason.startsWith('Agent unreachable'));
         return html`
           <sl-tooltip content=${this.dispatchFailureReason || 'Delivery failed'} hoist>
             <div class="delivery-state failed">
               <sl-icon name="exclamation-triangle"></sl-icon>
-              Failed
+              ${isUnreachable ? 'Agent unreachable' : 'Failed'}
             </div>
           </sl-tooltip>
         `;
+      }
       default:
         return nothing;
     }
   }
 
   private renderBody() {
-    if (this.plain || !this.renderedHtml) {
+    if (this.plain || !this.renderedContent) {
       return html`<div class="plain-text">${this.body}</div>`;
     }
-    return html`<div
-      class="md-content"
-      @click=${this.handleContentClick}
-      .innerHTML=${this.renderedHtml}
-    ></div>`;
+    return this.renderedContent;
   }
 
   private renderBadges() {
@@ -1992,6 +2898,7 @@ export class ScionChatMessage extends LitElement {
                         src=${attachmentURL(img.id)}
                         alt=${img.name}
                         loading="lazy"
+                        style=${styleMap(imageThumbStyle(knownImageSize(img)))}
                       />
                     </button>
                     <div class="image-actions">
@@ -2117,24 +3024,23 @@ export class ScionChatMessage extends LitElement {
   private async copyAttachmentText(id: string): Promise<void> {
     const state = this.previews.get(id);
     if (!state || state.status !== 'ready' || !state.text) return;
-    try {
-      await navigator.clipboard.writeText(state.text);
-      const next = new Set(this.copiedIds);
-      next.add(id);
-      this.copiedIds = next;
-      const existing = this.copyTimers.get(id);
-      if (existing) clearTimeout(existing);
-      const timer = setTimeout(() => {
-        if (!this.isConnected) return;
-        const after = new Set(this.copiedIds);
-        after.delete(id);
-        this.copiedIds = after;
-        this.copyTimers.delete(id);
-      }, 1500);
-      this.copyTimers.set(id, timer);
-    } catch {
-      // Clipboard write may fail in insecure contexts; silently ignore.
+    if (!(await copyToClipboard(state.text))) {
+      showCopyFailedToast();
+      return;
     }
+    const next = new Set(this.copiedIds);
+    next.add(id);
+    this.copiedIds = next;
+    const existing = this.copyTimers.get(id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      if (!this.isConnected) return;
+      const after = new Set(this.copiedIds);
+      after.delete(id);
+      this.copiedIds = after;
+      this.copyTimers.delete(id);
+    }, 1500);
+    this.copyTimers.set(id, timer);
   }
 
   /** Rendered markdown body for a markdown attachment preview. */
@@ -2153,8 +3059,12 @@ export class ScionChatMessage extends LitElement {
     return html`<scion-markdown-preview .content=${state.text ?? ''}></scion-markdown-preview>`;
   }
 
-  /** Editor, spinner or error for one preview, depending on load state. */
-  private renderPreviewBody(ref: AttachmentRefInfo, state: PreviewState | undefined, full = false) {
+  /**
+   * Editor, spinner or error for the collapsed inline slice, clipped to the
+   * first lines — the full-height overlay now lives in the extracted
+   * `<scion-chat-file-preview>`, which fetches its own untruncated content.
+   */
+  private renderPreviewBody(ref: AttachmentRefInfo, state: PreviewState | undefined) {
     if (!state || state.status === 'loading') {
       return html`
         <div class="preview-placeholder">
@@ -2169,83 +3079,104 @@ export class ScionChatMessage extends LitElement {
     const text = state.text ?? '';
     return html`
       <scion-code-editor
-        .content=${full ? text : firstLines(text, PREVIEW_MAX_LINES)}
+        .content=${firstLines(text, PREVIEW_MAX_LINES)}
         language=${getLanguageFromPath(ref.name)}
         readonly
       ></scion-code-editor>
     `;
   }
 
-  /** Full-height overlay for the expanded attachment, when one is open. */
+  /**
+   * Full-height overlay for the expanded attachment, when one is open.
+   * Loading/error/markdown-toggle/copy/download state all live inside the
+   * reusable <scion-chat-file-preview>; this component only owns which
+   * attachment is open.
+   */
   private renderFullPreview() {
-    const ref = this.expanded;
-    if (!ref) return nothing;
-
-    const isMd = isMarkdownFile(ref.name);
-    const showSource = isMd && (this.mdSourceView.get(ref.id) ?? false);
-    const state = this.previews.get(ref.id);
-
+    const target = this.expandedTarget;
+    if (!target) return nothing;
     return html`
-      <sl-dialog
-        class="full-preview"
-        open
-        label=${ref.name}
-        @sl-after-hide=${(e: Event) => {
-          if (e.target === e.currentTarget) this.expanded = null;
+      <scion-chat-file-preview
+        .target=${target}
+        .currentUserId=${this.currentUserId}
+        @chat-file-preview-close=${() => {
+          this.expandedTarget = null;
         }}
-      >
-        ${IMAGE_MIMES.has(ref.mime)
-          ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
-          : isMd && !showSource
-            ? this.renderMdPreviewBody(ref, state)
-            : this.renderPreviewBody(ref, state, true)}
-        <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
-          ${isMd
-            ? html`
-                <sl-button size="small" @click=${() => this.toggleMdSource(ref.id)}>
-                  <sl-icon slot="prefix" name=${showSource ? 'eye' : 'code'}></sl-icon>
-                  ${showSource ? 'Preview' : 'Source'}
-                </sl-button>
-              `
-            : nothing}
-          ${isMd && showSource
-            ? html`
-                <sl-button size="small" @click=${() => this.copyAttachmentText(ref.id)}>
-                  <sl-icon
-                    slot="prefix"
-                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
-                  ></sl-icon>
-                  ${this.copiedIds.has(ref.id) ? 'Copied!' : 'Copy'}
-                </sl-button>
-              `
-            : nothing}
-          <sl-button href=${attachmentURL(ref.id)} download=${ref.name}>
-            <sl-icon slot="prefix" name="download"></sl-icon>
-            Download
-          </sl-button>
-        </div>
-      </sl-dialog>
+      ></scion-chat-file-preview>
     `;
   }
 
-  /** Open the overlay, fetching the content if the slice has not yet. */
+  /**
+   * Artifact chips, in the order their references appear in the message
+   * text; references attached without appearing in the text follow, in the
+   * order the hub returned them (artifact id order for history). A readable
+   * artifact shows title · vN · owner; any other shows only "Artifact
+   * unavailable", and still opens the preview, which explains it.
+   */
+  private renderArtifactChips() {
+    if (!this.artifactRefs || this.artifactRefs.length === 0) return nothing;
+    if (!isFeatureEnabled(ARTIFACTS_FLAG)) return nothing;
+    const refs = orderArtifactRefs(this.artifactRefs, this.body ?? '');
+    return html`
+      <div class="artifact-chips">
+        ${refs.map((r) =>
+          r.available
+            ? html`<button
+                type="button"
+                class="artifact-chip"
+                title=${r.ref}
+                @click=${() => this.openArtifactPreview(r.id, r.seq ?? 0, r.title)}
+              >
+                <sl-icon name="file-earmark-richtext"></sl-icon>
+                <span class="artifact-title">${r.title}</span>
+                <span class="artifact-meta"
+                  >· v${r.version}${r.ownerName ? html` · ${r.ownerName}` : nothing}</span
+                >
+              </button>`
+            : html`<button
+                type="button"
+                class="artifact-chip unavailable"
+                @click=${() => this.openArtifactPreview(r.id, r.seq ?? 0)}
+              >
+                <sl-icon name="lock"></sl-icon>
+                <span>Artifact unavailable</span>
+              </button>`
+        )}
+      </div>
+    `;
+  }
+
+  /** Open the in-place preview of an artifact (D23); it loads under the viewer's own access. */
+  private openArtifactPreview(id: string, seq: number, title?: string): void {
+    this.expandedTarget = { kind: 'artifact', id, seq, name: title || 'Artifact' };
+  }
+
+  /** Open the overlay for an attachment; the preview component fetches its own content. */
   private openFullPreview(ref: AttachmentRefInfo): void {
-    this.expanded = ref;
-    // An image is shown by the browser straight from its URL; only text
-    // previews need the body pulled down.
-    if (!IMAGE_MIMES.has(ref.mime)) {
-      void this.loadPreview(ref.id);
-    }
+    this.expandedTarget = {
+      kind: 'attachment',
+      id: ref.id,
+      name: ref.name,
+      mime: ref.mime,
+      size: ref.size,
+    };
   }
 
   private formatTime(): string {
     if (!this.timestamp) return '';
-    try {
-      const d = new Date(this.timestamp);
-      return Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_TIME_FORMAT.format(d);
-    } catch {
-      return '';
-    }
+    const formatted = formatInstant(this.timestamp, 'time');
+    return formatted || 'Invalid Date';
+  }
+
+  /**
+   * Full instant plus zone label for the `.msg-time` tooltip (review R1-3,
+   * AC4: "sees native chat timestamps in Tokyo time, with a zone label").
+   * Low-noise: surfaced as a `title`, not inline text, since every message
+   * in a thread shares the same effective zone.
+   */
+  private formatTimeTitle(): string {
+    if (!this.timestamp) return '';
+    return formatInstantWithZone(this.timestamp);
   }
 
   /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */

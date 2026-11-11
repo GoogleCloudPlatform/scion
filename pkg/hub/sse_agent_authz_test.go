@@ -1,0 +1,240 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type sseCountingPublisher struct {
+	*ChannelEventPublisher
+	subscriptions int
+	// patterns holds each Subscribe call's patterns, in call order.
+	patterns [][]string
+}
+
+func (p *sseCountingPublisher) Subscribe(patterns ...string) (<-chan Event, func()) {
+	p.subscriptions++
+	p.patterns = append(p.patterns, append([]string(nil), patterns...))
+	return p.ChannelEventPublisher.Subscribe(patterns...)
+}
+
+// clientSubscriptions returns the subscriptions other than userID's own
+// membership-changed subscription, which a stream installs before it
+// authorizes (ptone/scion#7494) and so holds even on a refused request.
+// Only that exact subject is skipped.
+func (p *sseCountingPublisher) clientSubscriptions(userID string) [][]string {
+	own := membershipChangedSubjectFor(userID)
+	var out [][]string
+	for _, pat := range p.patterns {
+		if len(pat) == 1 && pat[0] == own {
+			continue
+		}
+		out = append(out, pat)
+	}
+	return out
+}
+
+// assertRefusedSubscriptions: a stream refused for userID subscribed to no
+// client subject, held at most userID's own membership subscription, and
+// released everything before returning.
+func assertRefusedSubscriptions(t *testing.T, pub *sseCountingPublisher, userID string) {
+	t.Helper()
+	assert.Empty(t, pub.clientSubscriptions(userID), "denied requests must never subscribe to a client subject")
+	assert.LessOrEqual(t, pub.subscriptions, 1, "at most the caller's own membership subscription")
+	assertNoSSESubscribers(t, pub.ChannelEventPublisher)
+}
+
+func TestSSEHandler_AgentUnauthorized(t *testing.T) {
+	id := tid("sse-unauthorized-agent")
+	s := &sseAgentStore{mockAuthzStore: &mockAuthzStore{}, agents: map[string]*store.Agent{
+		id: {ID: id, ProjectID: tid("other-project"), OwnerID: "other-user"},
+	}}
+	pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
+	defer pub.Close()
+	ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, slog.Default())}
+	subject := "agent." + id + ".>"
+	w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, "user-1", "user", subject) })
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.False(t, w.Flushed)
+	assertRefusedSubscriptions(t, pub, "user-1")
+	var body struct {
+		Denied []string `json:"denied_subjects"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, []string{subject}, body.Denied)
+}
+
+func sseAgentReadBinding(userID, scopeType, scopeID string) *mockAuthzStore {
+	return &mockAuthzStore{
+		roleDefinitions: map[string]*store.RoleDefinition{"read-role": {
+			ID: "read-role", Name: "sse-agent-reader", ScopeType: scopeType, Permissions: []string{"agent.read"},
+		}},
+		roleBindings: []*store.RoleBinding{{ID: "read-binding", RoleDefinitionID: "read-role", PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID, ScopeType: scopeType, ScopeID: scopeID}},
+	}
+}
+
+// sseAgentProjectAccess is a project binding to a role with no permissions:
+// project access without any permission granted through the role.
+func sseAgentProjectAccess(userID, projectID string) *mockAuthzStore {
+	return &mockAuthzStore{
+		roleDefinitions: map[string]*store.RoleDefinition{"access-role": {
+			ID: "access-role", Name: "sse-agent-project-access", ScopeType: store.RoleScopeProject, Permissions: []string{},
+		}},
+		roleBindings: []*store.RoleBinding{{ID: "access-binding", RoleDefinitionID: "access-role", PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID, ScopeType: store.RoleScopeProject, ScopeID: projectID}},
+	}
+}
+
+func TestAuthorizeSSESubjects_AgentPolicy(t *testing.T) {
+	id, projectID := tid("sse-policy-agent"), tid("sse-policy-project")
+	for _, tc := range []struct {
+		name     string
+		role     string
+		owner    string
+		ancestry []string
+		bindings *mockAuthzStore
+		want     bool
+	}{
+		{name: "unrelated user", bindings: &mockAuthzStore{}},
+		// Owner and ancestor relationships on a project agent require active
+		// project access (ptone/scion#2141).
+		{name: "resource owner", owner: "user-1", bindings: sseAgentProjectAccess("user-1", projectID), want: true},
+		{name: "ancestor", ancestry: []string{"user-1"}, bindings: sseAgentProjectAccess("user-1", projectID), want: true},
+		{name: "resource owner without project access", owner: "user-1", bindings: &mockAuthzStore{}},
+		{name: "ancestor without project access", ancestry: []string{"user-1"}, bindings: &mockAuthzStore{}},
+		{name: "project inherited read", bindings: sseAgentReadBinding("user-1", store.RoleScopeProject, projectID), want: true},
+		{name: "cross project", bindings: sseAgentReadBinding("user-1", store.RoleScopeProject, tid("other-project"))},
+		{name: "hub read grant", bindings: sseAgentReadBinding("user-1", store.RoleScopeSystem, ""), want: true},
+		{name: "super admin", role: "admin", bindings: mockSuperAdminStore("user-1"), want: true},
+		{name: "role string alone is not admin grant", role: "admin", bindings: &mockAuthzStore{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &store.Agent{ID: id, ProjectID: projectID, OwnerID: tc.owner, Ancestry: tc.ancestry}
+			s := &sseAgentStore{mockAuthzStore: tc.bindings, agents: map[string]*store.Agent{id: agent}}
+			ws := &WebServer{store: s, authzService: NewAuthzService(s, slog.Default())}
+			req := sseAgentRequest(context.Background(), "user-1", tc.role)
+			// The metadata endpoint uses this exact resource/action policy, not PTY attach.
+			identity := NewAuthenticatedUser("user-1", "", "", tc.role, "web")
+			require.Equal(t, tc.want, ws.authzService.CheckAccess(req.Context(), identity, agentResource(agent), ActionRead).Allowed)
+			for _, suffix := range []string{">", "status", "created", "deleted", "ports", "message", "*"} {
+				subject := "agent." + id + "." + suffix
+				denied := ws.authorizeSSESubjects(req, []string{subject})
+				if tc.want {
+					assert.Empty(t, denied)
+				} else {
+					assert.Equal(t, []string{subject}, denied)
+				}
+			}
+		})
+	}
+}
+
+func TestAuthorizeSSESubjects_AgentSelectorsFailClosed(t *testing.T) {
+	id := tid("sse-selector-agent")
+	for _, subject := range []string{"agent", "agent.>", "agent.*.>", "agent.>.status", "agent.not-a-uuid.>", "agent." + id, "agent." + strings.ReplaceAll(id, "-", "") + ".>", "agent." + strings.ToUpper(id) + ".>", "agent." + tid("missing-agent") + ".>"} {
+		t.Run(subject, func(t *testing.T) {
+			s := &sseAgentStore{mockAuthzStore: mockSuperAdminStore("user-1"), agents: map[string]*store.Agent{id: {ID: id}}}
+			ws := &WebServer{store: s, authzService: NewAuthzService(s, slog.Default())}
+			req := sseAgentRequest(context.Background(), "user-1", "admin", subject)
+			assert.Equal(t, []string{subject}, ws.authorizeSSESubjects(req, []string{subject}))
+		})
+	}
+	for _, tc := range []struct {
+		name                string
+		missingStore        bool
+		lookupErr, authzErr error
+		agent               *store.Agent
+	}{
+		{name: "missing store", missingStore: true},
+		{name: "lookup error", lookupErr: errors.New("lookup unavailable")},
+		{name: "authorization error", authzErr: errors.New("policy unavailable"), agent: &store.Agent{ID: id}},
+		{name: "nil resource"},
+		{name: "mismatched resource", agent: &store.Agent{ID: tid("different-agent")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &sseAgentStore{mockAuthzStore: &mockAuthzStore{}, agents: map[string]*store.Agent{id: tc.agent}, lookupErr: tc.lookupErr, authzErr: tc.authzErr}
+			ws := &WebServer{store: s, authzService: NewAuthzService(s, slog.Default())}
+			if tc.missingStore {
+				ws.store = nil
+			}
+			subject := "agent." + id + ".>"
+			req := sseAgentRequest(context.Background(), "user-1", "user", subject)
+			assert.Equal(t, []string{subject}, ws.authorizeSSESubjects(req, []string{subject}))
+		})
+	}
+}
+
+func TestSSEHandler_AgentMixedBatch(t *testing.T) {
+	allowedID, deniedID := tid("sse-allowed-agent"), tid("sse-denied-agent")
+	for _, deny := range []bool{false, true} {
+		t.Run(map[bool]string{false: "authorized batch", true: "mixed batch"}[deny], func(t *testing.T) {
+			// Agents always belong to a project, and the owner relationship
+			// requires active access to it (ptone/scion#2141).
+			projectID := tid("sse-batch-project")
+			s := &sseAgentStore{mockAuthzStore: sseAgentProjectAccess("user-1", projectID), agents: map[string]*store.Agent{
+				allowedID: {ID: allowedID, ProjectID: projectID, OwnerID: "user-1"}, deniedID: {ID: deniedID, ProjectID: projectID, OwnerID: "other-user"},
+			}}
+			pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
+			defer pub.Close()
+			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, slog.Default())}
+			subjects := []string{"agent." + allowedID + ".>", "user.user-1.message", "agent." + allowedID + ".ports"}
+			deniedSubject := "agent." + deniedID + ".>"
+			if deny {
+				subjects = append(subjects, deniedSubject)
+			}
+			w := serveSSELive(t, ws, func(ctx context.Context) *http.Request { return sseAgentRequest(ctx, "user-1", "user", subjects...) })
+			if deny {
+				assert.Equal(t, http.StatusForbidden, w.Code)
+				assert.False(t, w.Flushed)
+				assertRefusedSubscriptions(t, pub, "user-1")
+				var body struct {
+					Denied []string `json:"denied_subjects"`
+				}
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+				assert.Equal(t, []string{deniedSubject}, body.Denied)
+			} else {
+				assert.Equal(t, http.StatusOK, w.Code)
+				assert.True(t, w.Flushed)
+				// One subscription for the whole authorized batch, plus the
+				// internal subscription to the caller's own membership-change
+				// subject every stream holds (ptone/scion#7494).
+				assert.Equal(t, 2, pub.subscriptions)
+				var client, internal [][]string
+				for _, p := range pub.patterns {
+					if len(p) == 1 && p[0] == membershipChangedSubjectFor("user-1") {
+						internal = append(internal, p)
+					} else {
+						client = append(client, p)
+					}
+				}
+				assert.Len(t, internal, 1, "exactly one internal membership subscription")
+				if assert.Len(t, client, 1, "exactly one client subscription for the batch") {
+					assert.ElementsMatch(t, subjects, client[0])
+				}
+			}
+			assertNoSSESubscribers(t, pub.ChannelEventPublisher)
+		})
+	}
+}

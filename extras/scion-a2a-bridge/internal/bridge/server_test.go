@@ -79,7 +79,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, state.Store) {
 		},
 		Projects: []ProjectConfig{
 			{
-				Slug:          "test-grove",
+				Slug:          "test-project",
 				ExposedAgents: []string{"test-agent"},
 			},
 		},
@@ -227,7 +227,7 @@ func TestWellKnownAgentCard(t *testing.T) {
 func TestPerAgentCard(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	resp, err := http.Get(ts.URL + "/projects/test-grove/agents/test-agent/.well-known/agent-card.json")
+	resp, err := http.Get(ts.URL + "/projects/test-project/agents/test-agent/.well-known/agent-card.json")
 	if err != nil {
 		t.Fatalf("GET agent card: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestPerAgentCard(t *testing.T) {
 		t.Errorf("name = %q, want %q", card["name"], "test-agent")
 	}
 
-	expectedURL := "https://a2a.test.example.com/projects/test-grove/agents/test-agent"
+	expectedURL := "https://a2a.test.example.com/projects/test-project/agents/test-agent"
 	if card["url"] != expectedURL {
 		t.Errorf("url = %q, want %q", card["url"], expectedURL)
 	}
@@ -264,7 +264,7 @@ func TestPerAgentCard(t *testing.T) {
 func TestPerAgentCardSupportedInterfaces(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	resp, err := http.Get(ts.URL + "/projects/test-grove/agents/test-agent/.well-known/agent-card.json")
+	resp, err := http.Get(ts.URL + "/projects/test-project/agents/test-agent/.well-known/agent-card.json")
 	if err != nil {
 		t.Fatalf("GET agent card: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestPerAgentCardSupportedInterfaces(t *testing.T) {
 		t.Fatal("expected supportedInterfaces[0] to be an object")
 	}
 
-	expectedURL := "https://a2a.test.example.com/projects/test-grove/agents/test-agent/jsonrpc"
+	expectedURL := "https://a2a.test.example.com/projects/test-project/agents/test-agent/jsonrpc"
 	if iface["url"] != expectedURL {
 		t.Errorf("supportedInterfaces[0].url = %q, want %q", iface["url"], expectedURL)
 	}
@@ -364,7 +364,7 @@ func TestGenerateAgentCardSupportedInterfaces(t *testing.T) {
 func TestPerAgentCardNotExposed(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	resp, err := http.Get(ts.URL + "/projects/test-grove/agents/hidden-agent/.well-known/agent-card.json")
+	resp, err := http.Get(ts.URL + "/projects/test-project/agents/hidden-agent/.well-known/agent-card.json")
 	if err != nil {
 		t.Fatalf("GET agent card: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestPerAgentCardNotExposed(t *testing.T) {
 func TestPerAgentCardUnknownProject(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	resp, err := http.Get(ts.URL + "/projects/unknown-grove/agents/test-agent/.well-known/agent-card.json")
+	resp, err := http.Get(ts.URL + "/projects/unknown-project/agents/test-agent/.well-known/agent-card.json")
 	if err != nil {
 		t.Fatalf("GET agent card: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestAuthMiddleware(t *testing.T) {
 
 	// JSON-RPC without auth should be rejected.
 	rpcReq, _ := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "tasks/get", Params: json.RawMessage(`{"id":"x"}`)})
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-project/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err = http.DefaultClient.Do(httpReq)
@@ -417,7 +417,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 
 	// With correct API key should succeed.
-	httpReq, _ = http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
+	httpReq, _ = http.NewRequest(http.MethodPost, ts.URL+"/projects/test-project/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")
 
@@ -435,7 +435,7 @@ func TestGetTaskNotFound(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
 	// The SDK handler will return TaskNotFound via its own error handling.
-	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-project/agents/test-agent/jsonrpc",
 		"tasks/get", map[string]interface{}{"id": "nonexistent-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -450,7 +450,7 @@ func TestGetTaskNotFound(t *testing.T) {
 func TestUnknownMethod(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-project/agents/test-agent/jsonrpc",
 		"unknown/method", map[string]string{}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -465,7 +465,7 @@ func TestUnknownMethod(t *testing.T) {
 func TestCancelTaskNotFound(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-project/agents/test-agent/jsonrpc",
 		"tasks/cancel", map[string]string{"id": "nonexistent-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -483,7 +483,7 @@ func TestInvalidJSONRPC(t *testing.T) {
 		"method":  "tasks/get",
 		"params":  map[string]string{"id": "x"},
 	})
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-project/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")
 
@@ -504,7 +504,7 @@ func TestInvalidJSONRPC(t *testing.T) {
 func TestMalformedJSON(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc",
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-project/agents/test-agent/jsonrpc",
 		bytes.NewReader([]byte(`{not valid json`)))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")
@@ -538,7 +538,7 @@ func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
 
 	for _, method := range methods {
 		t.Run("hidden-agent/"+method, func(t *testing.T) {
-			rpcResp := doRPC(t, ts, "/projects/test-grove/agents/hidden-agent/jsonrpc",
+			rpcResp := doRPC(t, ts, "/projects/test-project/agents/hidden-agent/jsonrpc",
 				method, map[string]string{"id": "x"}, "test-api-key")
 
 			if rpcResp.Error == nil {
@@ -550,45 +550,13 @@ func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
 		})
 
 		t.Run("unknown-project/"+method, func(t *testing.T) {
-			rpcResp := doRPC(t, ts, "/projects/unknown-grove/agents/test-agent/jsonrpc",
+			rpcResp := doRPC(t, ts, "/projects/unknown-project/agents/test-agent/jsonrpc",
 				method, map[string]string{"id": "x"}, "test-api-key")
 
 			if rpcResp.Error == nil {
 				t.Fatalf("expected error for unknown project on %s", method)
 			}
 		})
-	}
-}
-
-func TestLegacyGrovePath(t *testing.T) {
-	_, ts, _ := newTestServer(t)
-
-	// Test legacy .well-known path (public access)
-	resp, err := http.Get(ts.URL + "/groves/test-grove/agents/test-agent/.well-known/agent-card.json")
-	if err != nil {
-		t.Fatalf("GET legacy agent card: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-
-	// Test legacy JSON-RPC path (requires auth)
-	rpcReq, _ := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "tasks/get", Params: json.RawMessage(`{"id":"x"}`)})
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-API-Key", "test-api-key")
-
-	resp, err = http.DefaultClient.Do(httpReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	// Should be 200 OK (the actual RPC might fail with "task not found" but the route should be authorized)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("legacy RPC: status = %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -608,30 +576,30 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 
 	now := time.Now()
 	s.CreateTask(context.Background(), &state.Task{
-		ID: "owned-task", ContextID: "ctx-1", ProjectID: "grove-a", AgentSlug: "agent-x",
+		ID: "owned-task", ContextID: "ctx-1", ProjectID: "project-a", AgentSlug: "agent-x",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
 	// Task not found returns (nil, nil).
-	task, err := b.AuthorizeTask("nonexistent", "grove-a", "agent-x")
+	task, err := b.AuthorizeTask("nonexistent", "project-a", "agent-x")
 	if task != nil || err != nil {
 		t.Errorf("AuthorizeTask(nonexistent) = (%v, %v), want (nil, nil)", task, err)
 	}
 
 	// Task exists but wrong project returns (nil, nil) — no existence leak.
-	task, err = b.AuthorizeTask("owned-task", "grove-b", "agent-x")
+	task, err = b.AuthorizeTask("owned-task", "project-b", "agent-x")
 	if task != nil || err != nil {
 		t.Errorf("AuthorizeTask(wrong project) = (%v, %v), want (nil, nil)", task, err)
 	}
 
 	// Task exists but wrong agent returns (nil, nil).
-	task, err = b.AuthorizeTask("owned-task", "grove-a", "agent-y")
+	task, err = b.AuthorizeTask("owned-task", "project-a", "agent-y")
 	if task != nil || err != nil {
 		t.Errorf("AuthorizeTask(wrong agent) = (%v, %v), want (nil, nil)", task, err)
 	}
 
 	// Correct project and agent returns the task.
-	task, err = b.AuthorizeTask("owned-task", "grove-a", "agent-x")
+	task, err = b.AuthorizeTask("owned-task", "project-a", "agent-x")
 	if err != nil {
 		t.Fatalf("AuthorizeTask(correct owner) error: %v", err)
 	}

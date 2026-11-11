@@ -8,7 +8,7 @@ description: A guided, browser-based walkthrough that sets up your workstation t
 The onboarding wizard is the fastest way to get the hosted experience running locally. When you start the Workstation combo server for the first time, Scion opens a guided setup in your browser that walks through machine configuration, environment checks, runtime selection, harness images, and creating your first project.
 
 :::note[Which mode is this?]
-The wizard sets up **Workstation mode** — a single-tenant Scion server (Hub + Runtime Broker + Web dashboard) running on your own machine over loopback. If you only want to run agents from the CLI with no server, see [Local mode](/scion/choosing-a-mode/) and the [Installation guide](/scion/getting-started/install/) instead.
+The wizard sets up **Workstation mode** — a single-tenant Scion server (Hub + Runtime Broker + Web dashboard) running on your own machine over loopback. This server is the hub that every `scion` command on this machine uses, from the web UI and from the CLI alike. To use a shared hub instead, see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
 :::
 
 ## Prerequisites
@@ -17,7 +17,7 @@ Before you start, you need a working Scion install and a container runtime. See 
 
 - Scion installed with its web assets. Use **Homebrew** (`brew tap homebrew-scion/scion && brew install homebrew-scion/scion/scion`) for a ready-to-run install; a bare `go install` does **not** embed the web UI, so the wizard would load blank. See the [Installation guide](/scion/getting-started/install/#install-with-homebrew-recommended) for details.
 - A container runtime — Docker, Podman, or Apple Container.
-- Git 2.47 or later (the wizard flags older versions).
+- Git 2.48 or later (the wizard flags older versions).
 
 You do **not** need to run `scion init --machine` first — the wizard handles machine initialization for you.
 
@@ -29,13 +29,17 @@ Start the Workstation server:
 scion server start
 ```
 
-On a machine that has not been set up yet, Scion prints the web URL and **automatically opens your browser** to the wizard:
+While onboarding is not complete (Scion asks the Hub for its onboarding status), Scion prints the web URL and **automatically opens your browser** to the wizard:
 
 ```
 http://127.0.0.1:8080/onboarding
 ```
 
-If the browser does not open (for example over SSH, in a headless environment, or when `SCION_NO_BROWSER` is set), open that URL manually. The port is `8080` by default.
+Once onboarding is complete, it opens the Web Dashboard instead. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start.
+
+Scion opens it through a single-use sign-in link, which it also prints on a terminal as `Sign in: http://127.0.0.1:8080/auth/dev-signin?code=...`; the link signs your browser in to the local server. If the browser does not open (for example over SSH, in a headless environment, or when `SCION_NO_BROWSER` is set), open that link manually within two minutes, or run `scion server open --print` for a new one. The port is `8080` by default.
+
+If no image registry is configured yet, the server starts the Hub and the web UI without the Runtime Broker and prints a warning, so you can set the registry in the wizard. Run `scion server restart` afterwards to start the Runtime Broker.
 
 :::tip[You can leave and come back]
 The wizard saves your progress. If you close the tab or restart setup, reopening `/onboarding` resumes past the steps you have already completed.
@@ -47,27 +51,29 @@ The wizard runs through six steps and finishes with a confirmation screen. Each 
 
 ### 1. Welcome & identity
 
-Enter a **display name** and **email**. This identity is attached to the agents and activity you create on this workstation. Provide at least one of the two to continue.
+Enter a **display name** and **email**. This identity is attached to the agents and activity you create on this workstation. Saving this step (`PUT /api/v1/system/identity`) updates the local user record in the Hub database and the live development identity alongside `settings.yaml`, so `GET /api/v1/auth/me`, the dashboard, and `scion hub status` show the chosen display name and email immediately without a server restart. Provide at least one of the two to continue.
 
 ### 2. System check
 
-The wizard runs diagnostics against your environment and shows each result as **pass**, **warn**, or **fail**. Use **Re-check** after fixing anything. A common warning is an out-of-date Git — Scion needs **Git 2.47+** for agent worktrees; upgrade (for example `brew install git`) and re-check. You can only advance once the checks report ready.
+The wizard runs diagnostics against your environment and shows each result as **pass**, **warn**, or **fail**. Use **Re-check** after fixing anything. A common warning is an out-of-date Git — Scion needs **Git 2.48+** for agent worktrees; upgrade (for example `brew install git`) and re-check. You can only advance once the checks report ready.
 
 ### 3. Container runtime
 
 Scion detects the runtimes available on your machine and preselects the best one. Pick from **Docker**, **Podman**, or **Container (Apple Virtualization)**; runtimes that were not detected are shown but disabled.
 
 :::caution[Apple Container needs DNS setup]
-If you select **Container** (Apple Virtualization), the wizard attempts to configure container DNS, which requires `sudo`. If it cannot do so automatically, it shows the exact command to run manually, for example:
+If you select **Container** (Apple Virtualization), agents need a container DNS rule to reach the Hub. The wizard shows the command; run it yourself (it needs `sudo`), and again after each reboot:
 
 ```bash
-sudo container system dns create <hostname> --localhost <ip>
+sudo container system dns create host.containers.internal --localhost 203.0.113.1
 ```
+
+To avoid re-running it, install it as a LaunchDaemon; see [Apple Container DNS](/scion/local/apple-container/#automating-after-reboot).
 :::
 
 ### 4. Image registry
 
-Enter the container image registry that hosts the Scion harness images (for example `us-central1-docker.pkg.dev/my-project/scion`). Images such as `<registry>/scion-claude:latest` are pulled from here in the next step. If you are not ready, choose **Skip for now** and set it later.
+Enter the container image registry that hosts the Scion harness images (for example `us-central1-docker.pkg.dev/my-project/scion`). On a release build (`vX.Y.Z`, `vX.Y.Z-preview.N`, or `vX.Y.Z-rc.N`), bundled `scion-*` images such as `<registry>/scion-claude:<version>` are pulled at the binary's version tag in the next step when `image_tag` is unset and `hub.image_tag_version_default` is on (development builds, or `image_tag: latest`, pull `:latest`; see [Image tag](/scion/reference/settings-precedence/#image-tag-experimental)). If you are not ready, choose **Skip for now** and set it later.
 
 ### 5. AI harnesses
 
@@ -79,7 +85,15 @@ Select the [harnesses](/scion/supported-harnesses/) you want available (Claude C
 
 Use **Pull selected** to fetch any images that are not local yet (progress streams live), then **Re-check** to confirm. You can add or reconfigure harnesses later from Hub settings, or **Skip for now**.
 
-### 6. First workspace
+### 6. Welcome project (optional, experimental)
+
+When the `hub.welcome_project` [experiment](/scion/reference/experiments/) is enabled (off by default), the wizard offers an opt-in **Welcome project** step (`step: "welcome"`) before **First workspace**:
+
+- **Preview (`POST /api/v1/system/welcome/preview`)**: When the step opens, the Hub resolves `scion-frontiers/agent-team` (folder `templates`) and the allow-listed skill repositories its templates reference (`scion-frontiers/agent-team`, `addyosmani/agent-skills`, and `microsoft/playwright-cli`) to commit SHAs, downloads their tarballs from `github.com` / `codeload.github.com`, verifies each archive's PAX global header commit ID against the resolved commit SHA (`archive commit id does not match the requested commit` on mismatch), vendors each template's referenced skills into `skills/<name>/` with local paths, and returns a single-use `preview_id` (valid for 30 minutes), `expires_at`, `source` (`repo`, `path`, `sha`), `manifest` (`agent_team_repo`, `agent_team_sha`, `skills`, `templates`, `files_sha256`, `skipped_entries`), and `file_count` (recording `state: "previewed"` in the `welcome_project` `hub_settings` ledger, or `422 welcome_project_failed` on failure).
+- **Continue (`POST /api/v1/system/welcome/install`)**: Sending `{"preview_id": "<id>"}` re-hashes the staged files against `manifest.files_sha256`, creates a Hub-managed `welcome` project (or `welcome-1` when `welcome` is taken, recording `scion.welcome/manifest` on the project), imports the staged templates at project scope, starts the `coordinator` agent from the `coordinator` template when a Runtime Broker and harness credentials are ready (transitioning `state` to `started`, or leaving `state` at `pending_credentials` or `pending_broker` without creating an unauthenticated agent), and returns `state`, `project_id`, `project_slug`, `project_name`, `agent_id`, and `manifest`.
+- **Skip (`POST /api/v1/system/welcome/skip`)**: Records `state: "skipped"` in the `welcome_project` ledger without creating the project. Once the ledger reaches a final state (`created`, `pending_credentials`, `pending_broker`, `started`, `skipped`, or `failed`), the step does not run again (`409 welcome_project_done`).
+
+### 7. First workspace
 
 Create your first **project**. The wizard offers three ways to start:
 
@@ -87,7 +101,7 @@ Create your first **project**. The wizard offers three ways to start:
 - **Link a git repo** — connect an existing git repository for source-controlled workspaces.
 - **Add local directory** — link a local directory that stays where it is and is operated on in place. The wizard validates the path and warns if it is already a git repo or already linked.
 
-This step is optional — choose **Skip for now** to create projects later from the dashboard.
+This step is optional — choose **Skip for now** to create projects later from the dashboard. A repository you work on from the CLI does not need this step: run `scion init` in it, and it links to this hub without a prompt (see the [Tutorial](/scion/getting-started/tutorial/)).
 
 ### You're all set
 
@@ -95,12 +109,13 @@ The final screen confirms your workstation is configured. Click **Go to Dashboar
 
 ## After onboarding
 
+- Start your first agent from the CLI: follow the [Tutorial](/scion/getting-started/tutorial/).
 - Manage the running server with `scion server status`, `scion server restart`, and `scion server stop`. See [Workstation Server Mode](/scion/workstation/workstation-server/) for the combo server, network bridges, and lifecycle details.
 - Learn your way around the [Web Dashboard](/scion/workstation/dashboard/).
 - Understand the pieces you just configured in [Core Concepts](/scion/concepts/).
 
 ## See also
 
-- [Choosing a Mode](/scion/choosing-a-mode/) — where Workstation mode fits among Local and the hosted tiers.
+- [Choosing a Mode](/scion/choosing-a-mode/) — where Workstation mode fits next to the hosted tiers.
 - [Installation](/scion/getting-started/install/) — prerequisites and install methods.
 - [Workstation Server Mode](/scion/workstation/workstation-server/) — the server the wizard starts.

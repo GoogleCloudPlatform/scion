@@ -16,11 +16,9 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -72,53 +70,6 @@ type Message = store.Message
 // MessageListResult is a local alias for list results.
 type MessageListResult = store.ListResult[store.Message]
 
-// AgentMessage is a lightweight view of a message used in agent-scoped listings.
-type AgentMessage struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"projectId"`
-	Sender      string    `json:"sender"`
-	SenderID    string    `json:"senderId"`
-	Recipient   string    `json:"recipient"`
-	RecipientID string    `json:"recipientId"`
-	Msg         string    `json:"msg"`
-	Type        string    `json:"type"`
-	Urgent      bool      `json:"urgent,omitempty"`
-	Broadcasted bool      `json:"broadcasted,omitempty"`
-	Read        bool      `json:"read"`
-	AgentID     string    `json:"agentId"`
-	CreatedAt   time.Time `json:"createdAt"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (m *AgentMessage) UnmarshalJSON(data []byte) error {
-	type Alias AgentMessage
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(m),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if m.ProjectID == "" && aux.GroveID != "" {
-		m.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (m AgentMessage) MarshalJSON() ([]byte, error) {
-	type Alias AgentMessage
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(m),
-		GroveID: m.ProjectID,
-	})
-}
-
 // List returns messages for the authenticated user.
 func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*store.ListResult[store.Message], error) {
 	query := url.Values{}
@@ -166,7 +117,7 @@ func (s *messageService) Get(ctx context.Context, id string) (*store.Message, er
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.Message](resp)
+	return apiclient.DecodeRequired[store.Message](resp)
 }
 
 // MarkRead marks a message as read.
@@ -196,7 +147,7 @@ func (s *messageService) ListChannels(ctx context.Context) ([]MessageChannel, er
 	type channelsResponse struct {
 		Channels []MessageChannel `json:"channels"`
 	}
-	result, err := apiclient.DecodeResponse[channelsResponse](resp)
+	result, err := apiclient.DecodeRequired[channelsResponse](resp)
 	if err != nil {
 		return nil, fmt.Errorf("decoding message channels: %w", err)
 	}

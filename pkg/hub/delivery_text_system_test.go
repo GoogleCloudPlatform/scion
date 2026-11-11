@@ -59,7 +59,7 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "9f-sched-on-agent", Slug: "9f-sched-on-agent",
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 
 	dispatcher := &recordingDispatcher{}
@@ -79,8 +79,10 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 		EventType: "message",
 		Payload:   string(payload),
 		Status:    store.ScheduledEventPending,
-		CreatedBy: agentID, // Creator must be a real agent for fire-time authorization.
+		CreatedBy: agentID,
 	}
+	// The revision principal is the target agent itself (a self-message).
+	evt = withAgentRevision(t, srv, evt, agentID)
 
 	err := handler(ctx, evt)
 	require.NoError(t, err, "messageEventHandler should succeed")
@@ -117,7 +119,7 @@ func TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "9f-sched-off-agent", Slug: "9f-sched-off-agent",
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 
 	dispatcher := &recordingDispatcher{}
@@ -136,8 +138,10 @@ func TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 		EventType: "message",
 		Payload:   string(payload),
 		Status:    store.ScheduledEventPending,
-		CreatedBy: agentID, // Creator must be a real agent for fire-time authorization.
+		CreatedBy: agentID,
 	}
+	// The revision principal is the target agent itself (a self-message).
+	evt = withAgentRevision(t, srv, evt, agentID)
 
 	err := handler(ctx, evt)
 	require.NoError(t, err, "messageEventHandler should succeed")

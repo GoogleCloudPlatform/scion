@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -92,16 +93,16 @@ func ClassifyPath(ctx context.Context, s store.Store, path, managedRoot string) 
 	}
 
 	if managedRoot != "" {
-		cleanManaged := filepath.Clean(managedRoot)
+		// resolved is already normalized through filepath.EvalSymlinks above,
+		// so a path reached through a symlink left behind by a directory
+		// rename already resolves to its canonical location under
+		// managedRoot here; no separate legacy-path check is needed.
+		// managedRoot itself is resolved the same way — not just cleaned —
+		// so a managed root that is itself behind a symlink (a symlinked
+		// home directory, common on macOS) still matches.
+		cleanManaged := projectkeys.ResolvePathForCompare(managedRoot)
 		if pathHasPrefix(resolved, cleanManaged+string(filepath.Separator)) || pathEqual(resolved, cleanManaged) {
 			pc.IsManaged = true
-		}
-		// Also check legacy groves path
-		legacyRoot := strings.Replace(cleanManaged, string(filepath.Separator)+"projects", string(filepath.Separator)+"groves", 1)
-		if !pathEqual(legacyRoot, cleanManaged) {
-			if pathHasPrefix(resolved, legacyRoot+string(filepath.Separator)) || pathEqual(resolved, legacyRoot) {
-				pc.IsManaged = true
-			}
 		}
 	}
 

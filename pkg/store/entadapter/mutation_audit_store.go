@@ -49,6 +49,27 @@ func entMutationAuditToStore(ma *ent.MutationAudit) *store.MutationAuditRecord {
 		AfterSummary:        ma.AfterSummary,
 		CanDelegateResult:   ma.CanDelegateResult,
 		CanDelegateReason:   ma.CanDelegateReason,
+
+		// E.2a additive fields.
+		CredentialName:              ma.CredentialName,
+		CredentialBoundaryKind:      ma.CredentialBoundaryKind,
+		CredentialBoundaryProjectID: ma.CredentialBoundaryProjectID,
+		CredentialLabels:            ma.CredentialLabels,
+		CorrelationID:               ma.CorrelationID,
+		ExecutorKind:                ma.ExecutorKind,
+		ExecutorID:                  ma.ExecutorID,
+
+		// Agent delegation block.
+		ActorAgentID:              ma.ActorAgentID,
+		AuthorizingUserID:         ma.AuthorizingUserID,
+		SourceGrantID:             ma.SourceGrantID,
+		ParentGrantID:             ma.ParentGrantID,
+		DelegationEdgeID:          ma.DelegationEdgeID,
+		ExchangeAgentCredentialID: ma.ExchangeAgentCredentialID,
+		ActorKind:                 ma.ActorKind,
+		AgentDelegationCode:       ma.AgentDelegationCode,
+
+		ProvenanceBasis: ma.ProvenanceBasis,
 	}
 }
 
@@ -89,6 +110,54 @@ func (s *MutationAuditStore) CreateMutationAudit(ctx context.Context, record *st
 	if record.CanDelegateReason != "" {
 		builder.SetCanDelegateReason(record.CanDelegateReason)
 	}
+	if record.CredentialName != "" {
+		builder.SetCredentialName(record.CredentialName)
+	}
+	if record.CredentialBoundaryKind != "" {
+		builder.SetCredentialBoundaryKind(record.CredentialBoundaryKind)
+	}
+	if record.CredentialBoundaryProjectID != "" {
+		builder.SetCredentialBoundaryProjectID(record.CredentialBoundaryProjectID)
+	}
+	if record.CredentialLabels != "" {
+		builder.SetCredentialLabels(record.CredentialLabels)
+	}
+	if record.CorrelationID != "" {
+		builder.SetCorrelationID(record.CorrelationID)
+	}
+	if record.ExecutorKind != "" {
+		builder.SetExecutorKind(record.ExecutorKind)
+	}
+	if record.ExecutorID != "" {
+		builder.SetExecutorID(record.ExecutorID)
+	}
+	if record.ActorAgentID != "" {
+		builder.SetActorAgentID(record.ActorAgentID)
+	}
+	if record.AuthorizingUserID != "" {
+		builder.SetAuthorizingUserID(record.AuthorizingUserID)
+	}
+	if record.SourceGrantID != "" {
+		builder.SetSourceGrantID(record.SourceGrantID)
+	}
+	if record.ParentGrantID != "" {
+		builder.SetParentGrantID(record.ParentGrantID)
+	}
+	if record.DelegationEdgeID != "" {
+		builder.SetDelegationEdgeID(record.DelegationEdgeID)
+	}
+	if record.ExchangeAgentCredentialID != "" {
+		builder.SetExchangeAgentCredentialID(record.ExchangeAgentCredentialID)
+	}
+	if record.ActorKind != "" {
+		builder.SetActorKind(record.ActorKind)
+	}
+	if record.AgentDelegationCode != "" {
+		builder.SetAgentDelegationCode(record.AgentDelegationCode)
+	}
+	if record.ProvenanceBasis != "" {
+		builder.SetProvenanceBasis(record.ProvenanceBasis)
+	}
 
 	created, err := builder.Save(ctx)
 	if err != nil {
@@ -122,6 +191,12 @@ func (s *MutationAuditStore) ListMutationAudits(ctx context.Context, filter stor
 	}
 	if filter.TargetID != "" {
 		query = query.Where(mutationaudit.TargetIDEQ(filter.TargetID))
+	}
+	if filter.CorrelationID != "" {
+		query = query.Where(mutationaudit.CorrelationIDEQ(filter.CorrelationID))
+	}
+	if filter.ExecutorID != "" {
+		query = query.Where(mutationaudit.ExecutorIDEQ(filter.ExecutorID))
 	}
 	if !filter.Since.IsZero() {
 		query = query.Where(mutationaudit.TimestampGTE(filter.Since))

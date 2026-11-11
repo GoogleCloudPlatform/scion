@@ -28,57 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupProjectMembersTest creates a test server with two users and a project
-// where "owner" has a project-owner role binding. "other" is a hub member
-// with no project role.
-func setupProjectMembersTest(t *testing.T) (srv *Server, st store.Store, owner *store.User, other *store.User, project *store.Project) {
-	t.Helper()
-	srv, st = testServer(t)
-	ctx := context.Background()
-
-	owner = &store.User{
-		ID:          tid("pm-owner"),
-		Email:       "owner@test.com",
-		DisplayName: "Owner",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, st.CreateUser(ctx, owner))
-
-	other = &store.User{
-		ID:          tid("pm-other"),
-		Email:       "other@test.com",
-		DisplayName: "Other",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, st.CreateUser(ctx, other))
-
-	// Ensure both are hub members (get system-scoped bindings).
-	ensureHubMembership(ctx, st, owner.ID)
-	ensureHubMembership(ctx, st, other.ID)
-
-	// Create project.
-	project = &store.Project{
-		ID:        tid("pm-project"),
-		Name:      "Members Test Project",
-		Slug:      "pm-test-project",
-		OwnerID:   owner.ID,
-		CreatedBy: owner.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, st.CreateProject(ctx, project))
-
-	// Create project-owner role binding for "owner" (simulates project creation).
-	srv.createProjectMembersGroup(ctx, project)
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID))
-
-	return srv, st, owner, other, project
-}
-
 // ---------------------------------------------------------------------------
 // GET /api/v1/projects/{id}/members
 // ---------------------------------------------------------------------------
@@ -109,6 +58,29 @@ func TestProjectMembers_List_ReturnsProjectScopedBindings(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "owner binding should be in results with enriched roleName")
+}
+
+// TestProjectMembers_List_NilMembershipServiceOmitsCapabilities proves the
+// members list does not panic when membershipService is nil: capabilities are
+// advisory, so they are omitted and the list still returns 200
+// (GoogleCloudPlatform/scion#2320).
+func TestProjectMembers_List_NilMembershipServiceOmitsCapabilities(t *testing.T) {
+	srv, _, owner, _, project := setupProjectMembersTest(t)
+	srv.membershipService = nil
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/members", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp listProjectMembersResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.GreaterOrEqual(t, resp.TotalCount, 1)
+	assert.Nil(t, resp.Capabilities, "capabilities must be omitted with a nil membership service")
+
+	// Direct call with a user identity in context also returns nil.
+	ctx := contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, "web"))
+	assert.Nil(t, srv.memberListCapabilities(ctx, project.ID))
 }
 
 func TestProjectMembers_List_NonMemberDenied(t *testing.T) {
@@ -1008,7 +980,7 @@ func TestC0_CrossProjectDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, st.CreateProject(ctx, otherProject))
-	srv.createProjectMembersGroup(ctx, otherProject)
+	srv.seedProjectCreatorMembership(ctx, otherProject)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, otherProject.ID, otherOwner.ID))
 
 	// The first project's owner tries to manage members in the other project.

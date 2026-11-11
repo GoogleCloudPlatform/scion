@@ -21,13 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -67,215 +63,22 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if suspendAll {
-			hubCtx, err := CheckHubAvailability(projectPath)
+			hubCtx, err := requireHub(projectPath)
 			if err != nil {
 				return err
 			}
-			if hubCtx != nil {
-				return suspendAllAgentsViaHub(hubCtx)
-			}
-			return suspendAllAgents()
+			return suspendAllAgentsViaHub(hubCtx)
 		}
 
 		agentName := api.Slugify(args[0])
 
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 
-		if hubCtx != nil {
-			return suspendAgentViaHub(hubCtx, agentName)
-		}
-
-		// Local mode — verify the harness supports resume before suspending.
-		if err := checkHarnessResumeSupport(agentName, projectPath); err != nil {
-			return err
-		}
-
-		rt := runtime.GetRuntime(projectPath, profile)
-		mgr := agent.NewManager(rt)
-
-		statusf("Suspending agent '%s'...\n", agentName)
-		if err := mgr.Stop(context.Background(), agentName, projectPath); err != nil {
-			return err
-		}
-
-		_ = agent.UpdateAgentConfig(agentName, projectPath, "suspended", "", "")
-
-		if isJSONOutput() {
-			return outputJSON(ActionResult{
-				Status:  "success",
-				Command: "suspend",
-				Agent:   agentName,
-				Message: fmt.Sprintf("Agent '%s' suspended.", agentName),
-			})
-		}
-		statusf("Agent '%s' suspended.\n", agentName)
-		return nil
+		return suspendAgentViaHub(hubCtx, agentName)
 	},
-}
-
-// checkHarnessResumeSupport resolves the agent's harness and returns an error
-// if the harness does not support session resume.
-func checkHarnessResumeSupport(agentName, projectPath string) error {
-	harnessConfigName := agent.GetSavedHarnessConfig(agentName, projectPath)
-	if harnessConfigName == "" {
-		return nil
-	}
-	h := harness.New(harnessConfigName)
-	caps := h.AdvancedCapabilities()
-	if caps.Resume.Support == api.SupportNo {
-		reason := caps.Resume.Reason
-		if reason == "" {
-			reason = "harness does not support session resume"
-		}
-		return fmt.Errorf("cannot suspend agent '%s': %s. Use 'stop' instead", agentName, reason)
-	}
-	return nil
-}
-
-func suspendAllAgents() error {
-	rt := runtime.GetRuntime(projectPath, profile)
-	mgr := agent.NewManager(rt)
-
-	filters := map[string]string{
-		"scion.agent": "true",
-	}
-
-	projectDir, _ := config.GetResolvedProjectDir(projectPath)
-	if projectDir != "" {
-		filters["scion.project_path"] = projectDir
-		filters["scion.project"] = config.GetProjectName(projectDir)
-	}
-
-	agents, err := mgr.List(context.Background(), filters)
-	if err != nil {
-		return err
-	}
-
-	type runningAgent struct {
-		Name string
-	}
-	var running []runningAgent
-	for _, a := range agents {
-		if a.ContainerID == "" {
-			continue
-		}
-		agentName := a.Labels["scion.name"]
-		if agentName == "" {
-			continue
-		}
-		if a.Phase == string(state.PhaseRunning) {
-			running = append(running, runningAgent{Name: agentName})
-		}
-	}
-
-	if len(running) == 0 {
-		if isJSONOutput() {
-			return outputJSON(map[string]interface{}{
-				"status":  "success",
-				"command": "suspend",
-				"message": "No running agents found.",
-				"results": []interface{}{},
-			})
-		}
-		statusln("No running agents found.")
-		return nil
-	}
-
-	type agentResult struct {
-		Name   string
-		Status string
-		Error  string
-	}
-
-	var (
-		mu      sync.Mutex
-		wg      sync.WaitGroup
-		results []agentResult
-	)
-
-	for _, ra := range running {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-
-			res := agentResult{Name: name, Status: "success"}
-
-			if err := checkHarnessResumeSupport(name, projectPath); err != nil {
-				res.Status = "skipped"
-				res.Error = err.Error()
-				mu.Lock()
-				results = append(results, res)
-				mu.Unlock()
-				return
-			}
-
-			agentRt := runtime.GetRuntime(projectPath, profile)
-			agentMgr := agent.NewManager(agentRt)
-
-			if err := agentMgr.Stop(context.Background(), name, projectPath); err != nil {
-				res.Status = "error"
-				res.Error = err.Error()
-				mu.Lock()
-				results = append(results, res)
-				mu.Unlock()
-				return
-			}
-
-			_ = agent.UpdateAgentConfig(name, projectPath, "suspended", "", "")
-
-			mu.Lock()
-			results = append(results, res)
-			mu.Unlock()
-		}(ra.Name)
-	}
-
-	wg.Wait()
-
-	if isJSONOutput() {
-		jsonResults := make([]map[string]interface{}, len(results))
-		hasErrors := false
-		for i, r := range results {
-			entry := map[string]interface{}{
-				"agent":  r.Name,
-				"status": r.Status,
-			}
-			if r.Error != "" {
-				entry["error"] = r.Error
-				hasErrors = true
-			}
-			jsonResults[i] = entry
-		}
-		overallStatus := "success"
-		if hasErrors {
-			overallStatus = "partial"
-		}
-		return outputJSON(map[string]interface{}{
-			"status":  overallStatus,
-			"command": "suspend",
-			"results": jsonResults,
-		})
-	}
-
-	var errs []string
-	for _, r := range results {
-		switch r.Status {
-		case "skipped":
-			statusf("Agent '%s': skipped: %s\n", r.Name, r.Error)
-		case "error":
-			statusf("Agent '%s': error: %s\n", r.Name, r.Error)
-			errs = append(errs, fmt.Sprintf("%s: %s", r.Name, r.Error))
-		default:
-			statusf("Agent '%s' suspended.\n", r.Name)
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("failed to suspend some agents:\n  %s", strings.Join(errs, "\n  "))
-	}
-	return nil
 }
 
 func suspendAllAgentsViaHub(hubCtx *HubContext) error {
@@ -323,21 +126,20 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 
 	var (
 		mu      sync.Mutex
-		wg      sync.WaitGroup
 		results []agentResult
 	)
 
-	for _, a := range running {
-		wg.Add(1)
-		go func(ag hubclient.Agent) {
-			defer wg.Done()
+	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
+	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			ag := running[i]
 
 			res := agentResult{Name: ag.Name, Status: "success"}
 
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer agentCancel()
 
-			if err := agentSvc.Suspend(agentCtx, ag.Name); err != nil {
+			if _, err := agentSvc.Suspend(agentCtx, ag.Name); err != nil {
 				res.Status = "error"
 				res.Error = wrapHubError(fmt.Errorf("failed to suspend: %w", err)).Error()
 				mu.Lock()
@@ -349,10 +151,7 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
-		}(a)
-	}
-
-	wg.Wait()
+		}, func(int) {})
 
 	if isJSONOutput() {
 		jsonResults := make([]map[string]interface{}, len(results))
@@ -372,11 +171,11 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "suspend",
 			"results": jsonResults,
-		})
+		}, hasErrors, "failed to suspend some agents via Hub")
 	}
 
 	var errs []string
@@ -409,9 +208,11 @@ func suspendAgentViaHub(hubCtx *HubContext, agentName string) error {
 
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	if err := agentSvc.Suspend(ctx, agentName); err != nil {
+	suspendResp, err := agentSvc.Suspend(ctx, agentName)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to suspend agent via Hub: %w", err))
 	}
+	printLifecycleWarnings(suspendResp)
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{

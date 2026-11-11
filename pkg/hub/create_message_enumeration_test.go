@@ -18,7 +18,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,11 +36,12 @@ func TestCreateMessageEnumeration(t *testing.T) {
 	// CreateMessage.
 	// -------------------------------------------------------------------
 	stamped := map[string]string{
-		// handleAgentOutboundMessage: agent-to-agent DM (DEF-164 deliveryAgentDM path).
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:agentDM": "Phase 5 dual-write: DEF-164 agent-to-agent direct message persistence",
+		// ExecuteAgentDM: shared agent DM operation (#1688).
+		"agent_dm_operation.go:ExecuteAgentDM": "Phase 5 dual-write: shared agent DM operation (#1688)",
 
 		// handleAgentOutboundMessage: agent-to-user direct (deliveryUserDirect path).
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:userDirect": "Phase 5 dual-write: agent outbound DM or thread conversation",
+		// Only one CreateMessage remains after agent DM extraction (#1688).
+		"handlers_agent_messaging.go:handleAgentOutboundMessage": "Phase 5 dual-write: agent outbound DM or thread conversation",
 
 		// handleAgentMessage direct-persist path: user/agent → agent.
 		"handlers_agent_messaging.go:handleAgentMessage": "Phase 5 dual-write: user/agent → agent (authenticated sender)",
@@ -61,17 +61,18 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		// dispatchRoutedRecipient: routed broker inbound (centralized routing).
 		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Routed inbound: conversation stamped via Phase 11 or Phase 5 before CreateMessage",
 
-		// sendViaDirectConversation: cross-project direct message.
-		"handlers_conversation_send.go:sendViaDirectConversation": "Cross-project messaging: ConversationID set from resolved conversation before CreateMessage",
-
 		// sendAgentRouted primary: web chat user → agent.
 		"handlers_chat_v2.go:sendAgentRouted:primary": "B15 dual-write: web chat user→agent primary message",
 
 		// sendAgentRouted mention fan-out: web chat user → mentioned agent.
 		"handlers_chat_v2.go:sendAgentRouted:mention": "B15 dual-write: web chat mention fan-out",
 
-		// sendHumanToHuman: web chat user → user DM or thread.
-		"handlers_chat_v2.go:sendHumanToHuman": "B15 dual-write: human-to-human DM/thread conversation stamping",
+		// sendHumanToHuman: web chat user → user DM or thread. Also handles
+		// the unreachable-default override (nc-delivery-unreachable review
+		// R1): a topic send to an unresolvable default agent (soft-deleted,
+		// or missing) shares this same call site rather than a separate
+		// sendUnreachableDefaultAgent copy.
+		"handlers_chat_v2.go:sendHumanToHuman": "B15 dual-write: human-to-human DM/thread conversation stamping (also covers the unreachable-default override)",
 
 		// messagebroker deliverToUser: broker-delivered user messages.
 		"messagebroker.go:deliverToUser": "Phase 5 dual-write: broker-delivered user message",
@@ -109,7 +110,13 @@ func TestCreateMessageEnumeration(t *testing.T) {
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
 
-	entries, err := os.ReadDir(hubDir)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards CreateMessage call sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards CreateMessage call sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards CreateMessage call sites.
+	entries, err := readGuardScanDirs(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
 	}
@@ -257,11 +264,6 @@ func isCreateMessageCall(call *ast.CallExpr) bool {
 // The mapping is hard-coded for known cases.
 func disambiguationSuffixes(file, fn string, idx, total int) []string {
 	switch {
-	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && total == 2:
-		if idx == 0 {
-			return []string{"agentDM"}
-		}
-		return []string{"userDirect"}
 	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && total == 2:
 		if idx == 0 {
 			return []string{"primary"}
@@ -282,26 +284,3 @@ func disambiguationSuffixes(file, fn string, idx, total int) []string {
 }
 
 // findHubDir is defined in ast_test_helpers_test.go (shared helper).
-
-// itoa is a minimal int-to-string without importing strconv.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}

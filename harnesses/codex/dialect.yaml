@@ -17,9 +17,6 @@ mappings:
     event: response-complete
     fields:
       message: title
-      # Note: Codex may emit last-assistant-message (hyphenated) in older payloads.
-      # MappingDialect does not support field-source fallbacks yet; add if needed.
-      assistant_text: last_assistant_message
 
   notification:
     event: notification

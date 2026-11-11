@@ -19,7 +19,7 @@ spec:
     - -c
     - |
       set -e
-      SENTINEL="/workspace/.scion-provisioned"
+      SENTINEL="/scion-provision/.scion-provisioned"
       if [ -f "$SENTINEL" ]; then
         echo "PROVISION: sentinel found, skipping clone"
         exit 0
@@ -32,6 +32,9 @@ spec:
     - name: workspace
       mountPath: /workspace
       subPath: projects/test-project-alpha/workspace
+    - name: workspace
+      mountPath: /scion-provision
+      subPath: projects/test-project-alpha/provision
     resources:
       requests:
         cpu: 250m
@@ -46,7 +49,7 @@ spec:
       echo "=== WORKSPACE CONTENTS ==="
       ls -la /workspace/
       echo "=== SENTINEL CHECK ==="
-      cat /workspace/.scion-provisioned 2>/dev/null && echo "SENTINEL: present" || echo "SENTINEL: missing"
+      test -e /workspace/.scion-provisioned && echo "SENTINEL: in the workspace root (unexpected)" || echo "SENTINEL: not in the workspace (kept in the provisioning state directory)"
       echo "=== ISOLATION CHECK ==="
       echo "Attempting to access parent dir..."
       ls /workspace/../ 2>&1 || echo "ISOLATION: cannot traverse up"

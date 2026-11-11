@@ -25,7 +25,6 @@ type resourceMetadataPatch struct {
 	Slug        string `json:"slug,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
 	Description string `json:"description,omitempty"`
-	Visibility  string `json:"visibility,omitempty"`
 }
 
 type resourceMetadataFields struct {
@@ -33,13 +32,36 @@ type resourceMetadataFields struct {
 	Slug        *string
 	DisplayName *string
 	Description *string
-	Visibility  *string
 }
 
+// resourceNameNotComponentMessage is the fixed refusal text for a template
+// or harness-config name that is not exactly one path component. It never
+// contains the name.
+const resourceNameNotComponentMessage = "name must be a single path component"
+
+// refuseNonComponentResourceName writes a validation error and returns true
+// when name, a template or harness-config Name about to be stored, is not
+// exactly one path component (api.IsSingleNameComponent): such a name is
+// later joined into directory paths by the CLI and the brokers. The store
+// refuses it too; this answers before any other work, with a fixed text.
+func refuseNonComponentResourceName(w http.ResponseWriter, name string) bool {
+	if api.IsSingleNameComponent(name) {
+		return false
+	}
+	ValidationError(w, resourceNameNotComponentMessage, nil)
+	return true
+}
+
+// applyResourceMetadataPatch applies a template or harness-config PATCH
+// body to fields. A new name that is not one path component is refused
+// (refuseNonComponentResourceName) and nothing is applied.
 func applyResourceMetadataPatch(w http.ResponseWriter, r *http.Request, fields resourceMetadataFields) bool {
 	var updates resourceMetadataPatch
 	if err := readJSON(r, &updates); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	if updates.Name != "" && refuseNonComponentResourceName(w, updates.Name) {
 		return false
 	}
 
@@ -57,9 +79,6 @@ func applyResourceMetadataPatch(w http.ResponseWriter, r *http.Request, fields r
 	}
 	if updates.Description != "" {
 		*fields.Description = updates.Description
-	}
-	if updates.Visibility != "" {
-		*fields.Visibility = updates.Visibility
 	}
 	return true
 }

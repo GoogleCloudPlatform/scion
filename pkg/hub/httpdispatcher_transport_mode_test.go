@@ -18,10 +18,13 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -173,5 +176,124 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_NoTransportMode(t *testing.T) {
 	}
 	if _, ok := mockClient.lastResolvedEnv["SCION_TRANSPORT_TOKEN"]; ok {
 		t.Error("SCION_TRANSPORT_TOKEN should not be in resolvedEnv when no transport minter")
+	}
+}
+
+// newTransportModeDispatcher returns a dispatcher (with a mock broker
+// client) configured with minter in "iap" mode, and an agent whose project
+// and broker exist in the store. suffix keeps IDs distinct per test.
+func newTransportModeDispatcher(t *testing.T, suffix string, minter TransportTokenMinter) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
+	t.Helper()
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	if err := memStore.CreateProject(ctx, &store.Project{
+		ID:        tid("project-" + suffix),
+		Name:      "transport-" + suffix,
+		Slug:      "transport-" + suffix,
+		GitRemote: "https://github.com/example/repo.git",
+	}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:       tid("broker-" + suffix),
+		Name:     "test-broker-" + suffix,
+		Slug:     "test-broker-" + suffix,
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  tid("project-" + suffix),
+		BrokerID:   tid("broker-" + suffix),
+		BrokerName: "test-broker-" + suffix,
+		LocalPath:  "/home/user/projects/.scion",
+		Status:     store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetTransportMinter(minter, "https://iap-client-id.apps.googleusercontent.com", "iap")
+
+	agent := &store.Agent{
+		ID:              "agent-" + suffix + "-123",
+		Name:            "transport-agent-" + suffix,
+		Slug:            "transport-agent-" + suffix,
+		ProjectID:       tid("project-" + suffix),
+		RuntimeBrokerID: tid("broker-" + suffix),
+	}
+	return dispatcher, mockClient, agent
+}
+
+// assertTransportModeEnv checks that SCION_TRANSPORT_MODE is "iap" and
+// classified plain, and that the token variables are present only when
+// wantToken is true.
+func assertTransportModeEnv(t *testing.T, env map[string]string, classes map[string]api.EnvKind, wantToken bool) {
+	t.Helper()
+	if v := env["SCION_TRANSPORT_MODE"]; v != "iap" {
+		t.Errorf("expected SCION_TRANSPORT_MODE='iap', got %q", v)
+	}
+	if k := classes["SCION_TRANSPORT_MODE"]; k != api.EnvKindPlain {
+		t.Errorf("expected SCION_TRANSPORT_MODE classified %q, got %q", api.EnvKindPlain, k)
+	}
+	for _, k := range []string{"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_AUDIENCE", "SCION_TRANSPORT_TOKEN_EXPIRY"} {
+		if _, ok := env[k]; ok != wantToken {
+			t.Errorf("%s present=%v, want %v", k, ok, wantToken)
+		}
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_TransportModeOnMintFailure
+// verifies that SCION_TRANSPORT_MODE is still injected when the transport
+// minter fails at dispatch time, so the agent can adopt a transport token
+// delivered later by a token refresh or reset-auth. No token is injected.
+func TestHTTPAgentDispatcher_DispatchAgentStart_TransportModeOnMintFailure(t *testing.T) {
+	minter := &FakeTransportMinter{Err: errors.New("mint unavailable")}
+	dispatcher, mockClient, agent := newTransportModeDispatcher(t, "mf", minter)
+
+	if err := dispatcher.DispatchAgentStart(context.Background(), agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+	if minter.CallCount == 0 {
+		t.Fatal("expected the transport minter to be called")
+	}
+	if v := mockClient.lastResolvedEnv["SCION_TRANSPORT_MODE"]; v != "iap" {
+		t.Errorf("expected SCION_TRANSPORT_MODE='iap' after a mint failure, got %q", v)
+	}
+	for _, k := range []string{"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_AUDIENCE", "SCION_TRANSPORT_TOKEN_EXPIRY"} {
+		if _, ok := mockClient.lastResolvedEnv[k]; ok {
+			t.Errorf("%s should not be in resolvedEnv when the mint failed", k)
+		}
+	}
+}
+
+// TestHTTPAgentDispatcher_BuildCreateRequest_TransportMode covers the
+// create path: SCION_TRANSPORT_MODE is injected (classified plain) whether
+// or not the dispatch-time mint succeeds; the token variables only on
+// success.
+func TestHTTPAgentDispatcher_BuildCreateRequest_TransportMode(t *testing.T) {
+	cases := []struct {
+		name      string
+		minter    *FakeTransportMinter
+		wantToken bool
+	}{
+		{name: "mint failure", minter: &FakeTransportMinter{Err: errors.New("mint unavailable")}},
+		{name: "mint success", minter: &FakeTransportMinter{Token: "placeholder-transport-token", Expiry: time.Now().Add(time.Hour)}, wantToken: true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dispatcher, _, agent := newTransportModeDispatcher(t, fmt.Sprintf("cr%d", i), tc.minter)
+			req, err := dispatcher.buildCreateRequest(context.Background(), agent, "test")
+			if err != nil {
+				t.Fatalf("buildCreateRequest failed: %v", err)
+			}
+			if tc.minter.CallCount == 0 {
+				t.Fatal("expected the transport minter to be called")
+			}
+			assertTransportModeEnv(t, req.ResolvedEnv, req.EnvClassifications, tc.wantToken)
+		})
 	}
 }

@@ -27,10 +27,8 @@ const (
 	FieldHarness = "harness"
 	// FieldDefaultHarnessConfig holds the string denoting the default_harness_config field in the database.
 	FieldDefaultHarnessConfig = "default_harness_config"
-	// FieldImage holds the string denoting the image field in the database.
-	FieldImage = "image"
-	// FieldConfig holds the string denoting the config field in the database.
-	FieldConfig = "config"
+	// FieldAgentConfig holds the string denoting the agent_config field in the database.
+	FieldAgentConfig = "agent_config"
 	// FieldContentHash holds the string denoting the content_hash field in the database.
 	FieldContentHash = "content_hash"
 	// FieldScope holds the string denoting the scope field in the database.
@@ -45,6 +43,8 @@ const (
 	FieldStorageBucket = "storage_bucket"
 	// FieldStoragePath holds the string denoting the storage_path field in the database.
 	FieldStoragePath = "storage_path"
+	// FieldLayout holds the string denoting the layout field in the database.
+	FieldLayout = "layout"
 	// FieldFiles holds the string denoting the files field in the database.
 	FieldFiles = "files"
 	// FieldBaseTemplate holds the string denoting the base_template field in the database.
@@ -59,8 +59,6 @@ const (
 	FieldUpdatedBy = "updated_by"
 	// FieldSourceURL holds the string denoting the source_url field in the database.
 	FieldSourceURL = "source_url"
-	// FieldVisibility holds the string denoting the visibility field in the database.
-	FieldVisibility = "visibility"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -78,8 +76,7 @@ var Columns = []string{
 	FieldDescription,
 	FieldHarness,
 	FieldDefaultHarnessConfig,
-	FieldImage,
-	FieldConfig,
+	FieldAgentConfig,
 	FieldContentHash,
 	FieldScope,
 	FieldScopeID,
@@ -87,6 +84,7 @@ var Columns = []string{
 	FieldStorageURI,
 	FieldStorageBucket,
 	FieldStoragePath,
+	FieldLayout,
 	FieldFiles,
 	FieldBaseTemplate,
 	FieldStatus,
@@ -94,7 +92,6 @@ var Columns = []string{
 	FieldCreatedBy,
 	FieldUpdatedBy,
 	FieldSourceURL,
-	FieldVisibility,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -116,8 +113,8 @@ var (
 	SlugValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
-	// DefaultVisibility holds the default value on creation for the "visibility" field.
-	DefaultVisibility string
+	// DefaultLayout holds the default value on creation for the "layout" field.
+	DefaultLayout string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -193,14 +190,9 @@ func ByDefaultHarnessConfig(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDefaultHarnessConfig, opts...).ToFunc()
 }
 
-// ByImage orders the results by the image field.
-func ByImage(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldImage, opts...).ToFunc()
-}
-
-// ByConfig orders the results by the config field.
-func ByConfig(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldConfig, opts...).ToFunc()
+// ByAgentConfig orders the results by the agent_config field.
+func ByAgentConfig(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAgentConfig, opts...).ToFunc()
 }
 
 // ByContentHash orders the results by the content_hash field.
@@ -238,6 +230,11 @@ func ByStoragePath(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStoragePath, opts...).ToFunc()
 }
 
+// ByLayout orders the results by the layout field.
+func ByLayout(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLayout, opts...).ToFunc()
+}
+
 // ByFiles orders the results by the files field.
 func ByFiles(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldFiles, opts...).ToFunc()
@@ -271,11 +268,6 @@ func ByUpdatedBy(opts ...sql.OrderTermOption) OrderOption {
 // BySourceURL orders the results by the source_url field.
 func BySourceURL(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSourceURL, opts...).ToFunc()
-}
-
-// ByVisibility orders the results by the visibility field.
-func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

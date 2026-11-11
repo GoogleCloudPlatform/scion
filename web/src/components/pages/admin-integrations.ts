@@ -15,9 +15,25 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import {
+  fallbackFieldKey,
+  fieldErrorMessages,
+  genericSaveErrorText,
+  readSettingsSaveError,
+} from '../../shared/settings-save-errors.js';
+import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
+import { copyWithToast } from '../../utils/clipboard.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -98,7 +114,7 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
     {
       key: 'webhook_secret',
       label: 'Webhook Secret',
-      description: 'Secret for webhook verification (webhook mode only)',
+      description: 'Secret for webhook verification (required in webhook mode)',
     },
   ],
   discord: [
@@ -432,6 +448,42 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
   ],
 };
 
+/**
+ * The settings to send in a config PUT (ptone/scion#3913): only the keys
+ * whose value differs from the stored one. The hub keeps every key the body
+ * omits, so a plugin default the page shows is never written unless the
+ * user sets the field to another value:
+ * - a key that is not stored and is left empty, or set to its field's
+ *   default, is not sent;
+ * - a stored key the user cleared ("") or reset to the default (removed
+ *   from edited) is sent as null, which deletes it, so the plugin's own
+ *   default applies again;
+ * - any other changed key is sent with its value.
+ */
+export function integrationSettingsPayload(
+  edited: Record<string, string>,
+  stored: Record<string, string>,
+  fields: ReadonlyArray<{ key: string; defaultValue: string }>
+): Record<string, string | null> {
+  const defaults = new Map(fields.map((f) => [f.key, f.defaultValue]));
+  const out: Record<string, string | null> = {};
+  for (const key of new Set([...Object.keys(stored), ...Object.keys(edited)])) {
+    const isStored = Object.prototype.hasOwnProperty.call(stored, key);
+    const hasEdit = Object.prototype.hasOwnProperty.call(edited, key);
+    const value = edited[key];
+    if (isStored) {
+      if (!hasEdit || (value === '' && stored[key] !== '')) {
+        out[key] = null;
+      } else if (value !== stored[key]) {
+        out[key] = value;
+      }
+    } else if (hasEdit && value !== '' && value !== defaults.get(key)) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 @customElement('scion-page-admin-integrations')
 export class ScionPageAdminIntegrations extends LitElement {
   @state() private loading = true;
@@ -445,6 +497,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private detail: IntegrationDetail | null = null;
   @state() private editedSettings: Record<string, string> = {};
   @state() private editedSecrets: Record<string, string> = {};
+  // Structured error from the last failed config save (ptone/scion#3923)
+  @state() private saveError: SettingsSaveError | null = null;
   @state() private saving = false;
   @state() private restarting = false;
   @state() private updating = false;
@@ -463,6 +517,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private availableProjects: ProjectInfo[] = [];
 
   static override styles = css`
+    ${settingsErrorStyles}
+
     :host {
       display: block;
     }
@@ -573,6 +629,17 @@ export class ScionPageAdminIntegrations extends LitElement {
       font-size: 0.875rem;
       border-color: var(--scion-border, #e2e8f0);
       background: var(--scion-surface, #ffffff);
+    }
+
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      sl-input::part(base),
+      sl-select::part(combobox) {
+        font-size: max(16px, 0.875rem);
+      }
     }
 
     sl-input::part(input) {
@@ -696,6 +763,14 @@ export class ScionPageAdminIntegrations extends LitElement {
       gap: 1rem;
       padding: 0.75rem 0;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .secret-row:has(.field-error) {
+      flex-wrap: wrap;
+    }
+
+    .secret-row .field-error {
+      flex-basis: 100%;
     }
 
     .secret-row:last-child {
@@ -874,6 +949,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   private async loadDetail(name: string): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.saveError = null;
     try {
       const res = await apiFetch(`/api/v1/admin/integrations/${encodeURIComponent(name)}`);
       if (!res.ok) {
@@ -881,11 +957,9 @@ export class ScionPageAdminIntegrations extends LitElement {
         return;
       }
       this.detail = (await res.json()) as IntegrationDetail;
-      const knownFields = PLATFORM_FIELDS[this.detail.platform] ?? [];
-      this.editedSettings = {
-        ...Object.fromEntries(knownFields.map((f) => [f.key, f.defaultValue])),
-        ...(this.detail.settings || {}),
-      };
+      // Only stored values fill the form; plugin defaults show as
+      // placeholders and are never saved (ptone/scion#3913).
+      this.editedSettings = { ...(this.detail.settings || {}) };
       this.editedSecrets = {};
 
       // For A2A integrations, fetch the project list for the projects editor.
@@ -916,10 +990,18 @@ export class ScionPageAdminIntegrations extends LitElement {
     if (!this.detail) return;
     this.saving = true;
     this.error = null;
+    this.saveError = null;
     this.successMessage = null;
     try {
-      const body: { settings: Record<string, string>; secrets?: Record<string, string> } = {
-        settings: this.editedSettings,
+      const body: {
+        settings: Record<string, string | null>;
+        secrets?: Record<string, string>;
+      } = {
+        settings: integrationSettingsPayload(
+          this.editedSettings,
+          this.detail.settings || {},
+          PLATFORM_FIELDS[resolvePlatform(this.detail.name)] ?? []
+        ),
       };
       const changedSecrets = Object.entries(this.editedSecrets).filter(([, v]) => v !== '');
       if (changedSecrets.length > 0) {
@@ -934,7 +1016,12 @@ export class ScionPageAdminIntegrations extends LitElement {
         }
       );
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to save configuration');
+        const err = await readSettingsSaveError(res);
+        if (err.kind === 'generic') {
+          this.error = genericSaveErrorText(err, 'Failed to save configuration');
+        } else {
+          this.saveError = err;
+        }
         return;
       }
       this.successMessage = 'Configuration saved successfully';
@@ -1105,11 +1192,82 @@ export class ScionPageAdminIntegrations extends LitElement {
     );
   }
 
+  /**
+   * Validation entries from the last failed config save, or [].
+   *
+   * PUT /api/v1/admin/integrations/<name>/config emits no validation,
+   * conflict or layer0 body today (only bad-request, forbidden and internal
+   * errors). This handling is kept so the form shows such errors at the
+   * field once the handler sends them, in the same shape as the
+   * server-config PUT (ptone/scion#3923).
+   *
+   * The request body is not a koanf settings section, so a path is keyed by
+   * the body group it names: settings.<key> or secrets.<key>. A path with no
+   * group is placed only when its key exists in exactly one group;
+   * otherwise it is shown in the section summary only.
+   */
+  private get saveFieldErrors(): SettingsFieldError[] {
+    if (this.saveError?.kind !== 'validation') return [];
+    const groups = this.configKeyGroups();
+    return this.saveError.fieldErrors.map((e) => {
+      let key = e.key ?? fallbackFieldKey(e.section, e.path);
+      if (key && !key.startsWith('settings.') && !key.startsWith('secrets.')) {
+        const head = key.split('.')[0];
+        const inSettings = groups.settings.has(head);
+        const inSecrets = groups.secrets.has(head);
+        key = inSettings !== inSecrets ? `${inSettings ? 'settings' : 'secrets'}.${key}` : null;
+      }
+      return { ...e, key };
+    });
+  }
+
+  /** Setting and secret keys the detail view renders. */
+  private configKeyGroups(): { settings: Set<string>; secrets: Set<string> } {
+    const d = this.detail;
+    if (!d) return { settings: new Set(), secrets: new Set() };
+    const platform = resolvePlatform(d.name);
+    return {
+      settings: new Set([
+        ...(PLATFORM_FIELDS[platform] ?? []).map((f) => f.key),
+        ...Object.keys(d.settings ?? {}),
+      ]),
+      secrets: new Set([
+        ...(PLATFORM_SECRETS[platform] ?? []).map((f) => f.key),
+        ...Object.keys(d.has_secrets ?? {}),
+      ]),
+    };
+  }
+
+  /** Inline messages for one setting or secret. */
+  private renderConfigFieldErrors(
+    group: 'settings' | 'secrets',
+    key: string
+  ): TemplateResult | typeof nothing {
+    const field = `${group}.${key}`;
+    return renderFieldErrorMessages(fieldErrorMessages(this.saveFieldErrors, field), field);
+  }
+
+  private reloadAfterConflict(): void {
+    this.saveError = null;
+    this.error = null;
+    this.successMessage = null;
+    if (this.detail) void this.loadDetail(this.detail.name);
+  }
+
+  private renderSaveError(): TemplateResult | typeof nothing {
+    const err = this.saveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') return renderConflictNotice(err, () => this.reloadAfterConflict());
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return nothing;
+  }
+
   override render() {
     const isDetail = this.currentName !== null;
 
     return html`
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
+      ${this.renderSaveError()}
       ${this.successMessage
         ? html`<div class="status-message success">${this.successMessage}</div>`
         : nothing}
@@ -1375,6 +1533,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">Configuration</h3>
+        ${renderSectionErrorSummary(this.saveFieldErrors, 'configuration')}
         <div class="form-grid">
           ${fieldDefs.map(
             (field) => html`
@@ -1382,6 +1541,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <label>${field.label}</label>
                 ${this.renderFieldInput(field)}
                 <span class="hint">${field.description}</span>
+                ${this.renderConfigFieldErrors('settings', field.key)}
               </div>
             `
           )}
@@ -1398,6 +1558,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                     };
                   }}
                 ></sl-input>
+                ${this.renderConfigFieldErrors('settings', key)}
               </div>
             `
           )}
@@ -1409,6 +1570,9 @@ export class ScionPageAdminIntegrations extends LitElement {
   private renderFieldInput(field: PlatformFieldDef) {
     const fieldType = field.type ?? 'text';
 
+    // A select or switch shows the plugin default while the key is unset;
+    // that value is not saved unless the user picks another one, and
+    // "Use default" unsets a set key again (ptone/scion#3913).
     if (fieldType === 'select' && field.options) {
       const currentValue = this.editedSettings[field.key] ?? field.defaultValue;
       return html`
@@ -1425,6 +1589,7 @@ export class ScionPageAdminIntegrations extends LitElement {
             (opt) => html`<sl-option value=${opt.value}>${opt.label}</sl-option>`
           )}
         </sl-select>
+        ${this.renderUseDefault(field)}
       `;
     }
 
@@ -1441,13 +1606,14 @@ export class ScionPageAdminIntegrations extends LitElement {
             };
           }}
         ></sl-switch>
+        ${this.renderUseDefault(field)}
       `;
     }
 
-    // Default: text input
+    // Default: text input. The plugin default is only a placeholder.
     return html`
       <sl-input
-        .value=${this.editedSettings[field.key] ?? field.defaultValue}
+        .value=${this.editedSettings[field.key] ?? ''}
         placeholder=${field.placeholder ?? field.defaultValue}
         @sl-change=${(e: Event) => {
           this.editedSettings = {
@@ -1456,6 +1622,29 @@ export class ScionPageAdminIntegrations extends LitElement {
           };
         }}
       ></sl-input>
+    `;
+  }
+
+  /**
+   * "Use default" for a select or switch whose key is set: it unsets the
+   * key, so the save deletes a stored value and the plugin default applies.
+   */
+  private renderUseDefault(field: PlatformFieldDef) {
+    if (!Object.prototype.hasOwnProperty.call(this.editedSettings, field.key)) {
+      return nothing;
+    }
+    return html`
+      <sl-button
+        size="small"
+        variant="text"
+        data-use-default=${field.key}
+        @click=${() => {
+          const next = { ...this.editedSettings };
+          delete next[field.key];
+          this.editedSettings = next;
+        }}
+        >Use default</sl-button
+      >
     `;
   }
 
@@ -1785,7 +1974,7 @@ export class ScionPageAdminIntegrations extends LitElement {
           <sl-button
             size="small"
             @click=${() => {
-              void navigator.clipboard.writeText(messagingEndpoint);
+              void copyWithToast(messagingEndpoint);
             }}
           >
             <sl-icon slot="prefix" name="clipboard"></sl-icon>
@@ -1891,6 +2080,9 @@ export class ScionPageAdminIntegrations extends LitElement {
     // For A2A, the api_key secret is only relevant when auth_scheme is apiKey or bearer.
     const authScheme = platform === 'a2a' ? (this.editedSettings['auth_scheme'] ?? 'none') : '';
     const apiKeyRelevant = authScheme === 'apiKey' || authScheme === 'bearer';
+    // The Telegram plugin refuses to start in webhook mode without webhook_secret.
+    const telegramWebhook =
+      platform === 'telegram' && this.editedSettings['inbound_mode'] === 'webhook';
 
     return html`
       <div class="section">
@@ -1900,9 +2092,12 @@ export class ScionPageAdminIntegrations extends LitElement {
           if (platform === 'a2a' && key === 'api_key' && !apiKeyRelevant) return nothing;
           const def = secretDefMap.get(key);
           const label = def?.label ?? key;
-          // For A2A, mark api_key as required when the scheme needs it.
-          const isRequired =
-            platform === 'a2a' && key === 'api_key' ? apiKeyRelevant : (def?.required ?? false);
+          // Some secrets are required only in the mode that uses them: A2A
+          // api_key when the scheme needs it, Telegram webhook_secret in
+          // webhook mode.
+          let isRequired = def?.required ?? false;
+          if (platform === 'a2a' && key === 'api_key') isRequired = apiKeyRelevant;
+          if (platform === 'telegram' && key === 'webhook_secret') isRequired = telegramWebhook;
           const isConfigured = d.has_secrets?.[key];
           return html`
             <div class="secret-row">
@@ -1934,6 +2129,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                   };
                 }}
               ></sl-input>
+              ${this.renderConfigFieldErrors('secrets', key)}
             </div>
           `;
         })}

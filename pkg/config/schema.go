@@ -17,9 +17,11 @@ package config
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 )
@@ -39,9 +41,14 @@ var agentSchemaFiles = map[string]string{
 // ValidationError represents a single schema validation error.
 type ValidationError struct {
 	// Path is the JSON pointer to the field that failed validation (e.g., "hub/endpoint").
-	Path string
+	Path string `json:"path"`
 	// Message describes the validation failure.
-	Message string
+	Message string `json:"message"`
+	// StorageField marks a project storage field rule
+	// (ValidateProjectStorage). Path is then the field's settings path. A
+	// settings migration converts the file anyway and reports these as
+	// warnings, so the operator gets the file to fix.
+	StorageField bool `json:"storage_field,omitempty"`
 }
 
 func (e ValidationError) Error() string {
@@ -56,7 +63,7 @@ func (e ValidationError) Error() string {
 //
 // Returns:
 //   - version: the schema_version value if present (e.g., "1"), or "1" if v1-only
-//     runtime fields are detected (type, cloudrun, gke, list_all_namespaces), or ""
+//     runtime fields are detected (see v1RuntimeIndicatorKeys), or ""
 //     for legacy/empty files.
 //   - isLegacy: true if the file uses the legacy format (has "harnesses" key but no schema_version)
 //
@@ -68,7 +75,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 
 	// Parse into a generic map to inspect top-level keys.
 	var raw map[string]interface{}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		// Unparseable data is treated as neither versioned nor legacy.
 		return "", false
 	}
@@ -93,8 +100,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 	}
 
 	// Check for v1-only structural indicators in runtime entries.
-	// A runtimes map containing type, cloudrun, gke, or list_all_namespaces
-	// keys indicates a v1-format file that is missing the schema_version marker.
+	// A runtimes map containing any v1RuntimeIndicatorKeys key indicates a v1-format file that is missing the schema_version marker.
 	// Treat as versioned v1 to prevent silent data loss via the legacy loading path.
 	if hasV1RuntimeIndicators(raw) {
 		return "1", false
@@ -105,9 +111,21 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 	return "", false
 }
 
+// v1RuntimeIndicatorKeys are runtime-entry keys that exist only on
+// V1RuntimeConfig, not on the legacy RuntimeConfig. A file using any of them
+// without schema_version is loaded as v1 so the key is not dropped by the
+// legacy loader.
+var v1RuntimeIndicatorKeys = []string{
+	"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict",
+	"shared_dir_storage_backend", "shared_dir_storage_backends", "home_storage_backend", "home_storage_leaf",
+	"priority_class_name", "runtime_class_name", "node_selector", "tolerations",
+	"cloudrun_instances", "cloudrun_sandbox", "substrate",
+	"kubernetes_service_account_mappings", "kubernetes_block_service_account",
+}
+
 // hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only
-// runtime fields (type, cloudrun, gke, list_all_namespaces) that are absent from
-// the legacy RuntimeConfig struct. Used to detect v1-shaped files missing schema_version.
+// runtime fields (v1RuntimeIndicatorKeys) that are absent from the legacy
+// RuntimeConfig struct. Used to detect v1-shaped files missing schema_version.
 func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 	runtimes, ok := raw["runtimes"]
 	if !ok {
@@ -122,7 +140,7 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 		if !ok {
 			continue
 		}
-		for _, key := range []string{"type", "cloudrun", "gke", "list_all_namespaces"} {
+		for _, key := range v1RuntimeIndicatorKeys {
 			if _, has := entry[key]; has {
 				return true
 			}
@@ -139,8 +157,83 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 //
 // Returns an error (not ValidationError) if the schema version is unsupported
 // or if the data cannot be parsed.
+//
+// For schema version "1" it also checks value formats the schema cannot
+// express, such as shared_dir_size being a Kubernetes quantity, and that a
+// shared_dir_storage_backend of "nfs" has a complete
+// server.shared_dir_storage.nfs block. It also validates the Kubernetes
+// placement fields and requires runtime entries with literally the same
+// context and namespace to agree on placement (ValidatePlacement).
 func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, error) {
-	return validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
+	errs, err := validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
+	if err != nil || schemaVersion != "1" {
+		return errs, err
+	}
+	var vs struct {
+		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
+		Server   struct {
+			ProjectStorage   *V1ProjectStorageConfig   `yaml:"project_storage"`
+			WorkspaceStorage *V1WorkspaceStorageConfig `yaml:"workspace_storage"`
+			SharedDirStorage *V1SharedDirStorageConfig `yaml:"shared_dir_storage"`
+			HomeStorage      *V1HomeStorageConfig      `yaml:"home_storage"`
+			Broker           struct {
+				Instances []V1RuntimeBrokerInstanceConfig `yaml:"instances"`
+			} `yaml:"broker"`
+		} `yaml:"server"`
+	}
+	// A decode failure here (e.g. a wrongly typed field) is already
+	// reported by the schema pass above.
+	if unmarshalSettingsYAML(data, &vs) == nil {
+		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
+		errs = append(errs, RemovedStorageOverrideErrors(vs.Runtimes, vs.Profiles, RuntimeBrokerInstanceTargets(vs.Server.Broker.Instances))...)
+		if err := ValidateStorageBlocks(vs.Server.ProjectStorage, vs.Server.WorkspaceStorage, vs.Server.SharedDirStorage, vs.Server.HomeStorage); err != nil {
+			var fields FieldErrorList
+			if errors.As(err, &fields) {
+				for _, f := range fields {
+					errs = append(errs, ValidationError{Path: f.Path, Message: strings.TrimPrefix(strings.TrimPrefix(f.Error(), f.Path), ": "), StorageField: true})
+				}
+			} else {
+				errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			}
+		}
+		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
+		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
+		errs = append(errs, RuntimeBrokerInstanceSharedDirSizes(vs.Server.Broker.Instances)...)
+	}
+	return errs, nil
+}
+
+// SettingsWarnings returns non-fatal findings for a schema version "1"
+// settings file: settings that are accepted but have no effect where they
+// are set, such as safe_to_evict on a non-Kubernetes runtime entry. Data
+// that does not decode yields no warnings (ValidateSettings reports it).
+func SettingsWarnings(data []byte, schemaVersion string) []string {
+	if schemaVersion != "1" {
+		return nil
+	}
+	var vs struct {
+		Runtimes         map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles         map[string]V1ProfileConfig `yaml:"profiles"`
+		DefaultResources *api.ResourceSpec          `yaml:"default_resources"`
+		Server           struct {
+			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
+		} `yaml:"server"`
+	}
+	if unmarshalSettingsYAML(data, &vs) != nil {
+		return nil
+	}
+	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
+	// Resource quantities the server-config API rejects or warns about
+	// (ptone/scion#6581) are warnings here: a loaded file is never refused
+	// for them.
+	qErrs, qWarnings := ValidateResourceQuantities(vs.DefaultResources, vs.Profiles)
+	for _, e := range append(qErrs, qWarnings...) {
+		warnings = append(warnings, e.Error())
+	}
+	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
+	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)
 }
 
 // ValidateAgentConfig validates raw agent config data (YAML or JSON) against
@@ -152,6 +245,16 @@ func ValidateAgentConfig(data []byte, schemaVersion string) ([]ValidationError, 
 // ValidateHarnessConfig validates a standalone harness-config config.yaml by
 // wrapping it in the versioned settings schema's harness_configs map.
 func ValidateHarnessConfig(data []byte) ([]ValidationError, error) {
+	return validateHarnessConfigWith(data, func(wrapped []byte) ([]ValidationError, error) {
+		return ValidateSettings(wrapped, "1")
+	})
+}
+
+// validateHarnessConfigWith wraps a harness-config config.yaml in a v1
+// settings document and validates it with validateSettings. Tests pass a
+// validator for an older settings schema (see
+// TestHarnessConfigs_ValidateAgainstPre3698Schema).
+func validateHarnessConfigWith(data []byte, validateSettings func([]byte) ([]ValidationError, error)) ([]ValidationError, error) {
 	var doc interface{}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse harness config: %w", err)
@@ -168,7 +271,7 @@ func ValidateHarnessConfig(data []byte) ([]ValidationError, error) {
 		return nil, fmt.Errorf("failed to prepare harness config for validation: %w", err)
 	}
 
-	errors, err := ValidateSettings(wrappedData, "1")
+	errors, err := validateSettings(wrappedData)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +296,7 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 
 	// Parse the input data from YAML to a generic structure.
 	var doc interface{}
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	if err := unmarshalSettingsYAML(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)
 	}
 
@@ -207,7 +310,13 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 	if err != nil {
 		return nil, fmt.Errorf("failed to read embedded schema: %w", err)
 	}
+	return validateDocAgainstSchemaJSON(doc, schemaPath, schemaData)
+}
 
+// validateDocAgainstSchemaJSON validates doc (already converted by
+// convertYAMLToJSON) against the JSON Schema schemaData, registered under
+// resource name schemaPath.
+func validateDocAgainstSchemaJSON(doc interface{}, schemaPath string, schemaData []byte) ([]ValidationError, error) {
 	var schemaDoc interface{}
 	if err := json.Unmarshal(schemaData, &schemaDoc); err != nil {
 		return nil, fmt.Errorf("failed to parse schema: %w", err)

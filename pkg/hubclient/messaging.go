@@ -34,9 +34,6 @@ type MessagingService interface {
 	// Returns exists=false when the peer is valid but no conversation exists yet.
 	ResolveConversation(ctx context.Context, reference string, projectID string) (*ConversationResolveResult, error)
 
-	// SendMessage sends a message into an existing conversation.
-	SendMessage(ctx context.Context, conversationID string, req *ConversationSendRequest) (*ConversationSendResult, error)
-
 	// GetHubMessagingSettings returns the hub-level messaging admin settings.
 	GetHubMessagingSettings(ctx context.Context) (*HubMessagingSettings, error)
 
@@ -92,27 +89,13 @@ type ConversationResolveResult struct {
 	PeerAgent    *TargetAgentInfo    `json:"peerAgent,omitempty"`
 }
 
-// ConversationSendRequest is the request body for sending a message into a conversation.
-type ConversationSendRequest struct {
-	Msg       string `json:"msg"`
-	Type      string `json:"type,omitempty"`
-	Urgent    bool   `json:"urgent,omitempty"`
-	Interrupt bool   `json:"interrupt,omitempty"`
-}
-
-// ConversationSendResult is the response from sending a message.
-type ConversationSendResult struct {
-	MessageID string `json:"messageId"`
-	Status    string `json:"status"`
-}
-
 // Capabilities returns the hub's messaging capabilities.
 func (s *messagingService) Capabilities(ctx context.Context) (*MessagingCapabilities, error) {
 	resp, err := s.c.get(ctx, "/api/v1/messaging/capabilities", nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[MessagingCapabilities](resp)
+	return apiclient.DecodeRequired[MessagingCapabilities](resp)
 }
 
 // ResolveTarget resolves a cross-project messaging target.
@@ -125,7 +108,7 @@ func (s *messagingService) ResolveTarget(ctx context.Context, projectRef, agentR
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[TargetResolveResult](resp)
+	return apiclient.DecodeRequired[TargetResolveResult](resp)
 }
 
 // ResolveConversation resolves a conversation reference without creating rows.
@@ -140,16 +123,7 @@ func (s *messagingService) ResolveConversation(ctx context.Context, reference st
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ConversationResolveResult](resp)
-}
-
-// SendMessage sends a message into an existing conversation.
-func (s *messagingService) SendMessage(ctx context.Context, conversationID string, req *ConversationSendRequest) (*ConversationSendResult, error) {
-	resp, err := s.c.post(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/messages", req, nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeResponse[ConversationSendResult](resp)
+	return apiclient.DecodeRequired[ConversationResolveResult](resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +150,7 @@ func (s *messagingService) GetHubMessagingSettings(ctx context.Context) (*HubMes
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HubMessagingSettings](resp)
+	return apiclient.DecodeRequired[HubMessagingSettings](resp)
 }
 
 // UpdateHubMessagingSettings updates the hub-level messaging admin settings.
@@ -185,7 +159,7 @@ func (s *messagingService) UpdateHubMessagingSettings(ctx context.Context, req *
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HubMessagingSettings](resp)
+	return apiclient.DecodeRequired[HubMessagingSettings](resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +186,7 @@ func (s *messagingService) GetProjectMessagingPolicy(ctx context.Context, projec
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectMessagingPolicy](resp)
+	return apiclient.DecodeRequired[ProjectMessagingPolicy](resp)
 }
 
 // UpdateProjectMessagingPolicy updates a project's cross-project inbound policy.
@@ -221,5 +195,5 @@ func (s *messagingService) UpdateProjectMessagingPolicy(ctx context.Context, pro
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectMessagingPolicy](resp)
+	return apiclient.DecodeRequired[ProjectMessagingPolicy](resp)
 }

@@ -194,7 +194,7 @@ the maintenance row).
    - `settings_tier`: `"db"` | `"file"`.
    - Per-section `origin` added to `section_metadata` (drives UI captions and
      the reset button).
-   - DB mode: `superseded_keys: [{key, source: "seed_env"|"yaml"|"server_env"}]`
+   - DB mode: `superseded_keys: [{key, source: "seed_env"|"yaml"|"server_env"|"default"}]`
      for managed sections only.
    - File mode: `env_keys` — all keys pinned by `SCION_SERVER_*` (generalize
      `DetectEnvOverrides`, `pkg/config/opsettings/koanf.go:303`, which today

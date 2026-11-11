@@ -15,6 +15,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,6 +95,49 @@ func TestProjectMarker_ExternalProjectPath(t *testing.T) {
 	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-project__550e8400", ".scion")
 	if got != want {
 		t.Errorf("ExternalProjectPath() = %q, want %q", got, want)
+	}
+}
+
+// A marker without a project slug is refused and nothing is written: no new
+// file, and an existing marker keeps its content.
+func TestWriteProjectMarker_RefusesEmptySlug(t *testing.T) {
+	const id = "550e8400-e29b-41d4-a716-446655440000"
+	for _, marker := range []*ProjectMarker{
+		{ProjectID: id, ProjectName: "Test Project"},
+		{ProjectID: id},
+		nil,
+	} {
+		dir := t.TempDir()
+		markerPath := filepath.Join(dir, DotScion)
+		err := WriteProjectMarker(markerPath, marker)
+		if !errors.Is(err, ErrEmptyProjectSlug) {
+			t.Errorf("WriteProjectMarker(%+v) error = %v, want ErrEmptyProjectSlug", marker, err)
+		}
+		if _, statErr := os.Lstat(markerPath); !os.IsNotExist(statErr) {
+			t.Errorf("WriteProjectMarker(%+v) created %s (stat err %v)", marker, markerPath, statErr)
+		}
+		if entries, readErr := os.ReadDir(dir); readErr != nil || len(entries) != 0 {
+			t.Errorf("WriteProjectMarker(%+v) left entries %v in the directory (err %v)", marker, entries, readErr)
+		}
+	}
+
+	markerPath := filepath.Join(t.TempDir(), DotScion)
+	if err := WriteProjectMarker(markerPath, &ProjectMarker{ProjectID: id, ProjectName: "p", ProjectSlug: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectMarker(markerPath, &ProjectMarker{ProjectID: id}); !errors.Is(err, ErrEmptyProjectSlug) {
+		t.Errorf("overwrite with an empty slug: error = %v, want ErrEmptyProjectSlug", err)
+	}
+	after, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("existing marker changed:\nbefore: %q\nafter:  %q", before, after)
 	}
 }
 
@@ -305,11 +350,77 @@ func TestWriteAndReadProjectID(t *testing.T) {
 	}
 }
 
+// TestReadProjectID_FollowsSymlinkedMarker pins ReadProjectID to following
+// a project-id entry that is a symbolic link: callers such as the broker's
+// project re-link read the recorded ID through the link and then replace the
+// link with a regular file. Only project setup (readProjectIDInDir) refuses
+// a link leading out of the directory.
+func TestReadProjectID_FollowsSymlinkedMarker(t *testing.T) {
+	scionDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-id")
+	projectID := "550e8400-e29b-41d4-a716-446655440000"
+	if err := os.WriteFile(outside, []byte(projectID+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(scionDir, "project-id")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := ReadProjectID(scionDir)
+	if err != nil || got != projectID {
+		t.Fatalf("ReadProjectID() = %q, %v; want %q, nil", got, err, projectID)
+	}
+	if _, err := readProjectIDInDir(scionDir); err == nil {
+		t.Fatal("readProjectIDInDir() followed a link leading out of the directory; want an error")
+	}
+}
+
+// TestWriteProjectID_WritesThroughSymlinkedMarker pins WriteProjectID to
+// writing through a project-id entry that is a symbolic link, as it always
+// has. Only project setup (writeProjectIDInDir) refuses a link leading out
+// of the directory, and leaves its destination unchanged.
+func TestWriteProjectID_WritesThroughSymlinkedMarker(t *testing.T) {
+	scionDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-id")
+	oldID := "550e8400-e29b-41d4-a716-446655440000"
+	newID := "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
+	if err := os.WriteFile(outside, []byte(oldID+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(scionDir, "project-id")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := writeProjectIDInDir(scionDir, newID); err == nil {
+		t.Fatal("writeProjectIDInDir() followed a link leading out of the directory; want an error")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != oldID+"\n" {
+		t.Fatalf("writeProjectIDInDir() changed the link destination to %q", got)
+	}
+
+	if err := WriteProjectID(scionDir, newID); err != nil {
+		t.Fatalf("WriteProjectID() error: %v", err)
+	}
+	if got, _ := os.ReadFile(outside); string(got) != newID+"\n" {
+		t.Fatalf("link destination = %q, want %q", got, newID+"\n")
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("project-id is no longer a symbolic link: %v, %v", info, err)
+	}
+}
+
 func TestReadProjectID_NotExist(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := ReadProjectID(tmpDir)
 	if err == nil {
-		t.Fatal("expected error for missing grove-id")
+		t.Fatal("expected error for missing project-id")
 	}
 	if !os.IsNotExist(err) {
 		t.Errorf("expected os.IsNotExist error, got: %v", err)
@@ -347,7 +458,7 @@ func TestGetGitProjectExternalConfigDir_NoProjectID(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got != "" {
-		t.Errorf("expected empty string for missing grove-id, got %q", got)
+		t.Errorf("expected empty string for missing project-id, got %q", got)
 	}
 }
 
@@ -355,7 +466,7 @@ func TestGetGitProjectExternalAgentsDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a simulated git project .scion dir with grove-id
+	// Create a simulated git project .scion dir with project-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -375,7 +486,7 @@ func TestGetGitProjectExternalAgentsDir_NoProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a .scion dir without grove-id
+	// Create a .scion dir without project-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 
@@ -384,7 +495,7 @@ func TestGetGitProjectExternalAgentsDir_NoProjectID(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got != "" {
-		t.Errorf("expected empty string for missing grove-id, got %q", got)
+		t.Errorf("expected empty string for missing project-id, got %q", got)
 	}
 }
 
@@ -392,7 +503,7 @@ func TestGetAgentHomePath_GitProjectSplitStorage(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a git project with grove-id (split storage)
+	// Create a git project with project-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -408,7 +519,7 @@ func TestGetAgentHomePath_NoProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a .scion dir without grove-id (fallback to in-repo)
+	// Create a .scion dir without project-id (fallback to in-repo)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 
@@ -423,7 +534,7 @@ func TestGetAgentDir_SharedWorkspaceUsesExternal(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Git project with grove-id (split storage)
+	// Git project with project-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -439,7 +550,7 @@ func TestGetAgentDir_WorktreeModeStaysInProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Git project with grove-id (split storage), but caller is NOT shared-workspace
+	// Git project with project-id (split storage), but caller is NOT shared-workspace
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -455,14 +566,14 @@ func TestGetAgentDir_SharedWorkspaceWithoutProjectIDFallsBack(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// .scion dir without grove-id — split storage not initialized
+	// .scion dir without project-id — split storage not initialized
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
 
 	got := GetAgentDir(projectDir, "test-agent", true)
 	want := filepath.Join(projectDir, "agents", "test-agent")
 	if got != want {
-		t.Errorf("GetAgentDir(sharedWorkspace=true, no grove-id) = %q, want %q", got, want)
+		t.Errorf("GetAgentDir(sharedWorkspace=true, no project-id) = %q, want %q", got, want)
 	}
 }
 
@@ -510,7 +621,6 @@ func TestIsHubContext(t *testing.T) {
 	// Clear all hub env vars
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", "")
 	t.Setenv("SCION_PROJECT_ID", "")
 
 	if IsHubContext() {
@@ -531,10 +641,17 @@ func TestIsHubContext(t *testing.T) {
 	}
 	t.Setenv("SCION_HUB_URL", "")
 
-	// SCION_GROVE_ID alone (broker-dispatched)
-	t.Setenv("SCION_GROVE_ID", "grove-uuid-123")
+	// SCION_PROJECT_ID alone (broker-dispatched)
+	t.Setenv("SCION_PROJECT_ID", "project-uuid-123")
 	if !IsHubContext() {
-		t.Error("expected IsHubContext() = true when SCION_GROVE_ID is set")
+		t.Error("expected IsHubContext() = true when SCION_PROJECT_ID is set")
+	}
+	t.Setenv("SCION_PROJECT_ID", "")
+
+	// SCION_GROVE_ID is no longer read.
+	t.Setenv("SCION_GROVE_ID", "grove-uuid-123")
+	if IsHubContext() {
+		t.Error("expected IsHubContext() = false when only SCION_GROVE_ID is set")
 	}
 }
 
@@ -543,7 +660,7 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 	workspaceDir := filepath.Join(tmpDir, "workspace")
 	_ = os.MkdirAll(workspaceDir, 0755)
 
-	err := WriteWorkspaceMarker(workspaceDir, "grove-id-123", "my-project", "my-project")
+	err := WriteWorkspaceMarker(workspaceDir, "project-id-123", "my-project", "my-project")
 	if err != nil {
 		t.Fatalf("WriteWorkspaceMarker failed: %v", err)
 	}
@@ -555,8 +672,8 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 		t.Fatalf("ReadProjectMarker failed: %v", err)
 	}
 
-	if marker.ProjectID != "grove-id-123" {
-		t.Errorf("ProjectID = %q, want %q", marker.ProjectID, "grove-id-123")
+	if marker.ProjectID != "project-id-123" {
+		t.Errorf("ProjectID = %q, want %q", marker.ProjectID, "project-id-123")
 	}
 	if marker.ProjectName != "my-project" {
 		t.Errorf("ProjectName = %q, want %q", marker.ProjectName, "my-project")
@@ -569,16 +686,16 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 func TestWriteWorkspaceMarker_MissingRequiredFields(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Missing grove-id
+	// Missing project-id
 	err := WriteWorkspaceMarker(tmpDir, "", "name", "slug")
 	if err == nil {
-		t.Error("expected error when grove-id is empty")
+		t.Error("expected error when project-id is empty")
 	}
 
-	// Missing grove-slug
+	// Missing project-slug
 	err = WriteWorkspaceMarker(tmpDir, "id", "name", "")
 	if err == nil {
-		t.Error("expected error when grove-slug is empty")
+		t.Error("expected error when project-slug is empty")
 	}
 }
 
@@ -596,6 +713,27 @@ func TestGetProjectName_ExternalDir(t *testing.T) {
 		got := GetProjectName(tt.dir)
 		if got != tt.want {
 			t.Errorf("GetProjectName(%q) = %q, want %q", tt.dir, got, tt.want)
+		}
+	}
+}
+
+func TestProjectMarker_HasCanonicalDirName(t *testing.T) {
+	for _, tc := range []struct {
+		slug, id string
+		want     bool
+	}{
+		{"my-project", "0a1b2c3d-1111-2222-3333-444455556666", true},
+		{"a", "x", true},
+		{"", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"My-Project", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my-project-", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my/project", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my-project", "", false},
+		{"my-project", "bad id!", false},
+	} {
+		m := ProjectMarker{ProjectID: tc.id, ProjectSlug: tc.slug}
+		if got := m.HasCanonicalDirName(); got != tc.want {
+			t.Errorf("HasCanonicalDirName(slug %q, id %q) = %v, want %v", tc.slug, tc.id, got, tc.want)
 		}
 	}
 }

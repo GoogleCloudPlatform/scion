@@ -1,0 +1,303 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// StartClaimSettings are the timing settings of the start claim every agent
+// start runs under.
+type StartClaimSettings struct {
+	// LeaseTTL is the claim lease; the holder renews it every LeaseTTL/3.
+	LeaseTTL time.Duration
+	// MaxDuration is the hard deadline on any start, including a wait for
+	// another hub node to dispatch it.
+	MaxDuration time.Duration
+	// UnconfirmedHold bounds how long a start with an unknown outcome
+	// blocks other starts, sized from the broker's whole start budget
+	// (pod ready 10m, exec ready 90s, 10s, plus a margin).
+	UnconfirmedHold time.Duration
+	// CreateUnconfirmedHold is UnconfirmedHold for create-and-start. A
+	// queued-stop drain's stop claim has its own fixed hold
+	// (stopUnconfirmedHold).
+	CreateUnconfirmedHold time.Duration
+}
+
+// Bounds of the start-claim settings.
+const (
+	minStartClaimLeaseTTL = 30 * time.Second
+	maxStartClaimLeaseTTL = 5 * time.Minute
+	// minStartMaxDuration is the broker's pod-ready bound plus a minute.
+	minStartMaxDuration = 10*time.Minute + time.Minute
+	// minStartUnconfirmedHold covers the broker's bound on a synchronous
+	// start that runs on after the hub gave up on it (api.SyncStartCeiling,
+	// which itself covers pod ready plus exec ready), plus a minute, so the
+	// create hold below fits under it.
+	minStartUnconfirmedHold = api.SyncStartCeiling + time.Minute
+	// minStartCreateUnconfirmedHold covers a create whose dispatch outcome
+	// was unknown: the broker may go on starting it for up to
+	// api.SyncStartCeiling (ptone/scion#4817), plus two heartbeat
+	// intervals for the inventory that shows the outcome. Below it, the
+	// reaper would stop a start that is still legitimately coming up.
+	minStartCreateUnconfirmedHold = api.SyncStartCeiling + 2*30*time.Second
+	// stopUnconfirmedHold is the hold of a stop claim (a queued stop being
+	// applied), kept at the create hold's old default when the create hold
+	// grew to cover api.SyncStartCeiling: a stop has no start to wait for.
+	stopUnconfirmedHold = 5 * time.Minute
+)
+
+// DefaultStartClaimSettings returns the defaults.
+func DefaultStartClaimSettings() StartClaimSettings {
+	return StartClaimSettings{
+		LeaseTTL:              90 * time.Second,
+		MaxDuration:           12 * time.Minute,
+		UnconfirmedHold:       minStartUnconfirmedHold + time.Minute,
+		CreateUnconfirmedHold: minStartCreateUnconfirmedHold,
+	}
+}
+
+// Holds returns the unconfirmed holds by kind.
+func (c StartClaimSettings) Holds() store.StartClaimHolds {
+	return store.StartClaimHolds{Default: c.UnconfirmedHold, Create: c.CreateUnconfirmedHold, Stop: stopUnconfirmedHold}
+}
+
+// normalized returns c with each zero value replaced by its default and
+// each out-of-range value replaced by its default, plus one warning per
+// replaced non-zero value.
+func (c StartClaimSettings) normalized() (StartClaimSettings, []string) {
+	c, hard, soft := c.normalize()
+	return c, append(hard, soft...)
+}
+
+// normalize is normalized with its warnings split: hard ones replace a
+// value that is invalid in any configuration (a PUT refuses it), soft ones
+// raise an unconfirmed hold that an earlier release accepted but that is
+// below today's minimum (api.SyncStartCeiling grew the minimums,
+// ptone/scion#4817). A configuration written for an earlier release keeps
+// working: such a hold is raised to the minimum, with a warning, and never
+// refused.
+func (c StartClaimSettings) normalize() (StartClaimSettings, []string, []string) {
+	n, issues, soft := c.normalizeIssues()
+	var hard []string
+	for _, is := range issues {
+		hard = append(hard, is.msg)
+	}
+	return n, hard, soft
+}
+
+// startClaimIssue is an out-of-range start-claim value: name is its
+// lifecycle section key.
+type startClaimIssue struct {
+	name string
+	msg  string
+}
+
+// normalizeIssues is normalize with the hard issues naming their key.
+func (c StartClaimSettings) normalizeIssues() (StartClaimSettings, []startClaimIssue, []string) {
+	d := DefaultStartClaimSettings()
+	var hard []startClaimIssue
+	var soft []string
+	check := func(name string, v *time.Duration, def time.Duration, ok bool, rule string) {
+		if *v == 0 {
+			*v = def
+			return
+		}
+		if !ok {
+			hard = append(hard, startClaimIssue{name: name,
+				msg: fmt.Sprintf("%s %s is out of range (%s); using default %s", name, *v, rule, def)})
+			*v = def
+		}
+	}
+	raise := func(name string, v *time.Duration, min time.Duration) {
+		if *v > 0 && *v < min {
+			soft = append(soft, fmt.Sprintf("%s %s is below the minimum %s (the runtime broker's start bound); using %s", name, *v, min, min))
+			*v = min
+		}
+	}
+	check("start_claim_lease_ttl", &c.LeaseTTL, d.LeaseTTL,
+		c.LeaseTTL >= minStartClaimLeaseTTL && c.LeaseTTL <= maxStartClaimLeaseTTL, "30s to 5m")
+	check("start_max_duration", &c.MaxDuration, d.MaxDuration,
+		c.MaxDuration >= minStartMaxDuration, "at least 11m")
+	raise("start_unconfirmed_hold", &c.UnconfirmedHold, minStartUnconfirmedHold)
+	check("start_unconfirmed_hold", &c.UnconfirmedHold, d.UnconfirmedHold,
+		c.UnconfirmedHold >= minStartUnconfirmedHold, "at least "+minStartUnconfirmedHold.String())
+	raise("start_create_unconfirmed_hold", &c.CreateUnconfirmedHold, minStartCreateUnconfirmedHold)
+	check("start_create_unconfirmed_hold", &c.CreateUnconfirmedHold, d.CreateUnconfirmedHold,
+		c.CreateUnconfirmedHold >= minStartCreateUnconfirmedHold && c.CreateUnconfirmedHold <= c.UnconfirmedHold,
+		minStartCreateUnconfirmedHold.String()+" up to start_unconfirmed_hold")
+	// The default create hold must itself fit under a configured hold.
+	if c.CreateUnconfirmedHold > c.UnconfirmedHold {
+		c.CreateUnconfirmedHold = c.UnconfirmedHold
+	}
+	return c, hard, soft
+}
+
+// parseStartClaimSettings parses the four duration strings of a settings
+// snapshot. An empty string keeps the matching field of base; an
+// unparseable one also keeps it, with a warning.
+func parseStartClaimSettings(base StartClaimSettings, lease, maxDur, hold, createHold string) (StartClaimSettings, []string) {
+	var warns []string
+	parse := func(name, v string, dst *time.Duration) {
+		if v == "" {
+			return
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			warns = append(warns, fmt.Sprintf("invalid %s %q, keeping %s", name, v, *dst))
+			return
+		}
+		*dst = d
+	}
+	parse("start_claim_lease_ttl", lease, &base.LeaseTTL)
+	parse("start_max_duration", maxDur, &base.MaxDuration)
+	parse("start_unconfirmed_hold", hold, &base.UnconfirmedHold)
+	parse("start_create_unconfirmed_hold", createHold, &base.CreateUnconfirmedHold)
+	return base, warns
+}
+
+// startClaimSettings returns the current start-claim settings.
+func (s *Server) startClaimSettings() StartClaimSettings {
+	if p := s.startClaimCfg.Load(); p != nil {
+		return *p
+	}
+	return DefaultStartClaimSettings()
+}
+
+// setStartClaimSettings normalizes and stores c, logging each warning, and
+// reports whether the stored value changed.
+func (s *Server) setStartClaimSettings(c StartClaimSettings) bool {
+	n, warns := c.normalized()
+	for _, w := range warns {
+		slog.Warn("start claim setting: " + w)
+	}
+	old := s.startClaimCfg.Swap(&n)
+	return old == nil || *old != n
+}
+
+// validateStartClaimSettingStrings checks the start-claim keys of a
+// lifecycle document against the settings they would produce: base (the
+// startup value, which ApplySnapshot also uses for absent keys) with each
+// set key parsed over it. Each set value must parse as a duration, and the
+// result must be within range (the create hold is compared with the
+// effective hold).
+//
+// A failure is a *startClaimFieldError naming the key.
+func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.LifecycleSettings) error {
+	for _, f := range []struct{ name, v string }{
+		{"start_claim_lease_ttl", d.StartClaimLeaseTTL},
+		{"start_max_duration", d.StartMaxDuration},
+		{"start_unconfirmed_hold", d.StartUnconfirmedHold},
+		{"start_create_unconfirmed_hold", d.StartCreateUnconfirmedHold},
+	} {
+		if f.v == "" {
+			continue
+		}
+		if _, err := time.ParseDuration(f.v); err != nil {
+			return &startClaimFieldError{name: f.name, msg: fmt.Sprintf("invalid %s %q: %v", f.name, f.v, err)}
+		}
+	}
+	// The base is what is applied today: an out-of-range startup value has
+	// already been replaced by its default, so it must not fail a PUT.
+	base, _ = base.normalized()
+	c, _ := parseStartClaimSettings(base, d.StartClaimLeaseTTL, d.StartMaxDuration, d.StartUnconfirmedHold, d.StartCreateUnconfirmedHold)
+	// A hold below today's minimum is raised, not refused (normalize's
+	// soft warnings): a configuration from an earlier release still saves.
+	if _, hard, _ := c.normalizeIssues(); len(hard) > 0 {
+		return &startClaimFieldError{name: hard[0].name, msg: hard[0].msg}
+	}
+	return nil
+}
+
+// startClaimFieldError is a start-claim value a lifecycle save refuses;
+// name is its lifecycle section key.
+type startClaimFieldError struct {
+	name string
+	msg  string
+}
+
+func (e *startClaimFieldError) Error() string { return e.msg }
+
+// startClaimErrorField is the koanf path of the key a
+// validateStartClaimSettingStrings error names.
+func startClaimErrorField(err error) string {
+	var fe *startClaimFieldError
+	if errors.As(err, &fe) {
+		return settingsKoanfField("lifecycle", fe.name)
+	}
+	return settingsKoanfField("lifecycle", "")
+}
+
+// startClaimSettingKeys are the start-claim keys under server.hub, in the
+// order validateStartClaimSettingStrings checks them.
+var startClaimSettingKeys = []string{
+	"start_claim_lease_ttl",
+	"start_max_duration",
+	"start_unconfirmed_hold",
+	"start_create_unconfirmed_hold",
+}
+
+// startClaimKeysSent reports whether a server-config PUT body sends any
+// start-claim key under server.hub (any value, "" and null included).
+func startClaimKeysSent(rawBody []byte) bool {
+	var body struct {
+		Server *struct {
+			Hub map[string]json.RawMessage `json:"hub"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(rawBody, &body); err != nil || body.Server == nil {
+		return false
+	}
+	for _, k := range startClaimSettingKeys {
+		if _, ok := body.Server.Hub[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// fileStartClaimLifecycle returns the start-claim keys of a merged
+// settings.yaml document (raw, as the settings.yaml PUT writes it) as a
+// lifecycle document for validateStartClaimSettingStrings. A missing value
+// is unset; a non-string value (for example a YAML integer) is passed as
+// its text, so the validator refuses it instead of silently skipping it.
+func fileStartClaimLifecycle(raw map[string]any) opsettings.LifecycleSettings {
+	var d opsettings.LifecycleSettings
+	server, _ := raw["server"].(map[string]any)
+	hub, _ := server["hub"].(map[string]any)
+	get := func(k string) string {
+		switch v := hub[k].(type) {
+		case nil:
+			return ""
+		case string:
+			return v
+		default:
+			return fmt.Sprint(v)
+		}
+	}
+	d.StartClaimLeaseTTL = get("start_claim_lease_ttl")
+	d.StartMaxDuration = get("start_max_duration")
+	d.StartUnconfirmedHold = get("start_unconfirmed_hold")
+	d.StartCreateUnconfirmedHold = get("start_create_unconfirmed_hold")
+	return d
+}

@@ -134,3 +134,63 @@ func TestHubClient_SignRequest_NoCredentials(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Empty(t, req.Header.Get("X-Scion-Signature"))
 }
+
+func TestHubClient_Reads_SendLinkedUser(t *testing.T) {
+	var headers []http.Header
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = append(headers, r.Header.Clone())
+		switch r.URL.Path {
+		case "/api/v1/projects/proj-1/agents":
+			json.NewEncoder(w).Encode(hubAgentsResponse{})
+		default:
+			json.NewEncoder(w).Encode(hubProjectsResponse{})
+		}
+	}))
+	defer ts.Close()
+
+	hmacKey := base64.StdEncoding.EncodeToString([]byte("test-secret-key-1234"))
+	client := NewHubClient(ts.URL, hmacKey, "teams-broker-1", slog.Default())
+	client.httpClient = ts.Client()
+	ctx := context.Background()
+
+	_, err := client.ListAgents(ctx, "proj-1", "user:alice@example.com")
+	require.NoError(t, err)
+	_, err = client.ListUserProjects(ctx, "user:alice@example.com", "")
+	require.NoError(t, err)
+
+	require.Len(t, headers, 2)
+	for _, h := range headers {
+		assert.Equal(t, "user:alice@example.com", h.Get("X-Scion-On-Behalf-Of"))
+		assert.Equal(t, "x-scion-on-behalf-of", h.Get("X-Scion-Signed-Headers"))
+		assert.NotEmpty(t, h.Get("X-Scion-Signature"))
+	}
+}
+
+func TestHubClient_Reads_NoLinkedUserOmitsHeader(t *testing.T) {
+	var headers []http.Header
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = append(headers, r.Header.Clone())
+		if r.URL.Path == "/api/v1/projects" {
+			json.NewEncoder(w).Encode(hubProjectsResponse{})
+			return
+		}
+		json.NewEncoder(w).Encode(hubAgentsResponse{})
+	}))
+	defer ts.Close()
+
+	hmacKey := base64.StdEncoding.EncodeToString([]byte("test-secret-key-1234"))
+	client := NewHubClient(ts.URL, hmacKey, "teams-broker-1", slog.Default())
+	client.httpClient = ts.Client()
+	ctx := context.Background()
+
+	_, err := client.ListAgents(ctx, "proj-1", "")
+	require.NoError(t, err)
+	_, err = client.ListUserProjects(ctx, "", "")
+	require.NoError(t, err)
+
+	require.Len(t, headers, 2)
+	for _, h := range headers {
+		assert.Empty(t, h.Get("X-Scion-On-Behalf-Of"))
+		assert.Empty(t, h.Get("X-Scion-Signed-Headers"))
+	}
+}

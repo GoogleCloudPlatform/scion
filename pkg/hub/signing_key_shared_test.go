@@ -21,6 +21,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
 // TestEnsureSigningKey_RequireStableRefusesGeneration verifies that, with
@@ -28,16 +30,16 @@ import (
 // fails fast instead of silently minting a new key (which would invalidate every
 // live token). This is the regression guard for the hub-restart auth deadlock.
 func TestEnsureSigningKey_RequireStableRefusesGeneration(t *testing.T) {
-	st, err := newTestStore(":memory:")
+	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
-	defer func() { _ = st.Close() }()
 
 	s := &Server{
 		hubID:  "host-with-no-key",
 		store:  st,
 		config: ServerConfig{RequireStableSigningKey: true},
+		cipher: secret.NewLegacyValueCipher(""),
 	}
 
 	_, err = s.ensureSigningKey(context.Background(), SecretKeyAgentSigningKey, nil)
@@ -75,13 +77,12 @@ func TestEnsureSigningKey_RequireStableAllowsSharedSecret(t *testing.T) {
 // preserved: without RequireStableSigningKey, a missing key is generated and
 // persisted rather than erroring.
 func TestEnsureSigningKey_GeneratesWhenNotRequired(t *testing.T) {
-	st, err := newTestStore(":memory:")
+	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
-	defer func() { _ = st.Close() }()
 
-	s := &Server{hubID: "host1", store: st, config: ServerConfig{}}
+	s := &Server{hubID: "host1", store: st, config: ServerConfig{}, cipher: secret.NewLegacyValueCipher("")}
 
 	key, err := s.ensureSigningKey(context.Background(), SecretKeyAgentSigningKey, nil)
 	if err != nil {

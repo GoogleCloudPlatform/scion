@@ -14,7 +14,11 @@
 
 package storage
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestTemplateStoragePath(t *testing.T) {
 	tests := []struct {
@@ -33,11 +37,11 @@ func TestTemplateStoragePath(t *testing.T) {
 			want:         "templates/global/my-template",
 		},
 		{
-			name:         "grove scope",
-			scope:        "grove",
-			scopeID:      "grove-123",
+			name:         "project scope",
+			scope:        "project",
+			scopeID:      "project-123",
 			templateSlug: "my-template",
-			want:         "templates/groves/grove-123/my-template",
+			want:         "templates/groves/project-123/my-template",
 		},
 		{
 			name:         "user scope",
@@ -62,12 +66,12 @@ func TestTemplateStoragePath(t *testing.T) {
 			want:         "hubs/my-hub/templates/global/my-template",
 		},
 		{
-			name:         "hub-scoped grove",
+			name:         "hub-scoped project",
 			hubID:        "my-hub",
-			scope:        "grove",
-			scopeID:      "grove-123",
+			scope:        "project",
+			scopeID:      "project-123",
 			templateSlug: "my-template",
-			want:         "hubs/my-hub/templates/groves/grove-123/my-template",
+			want:         "hubs/my-hub/templates/groves/project-123/my-template",
 		},
 	}
 
@@ -83,17 +87,51 @@ func TestTemplateStoragePath(t *testing.T) {
 
 func TestTemplateStorageURI(t *testing.T) {
 	bucket := "my-bucket"
-	uri := TemplateStorageURI("", bucket, "grove", "grove-123", "my-template")
-	want := "gs://my-bucket/templates/groves/grove-123/my-template/"
+	uri := TemplateStorageURI("", bucket, "project", "project-123", "my-template")
+	want := "gs://my-bucket/templates/groves/project-123/my-template/"
 	if uri != want {
 		t.Errorf("TemplateStorageURI() = %q, want %q", uri, want)
 	}
 
-	uri = TemplateStorageURI("my-hub", bucket, "grove", "grove-123", "my-template")
-	want = "gs://my-bucket/hubs/my-hub/templates/groves/grove-123/my-template/"
+	uri = TemplateStorageURI("my-hub", bucket, "project", "project-123", "my-template")
+	want = "gs://my-bucket/hubs/my-hub/templates/groves/project-123/my-template/"
 	if uri != want {
 		t.Errorf("TemplateStorageURI(hub-scoped) = %q, want %q", uri, want)
 	}
+}
+
+func TestStorageURIForPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"plain path", "templates/global/my-template", "gs://my-bucket/templates/global/my-template/"},
+		{"one trailing slash", "templates/global/my-template/", "gs://my-bucket/templates/global/my-template/"},
+		{"multiple trailing slashes", "templates/global/my-template///", "gs://my-bucket/templates/global/my-template/"},
+		// No caller produces an empty or all-slash path; these rows pin current behaviour.
+		{"empty path", "", "gs://my-bucket//"},
+		{"all-slash path", "///", "gs://my-bucket//"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StorageURIForPath("my-bucket", tt.path); got != tt.want {
+				t.Errorf("StorageURIForPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+
+	// ResourceStorageURI computes its path internally and never produces a
+	// trailing slash on the slug, so the trim must be a no-op for it: normal
+	// inputs keep producing exactly the same URI as before.
+	t.Run("ResourceStorageURI unchanged for normal inputs", func(t *testing.T) {
+		got := ResourceStorageURI("", "my-bucket", ResourceKindTemplate, "project", "grove-123", "my-template")
+		want := "gs://my-bucket/templates/groves/grove-123/my-template/"
+		if got != want {
+			t.Errorf("ResourceStorageURI() = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestResourceStoragePath(t *testing.T) {
@@ -108,19 +146,17 @@ func TestResourceStoragePath(t *testing.T) {
 	}{
 		{"template global", "", ResourceKindTemplate, "global", "", "t1", "templates/global/t1"},
 		{"template project", "", ResourceKindTemplate, "project", "p-1", "t1", "templates/groves/p-1/t1"},
-		{"template grove (legacy)", "", ResourceKindTemplate, "grove", "g-1", "t1", "templates/groves/g-1/t1"},
 		{"template user", "", ResourceKindTemplate, "user", "u-1", "t1", "templates/users/u-1/t1"},
 		{"template default", "", ResourceKindTemplate, "weird", "", "t1", "templates/t1"},
 		{"harness-config global", "", ResourceKindHarnessConfig, "global", "", "h1", "harness-configs/global/h1"},
 		{"harness-config project", "", ResourceKindHarnessConfig, "project", "p-1", "h1", "harness-configs/groves/p-1/h1"},
-		{"harness-config grove (legacy)", "", ResourceKindHarnessConfig, "grove", "g-1", "h1", "harness-configs/groves/g-1/h1"},
 		{"harness-config user", "", ResourceKindHarnessConfig, "user", "u-1", "h1", "harness-configs/users/u-1/h1"},
 		{"harness-config default", "", ResourceKindHarnessConfig, "weird", "", "h1", "harness-configs/h1"},
 		{"hub-scoped template global", "hub-1", ResourceKindTemplate, "global", "", "t1", "hubs/hub-1/templates/global/t1"},
 		{"hub-scoped template project", "hub-1", ResourceKindTemplate, "project", "p-1", "t1", "hubs/hub-1/templates/groves/p-1/t1"},
 		{"hub-scoped harness-config global", "hub-1", ResourceKindHarnessConfig, "global", "", "h1", "hubs/hub-1/harness-configs/global/h1"},
 		{"hub-scoped harness-config user", "hub-1", ResourceKindHarnessConfig, "user", "u-1", "h1", "hubs/hub-1/harness-configs/users/u-1/h1"},
-		{"hub-scoped skill grove", "hub-1", ResourceKindSkill, "grove", "g-1", "s1", "hubs/hub-1/skills/groves/g-1/s1"},
+		{"hub-scoped skill project", "hub-1", ResourceKindSkill, "project", "g-1", "s1", "hubs/hub-1/skills/groves/g-1/s1"},
 	}
 
 	for _, tt := range tests {
@@ -177,22 +213,22 @@ func TestWorkspaceStoragePath(t *testing.T) {
 	}{
 		{
 			name:      "basic path",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "workspaces/grove-abc/agent-123",
+			want:      "workspaces/project-abc/agent-123",
 		},
 		{
 			name:      "with special characters in IDs",
-			projectID: "grove_xyz",
+			projectID: "project_xyz",
 			agentID:   "agent_456",
-			want:      "workspaces/grove_xyz/agent_456",
+			want:      "workspaces/project_xyz/agent_456",
 		},
 		{
 			name:      "hub-scoped path",
 			hubID:     "my-hub",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "hubs/my-hub/workspaces/grove-abc/agent-123",
+			want:      "hubs/my-hub/workspaces/project-abc/agent-123",
 		},
 	}
 
@@ -218,24 +254,24 @@ func TestWorkspaceStorageURI(t *testing.T) {
 		{
 			name:      "basic URI",
 			bucket:    "scion-hub-dev",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "gs://scion-hub-dev/workspaces/grove-abc/agent-123/",
+			want:      "gs://scion-hub-dev/workspaces/project-abc/agent-123/",
 		},
 		{
 			name:      "production bucket",
 			bucket:    "scion-hub-prod",
-			projectID: "grove-xyz",
+			projectID: "project-xyz",
 			agentID:   "agent-456",
-			want:      "gs://scion-hub-prod/workspaces/grove-xyz/agent-456/",
+			want:      "gs://scion-hub-prod/workspaces/project-xyz/agent-456/",
 		},
 		{
 			name:      "hub-scoped URI",
 			hubID:     "my-hub",
 			bucket:    "scion-hub-dev",
-			projectID: "grove-abc",
+			projectID: "project-abc",
 			agentID:   "agent-123",
-			want:      "gs://scion-hub-dev/hubs/my-hub/workspaces/grove-abc/agent-123/",
+			want:      "gs://scion-hub-dev/hubs/my-hub/workspaces/project-abc/agent-123/",
 		},
 	}
 
@@ -249,37 +285,89 @@ func TestWorkspaceStorageURI(t *testing.T) {
 	}
 }
 
-func TestProjectWorkspaceStoragePath(t *testing.T) {
-	tests := []struct {
-		name      string
-		hubID     string
-		projectID string
-		want      string
-	}{
-		{
-			name:      "basic grove path",
-			projectID: "grove-abc",
-			want:      "workspaces/grove-abc/grove-workspace",
-		},
-		{
-			name:      "with UUID grove ID",
-			projectID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-			want:      "workspaces/a1b2c3d4-e5f6-7890-abcd-ef1234567890/grove-workspace",
-		},
-		{
-			name:      "hub-scoped grove path",
-			hubID:     "my-hub",
-			projectID: "grove-abc",
-			want:      "hubs/my-hub/workspaces/grove-abc/grove-workspace",
-		},
+func TestDirPrefix(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"hubs/h/templates/global/foo", "hubs/h/templates/global/foo/"},
+		{"hubs/h/templates/global/foo/", "hubs/h/templates/global/foo/"},
+		{"hubs/h/templates/global/foo//", "hubs/h/templates/global/foo/"},
+		// Never "/": GCS trims the leading "/" and would match the whole
+		// bucket. "" makes DeletePrefix fail with ErrInvalidPath instead.
+		{"", ""},
+		{"/", ""},
+		{"//", ""},
+	} {
+		if got := DirPrefix(tc.in); got != tc.want {
+			t.Errorf("DirPrefix(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ProjectWorkspaceStoragePath(tt.hubID, tt.projectID)
-			if got != tt.want {
-				t.Errorf("ProjectWorkspaceStoragePath() = %q, want %q", got, tt.want)
+// TestLocalListPages: MaxResults and StartOffset page through a prefix in
+// order, each object once.
+func TestLocalListPages(t *testing.T) {
+	s, err := NewLocal(Config{Provider: ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	want := []string{"p/a/1", "p/a/2", "p/b/1", "p/c", "p/d/e/f"}
+	for _, name := range append([]string{"q/x"}, want...) {
+		if _, err := s.Upload(ctx, name, strings.NewReader(name), UploadOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	offset := ""
+	for range 10 {
+		res, err := s.List(ctx, ListOptions{Prefix: "p/", MaxResults: 2, StartOffset: offset})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range res.Objects {
+			got = append(got, o.Name)
+		}
+		if res.NextOffset == "" {
+			break
+		}
+		offset = res.NextOffset
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("pages = %v, want %v", got, want)
+	}
+}
+
+// ResourceRootPaths covers every path ResourceStoragePath gives a template,
+// in every scope and with or without a hub namespace, and no workspace path.
+func TestResourceRootPaths(t *testing.T) {
+	under := func(p string, roots []string) bool {
+		for _, r := range roots {
+			if strings.HasPrefix(p, r+"/") {
+				return true
 			}
-		})
+		}
+		return false
+	}
+	if got := ResourceRootPaths("", ResourceKindTemplate); len(got) != 1 || got[0] != "templates" {
+		t.Fatalf("ResourceRootPaths(\"\", template) = %v, want [templates]", got)
+	}
+	if got := ResourceRootPaths("hub-1", ResourceKindTemplate); len(got) != 2 || got[0] != "templates" || got[1] != "hubs/hub-1/templates" {
+		t.Fatalf("ResourceRootPaths(hub-1, template) = %v, want [templates hubs/hub-1/templates]", got)
+	}
+	for _, hubID := range []string{"", "hub-1"} {
+		roots := ResourceRootPaths(hubID, ResourceKindTemplate)
+		for _, scope := range []string{"global", "project", "user", "weird"} {
+			if p := TemplateStoragePath(hubID, scope, "s-1", "t1"); !under(p, roots) {
+				t.Errorf("template path %q is not under %v", p, roots)
+			}
+		}
+		for _, p := range []string{
+			WorkspaceStoragePath(hubID, "p-1", "a-1"),
+			HarnessConfigStoragePath(hubID, "global", "", "h1"),
+			SkillStoragePath(hubID, "global", "", "s1"),
+		} {
+			if under(p, roots) {
+				t.Errorf("non-template path %q is under the template roots %v", p, roots)
+			}
+		}
 	}
 }

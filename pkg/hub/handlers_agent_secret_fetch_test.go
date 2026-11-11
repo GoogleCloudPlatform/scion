@@ -32,8 +32,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// setupAgentSecretFetchTest creates a test server with a project, agent, and
-// optional pre-seeded secrets for the POST /api/v1/agent/secrets endpoint.
+// setupAgentSecretFetchTest creates a test server with a project, an active
+// member root user, and an agent descending from that root, for the POST
+// /api/v1/agent/secrets endpoint. The agent's token carries
+// ScopeProjectSecretRead and an ancestry rooted at the member user, so it
+// passes the runtime material precheck (material_runtime.go): the delegation
+// edge backfill marker is absent in test servers (testServer, handlers_test.go),
+// so the pre-backfill ceiling exception admits a hub-attested agent with no
+// recorded edge.
 func setupAgentSecretFetchTest(t *testing.T) (*Server, store.Store, string, string, string) {
 	t.Helper()
 	srv, s := testServer(t)
@@ -49,17 +55,21 @@ func setupAgentSecretFetchTest(t *testing.T) (*Server, store.Store, string, stri
 		t.Fatalf("failed to create project: %v", err)
 	}
 
+	userID := tid("user-agent-fetch-secret-root")
+	createDCUser(t, s, userID, "root-agent-fetch-secret@test.com", projectID, store.ProjectRoleOwner)
+
 	agentID := tid("agent-fetch-secret-1")
 	agent := &store.Agent{
 		ID: agentID, Slug: "fetch-secret-agent", Name: "Fetch Secret Agent",
 		ProjectID: projectID, Phase: string(state.PhaseRunning), StateVersion: 1,
-		Created: time.Now(), Updated: time.Now(),
+		Ancestry: []string{userID},
+		Created:  time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}

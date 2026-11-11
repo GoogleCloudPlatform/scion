@@ -63,10 +63,10 @@ func TestPublishToSubscriber(t *testing.T) {
 		mu.Unlock()
 	}
 
-	require.NoError(t, b.Subscribe("scion.grove.g1.agent.*.messages"))
+	require.NoError(t, b.Subscribe("scion.project.g1.agent.*.messages"))
 
 	msg := messages.NewInstruction("user:alice", "agent:coder", "hello")
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg))
 
 	// Wait for async delivery
 	require.Eventually(t, func() bool {
@@ -76,7 +76,7 @@ func TestPublishToSubscriber(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	mu.Lock()
-	assert.Equal(t, "scion.grove.g1.agent.coder.messages", received[0].topic)
+	assert.Equal(t, "scion.project.g1.agent.coder.messages", received[0].topic)
 	assert.Equal(t, "hello", received[0].msg.Msg)
 	mu.Unlock()
 }
@@ -92,10 +92,10 @@ func TestPublishNoMatch(t *testing.T) {
 		mu.Unlock()
 	}
 
-	require.NoError(t, b.Subscribe("scion.grove.g1.agent.coder.messages"))
+	require.NoError(t, b.Subscribe("scion.project.g1.agent.coder.messages"))
 
 	msg := messages.NewInstruction("user:alice", "agent:other", "nope")
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g2.agent.other.messages", msg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g2.agent.other.messages", msg))
 
 	// Give some time to ensure no delivery
 	time.Sleep(50 * time.Millisecond)
@@ -115,7 +115,7 @@ func TestEchoFiltering(t *testing.T) {
 		mu.Unlock()
 	}
 
-	require.NoError(t, b.Subscribe("scion.grove.g1.agent.*.messages"))
+	require.NoError(t, b.Subscribe("scion.project.g1.agent.*.messages"))
 
 	// Publish a message with the origin marker — should be filtered
 	echoMsg := messages.NewInstruction(
@@ -123,7 +123,7 @@ func TestEchoFiltering(t *testing.T) {
 		"agent:coder",
 		"this is an echo",
 	)
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", echoMsg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.agent.coder.messages", echoMsg))
 
 	// Give time for potential delivery
 	time.Sleep(50 * time.Millisecond)
@@ -133,7 +133,7 @@ func TestEchoFiltering(t *testing.T) {
 
 	// Now publish a non-echo message — should be delivered
 	normalMsg := messages.NewInstruction("user:alice", "agent:coder", "real message")
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", normalMsg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.agent.coder.messages", normalMsg))
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -153,11 +153,11 @@ func TestUnsubscribe(t *testing.T) {
 		mu.Unlock()
 	}
 
-	require.NoError(t, b.Subscribe("scion.grove.g1.agent.*.messages"))
-	require.NoError(t, b.Unsubscribe("scion.grove.g1.agent.*.messages"))
+	require.NoError(t, b.Subscribe("scion.project.g1.agent.*.messages"))
+	require.NoError(t, b.Unsubscribe("scion.project.g1.agent.*.messages"))
 
 	msg := messages.NewInstruction("user:alice", "agent:coder", "after unsub")
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg))
 
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
@@ -175,8 +175,8 @@ func TestDoubleSubscribe(t *testing.T) {
 	b := newTestBroker(t)
 	b.InboundHandler = func(_ string, _ *messages.StructuredMessage) {}
 
-	require.NoError(t, b.Subscribe("scion.grove.g1.>"))
-	require.NoError(t, b.Subscribe("scion.grove.g1.>")) // idempotent
+	require.NoError(t, b.Subscribe("scion.project.g1.>"))
+	require.NoError(t, b.Subscribe("scion.project.g1.>")) // idempotent
 
 	b.mu.RLock()
 	assert.Len(t, b.subs, 1)
@@ -242,10 +242,10 @@ func TestHubAPIDelivery(t *testing.T) {
 		"plugin_name": "test-ref",
 	}))
 
-	require.NoError(t, b.Subscribe("scion.grove.g1.agent.*.messages"))
+	require.NoError(t, b.Subscribe("scion.project.g1.agent.*.messages"))
 
 	msg := messages.NewInstruction("user:alice", "agent:coder", "via hub api")
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg))
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -254,7 +254,7 @@ func TestHubAPIDelivery(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 
 	mu.Lock()
-	assert.Equal(t, "scion.grove.g1.agent.coder.messages", receivedPayloads[0].Topic)
+	assert.Equal(t, "scion.project.g1.agent.coder.messages", receivedPayloads[0].Topic)
 	assert.Equal(t, "via hub api", receivedPayloads[0].Message.Msg)
 	mu.Unlock()
 }
@@ -270,15 +270,15 @@ func TestMultipleSubscriptions(t *testing.T) {
 		mu.Unlock()
 	}
 
-	require.NoError(t, b.Subscribe("scion.grove.g1.agent.coder.messages"))
-	require.NoError(t, b.Subscribe("scion.grove.g1.broadcast"))
+	require.NoError(t, b.Subscribe("scion.project.g1.agent.coder.messages"))
+	require.NoError(t, b.Subscribe("scion.project.g1.broadcast"))
 
 	msg := messages.NewInstruction("user:alice", "agent:coder", "direct")
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg))
 
-	broadcast := messages.NewInstruction("user:alice", "grove:g1", "broadcast")
+	broadcast := messages.NewInstruction("user:alice", "project:g1", "broadcast")
 	broadcast.Broadcasted = true
-	require.NoError(t, b.Publish(context.Background(), "scion.grove.g1.broadcast", broadcast))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.broadcast", broadcast))
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -287,8 +287,8 @@ func TestMultipleSubscriptions(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	mu.Lock()
-	assert.Contains(t, received, "scion.grove.g1.agent.coder.messages")
-	assert.Contains(t, received, "scion.grove.g1.broadcast")
+	assert.Contains(t, received, "scion.project.g1.agent.coder.messages")
+	assert.Contains(t, received, "scion.project.g1.broadcast")
 	mu.Unlock()
 }
 
@@ -305,8 +305,8 @@ func TestSubjectMatchesPattern(t *testing.T) {
 		{"foo.>", "foo.bar", true},
 		{"foo.>", "foo.bar.baz", true},
 		{"foo.>", "foo", false},
-		{"scion.grove.*.agent.*.messages", "scion.grove.g1.agent.coder.messages", true},
-		{"scion.grove.*.agent.*.messages", "scion.grove.g1.broadcast", false},
+		{"scion.project.*.agent.*.messages", "scion.project.g1.agent.coder.messages", true},
+		{"scion.project.*.agent.*.messages", "scion.project.g1.broadcast", false},
 	}
 
 	for _, tt := range tests {

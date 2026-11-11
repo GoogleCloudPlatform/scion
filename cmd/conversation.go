@@ -16,13 +16,19 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 )
 
@@ -42,6 +48,7 @@ var (
 
 	convGetJSON        bool
 	convGetMessageJSON bool
+	convGetMessageBody bool
 
 	convParticipantsJSON bool
 
@@ -56,7 +63,9 @@ var conversationCmd = &cobra.Command{
 	Short:   "Manage conversations",
 	Long: `View and manage conversations you participate in.
 
-Conversations require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Conversations go through the hub (start the local one with 'scion server start',
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>').
 
 Commands:
   scion conversation list                       List your conversations
@@ -65,6 +74,7 @@ Commands:
   scion conversation get-message <ref> <msg-id> Get a message from a conversation
   scion conversation create <name>              Create a new group conversation
   scion conversation set-default <ref> <agent>  Set default agent for a conversation
+  scion conversation group ...                  Manage project thread groups
 
 Conversation references:
   conv:<uuid>     Direct conversation ID
@@ -115,7 +125,11 @@ var conversationCreateCmd = &cobra.Command{
 Examples:
   scion conversation create "Design Discussion"
   scion conversation create "Sprint Planning" --project <project-id>
-  scion conversation create "Debug Thread" --json`,
+  scion conversation create "Debug Thread" --json
+  scion conversation create "release-notes" --group Release
+
+--group files the new conversation into a thread group of the same project
+(a group ID, or a name resolved within the project).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConversationCreate,
 }
@@ -125,6 +139,13 @@ var conversationGetCmd = &cobra.Command{
 	Use:   "get <conversation-ref>",
 	Short: "Get conversation details",
 	Long: `Get details of a single conversation including participants.
+
+The MSG MODE column shows each agent participant's message mode (see
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
 
 Examples:
   scion conversation get conv:a1b2c3d4-...
@@ -141,7 +162,12 @@ var conversationGetMessageCmd = &cobra.Command{
 
 Examples:
   scion conversation get-message conv:a1b2c3d4-... msg-uuid-here
-  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --json`,
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --json
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --body
+
+--body prints only the message's body (msg.Msg) to stdout, with no added
+bytes, and exits 0. It is the fetch command a large-DM offload stub names
+(ptone/scion#2257) — it is silent to make "> file" redirection exact.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConversationGetMessage,
 }
@@ -164,6 +190,13 @@ var conversationParticipantsCmd = &cobra.Command{
 	Use:   "participants <conversation-ref>",
 	Short: "List participants in a conversation",
 	Long: `List participants in a conversation.
+
+The MSG MODE column shows each agent participant's message mode (see
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
 
 Examples:
   scion conversation participants conv:a1b2c3d4-...
@@ -247,6 +280,7 @@ func init() {
 	// Get flags
 	conversationGetCmd.Flags().BoolVar(&convGetJSON, "json", false, "Output in JSON format")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageJSON, "json", false, "Output in JSON format")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageBody, "body", false, "Print only the message body to stdout (no added bytes)")
 
 	// Participants flags
 	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
@@ -261,7 +295,7 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -270,10 +304,25 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	opts := &hubclient.ListConversationsOptions{
-		Kind:      convKind,
-		Surface:   convSurface,
-		ProjectID: convProject,
-		Limit:     convLimit,
+		Kind:    convKind,
+		Surface: convSurface,
+		Limit:   convLimit,
+	}
+
+	// Review round 1 finding #2 / design §3.2 addendum: project_id keeps
+	// its existing narrowing semantics (it drops every conversation whose
+	// ProjectID doesn't match, including every DM, which has ProjectID ==
+	// nil), so it must stay opt-in via an explicit --project. The
+	// hub-context default instead drives the purely additive
+	// include_project_groups union, which can only add groups the caller
+	// wasn't already listing — it never narrows out DMs or other
+	// projects' conversations. Unlike create, an unresolved project here
+	// is not an error: it just falls back to today's behavior (nothing
+	// sent, so the caller's participations plus canonical DMs).
+	if convProject != "" {
+		opts.ProjectID = convProject
+	} else if resolved, resolveErr := resolveProjectID(settings, ""); resolveErr == nil {
+		opts.IncludeProjectGroups = resolved
 	}
 
 	result, err := client.Conversations().List(ctx, opts)
@@ -292,16 +341,17 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tKIND\tSURFACE\tNAME\tDEFAULT AGENT\tLAST ACTIVITY")
+	// IDs are printed in full so a listed ID can be passed back as
+	// conv:<id> (ptone/scion#7131).
 	for _, conv := range result.Conversations {
-		shortID := truncateRunes(conv.ID, 12, false)
-		name := truncateRunes(conv.DisplayName, 20, true)
+		name := truncateRunes(conversationListName(conv), 20, true)
 		defaultAgent := ""
 		if conv.DefaultAgentID != nil {
-			defaultAgent = truncateRunes(*conv.DefaultAgentID, 12, false)
+			defaultAgent = *conv.DefaultAgentID
 		}
-		lastActivity := formatTimeAgo(conv.LastActivityAt)
+		lastActivity := clitime.Ago(conv.LastActivityAt)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			shortID, conv.Kind, conv.Surface, name, defaultAgent, lastActivity)
+			conv.ID, conv.Kind, conv.Surface, name, defaultAgent, lastActivity)
 	}
 	return tw.Flush()
 }
@@ -344,13 +394,18 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	label := newUserLabeler(ctx, client)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for _, msg := range result.Items {
-		timeStr := msg.CreatedAt.Format("15:04:05")
+	for i := range result.Items {
+		msg := &result.Items[i]
+		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
+		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
+			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
+		}
 	}
 	return tw.Flush()
 }
@@ -360,9 +415,27 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
+	}
+
+	// §3.6: --project documents "defaults to current project" but previously
+	// sent "" as-is, relying entirely on the server's agent-token fallback —
+	// which only applies to agent callers, so a human CLI user with no
+	// --project got a NULL-project group with no web audience. Fill it from
+	// the resolved hub context (flag > hub-linked project > local project),
+	// the same resolution every other project-scoped command uses. If none
+	// resolves, leave it empty: the server-side agent-token fallback (or,
+	// for a user identity with neither, a clear "projectId is required"
+	// error) still applies.
+	var projectResolveErr error
+	if convProject == "" {
+		if resolved, resolveErr := resolveProjectID(settings, convProject); resolveErr == nil {
+			convProject = resolved
+		} else {
+			projectResolveErr = resolveErr
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -374,8 +447,36 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		Kind:        "group",
 	}
 
+	// --group resolves within the same project the conversation is created
+	// in (ptone/scion#4424, design section 4); the hub also requires the
+	// group's project to equal the conversation's.
+	var group *hubclient.ThreadGroup
+	if convCreateGroup != "" {
+		group, err = resolveThreadGroup(ctx, client, convProject, projectResolveErr, convCreateGroup)
+		if err != nil {
+			return err
+		}
+		req.ThreadGroupID = group.ID
+	}
+
 	conv, err := client.Conversations().Create(ctx, req)
 	if err != nil {
+		if req.ThreadGroupID != "" && isThreadGroupsDisabledCreateError(err) {
+			return fmt.Errorf("failed to create conversation: %w", &hubclient.ThreadGroupsNotEnabledError{Err: err})
+		}
+		// If we couldn't resolve a project locally and the server's 400 is
+		// specifically the projectId-required guard, the resolveProjectID
+		// error ("Use --project flag or link this project with 'scion hub
+		// link'") is the more actionable message — surface both. Checking
+		// the message (not just "any 400") matters: an agent whose local
+		// settings don't resolve a project but whose token does still hits
+		// projectResolveErr != nil, and a 400 for an unrelated reason (e.g.
+		// an invalid name) must not be misreported as a project problem.
+		var apiErr *apiclient.APIError
+		if projectResolveErr != nil && errors.As(err, &apiErr) && apiErr.IsBadRequest() &&
+			strings.Contains(apiErr.Message, "projectId is required") {
+			return fmt.Errorf("failed to create conversation: %w (%v)", err, projectResolveErr)
+		}
 		return fmt.Errorf("failed to create conversation: %w", err)
 	}
 
@@ -383,11 +484,35 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		return outputJSON(conv)
 	}
 
+	if len(conv.Participants) == 0 {
+		// See handleCreateConversation's AddParticipant-failure path
+		// (pkg/hub/handlers_conversations.go): the conversation exists and
+		// is visible on the web, but until a participant row exists the
+		// creator can't read it back via `scion conversation
+		// show/messages/participants` or see it in `scion conversation list`.
+		fmt.Fprintf(os.Stderr, "warning: created conversation %s but could not add you as a participant; "+
+			"it won't appear in `scion conversation list` or be readable via `scion conversation show` yet\n", conv.ID)
+	}
+
 	fmt.Printf("Conversation created: %s\n", conv.ID)
 	fmt.Printf("  Name:    %s\n", conv.DisplayName)
 	fmt.Printf("  Kind:    %s\n", conv.Kind)
 	fmt.Printf("  Surface: %s\n", conv.Surface)
+	if group != nil {
+		fmt.Printf("  Group:   %s\n", group.Name)
+	}
 	return nil
+}
+
+// isThreadGroupsDisabledCreateError reports whether err is an older hub's
+// 400 for a threadGroupId sent while its thread groups experiment is off
+// (ptone/scion#5546 removed it). --group normally lists the
+// project's groups first, which already reports such a hub; this covers a
+// group ID used with no resolved project.
+func isThreadGroupsDisabledCreateError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.IsBadRequest() &&
+		strings.Contains(apiErr.Message, "thread groups are not enabled")
 }
 
 func runConversationGet(cmd *cobra.Command, args []string) error {
@@ -424,20 +549,73 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 	if conv.DefaultAgentID != nil {
 		fmt.Printf("Default Agent:  %s\n", *conv.DefaultAgentID)
 	}
-	fmt.Printf("Created:        %s\n", conv.CreatedAt.Format(time.RFC3339))
-	fmt.Printf("Last Activity:  %s\n", conv.LastActivityAt.Format(time.RFC3339))
+	fmt.Printf("Created:        %s\n", clitime.Format(conv.CreatedAt, clitime.Full))
+	fmt.Printf("Last Activity:  %s\n", clitime.Format(conv.LastActivityAt, clitime.Full))
 
-	if len(conv.Participants) > 0 {
-		fmt.Println("\nParticipants:")
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE")
-		for _, p := range conv.Participants {
-			shortID := truncateRunes(p.PrincipalID, 12, false)
-			_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\n", p.PrincipalKind, shortID, p.Role)
-		}
-		_ = tw.Flush()
-	}
+	writeConversationGetParticipants(os.Stdout, conv.Participants)
 	return nil
+}
+
+// participantModeCell is the MSG MODE cell for a participant: the agent's
+// message mode, or "-" for a user or an agent whose mode the hub did not
+// report (an agent outside the conversation's project, or any agent when a
+// user reads a conversation without a project).
+func participantModeCell(p hubclient.ConversationParticipantDetail) string {
+	if p.MessageMode == "" {
+		return "-"
+	}
+	return p.MessageMode
+}
+
+// conversationModeHint is printed under the conversation get participants
+// table when an agent participant has a restricted message mode.
+const conversationModeHint = "Agent-to-agent delivery requires compatible message modes; see `scion set-message-mode --help`."
+
+// writeConversationGetParticipants writes the participants section of
+// `scion conversation get`, including each agent's message mode
+// (ptone/scion#4411).
+func writeConversationGetParticipants(w io.Writer, participants []hubclient.ConversationParticipantDetail) {
+	if len(participants) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nParticipants:")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE\tMSG MODE")
+	restricted := false
+	for _, p := range participants {
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, participantModeCell(p))
+		switch p.MessageMode {
+		case "", "project", "hub":
+		default:
+			restricted = true
+		}
+	}
+	_ = tw.Flush()
+	if restricted {
+		_, _ = fmt.Fprintln(w, "\n"+conversationModeHint)
+	}
+}
+
+// writeConversationParticipantsTable writes the `scion conversation
+// participants` table, including each agent's message mode.
+func writeConversationParticipantsTable(w io.Writer, participants []hubclient.ConversationParticipantDetail) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tMSG MODE\tJOINED")
+	for _, p := range participants {
+		joined := clitime.Ago(p.JoinedAt)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, participantModeCell(p), joined)
+	}
+	return tw.Flush()
+}
+
+// writeMessageBody writes msg.Msg to w with no added bytes — no trailing
+// newline, no label — so a large-DM offload stub's fetch command
+// (ptone/scion#2257, `scion conversation get-message ... --body`) reproduces
+// exactly the persisted bytes when redirected to a file. Extracted from
+// runConversationGetMessage for direct unit testing.
+func writeMessageBody(w io.Writer, msg *store.Message) error {
+	_, err := io.WriteString(w, msg.Msg)
+	return err
 }
 
 func runConversationGetMessage(cmd *cobra.Command, args []string) error {
@@ -463,6 +641,10 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get message: %w", err)
 	}
 
+	if convGetMessageBody {
+		return writeMessageBody(os.Stdout, msg)
+	}
+
 	if isJSONOutput() {
 		return outputJSON(msg)
 	}
@@ -477,7 +659,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	}
 	dispatchedAt := ""
 	if msg.DispatchedAt != nil {
-		dispatchedAt = msg.DispatchedAt.Format(time.RFC3339)
+		dispatchedAt = clitime.Format(*msg.DispatchedAt, clitime.Full)
 	}
 	dispatchFailureReason := ""
 	if msg.DispatchFailureReason != nil {
@@ -492,6 +674,13 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(tw, "SENDER\t%s\n", msg.Sender)
 	_, _ = fmt.Fprintf(tw, "SENDER ID\t%s\n", msg.SenderID)
 	_, _ = fmt.Fprintf(tw, "SENDER PROJECT ID\t%s\n", senderProjectID)
+	// A message sent with an agent delegated credential also names the
+	// user who authorized it and the grant; other messages print no rows.
+	if msg.AuthorizingUserID != "" {
+		_, _ = fmt.Fprintf(tw, "AUTHORIZED BY\t%s\n", newUserLabeler(ctx, client)(msg.AuthorizingUserID))
+		_, _ = fmt.Fprintf(tw, "AUTHORIZING USER ID\t%s\n", msg.AuthorizingUserID)
+		_, _ = fmt.Fprintf(tw, "DELEGATION GRANT ID\t%s\n", msg.DelegationGrantID)
+	}
 	_, _ = fmt.Fprintf(tw, "RECIPIENT\t%s\n", msg.Recipient)
 	_, _ = fmt.Fprintf(tw, "RECIPIENT ID\t%s\n", msg.RecipientID)
 	_, _ = fmt.Fprintf(tw, "RECIPIENT PROJECT ID\t%s\n", recipientProjectID)
@@ -503,7 +692,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(tw, "GROUP ID\t%s\n", msg.GroupID)
 	_, _ = fmt.Fprintf(tw, "CHANNEL\t%s\n", msg.Channel)
 	_, _ = fmt.Fprintf(tw, "THREAD ID\t%s\n", msg.ThreadID)
-	_, _ = fmt.Fprintf(tw, "CREATED\t%s\n", msg.CreatedAt.Format(time.RFC3339))
+	_, _ = fmt.Fprintf(tw, "CREATED\t%s\n", clitime.Format(msg.CreatedAt, clitime.Full))
 	_, _ = fmt.Fprintf(tw, "DISPATCH STATE\t%s\n", msg.DispatchState)
 	_, _ = fmt.Fprintf(tw, "DISPATCHED AT\t%s\n", dispatchedAt)
 	_, _ = fmt.Fprintf(tw, "DISPATCH FAILURE REASON\t%s\n", dispatchFailureReason)
@@ -566,13 +755,7 @@ func runConversationParticipants(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tJOINED")
-	for _, p := range conv.Participants {
-		joined := formatTimeAgo(p.JoinedAt)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, joined)
-	}
-	return tw.Flush()
+	return writeConversationParticipantsTable(os.Stdout, conv.Participants)
 }
 
 func runConversationJoin(cmd *cobra.Command, args []string) error {
@@ -644,7 +827,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 
 	since, err := time.ParseDuration(convCatchUpSince)
 	if err != nil {
-		return fmt.Errorf("invalid --since value %q: %w", convCatchUpSince, err)
+		return newUsageError("invalid --since value %q: %w", convCatchUpSince, err)
 	}
 
 	afterTime := time.Now().UTC().Add(-since).Format(time.RFC3339)
@@ -667,15 +850,42 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	label := newUserLabeler(ctx, client)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for _, msg := range result.Items {
-		timeStr := msg.CreatedAt.Format("15:04:05")
+	for i := range result.Items {
+		msg := &result.Items[i]
+		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
+		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
+			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
+		}
+		// A deferred message was never dispatched, so its attachments never
+		// reached this agent's home (ptone/scion#4596). The hub lists them
+		// only to a reader.
+		for _, a := range msg.DeferredAttachments {
+			_, _ = fmt.Fprintf(tw, "\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
+		}
 	}
 	return tw.Flush()
+}
+
+// conversationListName is the NAME column of conversation list
+// (ptone/scion#3499): DM:<peer> for a direct conversation whose peer the hub
+// resolved, else the display name, else the linked thread name, else "-".
+func conversationListName(conv hubclient.ConversationDetail) string {
+	if conv.Kind == "direct" && conv.DMPeer != nil && conv.DMPeer.Name != "" {
+		return "DM:" + conv.DMPeer.Name
+	}
+	if conv.DisplayName != "" {
+		return conv.DisplayName
+	}
+	if conv.ThreadName != "" {
+		return conv.ThreadName
+	}
+	return "-"
 }
 
 // resolveConversationRef resolves a conversation reference string to a conversation ID.
@@ -684,7 +894,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr string) (string, error) {
 	ref, err := messaging.ParseReference(refStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid conversation reference %q: %w", refStr, err)
+		return "", newUsageError("invalid conversation reference %q: %w", refStr, err)
 	}
 
 	switch ref.Kind {
@@ -724,7 +934,7 @@ func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr
 		return "", fmt.Errorf("no conversation found for #%s", ref.Value)
 
 	default:
-		return "", fmt.Errorf("unsupported conversation reference type: %s", refStr)
+		return "", newUsageError("unsupported conversation reference type: %s", refStr)
 	}
 }
 
@@ -740,31 +950,4 @@ func truncateRunes(s string, max int, ellipsis bool) string {
 		return string(runes[:max-3]) + "..."
 	}
 	return string(runes[:max])
-}
-
-// formatTimeAgo formats a time as a human-readable relative time string.
-func formatTimeAgo(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		m := int(d.Minutes())
-		if m == 1 {
-			return "1m ago"
-		}
-		return fmt.Sprintf("%dm ago", m)
-	case d < 24*time.Hour:
-		h := int(d.Hours())
-		if h == 1 {
-			return "1h ago"
-		}
-		return fmt.Sprintf("%dh ago", h)
-	default:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1d ago"
-		}
-		return fmt.Sprintf("%dd ago", days)
-	}
 }

@@ -17,6 +17,13 @@ bridge:
     organization: "My Org"
     url: "https://example.com"
 
+  # Auto-provisioning asks the Hub for an asynchronous agent create
+  # (default true). With a Hub that has async launch on, the bridge
+  # reports the task as working while the agent starts, then sends the
+  # message; a failed start fails the task without sending. Set false to
+  # always use the synchronous create.
+  # async_create: true
+
 # Scion Hub connection.
 hub:
   # Hub API endpoint.
@@ -47,11 +54,18 @@ auth:
   # Supported schemes:
   #   "apiKey"  — shared static key via X-API-Key header (default for MVP)
   #   "bearer"  — shared static key via Authorization: Bearer header
-  #   "hubUAT"  — per-user Scion UAT (scion_pat_*) auth; tokens validated
-  #               via Hub /api/v1/auth/me; identity propagated to Hub calls
-  #   "hubJWT"  — per-user Scion JWT auth; tokens validated locally using
-  #               the hub.signing_key; identity propagated to Hub calls
-  #   "none"    — no authentication (not recommended for production)
+  #   "hubUAT"    — per-user Scion UAT (scion_pat_*) auth; tokens validated
+  #                 via Hub /api/v1/auth/me; identity propagated to Hub calls
+  #   "hubBearer" — forwards any bearer credential the Hub itself accepts
+  #                 (e.g. a Google user credential attached by an upstream
+  #                 caller) to Hub /api/v1/auth/me for admission, then
+  #                 forwards the same token verbatim to the Hub. Requires the
+  #                 Hub to have a matching trusted issuer configured
+  #                 (server.federation.trusted_issuers). No scion_pat_
+  #                 prefix requirement — the Hub is the sole arbiter.
+  #   "hubJWT"    — per-user Scion JWT auth; tokens validated locally using
+  #                 the hub.signing_key; identity propagated to Hub calls
+  #   "none"      — no authentication (not recommended for production)
   scheme: "apiKey"
 
   # Static API key (required for "apiKey" and "bearer" schemes only).
@@ -69,12 +83,20 @@ auth:
   # No api_key needed. The bridge validates each token via Hub /api/v1/auth/me.
   # uat_cache_ttl: 60s
 
+  # --- Google credential pass-through (e.g. Gemini Enterprise A2A clients) ---
+  # scheme: "hubBearer"
+  # Callers present "Authorization: Bearer <token>" with their own Google ID
+  # token or access token (no exchange). The bridge introspects it via Hub
+  # /api/v1/auth/me and forwards the same token to the Hub on every
+  # downstream call. No api_key needed.
+  # uat_cache_ttl: 60s
+
   # --- Per-user JWT auth (for CLI/scripted access) ---
   # scheme: "hubJWT"
   # Callers present Scion user JWTs. The hub.signing_key is used for
   # local JWT validation. No api_key needed.
 
-# Groves exposed through the bridge. Each project maps to a set of
+# Projects exposed through the bridge. Each project maps to a set of
 # Scion agents that become discoverable A2A endpoints.
 projects:
   - slug: "my-project"
@@ -108,6 +130,17 @@ timeouts:
 
   # Maximum number of retries for push notification webhook delivery.
   push_retry_max: 3
+
+# Agent replies: while an A2A call waits, the bridge reads the agent's reply
+# from the caller's own conversation with the agent, with the caller's own
+# credential. See "Agent replies" in README.md.
+reply_poll:
+  # Default true. false waits on pushed broker messages only (no
+  # same-caller check, no conversation preflight, no reply poller).
+  enabled: true
+
+  # Cap on conversation reads in flight per bridge process.
+  concurrency: 64
 
 # Request rate limiting. Limits are applied per API key (or per remote
 # address when no key is provided).

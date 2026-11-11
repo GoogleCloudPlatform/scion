@@ -116,6 +116,102 @@ func UserDomain() Domain[store.User] {
 	}
 }
 
+// UserTerminalWorkspaceConformance exercises store.UserTerminalWorkspaceStore
+// across backends. It is a hand-written test rather than a Domain[T]
+// descriptor: the store's contract (a single upserted row per user, keyed by
+// user ID rather than by an entity ID the store assigns, with an atomically
+// incrementing revision and no List/Delete of its own) does not match the
+// generic Create/Read/Update/Delete/List categories the harness drives.
+func UserTerminalWorkspaceConformance(t *testing.T, factory Factory) {
+	t.Helper()
+	ctx := context.Background()
+
+	seedUser := func(t *testing.T, s store.Store) string {
+		t.Helper()
+		id := uuid.NewString()
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID:          id,
+			Email:       fmt.Sprintf("terminal-workspace-%s@example.com", id[:8]),
+			DisplayName: "Terminal Workspace User",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+		}))
+		return id
+	}
+
+	t.Run("terminal_workspace", func(t *testing.T) {
+		t.Run("get on missing row returns ErrNotFound", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			_, err := s.GetUserTerminalWorkspace(ctx, userID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+		})
+
+		t.Run("put creates then replaces with incrementing revision, order preserved", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			agentA, agentB := uuid.NewString(), uuid.NewString()
+			got, err := s.PutUserTerminalWorkspace(ctx, userID, []string{agentA, agentB}, agentA)
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), got.Revision)
+			assert.Equal(t, []string{agentA, agentB}, got.AgentIDs)
+			assert.Equal(t, agentA, got.FrontmostAgentID)
+			assert.False(t, got.Updated.IsZero())
+
+			// A second put replaces the whole list, in the order given, and
+			// increments revision again.
+			agentC := uuid.NewString()
+			got2, err := s.PutUserTerminalWorkspace(ctx, userID, []string{agentC}, agentC)
+			require.NoError(t, err)
+			assert.Equal(t, int64(2), got2.Revision)
+			assert.Equal(t, []string{agentC}, got2.AgentIDs)
+			assert.Equal(t, agentC, got2.FrontmostAgentID)
+
+			// GetUserTerminalWorkspace reflects the latest write.
+			fetched, err := s.GetUserTerminalWorkspace(ctx, userID)
+			require.NoError(t, err)
+			assert.Equal(t, int64(2), fetched.Revision)
+			assert.Equal(t, []string{agentC}, fetched.AgentIDs)
+		})
+
+		t.Run("a subsequent put with an empty frontmost clears it", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			agentA := uuid.NewString()
+			got, err := s.PutUserTerminalWorkspace(ctx, userID, []string{agentA}, agentA)
+			require.NoError(t, err)
+			assert.Equal(t, agentA, got.FrontmostAgentID)
+
+			// The conflict-side upsert relies on the INSERT's own (omitted)
+			// column default to clear frontmost_agent_id via
+			// excluded.frontmost_agent_id; this pins that path.
+			got2, err := s.PutUserTerminalWorkspace(ctx, userID, []string{agentA}, "")
+			require.NoError(t, err)
+			assert.Equal(t, "", got2.FrontmostAgentID)
+
+			fetched, err := s.GetUserTerminalWorkspace(ctx, userID)
+			require.NoError(t, err)
+			assert.Equal(t, "", fetched.FrontmostAgentID)
+		})
+
+		t.Run("deleting the user cascades the row away", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			_, err := s.PutUserTerminalWorkspace(ctx, userID, []string{uuid.NewString()}, "")
+			require.NoError(t, err)
+
+			require.NoError(t, s.DeleteUser(ctx, userID))
+
+			_, err = s.GetUserTerminalWorkspace(ctx, userID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+		})
+	})
+}
+
 // AllowListDomain describes the email allow-list entry for the CRUD-parity
 // oracle. The allow list is keyed by email rather than ID: Get and Delete
 // operate on the (normalized) email address, so GetID returns the email.

@@ -15,8 +15,28 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
 	"net/http"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // APIError represents a standardized error response.
@@ -34,18 +54,109 @@ type ErrorResponse struct {
 
 // Error codes matching the Runtime Broker API specification.
 const (
-	ErrCodeInvalidRequest   = "invalid_request"
-	ErrCodeValidationError  = "validation_error"
-	ErrCodeUnauthorized     = "unauthorized"
-	ErrCodeForbidden        = "forbidden"
-	ErrCodeAgentNotFound    = "agent_not_found"
-	ErrCodeNotFound         = "not_found"
-	ErrCodeConflict         = "conflict"
-	ErrCodeMethodNotAllowed = "method_not_allowed"
-	ErrCodeInternalError    = "internal_error"
-	ErrCodeRuntimeError     = "runtime_error"
-	ErrCodeHubUnreachable   = "hub_unreachable"
-	ErrCodeTemplateError    = "template_error"
+	ErrCodeInvalidRequest  = "invalid_request"
+	ErrCodeValidationError = "validation_error"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeForbidden       = "forbidden"
+	ErrCodeAgentNotFound   = "agent_not_found"
+	ErrCodeNotFound        = "not_found"
+	ErrCodeConflict        = "conflict"
+	// ErrCodeProjectPathNotInitialized: a plain project's explicit project
+	// path holds no .scion directory or marker (agent.ErrProjectPathNotInitialized).
+	ErrCodeProjectPathNotInitialized = agent.ProjectPathNotInitializedCode
+	ErrCodeMethodNotAllowed          = "method_not_allowed"
+	ErrCodeInternalError             = "internal_error"
+	ErrCodeRuntimeError              = "runtime_error"
+	ErrCodeRuntimeUnavailable        = "runtime_unavailable"
+	ErrCodeHubUnreachable            = "hub_unreachable"
+	ErrCodeTemplateError             = "template_error"
+	ErrCodeSkillResolution           = api.BrokerErrCodeSkillResolution
+
+	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
+	// uploaded to bucket storage (workspaceStoragePath set) when neither the
+	// request nor this broker names the bucket to download it from. It is
+	// answered with 422 before anything is provisioned, and the hub relays
+	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
+	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
+
+	// ErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422).
+	ErrCodeWorkspaceDownloadModeUnsupported = api.BrokerErrCodeWorkspaceDownloadModeUnsupported
+
+	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
+	// identity "assign" dispatch on Kubernetes refused for a missing or
+	// conflicting kubernetes_service_account_mappings entry (400). The hub
+	// translates them into its own message (ptone/scion#4024).
+	ErrCodeIdentityNotMapped   = api.BrokerErrCodeIdentityNotMapped
+	ErrCodeIdentityKSAMismatch = api.BrokerErrCodeIdentityKSAMismatch
+
+	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
+	// verified as safe because a runtime process restart dropped the
+	// in-memory record needed to tell "not found" apart from "exists, but
+	// unidentifiable." Stable within this broker's own HTTP API, but what a
+	// hub or CLI caller sees differs by which endpoint triggered it:
+	//   - delete: the hub re-codes this broker's 409 as its own generic
+	//     "conflict" error (pkg/hub/handlers_agents_core.go, the
+	//     errors.As(err, &se) && se.StatusCode == http.StatusConflict check
+	//     around its DispatchAgentDelete call), so a caller sees this code's
+	//     message text, not the code itself;
+	//   - stop: the hub's stop dispatch (pkg/hub/handlers_agent_lifecycle.go,
+	//     the AgentActionStop case) has no equivalent check — every
+	//     DispatchAgentStop error, this one included, becomes a generic 502
+	//     "runtime_error" before the CLI sees it, so this 409 is not even
+	//     distinguishable as a conflict there today.
+	// Either way this constant lets broker-level callers and tests branch on
+	// it, not (yet) the hub or the CLI.
+	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
+
+	// ErrCodeLocalWorktreeRefused marks a refused local-worktree dispatch
+	// for a linked checkout (resolveLinkedCheckout); see
+	// api.BrokerErrCodeLocalWorktreeRefused.
+	ErrCodeLocalWorktreeRefused = api.BrokerErrCodeLocalWorktreeRefused
+
+	// ErrCodeStaleDispatch marks a delete refused because it arrived after
+	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
+	// hub's claim on the delete may have lapsed, so acting could remove an
+	// agent the user started again. Nothing was done.
+	ErrCodeStaleDispatch = "stale_dispatch"
+
+	// ErrCodeProjectStorageUnavailable is the 503 code for a dispatch of a
+	// project on shared project storage whose share is not mounted on the
+	// broker (ptone/scion#5823); see api.BrokerErrCodeProjectStorageUnavailable.
+	ErrCodeProjectStorageUnavailable = api.BrokerErrCodeProjectStorageUnavailable
+
+	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
+	// declines to serve at all, rather than one that failed. The broker uses
+	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
+	// which a runtime returns when serving logs at all would be unsafe or
+	// impossible (for example, when reading them would expose another
+	// tenant's output), so the runtime never makes the underlying call and
+	// this code is the client-visible signal that the feature, not the
+	// request, is the reason.
+	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
+
+	// ErrCodeStatsNotImplemented marks an agent stats request: this broker
+	// does not collect per-agent resource usage, so the stats action answers
+	// 501 with this code instead of placeholder values.
+	ErrCodeStatsNotImplemented = "stats_not_implemented"
+
+	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
+	// before the WebSocket upgrade because the target runtime declines
+	// interactive attach outright (pkg/runtime.AttachCapableRuntime,
+	// pkg/runtime/capabilities.go), rather than one that failed. Rejecting
+	// here — instead of upgrading and only failing once the runtime's own
+	// PTY dial rejects the stream — gives the caller a clean, pre-upgrade
+	// error instead of an abnormal WebSocket close. Shares its wire value
+	// with wsprotocol.ErrCodeRuntimeAttachUnsupported, which pkg/wsclient
+	// reads back to map this to the same fixed message the post-upgrade
+	// 4501 close code produces.
+	ErrCodeRuntimeAttachUnsupported = wsprotocol.ErrCodeRuntimeAttachUnsupported
+
+	// Flat Runtime Broker wire codes, shared with the Hub
+	// (.design/flat-runtime-brokers-contract.md section 9).
+	ErrCodeRuntimeTargetMismatch     = api.ErrCodeRuntimeTargetMismatch
+	ErrCodeRuntimeProfileUnsupported = api.ErrCodeRuntimeProfileUnsupported
+	ErrCodeRuntimeTargetRequired     = api.ErrCodeRuntimeTargetRequired
 )
 
 // writeError writes a JSON error response.
@@ -64,6 +175,84 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// startAttemptedDetails returns the error details for a failure inside
+// Manager.Start, so the hub knows the broker acted on the request (see
+// api.BrokerErrorDetailStartAttempted).
+func startAttemptedDetails(runID string) map[string]interface{} {
+	d := map[string]interface{}{api.BrokerErrorDetailStartAttempted: true}
+	if runID != "" {
+		d[api.BrokerErrorDetailRunID] = runID
+	}
+	return d
+}
+
+// startFailureDetails is startAttemptedDetails plus the run the runtime
+// holds for the agent now (api.BrokerErrorDetailCurrentRunID), when
+// currentRunID can report one. mgr is the manager the start went to.
+func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id, projectID, runID string) map[string]interface{} {
+	d := startAttemptedDetails(runID)
+	if current, ok := s.currentRunID(ctx, mgr, id, projectID); ok {
+		d[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	return d
+}
+
+// currentRunID reports the scion.run_id of the agent's runtime entry after
+// a failed start. It re-lists, under the request's ctx, allManagers(ctx)
+// plus mgr (the one the start went to), scoped to projectID the way a
+// delete resolves its target (collectAgentCandidates). allManagers honours
+// a recorded runtime type on ctx (ptone/scion#2748): a restart carries one,
+// so the list is limited to runtimes of the recorded type plus mgr; a
+// start carries none, so every registered runtime is listed. Either way it
+// sees what a later delete under the same ctx rules would see, including a
+// previous entry left on another listed runtime.
+//
+//   - One container entry: its run, or "" when it carries no run label.
+//   - Entries of more than one run: "", so the hub's next delete resolves
+//     by name, as before run IDs. Name resolution fails closed (409) only
+//     on ambiguity among the runtimes that delete itself lists; an entry
+//     on a runtime outside its recorded type is not seen.
+//   - No container entry on any runtime (file-only entries do not count):
+//     ok is false. The hub then keeps the run it minted, so a delayed delete
+//     cannot remove a same-name agent created later.
+//   - Any List failure: ok is false; the hub falls back as for an older
+//     broker.
+func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projectID string) (string, bool) {
+	managers := s.allManagers(ctx)
+	if mgr != nil && !slices.Contains(managers, mgr) {
+		managers = append(managers, mgr)
+	}
+	cands, err := s.collectAgentCandidates(ctx, managers, id, projectID,
+		"Agent start failed: could not re-list the agent to report its current run")
+	if err != nil {
+		return "", false
+	}
+	current, found := "", false
+	for _, c := range cands {
+		if c.entry.ContainerID == "" {
+			continue
+		}
+		if found && c.entry.RunID != current {
+			return "", true
+		}
+		current, found = c.entry.RunID, true
+	}
+	return current, found
+}
+
+// isRunNameConflict reports whether a start (create, start, restart or an
+// async launch) failed because another run holds the agent's name
+// (ptone/scion#2550): scionrt.ErrRunConflict from a runtime's Run
+// pre-clean, or scionrt.ErrRunMismatch from Manager.Start's removal of the
+// existing entry, when that entry was replaced by another run between its
+// listing and the run-checked Delete (the runtime then deleted nothing of
+// the other run). Both answer 409 with ErrRunConflict's fixed text: the
+// wrapped errors name the namespace, object and the other run's ID, which
+// must not reach clients (see runtimeOpError).
+func isRunNameConflict(err error) bool {
+	return errors.Is(err, scionrt.ErrRunConflict) || errors.Is(err, scionrt.ErrRunMismatch)
+}
+
 // NotFound writes a 404 Not Found response.
 func NotFound(w http.ResponseWriter, resource string) {
 	code := ErrCodeNotFound
@@ -71,6 +260,22 @@ func NotFound(w http.ResponseWriter, resource string) {
 		code = ErrCodeAgentNotFound
 	}
 	writeError(w, http.StatusNotFound, code, resource+" not found", nil)
+}
+
+// RunMismatch writes the 404 for a stop or delete naming run runID when
+// another run holds the agent's name (ptone/scion#2550). The code
+// (api.BrokerErrorCodeRunMismatch) lets the hub tell it apart from any
+// other 404; the details name the requested run and the run that holds
+// the name (current, omitted when unknown). On a stop it makes a hub/broker
+// run drift diagnosable; on a delete, a non-empty current tells the hub not
+// to finalize its row (ptone/scion#3080), since that run is still on this
+// broker.
+func RunMismatch(w http.ResponseWriter, runID, current string) {
+	details := map[string]interface{}{api.BrokerErrorDetailRunID: runID}
+	if current != "" {
+		details[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	writeError(w, http.StatusNotFound, api.BrokerErrorCodeRunMismatch, "Agent not found for the requested run", details)
 }
 
 // BadRequest writes a 400 Bad Request response.
@@ -95,8 +300,14 @@ func Forbidden(w http.ResponseWriter) {
 		"Insufficient permissions", nil)
 }
 
-// MethodNotAllowed writes a 405 Method Not Allowed response.
-func MethodNotAllowed(w http.ResponseWriter) {
+// MethodNotAllowed writes a 405 Method Not Allowed response. RFC 9110
+// section 15.5.6 requires a 405 to carry an Allow header listing the methods
+// the target resource supports. The signature requires at least one method,
+// so a bare call does not compile; hack/check-method-not-allowed.sh remains
+// as a backstop for helpers that keep a variadic-only signature.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed,
 		"Method not allowed", nil)
 }
@@ -104,6 +315,57 @@ func MethodNotAllowed(w http.ResponseWriter) {
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// RetainedFilesRefused writes a 409 Conflict response with the stable
+// api.BrokerErrCodeRetainedFilesRefused code, for a purge of retained files
+// that removed nothing (ptone/scion#4744). reason, which names no host path,
+// is also in the details under api.BrokerErrDetailReason.
+func RetainedFilesRefused(w http.ResponseWriter, reason string) {
+	writeError(w, http.StatusConflict, api.BrokerErrCodeRetainedFilesRefused,
+		"Retained files not removed: "+reason,
+		map[string]interface{}{api.BrokerErrDetailReason: reason})
+}
+
+// StaleDispatch writes a 409 Conflict response with the stable
+// ErrCodeStaleDispatch code.
+func StaleDispatch(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeStaleDispatch, message, nil)
+}
+
+// AgentIdentityUnknown writes a 409 Conflict response with the stable
+// ErrCodeAgentIdentityUnknown code for a delete/stop that a runtime process
+// restart made impossible to verify as safe. message must stay generic —
+// it must not name any runtime-specific scope (e.g. a namespace) or point
+// at a runtime-specific document; a caller's own log line carries those
+// details instead (see agentIdentityUnknownError).
+func AgentIdentityUnknown(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeAgentIdentityUnknown, message, nil)
+}
+
+// RuntimeLogsUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeLogsUnsupported code for a runtime that declines to
+// serve logs at all (pkg/runtime.ErrLogsNotSupported). message must not
+// name any runtime-specific scope, worker, pod, namespace, actor or
+// agent — see pkg/runtime.ErrLogsNotSupported for the fixed text this is
+// meant to carry.
+func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
+}
+
+// StatsNotImplemented writes a 501 Not Implemented response with the stable
+// ErrCodeStatsNotImplemented code for the agent stats action.
+func StatsNotImplemented(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeStatsNotImplemented, message, nil)
+}
+
+// RuntimeAttachUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeAttachUnsupported code for a runtime that declines
+// interactive attach at all (pkg/runtime.AttachCapableRuntime). message must
+// not name any runtime-specific scope, worker, pod, namespace, actor or
+// agent, mirroring RuntimeLogsUnsupported.
+func RuntimeAttachUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeAttachUnsupported, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.
@@ -115,6 +377,303 @@ func InternalError(w http.ResponseWriter) {
 // RuntimeError writes a 500 error for runtime failures.
 func RuntimeError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, message, nil)
+}
+
+// OpaqueError wraps a runtime-op failure (a container/pod runtime backend —
+// Docker, Podman, Kubernetes, substrate — declining a lifecycle operation)
+// with a fixed, identity-free message: Error() never returns the wrapped
+// error's own text, since a real backend error routinely embeds a
+// container ID, pod name, namespace, node name, image reference, or file
+// path — internal infrastructure identity a broker client has no
+// entitlement to see, whether or not it's authorized for the agent itself.
+// The wrapped error stays reachable via Unwrap for server-side telemetry
+// (span.SetStatus) and logging, neither of which is the HTTP response
+// body.
+type OpaqueError struct {
+	msg string
+	err error
+}
+
+// NewOpaqueError returns an OpaqueError whose Error() is exactly msg,
+// wrapping err for telemetry/logging only.
+func NewOpaqueError(msg string, err error) *OpaqueError {
+	return &OpaqueError{msg: msg, err: err}
+}
+
+func (e *OpaqueError) Error() string { return e.msg }
+func (e *OpaqueError) Unwrap() error { return e.err }
+
+// runtimeOpError builds the OpaqueError a broker runtime-op handler
+// (start, stop, restart, delete, exec, message, logs, list) writes to its
+// client on failure: op names the operation in the fixed message (e.g.
+// "stop agent", "list agents"), never anything about the specific agent,
+// runtime, or backend involved. writeRuntimeOpError is the preferred caller
+// for this; createAgent, the start/restart Manager.Start failure branches,
+// and the stop handler's record-less-probe branch (handlers.go) call
+// runtimeOpError/RuntimeError directly instead, each with its own inline
+// log call (and, for create/start, its own span.SetStatus) rather than
+// going through writeRuntimeOpError — err's text still always reaches the
+// log on every path (through sanitizeFailureCause on the create and start
+// paths), just not through this one function.
+//
+// A start that failed with agent.ErrNoHubToken gets that error's fixed text
+// after the lead: it names the cause (the hub issued no agent token) and no
+// credential value, so the hub relays an actionable create or start error.
+func runtimeOpError(op string, err error) *OpaqueError {
+	if errors.Is(err, agent.ErrNoHubToken) {
+		return NewOpaqueError(failedOpText(op)+": "+agent.ErrNoHubToken.Error(), err)
+	}
+	return NewOpaqueError(failedOpText(op), err)
+}
+
+// agentFilesDeleteRefusedMessage is the client message for an agent delete
+// whose files delete was refused (agent.ErrAgentFilesDeleteRefused). Like
+// every runtime-op message it names no path; the log has them.
+const agentFilesDeleteRefusedMessage = "Failed to delete agent: refused to remove a path outside the agent's own directories, or one that could not be resolved; nothing was removed there"
+
+// failedOpText is the fixed "Failed to <op>" lead every runtime-op error
+// message starts with (runtimeOpError, notFoundMessage).
+func failedOpText(op string) string {
+	return "Failed to " + op
+}
+
+// notFoundMessage is the full client message for a template or
+// harness-config that did not resolve during op: "Failed to <op>: " plus
+// notFoundResourceText. Every not-found response and launch report builds
+// its text here, so the sync and async spellings cannot drift.
+func notFoundMessage(op string, err error, templateSlug string) string {
+	return failedOpText(op) + ": " + notFoundResourceText(err, templateSlug)
+}
+
+// notFoundResourceText is the client text for a template or harness-config
+// that did not resolve (config.ErrTemplateNotFound /
+// config.ErrHarnessConfigNotFound). It names the resource, as the 404
+// contract from ptone/scion#1316 requires, but never repeats err's own
+// text, which can name broker filesystem paths (the directories searched,
+// an absolute template path) or a content hash (ptone/scion#3113).
+//
+//   - harness-config: the typed error's Name, the name that was requested.
+//   - template: the typed error's Name (config.FriendlyTemplateName of the
+//     reference). When that is empty — the reference was a hydrated cache
+//     directory named by its content hash — templateSlug, the template name
+//     the caller sent (api.StartOptions.TemplateName), passed through
+//     config.FriendlyTemplateName too.
+//   - no name either way (the caller named no template): the sentinel's
+//     own fixed text.
+func notFoundResourceText(err error, templateSlug string) string {
+	if errors.Is(err, config.ErrTemplateNotFound) {
+		name := ""
+		var tplErr *config.TemplateNotFoundError
+		if errors.As(err, &tplErr) {
+			name = tplErr.Name
+		}
+		if name == "" {
+			name = config.FriendlyTemplateName(templateSlug)
+		}
+		if name == "" {
+			return config.ErrTemplateNotFound.Error()
+		}
+		return fmt.Sprintf("template %q not found", name)
+	}
+	var hcErr *config.HarnessConfigNotFoundError
+	if errors.As(err, &hcErr) && hcErr.Name != "" {
+		return fmt.Sprintf("harness-config %q not found", hcErr.Name)
+	}
+	return config.ErrHarnessConfigNotFound.Error()
+}
+
+// writeGitConfigRefusal answers a create, start or restart whose start was
+// refused because the repository's git config sets keys agents may not be
+// given, and reports whether err was one. The body is 422
+// git_config_refused with the refusal's own text (util.StartRefusalText):
+// every refused key and its remedy, never a value or a host path.
+func writeGitConfigRefusal(w http.ResponseWriter, err error, details map[string]interface{}) bool {
+	text, ok := util.StartRefusalText(err)
+	if !ok {
+		return false
+	}
+	writeGitConfigRefusalText(w, text, details)
+	return true
+}
+
+// writeGitConfigRefusalText writes the 422 git_config_refused answer for a
+// refusal text already found by util.StartRefusalText.
+func writeGitConfigRefusalText(w http.ResponseWriter, text string, details map[string]interface{}) {
+	writeError(w, http.StatusUnprocessableEntity, api.BrokerErrCodeGitConfigRefused, text, details)
+}
+
+// opCreateAgent is the runtimeOpError op for a create's Manager.Start
+// failure. createAgent's synchronous start and the async launch
+// (classifyStartError, run_launch.go) share it, so both report the same
+// text for the same failure (ptone/scion#3113).
+const opCreateAgent = "create agent"
+
+// opStartAgent is the runtimeOpError op for a start launch's Manager.Start
+// failure: the same "Failed to start agent" lead the synchronous start
+// handler writes.
+const opStartAgent = "start agent"
+
+// runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
+// code on a create's 500 to that code: an api.BrokerRuntimeCause value, the
+// set the hub relays. The reasons are kept few on purpose
+// (ptone/scion#4555): a NotFound reaching the start error is ambiguous (the
+// pre-create reads treat a missing pod as normal), and a timeout overlaps
+// the launch deadline handling, so neither gets one.
+var runtimeCauseCodes = map[metav1.StatusReason]string{
+	metav1.StatusReasonForbidden:    api.BrokerRuntimeCauseForbidden,
+	metav1.StatusReasonUnauthorized: api.BrokerRuntimeCauseUnauthorized,
+}
+
+// runtimeFailureCause looks through a Manager.Start error for the failure
+// behind it. The create's client body never carries a start error's text
+// (it gets the fixed runtimeOpError text), and the text of a runtime's
+// start error need not name the underlying failure (the Kubernetes
+// runtime's opaque start errors do not), so the cause is reached through
+// errors.As and Unwrap.
+//
+//   - reason is the Kubernetes status reason ("" when there is none).
+//   - code is the fixed, client-safe details.cause code for reason, or ""
+//     when reason has none (runtimeCauseCodes).
+//   - cause is the first Kubernetes API status in err's chain (errors.As
+//     also searches multi-%w errors). Without one, it is the deepest error
+//     reached by single-error errors.Unwrap, which stops at an error that
+//     wraps several (a multi-%w error) and returns that error. Its text can
+//     name a namespace, ServiceAccount or object, so it is for server logs
+//     only.
+func runtimeFailureCause(err error) (reason metav1.StatusReason, code string, cause error) {
+	if err == nil {
+		return "", "", nil
+	}
+	var status k8serrors.APIStatus
+	if errors.As(err, &status) {
+		if e, ok := status.(error); ok {
+			cause = e
+		}
+		reason = status.Status().Reason
+	}
+	if cause == nil {
+		cause = err
+		for {
+			next := errors.Unwrap(cause)
+			if next == nil {
+				break
+			}
+			cause = next
+		}
+	}
+	return reason, runtimeCauseCodes[reason], cause
+}
+
+// runtimeFailureLogAttrs returns the log attributes describing err's cause
+// (runtimeFailureCause) for a terminal create failure's ERROR record:
+// cause (the innermost error text, through sanitizeFailureCause), and
+// k8s_reason and cause_code when set. Server logs only: none of these may
+// reach a client body except the fixed code.
+func runtimeFailureLogAttrs(err error) []any {
+	reason, code, cause := runtimeFailureCause(err)
+	if cause == nil {
+		return nil
+	}
+	attrs := []any{"cause", sanitizeFailureCause(cause.Error())}
+	if reason != "" {
+		attrs = append(attrs, "k8s_reason", string(reason))
+	}
+	if code != "" {
+		attrs = append(attrs, "cause_code", code)
+	}
+	return attrs
+}
+
+// writeCreateRuntimeError writes the 500 runtime_error for a create's
+// Manager.Start failure: the fixed runtimeOpError text and, when the
+// failure has a cause code (runtimeFailureCause), details.cause with only
+// that code. The API server message, namespace, ServiceAccount and object
+// names never reach the body.
+func writeCreateRuntimeError(w http.ResponseWriter, err error) {
+	var details map[string]interface{}
+	if _, code, _ := runtimeFailureCause(err); code != "" {
+		details = map[string]interface{}{"cause": code}
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError(opCreateAgent, err).Error(), details)
+}
+
+// writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
+// delete, exec, message, logs, list, and the workspace upload/apply
+// handlers in workspace_handlers.go) make on failure: it logs err
+// at scope op (plus any extra key/value pairs the caller has on hand — an
+// agent or project ID, for instance) via s.agentLifecycleLog, records err on
+// ctx's active span (trace.SpanFromContext(ctx) is a documented no-op when
+// ctx carries none, so this is always safe to call), and writes the fixed,
+// identity-free response body runtimeOpError builds.
+//
+// Not every runtime-op failure path routes through this one call — see
+// runtimeOpError's own doc comment for the create/start/restart/stop sites
+// that log and (mostly) set span status inline instead — but every one of
+// them still logs err before building the fixed response body, so err
+// always reaches the server's own log, never just the client's opaque
+// "Failed to <op>" message.
+//
+// Never call this with a *startContextError: that type carries its own
+// curated Status/Message from buildStartContext (a template/config
+// problem, not runtime topology) and must go through
+// writeStartContextError instead — routing it through runtimeOpError's
+// fixed "Failed to <op>" message would discard a message that was already
+// safe to show the caller verbatim.
+func (s *Server) writeRuntimeOpError(w http.ResponseWriter, ctx context.Context, op string, err error, extra ...any) {
+	args := make([]any, 0, len(extra)+2)
+	args = append(args, "op", op)
+	args = append(args, extra...)
+	args = append(args, "error", err)
+	s.agentLifecycleLog.Error("runtime op failed", args...)
+	trace.SpanFromContext(ctx).SetStatus(codes.Error, err.Error())
+	RuntimeError(w, runtimeOpError(op, err).Error())
+}
+
+// RuntimeUnavailable writes a 503 error for a transient container-runtime
+// failure (e.g. `docker ps` still failing after internal retries). Unlike
+// RuntimeError, this signals the caller should retry rather than treating
+// the failure as permanent.
+func RuntimeUnavailable(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeUnavailable, message, nil)
+}
+
+// agentLookupUnavailableMessage builds the generic "please retry" sentence
+// used whenever an agent lookup fails because the container runtime itself
+// is unavailable, rather than because the agent is genuinely missing.
+// retrySuffix, if non-empty, is inserted into the sentence (e.g. PTY attach
+// passes "the attach" to produce "please retry the attach in a moment");
+// pass "" for the plain "please retry in a moment".
+//
+// This is factored out of AgentLookupUnavailable so that call sites which
+// need the same wording but log their own distinct message (e.g. PTY
+// attach's nil-result guard, which has no err to log) can build it without
+// duplicating the sentence.
+func agentLookupUnavailableMessage(agentID, retrySuffix string) string {
+	retry := "retry"
+	if retrySuffix != "" {
+		retry = "retry " + retrySuffix
+	}
+	return fmt.Sprintf(
+		"Unable to look up agent %q: the container runtime is temporarily unavailable. Please %s in a moment.",
+		agentID, retry)
+}
+
+// AgentLookupUnavailable logs the underlying runtime error that caused an
+// agent lookup to fail (server-side only — see ptone/scion#2164 for keeping
+// raw runtime error text out of response bodies generally) and writes a
+// generic 503 response built from agentID. Callers use this when
+// errors.Is(err, ErrAgentListUnavailable): the container runtime itself
+// failed to respond, which is not the same as the agent being genuinely
+// missing, so the client should retry rather than be told "not found".
+//
+// op identifies the calling handler (e.g. "exec", "reset_auth", "stop",
+// "restart", "pty_attach") and is included in the log line so call-site
+// context isn't lost when several handlers share this one log message.
+//
+// retrySuffix is passed through to agentLookupUnavailableMessage.
+func AgentLookupUnavailable(w http.ResponseWriter, err error, agentID, op, retrySuffix string) {
+	slog.Warn("agent lookup failed: runtime listing unavailable", "agent_id", agentID, "op", op, "error", err)
+	RuntimeUnavailable(w, agentLookupUnavailableMessage(agentID, retrySuffix))
 }
 
 // HubUnreachableError writes a 503 Service Unavailable response for Hub connectivity issues.
@@ -134,4 +693,245 @@ func TemplateError(w http.ResponseWriter, message string) {
 // Unprocessable writes a 422 Unprocessable Entity response.
 func Unprocessable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, message, nil)
+}
+
+// skillResolutionHTTPStatus maps a SkillResolutionError.Code to an HTTP
+// status. Each cause gets the status whose standard semantics best fit it:
+//   - not_found: 404, a skill genuinely absent at the given ref.
+//   - rate_limited: 429, with a Retry-After header when the server sent one
+//     (see SkillResolutionFailed).
+//   - timeout: 504, no response from GitHub within the request deadline.
+//   - upstream_unavailable: 502, GitHub itself returned repeated 5xx.
+//   - unreachable: 502, a network-level failure (DNS, connection refused,
+//     TLS) rather than a response GitHub chose to send.
+//   - forbidden: 403, the Hub's per-URI code for a gh:// ref the caller may
+//     not resolve GitHub skills for in this project.
+//   - anything else — including an uncategorized local failure and the Hub's
+//     own per-URI codes for PreResolvedSkills (storage_error, internal_error,
+//     federation_error) — keeps the existing 500, not a client error: the
+//     caller did nothing wrong, so a 5xx is a more honest signal than a
+//     guessed 4xx (#2546 R3, O1).
+func skillResolutionHTTPStatus(code string) int {
+	switch code {
+	case agent.SkillErrCodeNotFound:
+		return http.StatusNotFound
+	case agent.SkillErrCodeForbidden:
+		return http.StatusForbidden
+	case agent.SkillErrCodeRateLimited:
+		return http.StatusTooManyRequests
+	case agent.SkillErrCodeTimeout:
+		return http.StatusGatewayTimeout
+	case agent.SkillErrCodeUpstreamUnavailable, agent.SkillErrCodeUnreachable:
+		return http.StatusBadGateway
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// SkillResolutionFailed writes a response for a required skill reference that
+// could not be resolved within the create deadline, naming the ref and the
+// cause instead of folding the failure into a generic 500/502 (#2546). Every
+// mapped status gets the same {skill, cause} detail payload so the response
+// is actionable without broker logs, including the uncategorized/5xx default.
+//
+// The message is fixed text (see skillResolutionPublicText) carrying ref,
+// the correlation id of the server-side log record; the caller logs the
+// full error with logSkillResolutionFailure.
+func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError, ref string) {
+	skillResolutionFailedWithDetails(w, err, ref, nil)
+}
+
+// skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
+// details (for example the start markers from startFailureDetails) merged
+// alongside the skill and cause.
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, ref string, extra map[string]interface{}) {
+	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
+		w.Header().Set("Retry-After", err.RetryAfter)
+	}
+	details := make(map[string]interface{}, len(extra)+2)
+	for k, v := range extra {
+		details[k] = v
+	}
+	details["skill"] = publicSkillRef(err.URI)
+	details["cause"] = err.Code
+	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
+		"Failed to provision agent: "+skillResolutionPublicText(err, ref), details)
+}
+
+// writeStartContextError writes the HTTP response for an error returned by
+// buildStartContext, honoring startContextError.Status (e.g. the 400 the
+// Kubernetes/"block" rejection sets, ptone/scion#2328) instead of collapsing
+// every failure into a generic 500. Returns the status code actually
+// written, so a caller that also tracks the dispatch attempt's status (e.g.
+// createAgent's markAttemptFailed) can record the same value instead of
+// hardcoding one.
+//
+// A Hub-connectivity failure (IsHubError) keeps its existing, more specific
+// handling — a retryable 503 hub_unreachable, or a redacted 500
+// template_error for any other hydration failure — ahead of the generic
+// Status check; neither of those was the 500-collapsing bug this helper
+// fixes. err need not be a *startContextError at all (any error
+// buildStartContext could return, including ones from other call sites in
+// this package): a plain error still gets the pre-existing generic 500
+// behavior. The exceptions are errSavedProfileUnresolved (a saved profile
+// that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
+// a default profile the Hub's stored profiles lack),
+// errProfileUnresolved (a named profile the Hub's stored profiles lack) and
+// errProfileRuntimeUnresolved (a stored profile whose runtime is missing),
+// which are checked ahead of every other case and written as the retryable
+// 503 from writeProfileUnresolved; their text is client-safe by
+// construction.
+//
+// Within that Hub branch, a missing local file (OriginalErr matches
+// fs.ErrNotExist) is checked first and written as a 422 template_error by
+// writeMissingLocalFileError. Like the rest of the Hub branch, this runs
+// ahead of, and regardless of, any explicit Status. A missing file outside
+// template/harness-config hydration (IsHubError false) is not affected.
+//
+// Any 4xx Status — not just exactly 400 — is treated as a client-caused
+// validation failure: buildStartContext only ever sets Status to a value it
+// means as a client error, so collapsing just one 4xx (400) into the generic
+// 500 path while honoring others would be an arbitrary distinction, not a
+// deliberate one. sce.Message is written to the client verbatim here (never
+// through runtimeOpError's redaction) since buildStartContext composes it
+// itself as client-safe text for exactly this case.
+//
+// Every other path writes a client-safe, op-labeled message built by
+// runtimeOpError (see its own doc comment for why) instead of err's own
+// text, which can carry a container ID, pod name, namespace, node name,
+// image reference, or file path a broker client has no entitlement to see —
+// template hydration's own error text is no exception (it can carry a
+// template path or a storage bucket/object name). Each such path logs the
+// real error server-side first (preferring a *startContextError's
+// OriginalErr, the actual underlying failure, over its own curated Message)
+// so the detail reaches the broker's own diagnostics before being redacted
+// out of the response body.
+//
+// extra holds the caller's agent identification (agent_id, and runtime and
+// profile once resolved) for the log record.
+func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string, extra ...any) int {
+	// errSavedProfileUnresolved's text names only the agent, the profile
+	// and a fixed or ResolveRuntime cause, and is client-safe as is;
+	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
+	// the stored profile names, and errProfileRuntimeUnresolved's the
+	// stored runtime names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) || errors.Is(err, errProfileRuntimeUnresolved) {
+		writeProfileUnresolved(w, err)
+		return http.StatusServiceUnavailable
+	}
+	sce, ok := err.(*startContextError)
+	if !ok {
+		s.logStartContextFailure("buildStartContext failed", op, err, extra)
+		RuntimeError(w, runtimeOpError(op, err).Error())
+		return http.StatusInternalServerError
+	}
+	if sce.IsHubError {
+		// A missing local file is checked ahead of the Hub-connectivity
+		// classification: *fs.PathError satisfies net.Error (it has Timeout
+		// and Temporary methods), so IsHubConnectivityError would otherwise
+		// report a file the broker could not find as a 503 hub_unreachable,
+		// even though the Hub answered (ptone/scion#3531). errors.Is sees
+		// through the templatecache.HubConnectivityError the resolver wraps
+		// such a failure in, via its Unwrap method.
+		if errors.Is(sce.OriginalErr, fs.ErrNotExist) {
+			s.logStartContextFailure("buildStartContext failed: local file missing", op, startContextDiagnostic(sce), extra)
+			writeMissingLocalFileError(w, sce.OriginalErr, op)
+			return http.StatusUnprocessableEntity
+		}
+		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
+			HubUnreachableError(w, sce.OriginalErr.Error())
+			return http.StatusServiceUnavailable
+		}
+		s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
+		TemplateError(w, runtimeOpError(op, err).Error())
+		return http.StatusInternalServerError
+	}
+	if sce.Status == http.StatusServiceUnavailable && sce.Code == ErrCodeProjectStorageUnavailable {
+		// Its message is one of the path-free project storage texts
+		// (runtime.ProjectShareClientTexts): it names the mount point only
+		// as "its configured mount point" and gives the remedy; the path is
+		// in the broker log.
+		writeError(w, sce.Status, sce.Code, sce.Message, sce.Details)
+		return sce.Status
+	}
+	if sce.Status >= 400 && sce.Status < 500 {
+		code := sce.Code
+		if code == "" {
+			code = ErrCodeValidationError
+		}
+		writeError(w, sce.Status, code, sce.Message, sce.Details)
+		return sce.Status
+	}
+	s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
+	RuntimeError(w, runtimeOpError(op, err).Error())
+	return http.StatusInternalServerError
+}
+
+// createRequestProfile returns the runtime profile a create request names,
+// or "" when it names none.
+func createRequestProfile(req CreateAgentRequest) string {
+	if req.Config == nil {
+		return ""
+	}
+	return req.Config.Profile
+}
+
+// logStartContextFailure writes writeStartContextError's one WARN record
+// for a start context failure: op, the caller's extra attributes, and the
+// failure's text and cause through sanitizeFailureCause.
+func (s *Server) logStartContextFailure(msg, op string, err error, extra []any) {
+	args := append([]any{"op", op}, extra...)
+	args = append(args, failureLogAttrs(err, nil)...)
+	args = append(args, runtimeFailureLogAttrs(err)...)
+	s.agentLifecycleLog.Warn(msg, args...)
+}
+
+// writeMissingLocalFileError writes the 422 template_error for a file the
+// broker could not find while preparing an agent's start context (a
+// template or harness-config file, typically). The response names only the
+// missing file's base name, never its full path, since the path can be a
+// Hub-host or broker-internal location the caller has no entitlement to see.
+// The full error is logged server-side by the caller.
+func writeMissingLocalFileError(w http.ResponseWriter, err error, op string) {
+	details := map[string]interface{}{"cause": "file_not_found"}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) && pathErr.Path != "" {
+		details["file"] = filepath.Base(pathErr.Path)
+	}
+	msg := failedOpText(op) + ": a template or harness-config file is missing on this broker. " +
+		"Re-sync the template or harness-config to the Hub; if the Hub uses local storage, " +
+		"make sure it serves those files over HTTP rather than as local file paths."
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeTemplateError, msg, details)
+}
+
+// startContextDiagnostic returns the real, underlying error a
+// *startContextError's own Message may have been built from: its
+// OriginalErr when set (the actual failure buildStartContext composed
+// Message around), or sce itself when OriginalErr is nil (Message IS the
+// whole story — e.g. an unpinned image or an unrecognized GCP metadata
+// mode — so there is nothing more specific to log). Used so a server-side
+// log line records the real detail, not just the client-safe Message the
+// caller is about to redact out of the response body.
+func startContextDiagnostic(sce *startContextError) error {
+	if sce.OriginalErr != nil {
+		return sce.OriginalErr
+	}
+	return sce
+}
+
+// startContextSpanText is startContextDiagnostic's counterpart for a span
+// status message, callable with buildStartContext's raw, not-yet-type-
+// asserted return value: a caller recording err on an OTEL span via
+// span.SetStatus(codes.Error, err.Error()) would otherwise record a
+// *startContextError's own curated, client-safe Message (that type's
+// Error() method returns Message verbatim) on an internal diagnostics
+// surface that should carry the real failure instead — spans are never
+// shown to the broker's own caller the way the HTTP response body is. When
+// err is not a *startContextError at all, its own Error() text is already
+// the real detail, so it passes through unchanged.
+func startContextSpanText(err error) string {
+	if sce, ok := err.(*startContextError); ok {
+		return startContextDiagnostic(sce).Error()
+	}
+	return err.Error()
 }

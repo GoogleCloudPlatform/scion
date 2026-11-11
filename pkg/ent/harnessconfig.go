@@ -42,6 +42,8 @@ type HarnessConfig struct {
 	StorageBucket string `json:"storage_bucket,omitempty"`
 	// StoragePath holds the value of the "storage_path" field.
 	StoragePath string `json:"storage_path,omitempty"`
+	// Layout holds the value of the "layout" field.
+	Layout string `json:"layout,omitempty"`
 	// Files holds the value of the "files" field.
 	Files string `json:"files,omitempty"`
 	// Status holds the value of the "status" field.
@@ -50,6 +52,8 @@ type HarnessConfig struct {
 	ImageStatus harnessconfig.ImageStatus `json:"image_status,omitempty"`
 	// ImageStatusCheckedAt holds the value of the "image_status_checked_at" field.
 	ImageStatusCheckedAt *time.Time `json:"image_status_checked_at,omitempty"`
+	// BuiltImage holds the value of the "built_image" field.
+	BuiltImage string `json:"built_image,omitempty"`
 	// OwnerID holds the value of the "owner_id" field.
 	OwnerID string `json:"owner_id,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
@@ -58,8 +62,6 @@ type HarnessConfig struct {
 	UpdatedBy string `json:"updated_by,omitempty"`
 	// SourceURL holds the value of the "source_url" field.
 	SourceURL string `json:"source_url,omitempty"`
-	// Visibility holds the value of the "visibility" field.
-	Visibility string `json:"visibility,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -72,7 +74,7 @@ func (*HarnessConfig) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case harnessconfig.FieldName, harnessconfig.FieldSlug, harnessconfig.FieldDisplayName, harnessconfig.FieldDescription, harnessconfig.FieldHarness, harnessconfig.FieldConfig, harnessconfig.FieldContentHash, harnessconfig.FieldScope, harnessconfig.FieldScopeID, harnessconfig.FieldStorageURI, harnessconfig.FieldStorageBucket, harnessconfig.FieldStoragePath, harnessconfig.FieldFiles, harnessconfig.FieldStatus, harnessconfig.FieldImageStatus, harnessconfig.FieldOwnerID, harnessconfig.FieldCreatedBy, harnessconfig.FieldUpdatedBy, harnessconfig.FieldSourceURL, harnessconfig.FieldVisibility:
+		case harnessconfig.FieldName, harnessconfig.FieldSlug, harnessconfig.FieldDisplayName, harnessconfig.FieldDescription, harnessconfig.FieldHarness, harnessconfig.FieldConfig, harnessconfig.FieldContentHash, harnessconfig.FieldScope, harnessconfig.FieldScopeID, harnessconfig.FieldStorageURI, harnessconfig.FieldStorageBucket, harnessconfig.FieldStoragePath, harnessconfig.FieldLayout, harnessconfig.FieldFiles, harnessconfig.FieldStatus, harnessconfig.FieldImageStatus, harnessconfig.FieldBuiltImage, harnessconfig.FieldOwnerID, harnessconfig.FieldCreatedBy, harnessconfig.FieldUpdatedBy, harnessconfig.FieldSourceURL:
 			values[i] = new(sql.NullString)
 		case harnessconfig.FieldImageStatusCheckedAt, harnessconfig.FieldCreated, harnessconfig.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -171,6 +173,12 @@ func (_m *HarnessConfig) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.StoragePath = value.String
 			}
+		case harnessconfig.FieldLayout:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field layout", values[i])
+			} else if value.Valid {
+				_m.Layout = value.String
+			}
 		case harnessconfig.FieldFiles:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field files", values[i])
@@ -196,6 +204,12 @@ func (_m *HarnessConfig) assignValues(columns []string, values []any) error {
 				_m.ImageStatusCheckedAt = new(time.Time)
 				*_m.ImageStatusCheckedAt = value.Time
 			}
+		case harnessconfig.FieldBuiltImage:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field built_image", values[i])
+			} else if value.Valid {
+				_m.BuiltImage = value.String
+			}
 		case harnessconfig.FieldOwnerID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field owner_id", values[i])
@@ -219,12 +233,6 @@ func (_m *HarnessConfig) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field source_url", values[i])
 			} else if value.Valid {
 				_m.SourceURL = value.String
-			}
-		case harnessconfig.FieldVisibility:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field visibility", values[i])
-			} else if value.Valid {
-				_m.Visibility = value.String
 			}
 		case harnessconfig.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -310,6 +318,9 @@ func (_m *HarnessConfig) String() string {
 	builder.WriteString("storage_path=")
 	builder.WriteString(_m.StoragePath)
 	builder.WriteString(", ")
+	builder.WriteString("layout=")
+	builder.WriteString(_m.Layout)
+	builder.WriteString(", ")
 	builder.WriteString("files=")
 	builder.WriteString(_m.Files)
 	builder.WriteString(", ")
@@ -324,6 +335,9 @@ func (_m *HarnessConfig) String() string {
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")
+	builder.WriteString("built_image=")
+	builder.WriteString(_m.BuiltImage)
+	builder.WriteString(", ")
 	builder.WriteString("owner_id=")
 	builder.WriteString(_m.OwnerID)
 	builder.WriteString(", ")
@@ -335,9 +349,6 @@ func (_m *HarnessConfig) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("source_url=")
 	builder.WriteString(_m.SourceURL)
-	builder.WriteString(", ")
-	builder.WriteString("visibility=")
-	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

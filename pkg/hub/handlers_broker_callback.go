@@ -34,7 +34,7 @@ type brokerCallbackRequest struct {
 // validated by BrokerAuthMiddleware).
 func (s *Server) handleBrokerCallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

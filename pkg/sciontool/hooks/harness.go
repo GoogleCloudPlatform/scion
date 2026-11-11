@@ -77,20 +77,34 @@ func (p *HarnessProcessor) ProcessJSON(data []byte, dialectName string) error {
 
 // ProcessRaw processes a raw event map.
 func (p *HarnessProcessor) ProcessRaw(data map[string]interface{}, dialectName string) error {
+	event, err := p.ParseRaw(data, dialectName)
+	if err != nil {
+		return err
+	}
+	return p.Dispatch(event)
+}
+
+// ParseRaw normalizes a raw event map with the named dialect (or the default
+// dialect when dialectName is empty) without dispatching it.
+func (p *HarnessProcessor) ParseRaw(data map[string]interface{}, dialectName string) (*Event, error) {
 	if dialectName == "" {
 		dialectName = p.DefaultDialect
 	}
 
 	dialect, ok := p.Dialects[dialectName]
 	if !ok {
-		return fmt.Errorf("unknown dialect: %s", dialectName)
+		return nil, fmt.Errorf("unknown dialect: %s", dialectName)
 	}
 
 	event, err := dialect.Parse(data)
 	if err != nil {
-		return fmt.Errorf("parsing event with dialect %s: %w", dialectName, err)
+		return nil, fmt.Errorf("parsing event with dialect %s: %w", dialectName, err)
 	}
+	return event, nil
+}
 
+// Dispatch calls every registered handler for an already parsed event.
+func (p *HarnessProcessor) Dispatch(event *Event) error {
 	return p.dispatchEvent(event)
 }
 

@@ -1,0 +1,7 @@
+Runtime target
+--------------
+ID:                         rt-1234
+Type:                       kubernetes
+Display name:               Cluster A
+
+Reported defaults: none reported yet

@@ -118,6 +118,20 @@ func (_c *InviteCodeCreate) SetNillableCreated(v *time.Time) *InviteCodeCreate {
 	return _c
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *InviteCodeCreate) SetIssuanceID(v string) *InviteCodeCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *InviteCodeCreate) SetNillableIssuanceID(v *string) *InviteCodeCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *InviteCodeCreate) SetID(v uuid.UUID) *InviteCodeCreate {
 	_c.mutation.SetID(v)
@@ -309,6 +323,10 @@ func (_c *InviteCodeCreate) createSpec() (*InviteCode, *sqlgraph.CreateSpec) {
 		_spec.SetField(invitecode.FieldCreated, field.TypeTime, value)
 		_node.Created = value
 	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(invitecode.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
+	}
 	return _node, _spec
 }
 
@@ -488,6 +506,9 @@ func (u *InviteCodeUpsertOne) UpdateNewValues() *InviteCodeUpsertOne {
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(invitecode.FieldCreated)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(invitecode.FieldIssuanceID)
 		}
 	}))
 	return u
@@ -831,6 +852,9 @@ func (u *InviteCodeUpsertBulk) UpdateNewValues() *InviteCodeUpsertBulk {
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(invitecode.FieldCreated)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(invitecode.FieldIssuanceID)
 			}
 		}
 	}))

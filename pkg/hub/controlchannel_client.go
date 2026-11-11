@@ -21,10 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
-	"time"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -104,12 +108,14 @@ func (c *ControlChannelBrokerClient) CreateAgent(ctx context.Context, brokerID, 
 }
 
 // StartAgent starts an agent via control channel.
-func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/start", url.PathEscape(agentID))
 	if projectID != "" {
 		path += "?projectId=" + url.QueryEscape(projectID)
 	}
+	path = withRunIDURL(path, extras.RunID)
+	path = withDispatchAgentIDURL(ctx, path)
 
 	payload := map[string]interface{}{}
 	if task != "" {
@@ -148,13 +154,17 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 	if resume {
 		payload["resume"] = true
 	}
+	// Carry the same dispatch-time metadata create sends, so the broker can
+	// attach a working skill resolver and recreate the workspace on every
+	// path that can reach ProvisionAgent, not just create.
+	applyStartExtras(payload, extras)
 
 	var body []byte
 	if len(payload) > 0 {
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request: %w", err)
+			return nil, fmt.Errorf("failed to marshal request: %w (%w)", err, errStartRequestNotSent)
 		}
 	}
 
@@ -172,49 +182,62 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 }
 
 // StopAgent stops an agent via control channel.
-func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/stop", url.PathEscape(agentID))
-	query := ""
-	if projectID != "" {
-		query = "projectId=" + url.QueryEscape(projectID)
-	}
+	query := stopAgentQuery(ctx, projectID, runID)
 	_, err := c.doRequest(ctx, brokerID, "POST", path, query, nil)
-	return err
+	return stopAgentError(err, runID)
 }
 
 // RestartAgent restarts an agent via control channel.
-func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/restart", url.PathEscape(agentID))
 	query := ""
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
-	var body []byte
+	query = withRunIDQuery(query, extras.RunID)
+	query = withRecordedRuntimeQuery(ctx, query)
+	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
-		payload := map[string]interface{}{
-			"resolvedEnv": resolvedEnv,
-		}
+		payload["resolvedEnv"] = resolvedEnv
+	}
+	// Carry the same dispatch-time metadata the create/start paths send, so
+	// the broker can attach a working skill resolver when restart
+	// (re-)provisions the agent.
+	applyStartExtras(payload, extras)
+	var body []byte
+	if len(payload) > 0 {
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to marshal restart request: %w", err)
+			return nil, fmt.Errorf("failed to marshal restart request: %w", err)
 		}
 	}
-	_, err := c.doRequest(ctx, brokerID, "POST", path, query, body)
-	return err
+	resp, err := c.doRequest(ctx, brokerID, "POST", path, query, body)
+	if err != nil {
+		return nil, err
+	}
+	// As on HTTP: an undecodable body is not an error.
+	var result RemoteAgentResponse
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return nil, nil
+	}
+	return &result, nil
 }
 
 // ResetAuthAgent injects a fresh auth token into a running agent via the control channel.
-func (c *ControlChannelBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+func (c *ControlChannelBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/reset-auth", url.PathEscape(agentID))
 	query := ""
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
-	body, err := json.Marshal(map[string]string{"token": token})
+	query = withRecordedRuntimeQuery(ctx, query)
+	body, err := json.Marshal(resetAuthBody(token, transportToken))
 	if err != nil {
 		return fmt.Errorf("failed to marshal reset-auth request: %w", err)
 	}
@@ -223,25 +246,17 @@ func (c *ControlChannelBrokerClient) ResetAuthAgent(ctx context.Context, brokerI
 }
 
 // DeleteAgent deletes an agent via control channel.
-func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s", url.PathEscape(agentID))
-	query := fmt.Sprintf("deleteFiles=%t&removeBranch=%t", deleteFiles, removeBranch)
-	if projectID != "" {
-		query += "&projectId=" + url.QueryEscape(projectID)
-	}
-	if softDelete {
-		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.Format(time.RFC3339)))
-	}
-	resp, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)
-	if err != nil {
-		return err
-	}
-	// Allow 404 for idempotent delete
-	if resp.StatusCode == http.StatusNotFound {
-		return nil
-	}
-	return nil
+	query := deleteAgentQuery(ctx, projectID, opts)
+	_, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)
+	// A 404 means the broker has no such agent in this project; treat it
+	// as an idempotent success, matching the HTTP transport
+	// (brokerHTTPTransport.DeleteAgent), unless the broker refused a
+	// run-scoped delete because another run holds the name
+	// (deleteAgentError, ptone/scion#3080).
+	return deleteAgentError(err, opts.RunID)
 }
 
 // MessageAgent sends a message to an agent via control channel.
@@ -252,6 +267,7 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 
 	// Build the request body with structured message if available
 	reqBody := map[string]interface{}{
@@ -269,6 +285,19 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	} else {
 		reqBody["message"] = message
 	}
+	// #1820: carry the persisted hub message ID so the broker can report a
+	// buffered-delivery failure back against the right row.
+	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
+		reqBody["message_id"] = msgID
+	}
+	// ptone/scion#4596: the attachments the broker downloads and writes into
+	// the agent's home before delivering the text.
+	if wire := dispatchAttachmentsFromContext(ctx); len(wire) > 0 {
+		reqBody["attachments"] = wire
+		if days := dispatchRetentionFromContext(ctx); days > 0 {
+			reqBody["attachment_retention_days"] = days
+		}
+	}
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -279,6 +308,73 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	return err
 }
 
+// ExecuteKeys dispatches a typed keys request to a runtime broker's dedicated
+// keys route via the control channel. It implements agentkeys.BrokerClient
+// and is single-attempt: no reconnect resend on a mid-flight failure.
+//
+// Three pre-send failure classes — the connection check, the marshal/tunnel
+// body-size checks, and building+signing the request envelope
+// (c.buildRequestHeaders) — are all proven before anything is transmitted, so
+// each is reported as agentkeys.ErrNotDispatched (there is no HTTP fallback
+// or durable queue for keys, unlike MessageAgent's ErrMessageDeferred). This
+// method deliberately does not go through c.doRequestRaw, which folds
+// signing into the same call as the tunnel round trip and would make a
+// signing failure indistinguishable from a genuinely uncertain one: only the
+// c.manager.TunnelRequest call itself, below, does not prove the broker never
+// received or began acting on the request, so only its failure is returned
+// as a plain, unclassified error — agentkeys.ClassifyDispatchError maps that
+// to OutcomeKeysOutcomeUnknown, the honest "may have run" outcome required by
+// .design/agent-keys-contract.md §2.5/§4.3.
+func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
+	_ = brokerEndpoint
+	if !c.manager.IsConnected(brokerID) {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: broker %s not connected via control channel", agentkeys.ErrNotDispatched, brokerID)
+	}
+
+	req.ExecuteBefore = req.ExecuteBefore.UTC()
+	body, err := json.Marshal(req)
+	if err != nil {
+		// Proven before anything was sent: no envelope was ever built.
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to marshal keys request: %v", agentkeys.ErrNotDispatched, err)
+	}
+
+	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
+	query := agentkeys.BrokerProjectIDQueryParam + "=" + url.QueryEscape(req.ProjectID)
+	query = withRecordedRuntimeQuery(ctx, query)
+
+	if err := checkBodySize(agentkeys.BrokerRouteMethod, path, body); err != nil {
+		// Too large to tunnel safely: a Hub-side, pre-send capability limit,
+		// not a broker decision, and keys has no HTTP-fallback path to retry
+		// through (unlike MessageAgent/HybridBrokerClient). err wraps a
+		// *ErrPayloadTooLarge (and errStartRequestNotSent); wrap with %w (not
+		// %v) so a caller can still errors.As it out from underneath the
+		// ErrNotDispatched wrap.
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
+	}
+
+	// Build and sign the envelope directly here rather than going through
+	// doRequestRaw, which repeats the connected/size checks above and folds
+	// header-building (signing) in with the tunnel round trip itself. Signing
+	// failure (e.g. a missing/expired broker secret) is proven pre-send, the
+	// same as the checks above — only the c.manager.TunnelRequest call below
+	// can fail after the envelope may have reached the broker, so that is the
+	// one call whose error is genuinely uncertain rather than ErrNotDispatched.
+	headers, err := c.buildRequestHeaders(ctx, brokerID, agentkeys.BrokerRouteMethod, path, query, body)
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %w", agentkeys.ErrNotDispatched, err)
+	}
+
+	envelope := wsprotocol.NewRequestEnvelope(uuid.New().String(), agentkeys.BrokerRouteMethod, path, query, headers, body)
+	resp, err := c.manager.TunnelRequest(ctx, brokerID, envelope)
+	if err != nil {
+		// The tunnel round trip is the one step that may have reached the
+		// broker before failing (a reconnect, a lost response, ...): its
+		// error is honestly uncertain, not a proven non-dispatch.
+		return agentkeys.BrokerResult{}, fmt.Errorf("keys: control channel dispatch failed: %w", err)
+	}
+	return decodeBrokerKeysResponse(resp.StatusCode, resp.Body, req.OperationID)
+}
+
 // CheckAgentPrompt checks if an agent has a non-empty prompt.md file via control channel.
 func (c *ControlChannelBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) (bool, error) {
 	_ = brokerEndpoint
@@ -287,6 +383,7 @@ func (c *ControlChannelBrokerClient) CheckAgentPrompt(ctx context.Context, broke
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 
 	resp, err := c.doRequest(ctx, brokerID, "POST", path, query, nil)
 	if err != nil {
@@ -316,7 +413,8 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		// Keep the broker's status for the hub handler to relay (#2546 R2).
+		return nil, nil, newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
 	}
 
 	if resp.StatusCode == http.StatusAccepted {
@@ -349,6 +447,7 @@ func (c *ControlChannelBrokerClient) GetAgentLogs(ctx context.Context, brokerID,
 		}
 		query += "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 	resp, err := c.doRequest(ctx, brokerID, "GET", path, query, nil)
 	if err != nil {
 		return "", err
@@ -364,6 +463,7 @@ func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, br
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 
 	body, err := json.Marshal(map[string]interface{}{
 		"command": command,
@@ -394,13 +494,16 @@ func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerI
 	if projectID != "" {
 		path += "?project_id=" + url.QueryEscape(projectID)
 	}
-	resp, err := c.doRequest(ctx, brokerID, "DELETE", path, "", nil)
+	// doRequestRaw, not doRequest: doRequest turns every status >= 400 into
+	// an error, 404 included. A 404 is success for an idempotent cleanup, as
+	// over HTTP (brokerHTTPTransport.CleanupProject); any other error status
+	// is the broker's answer (a 409 keeps its project directory).
+	resp, err := c.doRequestRaw(ctx, brokerID, "DELETE", path, "", nil)
 	if err != nil {
 		return err
 	}
-	// Allow 404 for idempotent cleanup
-	if resp.StatusCode == http.StatusNotFound {
-		return nil
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		return newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
 	}
 	return nil
 }
@@ -424,7 +527,9 @@ func (c *ControlChannelBrokerClient) ImageStatus(ctx context.Context, brokerID, 
 		return nil, &BrokerUnsupportedError{StatusCode: resp.StatusCode}
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		// A plain error, as before; the body goes to the hub log only.
+		se := newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
+		return nil, errors.New(se.Error())
 	}
 
 	var result BrokerImageStatusResponse
@@ -435,7 +540,7 @@ func (c *ControlChannelBrokerClient) ImageStatus(ctx context.Context, brokerID, 
 }
 
 // PullImage asks a broker to pull an image via control channel.
-// Note: inherits the tunnel's RequestTimeout (default 120s). Large image pulls
+// Note: inherits the tunnel's RequestTimeout (brokerRequestTimeout, 180s). Large image pulls
 // may exceed this timeout and report an error even though the pull continues
 // broker-side. A future async-pull mechanism would address this limitation.
 func (c *ControlChannelBrokerClient) PullImage(ctx context.Context, brokerID, image string) error {
@@ -457,20 +562,25 @@ func (c *ControlChannelBrokerClient) DeleteImage(ctx context.Context, brokerID, 
 	return err
 }
 
-// checkBodySize returns an *ErrPayloadTooLarge if the body is too large to
-// tunnel safely through the control channel WebSocket without exceeding the
+// checkBodySize returns an error wrapping *ErrPayloadTooLarge (and
+// errStartRequestNotSent, see below) if the body is too large to tunnel
+// safely through the control channel WebSocket without exceeding the
 // broker's read limit. The Body field is base64-encoded in the RequestEnvelope
 // JSON, so the actual wire size is roughly len(body)*4/3 plus envelope
 // metadata. Callers should use errors.As(err, &ErrPayloadTooLarge{}) to detect
 // this condition and fall back to direct HTTP.
 func checkBodySize(method, path string, body []byte) error {
 	if len(body) > maxControlChannelBodySize {
-		return &ErrPayloadTooLarge{
+		// Wrapped with errStartRequestNotSent: this check runs before the
+		// request is ever written to the connection, so a start that trips
+		// it never reached the broker either. errors.As(err, &ErrPayloadTooLarge{})
+		// still works through the wrap.
+		return fmt.Errorf("%w (%w)", &ErrPayloadTooLarge{
 			Method: method,
 			Path:   path,
 			Size:   len(body),
 			Limit:  maxControlChannelBodySize,
-		}
+		}, errStartRequestNotSent)
 	}
 	return nil
 }
@@ -480,7 +590,7 @@ func checkBodySize(method, path string, body []byte) error {
 // inspecting resp.StatusCode themselves.
 func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID, method, path, query string, body []byte) (*wsprotocol.ResponseEnvelope, error) {
 	if !c.manager.IsConnected(brokerID) {
-		return nil, fmt.Errorf("broker %s not connected via control channel", brokerID)
+		return nil, fmt.Errorf("broker %s not connected via control channel: %w", brokerID, errStartBrokerNotConnected)
 	}
 
 	if err := checkBodySize(method, path, body); err != nil {
@@ -504,7 +614,7 @@ func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID,
 // doRequest tunnels an HTTP request through the control channel.
 func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, method, path, query string, body []byte) (*wsprotocol.ResponseEnvelope, error) {
 	if !c.manager.IsConnected(brokerID) {
-		return nil, fmt.Errorf("broker %s not connected via control channel", brokerID)
+		return nil, fmt.Errorf("broker %s not connected via control channel: %w", brokerID, errStartBrokerNotConnected)
 	}
 
 	if err := checkBodySize(method, path, body); err != nil {
@@ -523,10 +633,209 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		return nil, newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
 	}
 
 	return resp, nil
+}
+
+// brokerStatusError is returned by doRequest, CreateAgentWithGather and
+// brokerHTTPError when the broker answers with an HTTP error status, so
+// callers can react to specific codes (e.g. 404 on an idempotent delete)
+// instead of parsing the message. RetryAfter is the broker's Retry-After.
+//
+// Body is the broker's raw answer. It never goes into Error(), because error
+// text is copied into client responses and stored messages: Error() names
+// only the status and, when well formed, the broker's error code. The body
+// reaches the hub log only, rendered by brokerBodyForLog, once, when
+// newBrokerStatusError builds the error; LogValue leaves it out.
+type brokerStatusError struct {
+	StatusCode int
+	Body       string
+	RetryAfter string
+}
+
+func (e *brokerStatusError) Error() string {
+	if code := e.brokerErrorCode(); brokerCodePattern.MatchString(code) {
+		return fmt.Sprintf("runtime broker returned error %d (%s)", e.StatusCode, code)
+	}
+	return fmt.Sprintf("runtime broker returned error %d", e.StatusCode)
+}
+
+// LogValue renders the error for the hub log as its text, status, code and
+// body length, without the body: newBrokerStatusError has already logged
+// the body once.
+func (e *brokerStatusError) LogValue() slog.Value {
+	return slog.GroupValue(append([]slog.Attr{slog.String("text", e.Error())},
+		brokerStatusLogAttrs(e.StatusCode, e.Body)...)...)
+}
+
+// brokerErrorGenericMessage is the client-facing text used in place of a
+// broker answer that carries no JSON error message.
+const brokerErrorGenericMessage = "the runtime broker returned an error"
+
+// maxBrokerBodyLogBytes caps how much of a broker's error body is written
+// to the hub log; body_len records the full length.
+const maxBrokerBodyLogBytes = 2 << 10
+
+// newBrokerStatusError builds the error for a broker's HTTP error answer and
+// logs the answer once: the broker id, the status, the broker's error code
+// and the capped, rendered body with its full length. A 404 is logged at
+// debug level (idempotent deletes and not-found probes answer 404 as a
+// matter of course), any other status at warn. Nothing from the request
+// (headers included) is logged.
+func newBrokerStatusError(brokerID string, status int, body []byte, retryAfter string) *brokerStatusError {
+	se := &brokerStatusError{StatusCode: status, Body: string(body), RetryAfter: retryAfter}
+	args := []any{slog.String("broker_id", brokerID)}
+	for _, a := range brokerStatusLogAttrs(status, se.Body) {
+		args = append(args, a)
+	}
+	args = append(args, slog.String("body", brokerBodyForLog(se.Body)))
+	level := slog.LevelWarn
+	if status == http.StatusNotFound {
+		level = slog.LevelDebug
+	}
+	slog.Log(context.Background(), level, "runtime broker returned an error", args...)
+	return se
+}
+
+// brokerStatusLogAttrs returns the log attributes for a broker error answer
+// without its body: status, error code (only when well formed) and the full
+// body length.
+func brokerStatusLogAttrs(status int, body string) []slog.Attr {
+	se := brokerStatusError{StatusCode: status, Body: body}
+	code := se.brokerErrorCode()
+	if !brokerCodePattern.MatchString(code) {
+		code = ""
+	}
+	return []slog.Attr{
+		slog.Int("status", status),
+		slog.String("code", code),
+		slog.Int("body_len", len(body)),
+	}
+}
+
+// brokerBodyForLog renders a broker error body for the hub log: at most
+// maxBrokerBodyLogBytes of it, rendered by renderBrokerText, so the body
+// cannot forge or split log lines.
+func brokerBodyForLog(body string) string {
+	return renderBrokerText(body, maxBrokerBodyLogBytes)
+}
+
+// maxBrokerMessageBytes caps a broker's JSON error message relayed to a
+// client by brokerErrorMessage.
+const maxBrokerMessageBytes = 512
+
+// renderBrokerText renders broker-supplied text with invalid UTF-8, control
+// characters (newlines included) and other non-printable runes replaced by
+// U+FFFD, and returns at most maxBytes of the RESULT, cut on a rune
+// boundary. The budget is on the output because a replaced byte grows to
+// the 3-byte U+FFFD; the input pre-cut (also on a rune boundary) only
+// bounds the work.
+func renderBrokerText(text string, maxBytes int) string {
+	if len(text) > maxBytes {
+		n := maxBytes
+		for n > 0 && !utf8.RuneStart(text[n]) {
+			n--
+		}
+		text = text[:n]
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		i += size
+		if (r == utf8.RuneError && size == 1) || !unicode.IsPrint(r) {
+			r = utf8.RuneError
+		}
+		if b.Len()+utf8.RuneLen(r) > maxBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// isBrokerStatus reports whether err is a broker HTTP error with the given code.
+func isBrokerStatus(err error, code int) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.StatusCode == code
+}
+
+// isBrokerAgentNotFound reports whether err is the broker's 404 answer with
+// error code agent_not_found. For a message dispatch this means the broker
+// found no running container for the agent.
+func isBrokerAgentNotFound(err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
+		return false
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal([]byte(se.Body), &body) == nil && body.Error.Code == ErrCodeAgentNotFound
+}
+
+// brokerErrorMessage returns the message from a broker JSON error body
+// ({"error":{"message":...}}), capped at maxBrokerMessageBytes and rendered
+// by renderBrokerText, or brokerErrorGenericMessage when the body is not in
+// that form or its message is empty. The raw body is never returned.
+func (e *brokerStatusError) brokerErrorMessage() string {
+	if msg, ok := e.brokerErrorRawMessage(); ok {
+		return renderBrokerText(msg, maxBrokerMessageBytes)
+	}
+	return brokerErrorGenericMessage
+}
+
+// brokerErrorRawMessage returns the message of a broker JSON error body
+// ({"error":{"message":...}}) as sent, and true, when the body decodes
+// without error and the message is non-empty. It is the one read of the
+// message that both brokerErrorMessage and brokerRecordText use, so the text
+// a relay filter judges and the text it renders come from the same decode.
+// The result is raw broker text: render it before it leaves the hub.
+func (e *brokerStatusError) brokerErrorRawMessage() (string, bool) {
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err == nil && body.Error.Message != "" {
+		return body.Error.Message, true
+	}
+	return "", false
+}
+
+// brokerErrorCode returns the machine-readable code from a broker JSON error
+// body ({"error":{"code":...}}), or "" if the body is not in that form.
+// Used by isConfirmedBrokerRejection to tell the broker's own JSON error
+// envelope (runtimebroker's writeError) apart from a generic error page a
+// proxy or load balancer in front of the broker might return instead.
+func (e *brokerStatusError) brokerErrorCode() string {
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err == nil {
+		return body.Error.Code
+	}
+	return ""
+}
+
+// brokerErrorDetails returns error.details from a broker JSON error body,
+// or nil if the body has none or is not in that form.
+func (e *brokerStatusError) brokerErrorDetails() map[string]interface{} {
+	var body struct {
+		Error struct {
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err != nil {
+		return nil
+	}
+	return body.Error.Details
 }
 
 func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, brokerID, method, path, query string, body []byte) (map[string]string, error) {
@@ -550,12 +859,12 @@ func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, br
 
 	httpReq, err := http.NewRequestWithContext(ctx, method, tunnelURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build control channel request for signing: %w", err)
+		return nil, fmt.Errorf("failed to build control channel request for signing: %w (%w)", err, errStartRequestNotSent)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	if err := c.signer.Sign(ctx, httpReq, brokerID); err != nil {
-		return nil, fmt.Errorf("failed to sign control channel request: %w", err)
+		return nil, fmt.Errorf("failed to sign control channel request: %w (%w)", err, errStartRequestNotSent)
 	}
 
 	for key := range httpReq.Header {
@@ -579,6 +888,10 @@ type HybridBrokerClient struct {
 	// only (correctness comes from durable intent + drain); injected so route()
 	// is unit-testable. Nil means "no affinity info" (treated as no owner).
 	affinity func(ctx context.Context, brokerID string) (owner string, alive bool)
+	// routed, when set (SetConduitRouting), sends the transient operations
+	// (logs, exec, images, project cleanup) through the conduit Router
+	// first; the control channel and HTTP paths below are the fallback.
+	routed *ControlChannelBrokerClient
 }
 
 // NewHybridBrokerClient creates a hybrid client that prefers control channel.
@@ -621,12 +934,12 @@ func (c *HybridBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEn
 // routeLocal uses the control-channel tunnel (unchanged fast path), routeHTTP
 // falls back to the broker's HTTP endpoint, and routeForward/routeUndeliverable
 // return ErrLifecycleDeferred so the caller can write durable intent + wait.
-func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
+		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 	case routeHTTP:
-		return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
+		return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 	default:
 		return nil, ErrLifecycleDeferred
 	}
@@ -635,12 +948,12 @@ func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEnd
 // StopAgent stops an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+		return c.controlChannel.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 	case routeHTTP:
-		return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+		return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 	default:
 		return ErrLifecycleDeferred
 	}
@@ -649,25 +962,25 @@ func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndp
 // RestartAgent restarts an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+		return c.controlChannel.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 	case routeHTTP:
-		return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+		return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 	default:
-		return ErrLifecycleDeferred
+		return nil, ErrLifecycleDeferred
 	}
 }
 
 // ResetAuthAgent injects a fresh auth token into a running agent, using route()
 // to decide the delivery path.
-func (c *HybridBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+func (c *HybridBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+		return c.controlChannel.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token, transportToken)
 	case routeHTTP:
-		return c.httpClient.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+		return c.httpClient.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token, transportToken)
 	default:
 		return ErrLifecycleDeferred
 	}
@@ -676,12 +989,12 @@ func (c *HybridBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, broke
 // DeleteAgent deletes an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (c *HybridBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
+		return c.controlChannel.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, opts)
 	case routeHTTP:
-		return c.httpClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
+		return c.httpClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, opts)
 	default:
 		return ErrLifecycleDeferred
 	}
@@ -700,6 +1013,39 @@ func (c *HybridBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerE
 		return c.httpClient.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
 	default:
 		return ErrMessageDeferred
+	}
+}
+
+// ExecuteKeys dispatches a typed keys request, using route() to decide the
+// delivery path. routeLocal tunnels through the control channel, routeHTTP
+// falls back to the broker's direct HTTP endpoint. Unlike every lifecycle and
+// message method above, routeForward and routeUndeliverable do not defer:
+// keys has no durable queue or cross-node forwarding to defer to
+// (.design/agent-keys-contract.md §4.1's "no immediate route" rule), so both
+// return agentkeys.ErrNotDispatched directly — never ErrLifecycleDeferred or
+// ErrMessageDeferred, which would imply a retry/durable-delivery path that
+// does not exist for keys. This is also the deployment limit #2184 asks to
+// document: in a multi-Hub deployment, a keys request that lands on a Hub
+// which does not hold the target broker's control-channel socket returns
+// keys_unavailable (503) even when some other Hub is connected to it — there
+// is no transparent cross-Hub forwarding for keys (contract AK-29).
+func (c *HybridBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
+		return c.controlChannel.ExecuteKeys(ctx, brokerID, brokerEndpoint, agentSlug, req)
+	case routeHTTP:
+		keysHTTP, ok := c.httpClient.(agentkeys.BrokerClient)
+		if !ok {
+			// A wiring defect (the configured HTTP client doesn't implement
+			// agentkeys.BrokerClient), not a runtime condition — proven
+			// before any request could have been built, so this is
+			// consistent with HTTPAgentDispatcher.DispatchAgentKeys treating
+			// the same defect as ErrNotDispatched.
+			return agentkeys.BrokerResult{}, fmt.Errorf("%w: HTTP client does not support keys dispatch", agentkeys.ErrNotDispatched)
+		}
+		return keysHTTP.ExecuteKeys(ctx, brokerID, brokerEndpoint, agentSlug, req)
+	default:
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: no immediate route to broker %s (routeForward/undeliverable)", agentkeys.ErrNotDispatched, brokerID)
 	}
 }
 
@@ -746,6 +1092,9 @@ func (c *HybridBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID
 
 // GetAgentLogs retrieves agent.log content, preferring control channel.
 func (c *HybridBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, tail int) (string, error) {
+	if out, done, err := c.routedGetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, projectID, tail); done {
+		return out, err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, projectID, tail)
 	}
@@ -754,6 +1103,9 @@ func (c *HybridBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerE
 
 // ExecAgent executes a command in an agent, preferring control channel.
 func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, command []string, timeout int) (string, int, error) {
+	if out, code, done, err := c.routedExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout); done {
+		return out, code, err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout)
 	}
@@ -761,6 +1113,9 @@ func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndp
 }
 
 func (c *HybridBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
+	if done, err := c.routedCleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID); done {
+		return err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 	}
@@ -777,6 +1132,9 @@ type brokerImageClient interface {
 
 // ImageStatus queries a broker's local image state, preferring control channel.
 func (c *HybridBrokerClient) ImageStatus(ctx context.Context, brokerID, brokerEndpoint, shortImage, longImage string) (*BrokerImageStatusResponse, error) {
+	if resp, done, err := c.routedImageStatus(ctx, brokerID, shortImage, longImage); done {
+		return resp, err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.ImageStatus(ctx, brokerID, shortImage, longImage)
 	}
@@ -788,6 +1146,9 @@ func (c *HybridBrokerClient) ImageStatus(ctx context.Context, brokerID, brokerEn
 
 // PullImage asks a broker to pull an image, preferring control channel.
 func (c *HybridBrokerClient) PullImage(ctx context.Context, brokerID, brokerEndpoint, image string) error {
+	if done, err := c.routedPullImage(ctx, brokerID, image); done {
+		return err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.PullImage(ctx, brokerID, image)
 	}
@@ -799,6 +1160,9 @@ func (c *HybridBrokerClient) PullImage(ctx context.Context, brokerID, brokerEndp
 
 // DeleteImage asks a broker to remove a local image, preferring control channel.
 func (c *HybridBrokerClient) DeleteImage(ctx context.Context, brokerID, brokerEndpoint, image string) error {
+	if done, err := c.routedDeleteImage(ctx, brokerID, image); done {
+		return err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.DeleteImage(ctx, brokerID, image)
 	}

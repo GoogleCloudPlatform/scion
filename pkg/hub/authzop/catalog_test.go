@@ -18,10 +18,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/hack/areadirs"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,12 +57,13 @@ func TestCatalogNoDuplicateIDs(t *testing.T) {
 }
 
 // TestCatalogNoDuplicateEntryPoints ensures no two operations claim the same
-// entry point.
+// entry point. Entry points that share a kind, method and pattern are
+// distinct only when their Variant differs.
 func TestCatalogNoDuplicateEntryPoints(t *testing.T) {
 	seen := make(map[string]OperationID)
 	for _, spec := range Catalog {
 		for _, ep := range spec.EntryPoints {
-			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
+			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern + "#" + ep.Variant
 			if owner, ok := seen[key]; ok {
 				t.Errorf("entry point %s claimed by both %q and %q", key, owner, spec.ID)
 			}
@@ -70,6 +75,26 @@ func TestCatalogNoDuplicateEntryPoints(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Entry point exemption validation
 // ---------------------------------------------------------------------------
+
+// TestPendingEntryResponseSensitivity ensures every pending entry's response
+// sensitivity is a known value, set only on HTTP-like entry points.
+func TestPendingEntryResponseSensitivity(t *testing.T) {
+	tagged := 0
+	for i, pe := range PendingBearerDispositions {
+		if !pe.Response.Valid() {
+			t.Errorf("pending entry [%d] (%s %s): unknown response sensitivity %q", i, pe.Method, pe.Pattern, pe.Response)
+		}
+		if pe.Response != "" {
+			tagged++
+			if !httpLikeEntryPoints[pe.Kind] {
+				t.Errorf("pending entry [%d] (%s): response sensitivity on a %s entry point", i, pe.Pattern, pe.Kind)
+			}
+		}
+	}
+	if tagged == 0 {
+		t.Error("expected at least one pending entry with a response sensitivity")
+	}
+}
 
 // TestEntryPointExemptionsAreValid ensures every exemption has required fields
 // and uses a valid exemption kind.
@@ -97,6 +122,9 @@ func TestEntryPointExemptionsAreValid(t *testing.T) {
 			t.Errorf("exemption [%d] (%s): duplicate pattern", i, ex.Pattern)
 		}
 		seen[ex.Pattern] = true
+		if !ex.Response.Valid() {
+			t.Errorf("exemption [%d] (%s): unknown response sensitivity %q", i, ex.Pattern, ex.Response)
+		}
 	}
 	t.Logf("entry point exemptions: %d validated", len(EntryPointExemptions))
 }
@@ -234,9 +262,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// List permissions covered by the corresponding read operation
 		// but registered as distinct permission IDs in the registry.
 		"agent.list":               "List subset of agent.read operation",
-		"skill.list":               "List subset of skill.read operation",
-		"template.list":            "List subset of template.read operation",
-		"harness_config.list":      "List subset of harnessconfig.read operation",
 		"group.list":               "List subset of group.read operation",
 		"gcp_service_account.list": "List subset of gcp.identity.read operation",
 		"scheduled_event.list":     "List subset of schedule.event.read operation",
@@ -251,40 +276,69 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 
 		// Broker internal operations — broker-HMAC only, not user-facing
 		"broker.create":   "Broker-HMAC only, not user-facing",
-		"broker.update":   "Broker-HMAC only, not user-facing",
-		"broker.delete":   "Broker-HMAC only, not user-facing",
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
+		// Checked in the broker registration handler when a request turns
+		// auto-provide on; no route declares it.
+		"broker.auto_provide": "Broker registration handler check, no route declaration",
 
-		// Hub admin permissions — NonRouteUse only (no route declaration)
-		"hub.settings.read":           "NonRouteUse only, no route declaration",
-		"hub.settings.update":         "NonRouteUse only, no route declaration",
-		"hub.admin_mode.read":         "NonRouteUse only, no route declaration",
-		"hub.integrations.update":     "NonRouteUse only, no route declaration",
-		"hub.lifecycle_hooks.update":  "NonRouteUse only, no route declaration",
-		"hub.allow_list.read":         "NonRouteUse only, no route declaration",
-		"hub.project_defaults.update": "NonRouteUse only, no route declaration",
-		"hub.scheduler.update":        "NonRouteUse only, no route declaration",
-		"hub.federation.read":         "NonRouteUse only, no route declaration",
-		"hub.federation.update":       "NonRouteUse only, no route declaration",
-		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
+		// Hub admin permissions — NonRouteUse only or Reserved (no route declaration)
+		"hub.settings.read":         "NonRouteUse only, no route declaration",
+		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
+		"hub.federation.read":       "Reserved in the permission registry: no route checks it",
+		"hub.federation.update":     "Reserved in the permission registry: no route checks it",
+		"hub.teams_manifest.update": "Reserved in the permission registry: no route checks it",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
-		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
-		"user.list":                    "NonRouteUse only, no route declaration",
-		"project.clone":                "NonRouteUse only, no route declaration",
-		"project.list":                 "NonRouteUse only, no route declaration",
+		"project.clone":                "Checked as a token selector in authorizeProjectClone and with project.update by set-template; neither is a route base permission",
+		"project.register":             "Reserved in the permission registry: project register checks project.create",
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
+		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
+		// project.chat_post is checked by the chat resolvers
+		// (chatThreadAccess, chatSpaceAccess) inside the chat send, promote
+		// and project upload routes, whose base permission is inbox.write
+		// (the token selector); it is decided on the caller's account
+		// (ptone/scion#5518, ptone/scion#5519).
+		"project.chat_post": "Checked by the chat resolvers (chatThreadAccess, chatSpaceAccess) within chat.conversation.send.topic, chat.conversation.promote and chat.attachment.upload.project, not a route base permission (ptone/scion#5518, ptone/scion#5519)",
+
+		// Admin test identities: the super-admin kind's capability is
+		// checked by testAdminIssuer inside testidentity.admin.create (whose
+		// base permission is test_identity.issue_admin; the route guard also
+		// admits test_identity.issue_super_admin, RouteMetadata.AlsoPermits).
+		"test_identity.issue_super_admin": "Checked by testAdminIssuer within testidentity.admin.create for adminRole super-admin (ptone/scion#4240)",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
-		"agent.log_append":     "Agent token scope, not route-enforced",
+		"agent.log_append":     "Reserved in the permission registry: no handler checks it",
 		"project.secret_read":  "Agent token scope, not route-enforced",
 		"agent.notify":         "Agent token scope, not route-enforced",
 		"agent.token_refresh":  "Agent token scope, not route-enforced",
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
+
+		// Artifact service: read, create and manage are cataloged. update
+		// and delete are Reserved registry rows (nothing checks them yet;
+		// PATCH and DELETE are gated by artifact.manage).
+		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
+		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
+		// artifact.steward is checked by the hub's StewardClause inside the
+		// artifact.manage-gated routes (adminAuthorityWith), not as a route
+		// base permission (design D25, ptone/scion#5144).
+		"artifact.steward": "Checked by StewardClause within the artifact.manage-gated routes, not route-enforced (ptone/scion#5144)",
+
+		// Material delivery and runtime-use permissions — NonRouteUse only
+		// (ptone/scion#2129)
+		"secret.deliver":          "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
+		"env_var.deliver":         "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
+		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
+		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
+		// Hub-minted service account creation (mintGCPServiceAccount; the
+		// hub-scope route is an authentication-only exemption with an inline
+		// policy check) and the mint capability it reports; not a cataloged
+		// base permission. The agent GCP token
+		// mint (gcp.identity.mint) decides gcp_service_account.use instead.
+		"gcp_service_account.mint": "Creation of Hub-minted service accounts: inline policy check in the mint handler, not a catalog base permission",
 	}
 
 	var unconsumed []string
@@ -507,6 +561,7 @@ func TestProofDuplicateEntryPointRejected(t *testing.T) {
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestProofDuplicateEntryPointRejected"}},
+		Bearer:           SessionOnly(ReasonInteractiveState),
 	}
 
 	if err := proofSpec.Validate(); err != nil {
@@ -1110,12 +1165,13 @@ func TestMutationClassificationsValid(t *testing.T) {
 	t.Logf("mutation classifications: %d entries validated", len(MutationClassifications))
 }
 
-// TestMutationClassificationBidirectional verifies bidirectional agreement
-// between the scanner and the classification table:
-//  1. Every scanner-discovered call site must have a classification entry.
-//  2. Every classification entry must correspond to a scanner-discovered site.
-func TestMutationClassificationBidirectional(t *testing.T) {
-	repoRoot := findRepoRoot(t)
+// discoverMutationCounts runs the TestSecurityMutationScanProduction
+// scanner over pkg/hub and pkg/store under repoRoot and counts the call
+// sites of SecurityMutationSymbols by "<file>:<function>:<symbol>", file
+// relative to repoRoot. A missing scan root is skipped, so a temporary tree
+// may hold only pkg/hub.
+func discoverMutationCounts(t *testing.T, repoRoot string) map[string]int {
+	t.Helper()
 
 	// Run the same scanner logic as TestSecurityMutationScanProduction
 	type callSite struct {
@@ -1174,14 +1230,29 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 		}
 	}
 
-	// Build classification lookup
-	classifiedCounts := mutationClassificationCounts(MutationClassifications)
-
-	// Build discovered lookup
 	discoveredCounts := make(map[string]int)
 	for _, s := range discovered {
 		key := s.file + ":" + s.function + ":" + s.symbol
 		discoveredCounts[key]++
+	}
+	return discoveredCounts
+}
+
+// TestMutationClassificationBidirectional verifies bidirectional agreement
+// between the scanner and the classification table:
+//  1. Every scanner-discovered call site must have a classification entry.
+//  2. Every classification entry must correspond to a scanner-discovered site.
+func TestMutationClassificationBidirectional(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+
+	// Build classification lookup
+	classifiedCounts := mutationClassificationCounts(MutationClassifications)
+
+	// Build discovered lookup
+	discoveredCounts := discoverMutationCounts(t, repoRoot)
+	discovered := 0
+	for _, n := range discoveredCounts {
+		discovered += n
 	}
 
 	unclassified := findUnclassifiedMutations(discoveredCounts, classifiedCounts)
@@ -1197,7 +1268,47 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 	}
 
 	t.Logf("mutation classification bidirectional check: %d discovered, %d classified",
-		len(discovered), len(MutationClassifications))
+		discovered, len(MutationClassifications))
+}
+
+// TestMutationClassificationBidirectionalReachesAreaDirs plants an
+// unclassified security mutation call in every pkg/hub area directory listed
+// in hack/area-dirs.txt, under a temporary tree, and requires the
+// bidirectional check to report each one (ptone/scion#4275).
+func TestMutationClassificationBidirectionalReachesAreaDirs(t *testing.T) {
+	entries, err := areadirs.Load(findRepoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	symbols := slices.Sorted(maps.Keys(SecurityMutationSymbols))
+	if len(symbols) == 0 {
+		t.Fatal("SecurityMutationSymbols is empty")
+	}
+	symbol := symbols[0]
+	root := t.TempDir()
+	var want []string
+	for _, e := range entries {
+		dir := filepath.Join(root, "pkg", "hub", filepath.FromSlash(e.Dir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := "package planted\n\nfunc zzPlantedMutation(s store) { s." + symbol + "(nil) }\n"
+		if err := os.WriteFile(filepath.Join(dir, "zz_planted.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rel := filepath.Join("pkg", "hub", filepath.FromSlash(e.Dir), "zz_planted.go")
+		want = append(want, rel+":zzPlantedMutation:"+symbol)
+	}
+	discovered := discoverMutationCounts(t, root)
+	unclassified := findUnclassifiedMutations(discovered, mutationClassificationCounts(MutationClassifications))
+	for i, e := range entries {
+		if discovered[want[i]] != 1 {
+			t.Errorf("%s %s: planted call %s not discovered (discovered %v)", e.Kind, e.Dir, want[i], discovered)
+		}
+		if !slices.Contains(unclassified, want[i]) {
+			t.Errorf("%s %s: planted call %s not reported as unclassified (%v)", e.Kind, e.Dir, want[i], unclassified)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,29 +1319,34 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 // operation domains and permission resource types. Every operation's base
 // permission must have a Resource type that is compatible with its domain.
 var domainResourceCompatibility = map[string][]string{
-	"project.membership": {"ResourceProject", "ResourceRoleBinding"},
-	"role":               {"ResourceRole"},
-	"role.binding":       {"ResourceRoleBinding"},
-	"group":              {"ResourceGroup"},
-	"access.constraint":  {"ResourceAccessConstraint"},
-	"credential":         {"ResourceUser"},
-	"gcp.identity":       {"ResourceGCPServiceAccount"},
-	"agent":              {"ResourceAgent"},
-	"project":            {"ResourceProject"},
-	"agent.message":      {"ResourceAgent"},
-	"user.admin":         {"ResourceUser"},
-	"secret":             {"ResourceProject"},
-	"hub":                {"ResourceHub"},
-	"hub.admin":          {"ResourceHub", "ResourceProject"},
-	"skill":              {"ResourceSkill"},
-	"template":           {"ResourceTemplate"},
-	"harnessconfig":      {"ResourceHarnessConfig"},
-	"user":               {"ResourceUser"},
-	"broker":             {"ResourceBroker"},
-	"quota":              {"ResourceQuota"},
-	"schedule":           {"ResourceScheduledEvent"},
-	"chat":               {"ResourceProject"},
-	"env":                {"ResourceProject"},
+	"project.membership":  {"ResourceProject", "ResourceRoleBinding"},
+	"role":                {"ResourceRole"},
+	"role.binding":        {"ResourceRoleBinding"},
+	"group":               {"ResourceGroup"},
+	"access.constraint":   {"ResourceAccessConstraint"},
+	"credential":          {"ResourceUser"},
+	"federation":          {"ResourceFederationToken"},
+	"gcp.identity":        {"ResourceGCPServiceAccount"},
+	"agent":               {"ResourceAgent"},
+	"project":             {"ResourceProject"},
+	"agent.message":       {"ResourceAgent"},
+	"user.admin":          {"ResourceUser"},
+	"secret":              {"ResourceProject"},
+	"hub":                 {"ResourceHub"},
+	"hub.admin":           {"ResourceHub", "ResourceProject"},
+	"skill":               {"ResourceSkill"},
+	"template":            {"ResourceTemplate"},
+	"harnessconfig":       {"ResourceHarnessConfig"},
+	"user":                {"ResourceUser"},
+	"broker":              {"ResourceBroker"},
+	"quota":               {"ResourceQuota"},
+	"schedule":            {"ResourceScheduledEvent"},
+	"chat":                {"ResourceProject", "ResourceInbox", "ResourceAgent"},
+	"env":                 {"ResourceProject", "ResourceHub"},
+	"artifact":            {"ResourceArtifact"},
+	"inbox":               {"ResourceInbox"},
+	"user.skillinjection": {"ResourceUserSkillInjection"},
+	"testidentity":        {"ResourceTestIdentity"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's
@@ -1474,6 +1590,10 @@ func TestCIGateCoversAllAF1Tests(t *testing.T) {
 		"TestProofNonexistentTestRefDetected",
 		"TestProofPermissionSemanticMismatchDetected",
 		"TestProofUnmappedDomainDetected",
+		// Bearer dispositions
+		"TestBearerDisposition_EveryOperationDeclaresOne",
+		"TestBearerDisposition_RuleRejectsInvalidDispositions",
+		"TestBearerDisposition_CredentialsMatchDisposition",
 	}
 
 	repoRoot := findRepoRoot(t)

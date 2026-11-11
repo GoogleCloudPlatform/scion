@@ -1,0 +1,8 @@
+{
+  "stateVersion": 5,
+  "config": {
+    "model": "claude-sonnet",
+    "max_turns": 40,
+    "max_duration": "2h"
+  }
+}

@@ -17,9 +17,9 @@ package logging
 import (
 	"context"
 	"log/slog"
-	"os"
 
 	gcplog "cloud.google.com/go/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // Cloud Logging log ID for the dedicated message log.
@@ -33,7 +33,15 @@ const (
 	AttrRecipientID  = "recipient_id"
 	AttrMsgType      = "msg_type"
 	AttrMsgProjectID = "project_id"
+	// AttrLogKind marks an entry that is not a message record.
+	AttrLogKind = "log_kind"
 )
+
+// LogKindEvent is the AttrLogKind value for lifecycle and bookkeeping
+// entries (dispatch outcomes, delivery acknowledgements, summaries).
+// Message views list only entries without it, so each message appears
+// once.
+const LogKindEvent = "event"
 
 // MessageLoggerConfig configures the dedicated message logger.
 type MessageLoggerConfig struct {
@@ -43,7 +51,7 @@ type MessageLoggerConfig struct {
 	HubName     string         // Logical hub identity for log labels
 	HubID       string         // Stable unique hub instance ID for log labels
 	UseGCP      bool           // Format output as GCP-compatible JSON
-	Level       slog.Level
+	Level       slog.Leveler   // Floor, consulted per record (nil = info)
 }
 
 // NewMessageLogger creates a dedicated logger for message audit logging.
@@ -65,7 +73,11 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
-			_ = ch.logger.Flush()
+			// Shutdown flush failure: counted (writer=cloud,
+			// reason=flush_error); still no stderr line here.
+			if err := ch.logger.Flush(); err != nil {
+				CloudWriter().RecordFailure(CloudReasonFlushError)
+			}
 		})
 	}
 
@@ -73,15 +85,9 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 	// On Cloud Run (K_SERVICE set), stdout is captured and forwarded to Cloud
 	// Logging by the runtime. When a cloud handler is also active, the stdout
 	// handler would produce duplicate entries — skip it in that case.
-	onCloudRun := os.Getenv("K_SERVICE") != ""
+	onCloudRun := cloudrunenv.IsService()
 	if !onCloudRun || cfg.CloudClient == nil {
-		if cfg.UseGCP {
-			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
-		} else {
-			handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
-				slog.String(AttrComponent, cfg.Component),
-			}))
-		}
+		handlers = append(handlers, newStdoutHandler(stdoutWriter(), opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
 	}
 
 	if len(handlers) == 0 {
@@ -112,7 +118,7 @@ type messageCloudHandler struct {
 
 // newMessageCloudHandler creates a CloudHandler for the message log that
 // promotes sender, recipient, and msg_type to GCP labels.
-func newMessageCloudHandler(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Level) *messageCloudHandler {
+func newMessageCloudHandler(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Leveler) *messageCloudHandler {
 	base := NewCloudHandlerFromClient(client, logID, component, hubName, hubID, level)
 	return &messageCloudHandler{CloudHandler: *base}
 }
@@ -123,9 +129,7 @@ func (h *messageCloudHandler) Handle(ctx context.Context, r slog.Record) error {
 	labels := map[string]string{
 		"component": h.component,
 	}
-	if h.hubName != "" {
-		labels["hub"] = h.hubName
-	}
+	addHubLabel(labels, h.hubName)
 	if h.hubID != "" {
 		labels["hub_id"] = h.hubID
 	}
@@ -176,6 +180,11 @@ func (h *messageCloudHandler) handleWithLabels(ctx context.Context, r slog.Recor
 		Timestamp: r.Time,
 	}
 
+	h.writeStats().RecordWrite()
+	if h.logHook != nil {
+		h.logHook(entry)
+		return nil
+	}
 	h.logger.Log(entry)
 	return nil
 }
@@ -199,6 +208,7 @@ func (h *messageCloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 			attrs:     newAttrs,
 			groups:    h.groups,
 			logHook:   h.logHook,
+			stats:     h.stats,
 		},
 	}
 }
@@ -222,6 +232,7 @@ func (h *messageCloudHandler) WithGroup(name string) slog.Handler {
 			attrs:     h.attrs,
 			groups:    newGroups,
 			logHook:   h.logHook,
+			stats:     h.stats,
 		},
 	}
 }
@@ -229,7 +240,7 @@ func (h *messageCloudHandler) WithGroup(name string) slog.Handler {
 // promoteMessageAttrToLabels promotes message-specific attributes to GCP labels.
 func promoteMessageAttrToLabels(labels map[string]string, a slog.Attr) {
 	switch a.Key {
-	case AttrSender, AttrSenderID, AttrRecipient, AttrRecipientID, AttrMsgType, AttrMsgProjectID:
+	case AttrSender, AttrSenderID, AttrRecipient, AttrRecipientID, AttrMsgType, AttrMsgProjectID, AttrLogKind:
 		if v := a.Value.String(); v != "" {
 			labels[a.Key] = v
 		}

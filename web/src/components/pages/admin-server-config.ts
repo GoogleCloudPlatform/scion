@@ -23,14 +23,151 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
-import type { RuntimeBroker } from '../../shared/types.js';
+import { isKubernetesRuntimeType } from '../../shared/runtime-kind.js';
+import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
+import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
+import { isHttpUrl } from '../../utils/http-url.js';
+import '../shared/timezone-picker.js';
+import type { UpdateStatus } from './admin-maintenance-update-card.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import {
+  fallbackFieldKey,
+  fieldErrorMessages,
+  genericSaveErrorText,
+  readSettingsSaveError,
+  sectionPathsFromSchema,
+} from '../../shared/settings-save-errors.js';
+import { dirtySectionsPayload, revisionsFromMetadata } from '../../shared/settings-dirty.js';
+import { diffPayload } from '../../shared/settings-diff.js';
+import type {
+  SettingsConflict,
+  SettingsFieldError,
+  SettingsSaveError,
+  SettingsSkippedKey,
+} from '../../shared/settings-save-errors.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
+import './admin-experiments.js';
+import './admin-chat-retention.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import {
+  issuesAt,
+  parseQuantity,
+  validateResourceSpec,
+  type QuantityIssues,
+  type ResourceSpecInput,
+} from '../../shared/resource-quantity.js';
+import {
+  validateK8sRuntimeFields,
+  type PlacementIssue,
+  type Toleration,
+} from '../../shared/k8s-placement.js';
+import {
+  type ImageRegistryProvenance,
+  hasOtherProfileEnvOverrides,
+  imageRegistryBadgeLines,
+  profileImageRegistryEnvLine,
+  profileInheritedHint,
+} from './image-registry-provenance.js';
+import {
+  type EnvKeyValue,
+  envValueFor,
+  envValuesUnder,
+  formatEnvValue,
+  hasInEffect,
+} from './admin-server-config-env-values.js';
+import {
+  type EnvNotInEffectCause,
+  envBadgeStyles,
+  readOnlyFieldStyles,
+  renderEnvBadge as envBadgeView,
+  renderEnvLockBadge,
+  renderEnvBadgeUnder as envBadgeUnderView,
+  renderEnvValueLine as envValueLineView,
+  renderEnvValuesList as envValuesListView,
+  renderKeysEnvBadge,
+} from '../shared/env-badge-views.js';
+
+/** GET /api/v1/admin/server-config returns this in place of each secret. */
+const MASKED_VALUE = '********';
+
+/** True when obj has a key whose value is not undefined (null counts). */
+function hasDefinedValue(obj: Record<string, unknown>): boolean {
+  return Object.values(obj).some((v) => v !== undefined);
+}
+
+/**
+ * Sets obj[key] to a tri-state switch value only when it differs from the
+ * loaded one; null (Use default) is sent as null, which clears the stored
+ * key (ptone/scion#3724).
+ */
+function putTriState(
+  obj: Record<string, unknown>,
+  key: string,
+  value: boolean | null,
+  loaded: boolean | null
+): void {
+  if (value !== loaded) obj[key] = value;
+}
+
+/**
+ * Deep-merges src into dst (plain objects only; src wins for other values).
+ * Used to combine the Layer-1 and Layer-0 parts of a workstation save.
+ */
+function mergePayload(dst: Record<string, unknown>, src: Record<string, unknown>): void {
+  for (const [k, v] of Object.entries(src)) {
+    const d = dst[k];
+    if (
+      d &&
+      v &&
+      typeof d === 'object' &&
+      typeof v === 'object' &&
+      !Array.isArray(d) &&
+      !Array.isArray(v)
+    ) {
+      mergePayload(d as Record<string, unknown>, v as Record<string, unknown>);
+    } else {
+      dst[k] = v;
+    }
+  }
+}
+
+/**
+ * True when a value (or anything nested in it) is the masked placeholder.
+ * The save payload omits raw config blocks that still contain it: they are
+ * the unedited GET value, and an omitted block keeps its stored value.
+ */
+export function containsMaskedValue(v: unknown): boolean {
+  if (v === MASKED_VALUE) return true;
+  if (Array.isArray(v)) return v.some(containsMaskedValue);
+  if (v && typeof v === 'object') return Object.values(v).some(containsMaskedValue);
+  return false;
+}
 
 // ── Type definitions matching the Go API response ──
+
+/** GCP identity minting quota from GET /api/v1/admin/gcp-quota. */
+interface GCPQuotaSummary {
+  minting_configured: boolean;
+  gcp_project_id?: string;
+  global_minted: number;
+  global_cap: number;
+  per_project_cap: number;
+  projects?: { project_id: string; project_name: string; minted: number }[];
+}
 
 interface V1CORSConfig {
   enabled?: boolean;
@@ -44,6 +181,9 @@ interface V1ServerHubConfig {
   port?: number;
   host?: string;
   public_url?: string;
+  monitoring_dashboard_url?: string;
+  /** Read-only on this page (shown with content_url_status). */
+  content_url?: string;
   read_timeout?: string;
   write_timeout?: string;
   cors?: V1CORSConfig;
@@ -52,8 +192,24 @@ interface V1ServerHubConfig {
   soft_delete_retain_files?: boolean;
   auto_suspend_stalled?: boolean;
   stalled_threshold?: string;
+  start_claim_lease_ttl?: string;
+  start_max_duration?: string;
+  start_unconfirmed_hold?: string;
+  start_create_unconfirmed_hold?: string;
   gcp_iam_check_mode?: string;
   gcp_iam_deny_unknown_policy?: string;
+  observability?: V1ServerHubObservabilityConfig;
+}
+
+/**
+ * The hub's own metrics and trace export switches
+ * (server.hub.observability, ptone/scion#4914). Absent means unset: the
+ * hub keeps the rule that applied before the switch existed. null in a save
+ * clears a stored switch.
+ */
+interface V1ServerHubObservabilityConfig {
+  metrics_enabled?: boolean | null;
+  tracing_enabled?: boolean | null;
 }
 
 interface V1BrokerConfig {
@@ -83,6 +239,7 @@ interface V1AuthConfig {
   dev_token_file?: string;
   authorized_domains?: string[];
   user_access_mode?: string;
+  default_user_role?: string;
 }
 
 interface V1OAuthProviderConfig {
@@ -138,10 +295,34 @@ interface V1GitHubAppConfig {
   installation_url?: string;
 }
 
+/**
+ * The server.github_app block echoed by the main Server Config save. Every
+ * non-secret field is present, so an empty one goes as an explicit clear (0
+ * or ""): the server keeps the stored value for an omitted key, so dropping
+ * an empty field would restore it.
+ *
+ * The echo is the state when the card last loaded or saved, so a save from a
+ * stale tab can clear a value set elsewhere since then. That last-write-wins
+ * risk applies to every field on this page; optimistic concurrency is
+ * tracked in ptone/scion#3922.
+ */
+function githubAppEcho(
+  appId: number | undefined,
+  apiBaseUrl: string | undefined,
+  installationUrl: string | undefined,
+  webhooksEnabled: boolean
+): V1GitHubAppConfig {
+  return {
+    app_id: appId || 0,
+    api_base_url: apiBaseUrl || '',
+    webhooks_enabled: webhooksEnabled,
+    installation_url: installationUrl || '',
+  };
+}
+
 interface V1ServerConfig {
   mode?: string;
   log_level?: string;
-  log_format?: string;
   hub?: V1ServerHubConfig;
   broker?: V1BrokerConfig;
   database?: V1DatabaseConfig;
@@ -170,6 +351,7 @@ interface V1TelemetryHubConfig {
   report_interval?: string;
 }
 
+/** telemetry.local: accepted but ignored (ptone/scion#4103); no UI edits it. */
 interface V1TelemetryLocalConfig {
   enabled?: boolean;
   file?: string;
@@ -183,10 +365,22 @@ interface V1TelemetryConfig {
   local?: V1TelemetryLocalConfig;
 }
 
+// Keys match CloudRunConfig JSON tags in pkg/config/settings_v1.go.
 interface V1CloudRunConfig {
-  project?: string;
+  project_id?: string;
+  location?: string;
+}
+
+// Keys match V1CloudRunInstancesConfig JSON tags in
+// pkg/config/settings_v1.go.
+interface V1CloudRunInstancesConfig {
+  project_id?: string;
   region?: string;
 }
+
+// The two Cloud Run fields the runtime editor shows. Each maps to a
+// different block and key depending on the runtime type.
+type CloudRunEditorField = 'project' | 'region';
 
 interface V1RuntimeConfig {
   type?: string;
@@ -198,6 +392,38 @@ interface V1RuntimeConfig {
   list_all_namespaces?: boolean;
   env?: Record<string, string>;
   cloudrun?: V1CloudRunConfig;
+  cloudrun_instances?: V1CloudRunInstancesConfig;
+  safe_to_evict?: boolean;
+  // Kubernetes placement and identity (ptone/scion#6580).
+  node_selector?: Record<string, string>;
+  tolerations?: Toleration[];
+  runtime_class_name?: string;
+  kubernetes_service_account_mappings?: Record<string, string>;
+  kubernetes_block_service_account?: string;
+  priority_class_name?: string;
+  shared_dir_storage_class?: string;
+  shared_dir_size?: string;
+}
+
+// Sets or clears one key in a runtime's Cloud Run block, and drops the
+// block when it becomes empty.
+function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
+  rt: V1RuntimeConfig,
+  block: B,
+  key: keyof NonNullable<V1RuntimeConfig[B]>,
+  value: string
+): void {
+  const next: Record<string, string> = { ...rt[block] };
+  if (value) {
+    next[key as string] = value;
+  } else {
+    delete next[key as string];
+  }
+  if (Object.keys(next).length > 0) {
+    rt[block] = next;
+  } else {
+    delete rt[block];
+  }
 }
 
 interface V1ProfileConfig {
@@ -207,6 +433,9 @@ interface V1ProfileConfig {
   image_registry?: string;
   env?: Record<string, string>;
   resources?: ResourceSpec;
+  safe_to_evict?: boolean;
+  shared_dir_storage_class?: string;
+  shared_dir_size?: string;
   [key: string]: unknown;
 }
 
@@ -241,12 +470,35 @@ interface ServerConfigResponse {
   default_max_agent_role?: string;
   default_agent_role?: string;
   default_runtime_broker?: string;
+  default_timezone?: string;
+  default_gcp_identity_mode?: string;
+  default_gcp_identity_service_account_id?: string;
 
   auto_expose_ports?: { enabled?: boolean };
 
-  // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+  quotas?: { enforce_broker_quotas?: boolean };
+
+  agent_secrets?: { user_scope_only?: boolean };
+
+  // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
   settings_tier?: 'db' | 'file';
+  // True on workstation hubs: Layer-0 and file-only settings are editable and
+  // the PUT writes them to settings.yaml. False on hosted hubs.
+  layer0_editable?: boolean;
   env_overrides?: string[];
+  /** Per env_overrides key: the environment value (masked) and whether it is in effect. */
+  env_values?: Record<string, EnvKeyValue>;
+  /**
+   * The value this node runs with for a server key that start-up sets
+   * (a workstation default or a start flag), where it differs from the
+   * value shown (ptone/scion#3722). A secret key never has an entry.
+   */
+  running_values?: Record<string, RunningKeyValue>;
+  public_url_status?: PublicURLStatus;
+  content_url_status?: ContentURLStatus;
+  observability_export?: HubObservabilityExport;
+  /** Where the image_registry in effect comes from (read-only, ptone/scion#3916). */
+  image_registry_provenance?: ImageRegistryProvenance;
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
@@ -261,13 +513,128 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
+/** A changed key that was saved but is not in use, with the reason. */
+type SkippedKey = SettingsSkippedKey;
+
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
+  // DB-backed saves: the changed Layer-1 keys (koanf paths), split into
+  // those applied to the running hub and those that take effect only after
+  // a hub restart (registry restart_required flag).
+  applied_keys?: string[];
+  pending_restart?: string[];
+  // Changed keys that were saved but are not in use (for example a
+  // notification channel that fails validation), each with a reason. They
+  // are not in applied_keys (ptone/scion#4466).
+  skipped?: SkippedKey[];
+  // Workstation hubs: the settings.yaml changes applied live (also listed
+  // in applied, next to the section names).
+  file_applied?: string[];
   error?: string;
 }
 
-/** Per-section provenance metadata from the settings-db GET response (postgres mode). */
+/** One running_values entry: the running value and its source ("startup"). */
+interface RunningKeyValue {
+  value: unknown;
+  source: string;
+}
+
+/**
+ * How the hub resolved its endpoint (server.hub.public_url) at startup
+ * (ptone/scion#3905). The endpoint is restart-required, so after a save the
+ * value in effect can differ from the stored value until the next restart.
+ */
+interface PublicURLStatus {
+  effective: string;
+  source: string; // "env" | "flag" | "database" | "file" | a fallback label
+  pinned_by?: string; // SCION_SERVER_HUB_ENDPOINT, --base-url or SCION_SERVER_BASE_URL
+}
+
+/**
+ * What the hub does with server.hub.content_url as applied (read-only,
+ * ptone/scion#7107): in effect, or why it is ignored.
+ */
+export interface ContentURLStatus {
+  state: string; // "unset" | "in_effect" | "ignored_invalid" | "refused_same_host" | "ignored_same_site" | "ignored_agent_endpoint_host"
+  effective?: string; // the content host in use, for in_effect
+  override_key?: string; // server.hub.content_url_allow_same_site, for ignored_same_site
+}
+
+/** The badge and one-line reason the page shows for a content URL status. */
+export function contentUrlStatusText(st: ContentURLStatus): {
+  badge: string;
+  variant: 'success' | 'neutral' | 'warning' | 'danger';
+  reason: string;
+} {
+  const hubOrigin = 'shared artifacts stay on the hub origin';
+  switch (st.state) {
+    case 'unset':
+      return { badge: 'Not set', variant: 'neutral', reason: `No content host; ${hubOrigin}.` };
+    case 'in_effect':
+      return {
+        badge: 'In effect',
+        variant: 'success',
+        reason: `Shared artifacts are served from ${st.effective ?? 'the content host'}.`,
+      };
+    case 'ignored_invalid':
+      return {
+        badge: 'Ignored',
+        variant: 'warning',
+        reason: `The value is invalid; ${hubOrigin}.`,
+      };
+    case 'refused_same_host':
+      return {
+        badge: 'Refused',
+        variant: 'danger',
+        reason: `The value is on the hub's own host name; ${hubOrigin}.`,
+      };
+    case 'ignored_same_site':
+      return {
+        badge: 'Ignored',
+        variant: 'danger',
+        reason: `The value shares the hub's registrable domain, so it is not a separate security origin for cookies; ${hubOrigin}. Use a content host on a different registrable domain, or set ${st.override_key ?? 'server.hub.content_url_allow_same_site'}.`,
+      };
+    case 'ignored_agent_endpoint_host':
+      return {
+        badge: 'Ignored',
+        variant: 'warning',
+        reason: `The value is on the host name of server.hub.agent_endpoint; ${hubOrigin}.`,
+      };
+    default:
+      return { badge: 'Unknown', variant: 'neutral', reason: `Unrecognised state "${st.state}".` };
+  }
+}
+
+/** The export project of the hub's own metrics and traces, as resolved at startup. */
+interface HubExportProject {
+  id?: string;
+  source?: string; // "env" | "file" | "metadata"; absent when none resolved
+  detail?: string; // why no project resolved
+}
+
+/** The startup state of one hub exporter (pkg/observability/hubexport.Decision). */
+interface HubExportDecision {
+  exporter: string;
+  setting: boolean | null;
+  enabled: boolean;
+  basis: string; // "setting" | "legacy" | "no_project" | "exporter_error"
+  reason: string;
+  project?: HubExportProject;
+}
+
+/**
+ * The hub's own metrics and trace exporters as started, and the export
+ * project with its source (ptone/scion#4914). Read-only: the export project
+ * is not a settings key.
+ */
+interface HubObservabilityExport {
+  project?: HubExportProject;
+  metrics?: HubExportDecision;
+  tracing?: HubExportDecision;
+}
+
+/** Per-section provenance metadata from the settings-db GET response (DB-backed hubs). */
 interface SectionMetadataInfo {
   source: string; // "db" | "file" | "default"
   revision?: number;
@@ -279,7 +646,7 @@ interface SectionMetadataInfo {
 /** A bootstrap-material key whose value differs from the DB value in a managed section. */
 interface SupersededKeyInfo {
   key: string;
-  source: string; // "seed_env" | "yaml" | "server_env"
+  source: string; // "seed_env" | "yaml" | "server_env" | "default"
 }
 
 /** A SCION_SERVER_* env var that targets a Layer-1 key (deprecated, migrate to SCION_SEED_*). */
@@ -289,31 +656,14 @@ interface DeprecatedEnvKeyInfo {
   seed_equivalent: string;
 }
 
-/** Per-field validation error from a 400 validation_failed response. */
-interface ValidationErrorDetail {
-  field: string;
-  message: string;
-}
-
 /** Conflict info from a 409 revision_conflict response. */
 interface ConflictInfo {
   message: string;
-  conflicted: { section: string; expected_revision?: number; current_revision?: number }[];
-}
-
-interface UpdateCommitInfo {
-  hash: string;
-  subject: string;
-}
-
-interface UpdateCheckResult {
-  update_available: boolean;
-  current_commit: string;
-  latest_commit: string;
-  current_branch: string;
-  tracking_ref: string;
-  commits_behind: number;
-  new_commits?: UpdateCommitInfo[];
+  conflicted: SettingsConflict[];
+  // Keys of the sections saved before the conflict (ptone/scion#4467).
+  appliedKeys: string[];
+  pendingRestart: string[];
+  skipped: SkippedKey[];
 }
 
 interface GitHubInstallationInfo {
@@ -352,17 +702,29 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // access section
   'server.hub.admin_emails': 'Admin Emails',
   'server.auth.user_access_mode': 'User Access Mode',
+  'server.auth.default_user_role': 'Default User Role',
   'server.auth.authorized_domains': 'Authorized Domains',
   // lifecycle section
   'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
   'server.hub.stalled_threshold': 'Stalled Threshold',
+  'server.hub.start_claim_lease_ttl': 'Start Claim Lease',
+  'server.hub.start_max_duration': 'Start Deadline',
+  'server.hub.start_unconfirmed_hold': 'Unconfirmed Start Hold',
+  'server.hub.start_create_unconfirmed_hold': 'Unconfirmed Create Hold',
   'server.hub.soft_delete_retention': 'Soft Delete Retention',
   'server.hub.soft_delete_retain_files': 'Retain Files on Soft Delete',
   // gcp iam section
   'server.hub.gcp_iam_check_mode': 'IAM Check Mode',
   'server.hub.gcp_iam_deny_unknown_policy': 'Deny Policy Fallback',
+  // hub_observability section
+  'server.hub.observability.metrics_enabled': 'Hub Metrics Export',
+  'server.hub.observability.tracing_enabled': 'Hub Trace Export',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
+  // quotas section
+  'quotas.enforce_broker_quotas': 'Enforce Broker Agent Quotas',
+  // agent_secrets section
+  'agent_secrets.user_scope_only': 'Agent Secrets: Profile Scope Only',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -373,9 +735,6 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'telemetry.cloud.cloud_logging': 'Cloud Logging',
   'telemetry.hub.enabled': 'Hub Reporting Enabled',
   'telemetry.hub.report_interval': 'Hub Report Interval',
-  'telemetry.local.enabled': 'Local Telemetry Enabled',
-  'telemetry.local.file': 'Local Telemetry File',
-  'telemetry.local.console': 'Local Telemetry Console',
   // agent_defaults section
   default_template: 'Default Template',
   default_harness_config: 'Default Harness Config',
@@ -389,8 +748,12 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
   default_runtime_broker: 'Default Runtime Broker',
+  default_timezone: 'Default Timezone',
+  default_gcp_identity_mode: 'Default GCP Identity Mode',
+  default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
   'server.hub.public_url': 'Public URL',
+  'server.hub.monitoring_dashboard_url': 'Monitoring Dashboard URL',
   image_registry: 'Image Registry',
   // github_app section
   'server.github_app': 'GitHub App',
@@ -407,14 +770,281 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   harness_configs: 'Harness Configs',
 };
 
+/** Fallback Layer-1 key list, used until the schema endpoint answers. */
 const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
+
+/** 422 codes for a save that named keys it could not persist; nothing was saved. */
+const KEYS_REJECTED_CODES = new Set([
+  'unpersisted_keys_rejected',
+  'unclassified_keys_rejected',
+  'hub_owned_keys_rejected',
+  'unsaved_keys_rejected',
+]);
+
+/** Why a field is read-only: hosted Layer-0, env-pinned, workstation flag-managed, pinned, or read only at startup (DB-backed hubs). */
+type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned' | 'startup';
+
+/** The agent start timing keys under server.hub (lifecycle section). */
+type StartTimingKey =
+  | 'start_claim_lease_ttl'
+  | 'start_max_duration'
+  | 'start_unconfirmed_hold'
+  | 'start_create_unconfirmed_hold';
+
+/**
+ * The agent start timing fields, in display order, with the coded default
+ * and the allowed range from the settings schema (ptone/scion#3925).
+ */
+export const START_TIMINGS: ReadonlyArray<{
+  key: StartTimingKey;
+  defaultValue: string;
+  hint: string;
+}> = [
+  {
+    key: 'start_claim_lease_ttl',
+    defaultValue: '90s',
+    hint: 'Lease of the claim each agent start holds; renewed every third of it. 30s to 5m.',
+  },
+  {
+    key: 'start_max_duration',
+    defaultValue: '12m',
+    hint: 'Hard deadline on any agent start, including a wait for another hub node. At least 11m.',
+  },
+  {
+    key: 'start_unconfirmed_hold',
+    defaultValue: '17m',
+    hint: 'Longest time a start with an unknown outcome blocks other starts of the agent. At least 16m.',
+  },
+  {
+    key: 'start_create_unconfirmed_hold',
+    defaultValue: '16m',
+    hint: "The same hold for a new agent's create-and-start. 16m up to the unconfirmed start hold.",
+  },
+];
+
+function emptyStartTimings(): Record<StartTimingKey, string> {
+  return {
+    start_claim_lease_ttl: '',
+    start_max_duration: '',
+    start_unconfirmed_hold: '',
+    start_create_unconfirmed_hold: '',
+  };
+}
+
+function startTimingsFrom(hub: V1ServerHubConfig): Record<StartTimingKey, string> {
+  const out = emptyStartTimings();
+  for (const t of START_TIMINGS) out[t.key] = hub[t.key] || '';
+  return out;
+}
+
+/**
+ * What wins over an environment value that is not in effect, for a field's
+ * read-only reason: a start-up default or flag for 'flag' and 'bootstrap',
+ * else the saved setting.
+ */
+function envCause(reason?: ReadOnlyReason): EnvNotInEffectCause {
+  return reason === 'flag' || reason === 'bootstrap' ? 'startup' : 'saved';
+}
+
+/** koanf path of the project default scratchpad toggle (ptone/scion#3837). */
+const SCRATCHPAD_KEY = 'project_defaults.default_scratchpad';
+
+/** The Agent Defaults sub-tabs, in order, with their labels. */
+type AgentDefaultsTab = 'general' | 'limits' | 'resources';
+const AGENT_DEFAULTS_TABS: ReadonlyArray<readonly [AgentDefaultsTab, string]> = [
+  ['general', 'General'],
+  ['limits', 'Limits'],
+  ['resources', 'Resources'],
+];
+
+/**
+ * The panel name of an Agent Defaults sub-tab. It is prefixed so it never
+ * equals a top-level panel name (the top-level General panel is
+ * "general"), and the panels bind active as well as the tabs, so the
+ * selected sub-tab shows without waiting for the tab group to initialise
+ * (ptone/scion#4109).
+ */
+export function agentDefaultsPanelName(tab: AgentDefaultsTab): string {
+  return `agent-defaults-${tab}`;
+}
+
+/** The sub-tab of an Agent Defaults panel name; an unknown name is General. */
+function agentDefaultsTabFromPanel(panel: string): AgentDefaultsTab {
+  const tab = AGENT_DEFAULTS_TABS.find(([t]) => agentDefaultsPanelName(t) === panel);
+  return tab ? tab[0] : 'general';
+}
+
+/**
+ * The hub's direct Cloud Logging switch. The hub reads it only at startup,
+ * from SCION_CLOUD_LOGGING or settings.yaml, before the settings database is
+ * opened; a database-backed hub refuses a changed value (ptone/scion#5664),
+ * so the page shows it read-only there and never sends it.
+ */
+const CLOUD_LOGGING_KEY = 'telemetry.cloud.cloud_logging';
+
+/** The koanf key of the hub's public URL. */
+const PUBLIC_URL_KEY = 'server.hub.public_url';
+const HUB_METRICS_ENABLED_KEY = 'server.hub.observability.metrics_enabled';
+const HUB_TRACING_ENABLED_KEY = 'server.hub.observability.tracing_enabled';
+
+/**
+ * Workstation fields that `scion server start` overrides at every start
+ * (workstation defaults and flags such as --enable-runtime-broker,
+ * --dev-auth, --host, --storage-bucket), so a settings.yaml value has no
+ * effect. Shown read-only on workstation hubs. server.broker.host is not
+ * listed: --host sets only the hub and web listeners, and the runtime
+ * broker uses server.broker.host (see WORKSTATION_BROKER_HOST_DEFAULT).
+ */
+const WORKSTATION_FLAG_MANAGED_KEYS: Set<string> = new Set([
+  'server.broker.enabled',
+  'server.hub.host',
+  'server.auth.dev_mode',
+  'server.storage.provider',
+  'server.secrets.backend',
+]);
+
+/**
+ * Runtime broker listen host on a workstation hub when server.broker.host is
+ * unset. An empty value or 0.0.0.0 counts as unset (applyServerListenHosts
+ * in cmd/server_foreground.go).
+ */
+const WORKSTATION_BROKER_HOST_DEFAULT = '127.0.0.1';
+
+/** Whether a server.broker.host value counts as unset in workstation mode. */
+const isUnsetBrokerHost = (host: string): boolean => host === '' || host === '0.0.0.0';
 
 /** Safe own-property check that won't match inherited keys on user-controlled objects. */
 const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key);
 
+/**
+ * Storage overrides the hub no longer accepts on runtime and profile entries
+ * (server.project_storage places every agent's storage; a node-local
+ * directory is a volumes: entry). Dropped when settings are loaded, so a
+ * save never sends them back and is refused.
+ */
+const REMOVED_STORAGE_OVERRIDE_KEYS = [
+  'shared_dir_storage_backend',
+  'shared_dir_storage_backends',
+  'home_storage_backend',
+  'home_storage_leaf',
+];
+
+// Runtime fields docker, podman and Kubernetes share; a switch between them
+// keeps them.
+const CONTAINER_HOST_KEYS = ['host', 'context'] as const;
+
+// Kubernetes-only runtime fields, cleared when a runtime switches to a
+// non-Kubernetes container type (docker, podman) or to Cloud Run, and hidden
+// on the card of a non-Kubernetes container type.
+const KUBERNETES_ONLY_RUNTIME_KEYS = [
+  'namespace',
+  'gke',
+  'list_all_namespaces',
+  'safe_to_evict',
+  'node_selector',
+  'tolerations',
+  'runtime_class_name',
+  'kubernetes_service_account_mappings',
+  'kubernetes_block_service_account',
+  'priority_class_name',
+  'shared_dir_storage_class',
+  'shared_dir_size',
+] as const;
+
+// Container and Kubernetes runtime fields, cleared when a runtime switches
+// to Cloud Run.
+const CONTAINER_RUNTIME_KEYS = [...CONTAINER_HOST_KEYS, ...KUBERNETES_ONLY_RUNTIME_KEYS];
+
+/**
+ * Whether a runtime type is a container type that is not Kubernetes (docker,
+ * podman): set, not a Cloud Run type and not a Kubernetes type. An empty type
+ * is not one, since an untyped entry can be Kubernetes by its name.
+ */
+function isNonKubernetesContainerType(type: string): boolean {
+  return (
+    type !== '' &&
+    type !== 'cloudrun' &&
+    type !== 'cloudrun-instances' &&
+    !isKubernetesRuntimeType(type)
+  );
+}
+
+/**
+ * Whether the shared-dir PVC fields are hidden for a runtime type: a
+ * non-Kubernetes container type (the predicate above) or a Cloud Run type.
+ * A runtime card renders the fields in its Kubernetes-only block, which both
+ * leave out; a profile card applies this to the type of its runtime.
+ */
+function hidesSharedDirFields(type: string): boolean {
+  if (type === 'cloudrun' || type === 'cloudrun-instances') return true;
+  return isNonKubernetesContainerType(type);
+}
+
+// A quantity is positive when it has no leading "-" and a non-zero digit
+// before any exponent or suffix. Read from the text, not a float: 1e-400 is
+// positive for the hub but underflows to 0 as a number.
+const POSITIVE_QUANTITY = /^[+]?[0-9.]*[1-9]/;
+
+/**
+ * The inline error for a shared_dir_size value, or null when it is valid:
+ * empty (unset) or a positive Kubernetes quantity, the hub's rule
+ * (config.ValidateSharedDirSize). The text names the field, never the value.
+ */
+export function sharedDirSizeError(value: string): string | null {
+  if (!value) return null;
+  if (parseQuantity(value) !== null && POSITIVE_QUANTITY.test(value)) return null;
+  return 'shared_dir_size must be a positive Kubernetes quantity, such as 10Gi or 1Ti.';
+}
+
+/**
+ * The runtime entry keys a switch to type clears: the container and
+ * Kubernetes fields and the other Cloud Run block when switching to a Cloud
+ * Run type; the Kubernetes-only fields and both Cloud Run blocks when
+ * switching to a non-Kubernetes container type (docker, podman), which keeps
+ * host and context; both Cloud Run blocks otherwise (a Kubernetes type or no
+ * type).
+ */
+export function runtimeTypeSwitchKeys(type: string): string[] {
+  if (type === 'cloudrun') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun_instances'];
+  if (type === 'cloudrun-instances') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun'];
+  if (isNonKubernetesContainerType(type)) {
+    return [...KUBERNETES_ONLY_RUNTIME_KEYS, 'cloudrun', 'cloudrun_instances'];
+  }
+  return ['cloudrun', 'cloudrun_instances'];
+}
+
+/** The keys of rt holding a value that a switch to type would clear. */
+export function runtimeTypeSwitchClears(rt: object, type: string): string[] {
+  const entry = rt as Record<string, unknown>;
+  return runtimeTypeSwitchKeys(type).filter((k) => {
+    const v = entry[k];
+    if (v === undefined || v === null || v === '') return false;
+    // false is unset for the switches; safe_to_evict false is a value.
+    if (v === false && k !== 'safe_to_evict') return false;
+    if (typeof v === 'object' && Object.keys(v).length === 0) return false;
+    return true;
+  });
+}
+
+export function stripRemovedStorageOverrides<T extends object>(
+  entries: Record<string, T>
+): Record<string, T> {
+  for (const entry of Object.values(entries)) {
+    if (entry && typeof entry === 'object') {
+      for (const key of REMOVED_STORAGE_OVERRIDE_KEYS) {
+        delete (entry as Record<string, unknown>)[key];
+      }
+    }
+  }
+  return entries;
+}
+
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private saving = false;
   @state() private error: string | null = null;
@@ -427,12 +1057,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private scionCommit = '';
   @state() private scionBuildTime = '';
 
-  // ── Update check state ──
-  @state() private updateCheckLoading = false;
-  @state() private updateCheckError: string | null = null;
-  @state() private updateCheckResult: UpdateCheckResult | null = null;
-  @state() private updateRunning = false;
-  @state() private showUpdateConfirm = false;
+  /**
+   * Running version and effective channel from GET
+   * /api/v1/admin/maintenance/update-status, or null when it is not loaded.
+   * Updates are managed on the Maintenance page only; this page shows them.
+   */
+  @state() private updateStatus: UpdateStatus | null = null;
 
   // ── Form state (mirrors settings.yaml) ──
 
@@ -473,10 +1103,27 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultMaxAgentRole = '';
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
+  // The loaded default runtime broker (as shown, see
+  // normalizeDefaultRuntimeBroker); a save sends the key only when the
+  // form value differs from it.
+  private loadedDefaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
+  // Agent container timezone (agent_defaults.default_timezone). Empty means UTC.
+  @state() private defaultTimezone = '';
+
+  private get defaultTimezoneInvalid(): boolean {
+    return this.defaultTimezone !== '' && !isValidTimeZone(this.defaultTimezone);
+  }
+
+  // Default GCP identity (hub-wide fallback)
+  @state() private defaultGCPIdentityMode = '';
+  @state() private defaultGCPIdentitySAID = '';
+  /** Account as loaded from the server; used to detect admin edits. */
+  private loadedGCPIdentitySAID = '';
+  @state() private hubGCPServiceAccounts: GCPServiceAccount[] = [];
 
   // Agent defaults sub-tab
-  @state() private agentDefaultsTab = 'general';
+  @state() private agentDefaultsTab: AgentDefaultsTab = 'general';
 
   // Project defaults
   @state() private scratchpadEnabled = true;
@@ -486,12 +1133,19 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Server
   @state() private serverMode = '';
   @state() private logLevel = '';
-  @state() private logFormat = '';
 
   // Hub Server
   @state() private hubPort = 0;
   @state() private hubHost = '';
   @state() private hubPublicUrl = '';
+  @state() private hubMonitoringDashboardUrl = '';
+  /**
+   * The monitoring dashboard URL as loaded, and whether the user edited the
+   * field: a save sends the key only when it was edited and changed, so an
+   * untouched form never writes (or materialises) it.
+   */
+  private loadedMonitoringDashboardUrl = '';
+  private monitoringDashboardUrlTouched = false;
   @state() private hubReadTimeout = '';
   @state() private hubWriteTimeout = '';
   @state() private hubAdminEmails = '';
@@ -499,8 +1153,17 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubSoftDeleteRetainFiles = false;
   @state() private hubAutoSuspendStalled = false;
   @state() private hubStalledThreshold = '';
+  // Agent start timing (server.hub.start_*, lifecycle section;
+  // ptone/scion#3925). "" is unset: the hub's coded default applies.
+  @state() private hubStartTimings: Record<StartTimingKey, string> = emptyStartTimings();
+  // The start timings as loaded: the settings.yaml save sends only the
+  // ones that differ (buildFilePayload).
+  private loadedStartTimings: Record<StartTimingKey, string> = emptyStartTimings();
   @state() private hubGcpIamCheckMode = 'off';
   @state() private hubGcpIamDenyUnknownPolicy = 'fail-open';
+  /** The GCP permission-check values as loaded, so a save sends only a changed key. */
+  private loadedGcpIamCheckMode = 'off';
+  private loadedGcpIamDenyUnknownPolicy = 'fail-open';
 
   // Runtime Broker
   @state() private brokerEnabled = false;
@@ -510,7 +1173,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private brokerContainerHubEndpoint = '';
   @state() private brokerName = '';
   @state() private brokerNickname = '';
-  @state() private brokerAutoProvide = false;
+  @state() private brokerAutoProvide = true; // absent means on
 
   // Database
   @state() private dbDriver = '';
@@ -521,6 +1184,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private authDevToken = '';
   @state() private authAuthorizedDomains = '';
   @state() private authUserAccessMode = 'open';
+  @state() private authDefaultUserRole = 'member';
 
   // Storage
   @state() private storageProvider = '';
@@ -532,22 +1196,44 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private secretsGCPProjectId = '';
   @state() private secretsGCPReplicationLocations = '';
 
+  // Tri-state switches (ptone/scion#3724, ptone/scion#3913): null means the
+  // key is unset (GET left it out), so the hub's default applies. Each has a
+  // loaded copy; a save sends a switch only when it differs from the loaded
+  // value, as null when the user chose "Use default". An untouched unset
+  // switch is therefore never written as an explicit false.
+
   // Auto-expose ports
-  @state() private autoExposePortsEnabled = false;
+  @state() private autoExposePortsEnabled: boolean | null = null;
+  private loadedAutoExposePortsEnabled: boolean | null = null;
+
+  // Quotas (unset means enforced)
+  @state() private enforceBrokerQuotas: boolean | null = null;
+  private loadedEnforceBrokerQuotas: boolean | null = null;
+
+  // Agent Secrets (unset means permissive)
+  @state() private agentSecretsUserScopeOnly: boolean | null = null;
+  private loadedAgentSecretsUserScopeOnly: boolean | null = null;
 
   // Telemetry
-  @state() private telemetryEnabled = false;
-  @state() private telemetryCloudEnabled = false;
+  @state() private telemetryEnabled: boolean | null = null;
+  private loadedTelemetryEnabled: boolean | null = null;
+  @state() private telemetryCloudEnabled: boolean | null = null;
+  private loadedTelemetryCloudEnabled: boolean | null = null;
   @state() private telemetryCloudEndpoint = '';
   @state() private telemetryCloudProtocol = '';
   @state() private telemetryCloudProvider = '';
   @state() private telemetryCloudGcpProjectId = '';
-  @state() private telemetryCloudCloudLogging = false;
-  @state() private telemetryHubEnabled = false;
+  @state() private telemetryCloudCloudLogging: boolean | null = null;
+  private loadedTelemetryCloudCloudLogging: boolean | null = null;
+  @state() private telemetryHubEnabled: boolean | null = null;
+  private loadedTelemetryHubEnabled: boolean | null = null;
   @state() private telemetryHubReportInterval = '';
-  @state() private telemetryLocalEnabled = false;
-  @state() private telemetryLocalFile = '';
-  @state() private telemetryLocalConsole = false;
+  /**
+   * Stored telemetry.local, kept only so a file-mode save (which replaces the
+   * whole telemetry object) writes it back unchanged. No UI edits it: nothing
+   * reads these keys (ptone/scion#4103).
+   */
+  private storedTelemetryLocal: V1TelemetryLocalConfig | undefined;
 
   // Message Broker
   @state() private messageBrokerEnabled = false;
@@ -555,6 +1241,20 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Native Chat — default ON, matching the server's absent-means-enabled rule.
   @state() private nativeChatEnabled = true;
+  /**
+   * The Layer-0 / file-only part of the save payload as built right after
+   * the form was populated. A workstation save sends only the leaves that
+   * differ from it (see buildLayer0Payload), so an untouched form sends no
+   * Layer-0 leaves, whatever defaults the form filled in.
+   */
+  private layer0Snapshot: Record<string, unknown> = {};
+  /**
+   * DB-tier (and workstation) Layer-1 payload as loaded, and each section's
+   * revision at load (ptone/scion#3922): a save sends only the sections the
+   * user changed, each guarded by its revision. null in the file tier.
+   */
+  private layer1Baseline: Record<string, unknown> | null = null;
+  private loadedRevisions: Record<string, number> = {};
 
   // Cross-project agent messaging (from admin/messaging API, not server-config)
   @state() private crossProjectMessagingEnabled = false;
@@ -565,6 +1265,16 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GitHub App
   @state() private githubAppConfigured = false;
+  /**
+   * True once GET /api/v1/github-app has succeeded, false after one fails.
+   * Until it is true the card's fields hold defaults, not the stored config,
+   * so the card cannot be saved and the main save does not echo
+   * server.github_app: either would send the defaults as explicit clears
+   * and wipe the stored App. A reload keeps the previous value while it is
+   * in flight (so the reload after a card save does not flash the "did not
+   * load" hint) and sets it from the result.
+   */
+  @state() private githubAppLoaded = false;
   @state() private githubAppId = 0;
   @state() private githubAppApiBaseUrl = '';
   @state() private githubAppWebhooksEnabled = false;
@@ -575,6 +1285,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private githubAppInstallationUrl = '';
   @state() private githubAppSaving = false;
   @state() private githubAppError: string | null = null;
+  // Structured error from the last failed GitHub App card save
+  // (PUT /api/v1/github-app, ptone/scion#3923).
+  @state() private githubAppSaveError: SettingsSaveError | null = null;
   @state() private githubAppSuccess: string | null = null;
   @state() private githubAppInstallations: GitHubInstallationInfo[] = [];
   @state() private githubAppInstallationsLoading = false;
@@ -585,17 +1298,14 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GCP Identity Quota
   @state() private gcpQuotaLoading = false;
-  @state() private gcpQuotaData: {
-    minting_configured: boolean;
-    gcp_project_id?: string;
-    global_minted: number;
-    global_cap: number;
-    per_project_cap: number;
-    projects?: { project_id: string; project_name: string; minted: number }[];
-  } | null = null;
+  @state() private gcpQuotaData: GCPQuotaSummary | null = null;
 
   // Runtimes, Profiles & Harness Configs
   @state() private runtimes: Record<string, V1RuntimeConfig> = {};
+  // The runtimes as loaded. A save sends null for each key the form
+  // removed from a loaded entry, because the hub keeps a key a sent entry
+  // leaves out (ptone/scion#6580).
+  private loadedRuntimes: Record<string, V1RuntimeConfig> = {};
   @state() private profiles: Record<string, V1ProfileConfig> = {};
   @state() private harnessConfigsMap: Record<string, unknown> = {};
   @state() private harnessConfigsRaw: Record<string, string> = {};
@@ -607,26 +1317,54 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Keep raw data for sections we don't fully edit
   private rawConfig: ServerConfigResponse | null = null;
 
-  // ── Settings-DB metadata (postgres mode only) ──
+  // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
+  @state() private envValues: Record<string, EnvKeyValue> = {};
+  @state() private runningValues: Record<string, RunningKeyValue> = {};
+  @state() private publicUrlStatus: PublicURLStatus | null = null;
+  /** Stored server.hub.content_url and its status; read-only here (ptone/scion#7107). */
+  @state() private hubContentUrl = '';
+  @state() private contentUrlStatus: ContentURLStatus | null = null;
+  @state() private imageRegistryProvenance: ImageRegistryProvenance | null = null;
+  @state() private observabilityExport: HubObservabilityExport | null = null;
+
+  // ── Hub observability export switches (ptone/scion#4914) ──
+  // null = unset (the earlier rule applies). Sent only when changed.
+  @state() private hubMetricsEnabled: boolean | null = null;
+  @state() private hubTracingEnabled: boolean | null = null;
+  private loadedHubMetricsEnabled: boolean | null = null;
+  private loadedHubTracingEnabled: boolean | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
+  // Warnings the last save returned (accepted values worth a look, such
+  // as a memory value without a unit).
+  @state() private saveWarningsNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
   @state() private deprecatedEnvKeys: DeprecatedEnvKeyInfo[] | null = null;
   @state() private resetConfirmSection: string | null = null;
   @state() private resettingSection = false;
 
   // ── Structured save errors (§3.6) ──
-  @state() private validationErrors: Record<string, ValidationErrorDetail[]> | null = null;
+  // Validation entries from a failed save, each mapped to a koanf key when
+  // the server named a field (ptone/scion#3923).
+  @state() private validationErrors: SettingsFieldError[] | null = null;
   @state() private conflictInfo: ConflictInfo | null = null;
   @state() private safetyNetKeys: string[] | null = null;
 
   // ── Layer-aware rendering state ──
   private settingsTier: 'db' | 'file' = 'file';
+  private layer0Editable = false;
   private layer1Keys: Set<string> = new Set(STATIC_LAYER1_KEYS);
+  // Settings section -> koanf paths from the schema endpoint, used to map a
+  // validation error's section-relative path to a form field.
+  private sectionKoanfPaths: Record<string, string[]> | undefined;
   private envKeys: Set<string> = new Set();
 
   static override styles = css`
+    ${settingsErrorStyles}
+    ${envBadgeStyles}
+    ${readOnlyFieldStyles}
+
     :host {
       display: block;
     }
@@ -759,6 +1497,15 @@ export class ScionPageAdminServerConfig extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .default-user-role-help p,
+    .default-user-role-help ul {
+      margin: 0 0 0.375rem 0;
+    }
+
+    .default-user-role-help ul {
+      padding-left: 1.25rem;
+    }
+
     .agent-defaults-tabs sl-tab-group {
       --indicator-color: var(--scion-primary, #3b82f6);
     }
@@ -784,6 +1531,17 @@ export class ScionPageAdminServerConfig extends LitElement {
       gap: 0.125rem;
     }
 
+    .start-timings {
+      margin-top: 1.25rem;
+    }
+
+    .start-timings .subsection-label {
+      display: block;
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+    }
+
     .version-label {
       font-size: 0.75rem;
       font-weight: 500;
@@ -806,66 +1564,23 @@ export class ScionPageAdminServerConfig extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    .version-actions {
+    .version-summary {
       display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-left: auto;
-      align-self: flex-start;
-    }
-
-    .update-banner {
-      margin-top: 0.75rem;
-      padding: 0.75rem 1rem;
-      border-radius: 0.375rem;
-      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
-      background: var(--sl-color-primary-50, #eff6ff);
-    }
-
-    .update-banner-header {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-weight: 600;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.5rem 1rem;
+      margin-bottom: 0.75rem;
       font-size: 0.875rem;
-      color: var(--sl-color-primary-700, #1d4ed8);
-    }
-
-    .update-banner-header sl-icon {
-      font-size: 1rem;
-    }
-
-    .update-commits {
-      margin-top: 0.5rem;
-      max-height: 10rem;
-      overflow-y: auto;
-      font-size: 0.8125rem;
-      font-family: var(--sl-font-mono, monospace);
-      line-height: 1.5;
       color: var(--scion-text, #1e293b);
     }
 
-    .update-commits .commit-hash {
+    .version-summary a {
       color: var(--sl-color-primary-600, #2563eb);
-      margin-right: 0.5rem;
+      text-decoration: none;
     }
 
-    .update-banner-actions {
-      margin-top: 0.75rem;
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .update-current {
-      margin-top: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .update-error {
-      margin-top: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--sl-color-danger-700, #b91c1c);
+    .version-summary a:hover {
+      text-decoration: underline;
     }
 
     sl-input::part(base),
@@ -874,6 +1589,18 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.875rem;
       border-color: var(--scion-border, #e2e8f0);
       background: var(--scion-surface, #ffffff);
+    }
+
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      sl-input::part(base),
+      sl-select::part(combobox),
+      sl-textarea::part(base) {
+        font-size: max(16px, 0.875rem);
+      }
     }
 
     sl-input::part(input),
@@ -929,6 +1656,15 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     .reload-info .restart {
       color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped {
+      color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
     }
 
     .loading-container {
@@ -998,53 +1734,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       background: var(--sl-color-warning-100, #fef3c7);
       padding: 0.125rem 0.375rem;
       border-radius: 0.25rem;
-    }
-
-    /* ── Layer-aware: read-only field rendering ── */
-
-    .read-only-value {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      padding: 0.5rem 0.75rem;
-      background: var(--scion-bg, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      min-height: 1.5em;
-    }
-
-    .read-only-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.6875rem;
-      font-weight: 500;
-      color: var(--sl-color-neutral-600, #475569);
-      background: var(--sl-color-neutral-100, #f1f5f9);
-      border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      white-space: nowrap;
-      font-style: italic;
-    }
-
-    /* ── Settings-DB: per-field env badge ── */
-
-    .env-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.6875rem;
-      font-weight: 500;
-      color: var(--sl-color-warning-700, #b45309);
-      background: var(--sl-color-warning-50, #fffbeb);
-      border: 1px solid var(--sl-color-warning-200, #fde68a);
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      white-space: nowrap;
-    }
-
-    .env-badge sl-icon {
-      font-size: 0.75rem;
     }
 
     /* ── Settings-DB: section metadata caption ── */
@@ -1230,6 +1919,35 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .k8s-placement {
+      margin-top: 0.75rem;
+    }
+    .k8s-placement summary {
+      cursor: pointer;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+    .k8s-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.25rem;
+    }
+    .k8s-row sl-input,
+    .k8s-row sl-select {
+      flex: 1;
+    }
+
+    .field-warning {
+      display: block;
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .save-warnings-notice ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
+    }
+
     .ignored-keys-notice code {
       font-family: var(--sl-font-mono, monospace);
       font-size: 0.75rem;
@@ -1339,6 +2057,27 @@ export class ScionPageAdminServerConfig extends LitElement {
       border-radius: 0.25rem;
       margin-right: 0.25rem;
     }
+
+    .conflict-banner-sections code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+    }
+
+    .conflict-saved {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .conflict-saved ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
+    }
+
+    .conflict-saved code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -1346,14 +2085,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     void this.loadConfig();
     void this.loadHarnessConfigs();
     void this.loadRuntimeBrokers();
+    void this.loadHubGCPServiceAccounts();
     void this.loadGitHubAppInstallations();
     void this.loadMessagingSettings();
+    void this.loadUpdateStatus();
   }
 
   private async loadConfig(): Promise<void> {
     this.loading = true;
     this.error = null;
     this.ignoredKeysNotice = null;
+    this.saveWarningsNotice = null;
     try {
       const [res] = await Promise.all([
         apiFetch('/api/v1/admin/server-config'),
@@ -1367,9 +2109,19 @@ export class ScionPageAdminServerConfig extends LitElement {
       const data = (await res.json()) as ServerConfigResponse;
       this.rawConfig = data;
       this.populateForm(data);
+      this.layer0Snapshot = this.buildLayer0Candidate();
       // Load GitHub App config before releasing the loading gate so values
       // are present when the form first renders (avoids Shoelace timing issues).
       await this.loadGitHubAppConfig();
+      // The baseline is taken after every field is loaded, so an unchanged
+      // form compares equal section by section.
+      if (this.settingsTier === 'db') {
+        this.layer1Baseline = this.buildLayer1Payload();
+        this.loadedRevisions = revisionsFromMetadata(data.section_metadata);
+      } else {
+        this.layer1Baseline = null;
+        this.loadedRevisions = {};
+      }
     } catch (e) {
       this.error = 'Failed to connect to server';
     } finally {
@@ -1422,6 +2174,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         const keys = Object.values(data.sections).flatMap((s) => s.koanf_paths ?? []);
         if (keys.length > 0) this.layer1Keys = new Set(keys);
       }
+      this.sectionKoanfPaths = sectionPathsFromSchema(data);
     } catch {
       // Fall back to STATIC_LAYER1_KEYS (already the default)
     }
@@ -1468,119 +2221,146 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.defaultModelSelection = '';
       this.defaultCustomModelId = '';
     }
-    this.defaultThinkingLevel = data.default_thinking_level ?? null;
+    // A stored 0 is not a valid level (the server rejects it); show it as
+    // unset so a save sends null instead of failing (ptone/scion#3898).
+    this.defaultThinkingLevel = data.default_thinking_level || null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.loadedDefaultRuntimeBroker = this.defaultRuntimeBroker;
+    this.normalizeDefaultRuntimeBroker();
+    this.defaultTimezone = data.default_timezone || '';
+    this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
+    this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
+    this.loadedGCPIdentitySAID = this.defaultGCPIdentitySAID;
 
-    // Server
-    const srv = data.server;
-    if (srv) {
-      this.serverMode = srv.mode || '';
-      this.logLevel = srv.log_level || '';
-      this.logFormat = srv.log_format || '';
+    // Server. Every field is assigned on each load, from an empty block
+    // when GET left one out, so a reload after a save that removed a
+    // sub-block shows it as unset instead of the values from before the
+    // save (ptone/scion#3724).
+    const srv = data.server ?? {};
+    this.serverMode = srv.mode || '';
+    this.logLevel = srv.log_level || '';
 
-      // Hub
-      if (srv.hub) {
-        this.hubPort = srv.hub.port || 0;
-        this.hubHost = srv.hub.host || '';
-        this.hubPublicUrl = srv.hub.public_url || '';
-        this.hubReadTimeout = srv.hub.read_timeout || '';
-        this.hubWriteTimeout = srv.hub.write_timeout || '';
-        this.hubAdminEmails = (srv.hub.admin_emails || []).join(', ');
-        this.hubSoftDeleteRetention = srv.hub.soft_delete_retention || '';
-        this.hubSoftDeleteRetainFiles = srv.hub.soft_delete_retain_files || false;
-        this.hubAutoSuspendStalled = srv.hub.auto_suspend_stalled || false;
-        this.hubStalledThreshold = srv.hub.stalled_threshold || '';
-        this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
-        this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
-      }
+    // Hub
+    const hubBlock = srv.hub ?? {};
+    this.hubPort = hubBlock.port || 0;
+    this.hubHost = hubBlock.host || '';
+    this.hubPublicUrl = hubBlock.public_url || '';
+    this.hubMonitoringDashboardUrl = hubBlock.monitoring_dashboard_url || '';
+    this.hubContentUrl = hubBlock.content_url || '';
+    this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
+    this.monitoringDashboardUrlTouched = false;
+    this.hubReadTimeout = hubBlock.read_timeout || '';
+    this.hubWriteTimeout = hubBlock.write_timeout || '';
+    this.hubAdminEmails = (hubBlock.admin_emails || []).join(', ');
+    this.hubSoftDeleteRetention = hubBlock.soft_delete_retention || '';
+    this.hubSoftDeleteRetainFiles = hubBlock.soft_delete_retain_files || false;
+    this.hubAutoSuspendStalled = hubBlock.auto_suspend_stalled || false;
+    this.hubStalledThreshold = hubBlock.stalled_threshold || '';
+    this.hubStartTimings = startTimingsFrom(hubBlock);
+    this.loadedStartTimings = { ...this.hubStartTimings };
+    this.hubGcpIamCheckMode = hubBlock.gcp_iam_check_mode || 'off';
+    this.hubGcpIamDenyUnknownPolicy = hubBlock.gcp_iam_deny_unknown_policy || 'fail-open';
+    this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
+    this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
 
-      // Broker
-      if (srv.broker) {
-        this.brokerEnabled = srv.broker.enabled || false;
-        this.brokerPort = srv.broker.port || 0;
-        this.brokerHost = srv.broker.host || '';
-        this.brokerHubEndpoint = srv.broker.hub_endpoint || '';
-        this.brokerContainerHubEndpoint = srv.broker.container_hub_endpoint || '';
-        this.brokerName = srv.broker.broker_name || '';
-        this.brokerNickname = srv.broker.broker_nickname || '';
-        this.brokerAutoProvide = srv.broker.auto_provide || false;
-      }
+    // Broker
+    const brokerBlock = srv.broker ?? {};
+    this.brokerEnabled = brokerBlock.enabled || false;
+    this.brokerPort = brokerBlock.port || 0;
+    this.brokerHost = brokerBlock.host || '';
+    this.brokerHubEndpoint = brokerBlock.hub_endpoint || '';
+    this.brokerContainerHubEndpoint = brokerBlock.container_hub_endpoint || '';
+    this.brokerName = brokerBlock.broker_name || '';
+    this.brokerNickname = brokerBlock.broker_nickname || '';
+    // Absent means on (the server auto-provides when the key is unset).
+    this.brokerAutoProvide = brokerBlock.auto_provide ?? true;
 
-      // Database
-      if (srv.database) {
-        this.dbDriver = srv.database.driver || '';
-        this.dbUrl = srv.database.url || '';
-      }
+    // Database
+    const dbBlock = srv.database ?? {};
+    this.dbDriver = dbBlock.driver || '';
+    this.dbUrl = dbBlock.url || '';
 
-      // Auth
-      if (srv.auth) {
-        this.authDevMode = srv.auth.dev_mode || false;
-        this.authDevToken = srv.auth.dev_token || '';
-        this.authAuthorizedDomains = (srv.auth.authorized_domains || []).join(', ');
-        this.authUserAccessMode = srv.auth.user_access_mode || 'open';
-      }
+    // Auth
+    const authBlock = srv.auth ?? {};
+    this.authDevMode = authBlock.dev_mode || false;
+    this.authDevToken = authBlock.dev_token || '';
+    this.authAuthorizedDomains = (authBlock.authorized_domains || []).join(', ');
+    this.authUserAccessMode = authBlock.user_access_mode || 'open';
+    this.authDefaultUserRole = authBlock.default_user_role || 'member';
 
-      // Storage
-      if (srv.storage) {
-        this.storageProvider = srv.storage.provider || '';
-        this.storageBucket = srv.storage.bucket || '';
-        this.storageLocalPath = srv.storage.local_path || '';
-      }
+    // Storage
+    const storageBlock = srv.storage ?? {};
+    this.storageProvider = storageBlock.provider || '';
+    this.storageBucket = storageBlock.bucket || '';
+    this.storageLocalPath = storageBlock.local_path || '';
 
-      // Secrets
-      if (srv.secrets) {
-        this.secretsBackend = srv.secrets.backend || '';
-        this.secretsGCPProjectId = srv.secrets.gcp_project_id || '';
-        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(
-          ', '
-        );
-      }
+    // Secrets
+    const secretsBlock = srv.secrets ?? {};
+    this.secretsBackend = secretsBlock.backend || '';
+    this.secretsGCPProjectId = secretsBlock.gcp_project_id || '';
+    this.secretsGCPReplicationLocations = (secretsBlock.gcp_replication_locations || []).join(', ');
 
-      // Message Broker
-      if (srv.message_broker) {
-        this.messageBrokerEnabled = srv.message_broker.enabled || false;
-        this.messageBrokerType = srv.message_broker.type || '';
-      }
+    // Message Broker
+    const mbBlock = srv.message_broker ?? {};
+    this.messageBrokerEnabled = mbBlock.enabled || false;
+    this.messageBrokerType = mbBlock.type || '';
 
-      // Native Chat — an absent section or an absent key means enabled.
-      this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
-    }
+    // Native Chat — an absent section or an absent key means enabled.
+    this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
 
     // Telemetry
     const tel = data.telemetry;
-    if (tel) {
-      this.telemetryEnabled = tel.enabled || false;
-      if (tel.cloud) {
-        this.telemetryCloudEnabled = tel.cloud.enabled || false;
-        this.telemetryCloudEndpoint = tel.cloud.endpoint || '';
-        this.telemetryCloudProtocol = tel.cloud.protocol || '';
-        this.telemetryCloudProvider = tel.cloud.provider || '';
-        this.telemetryCloudGcpProjectId = tel.cloud.gcp_project_id || '';
-        this.telemetryCloudCloudLogging = tel.cloud.cloud_logging || false;
-      }
-      if (tel.hub) {
-        this.telemetryHubEnabled = tel.hub.enabled || false;
-        this.telemetryHubReportInterval = tel.hub.report_interval || '';
-      }
-      if (tel.local) {
-        this.telemetryLocalEnabled = tel.local.enabled || false;
-        this.telemetryLocalFile = tel.local.file || '';
-        this.telemetryLocalConsole = tel.local.console || false;
-      }
-    }
+    this.storedTelemetryLocal = tel?.local;
+    this.telemetryEnabled = tel?.enabled ?? null;
+    this.telemetryCloudEnabled = tel?.cloud?.enabled ?? null;
+    this.telemetryCloudEndpoint = tel?.cloud?.endpoint || '';
+    this.telemetryCloudProtocol = tel?.cloud?.protocol || '';
+    this.telemetryCloudProvider = tel?.cloud?.provider || '';
+    this.telemetryCloudGcpProjectId = tel?.cloud?.gcp_project_id || '';
+    this.telemetryCloudCloudLogging = tel?.cloud?.cloud_logging ?? null;
+    this.telemetryHubEnabled = tel?.hub?.enabled ?? null;
+    this.telemetryHubReportInterval = tel?.hub?.report_interval || '';
+    this.loadedTelemetryEnabled = this.telemetryEnabled;
+    this.loadedTelemetryCloudEnabled = this.telemetryCloudEnabled;
+    this.loadedTelemetryCloudCloudLogging = this.telemetryCloudCloudLogging;
+    this.loadedTelemetryHubEnabled = this.telemetryHubEnabled;
 
     // Auto-expose ports
-    const aep = data.auto_expose_ports;
-    if (aep) {
-      this.autoExposePortsEnabled = aep.enabled || false;
-    }
+    this.autoExposePortsEnabled = data.auto_expose_ports?.enabled ?? null;
+    this.loadedAutoExposePortsEnabled = this.autoExposePortsEnabled;
+
+    // Quotas — absent means enforced (fail-safe default).
+    this.enforceBrokerQuotas = data.quotas?.enforce_broker_quotas ?? null;
+    this.loadedEnforceBrokerQuotas = this.enforceBrokerQuotas;
+
+    // Agent Secrets — absent means permissive (agents may write project scope).
+    this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? null;
+    this.loadedAgentSecretsUserScopeOnly = this.agentSecretsUserScopeOnly;
+
+    // Hub observability export switches — absent means unset.
+    const obs = data.server?.hub?.observability;
+    this.hubMetricsEnabled = obs?.metrics_enabled ?? null;
+    this.hubTracingEnabled = obs?.tracing_enabled ?? null;
+    this.loadedHubMetricsEnabled = this.hubMetricsEnabled;
+    this.loadedHubTracingEnabled = this.hubTracingEnabled;
 
     // Runtimes, profiles, harness_configs — deep-copy into editable state
-    this.runtimes = data.runtimes ? JSON.parse(JSON.stringify(data.runtimes)) : {};
+    this.runtimes = data.runtimes
+      ? stripRemovedStorageOverrides(
+          JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>
+        )
+      : {};
+    this.k8sRows.clear();
+    this.loadedRuntimes = JSON.parse(JSON.stringify(this.runtimes)) as Record<
+      string,
+      V1RuntimeConfig
+    >;
     this.profiles = data.profiles
-      ? (JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>)
+      ? stripRemovedStorageOverrides(
+          JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>
+        )
       : {};
     this.harnessConfigsMap = data.harness_configs
       ? (JSON.parse(JSON.stringify(data.harness_configs)) as Record<string, unknown>)
@@ -1597,11 +2377,20 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.harnessConfigsRaw = rawStrings;
     this.harnessConfigErrors = {};
 
-    // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+    // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
     this.settingsTier = data.settings_tier || 'file';
+    this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
+    this.envValues = data.env_values || {};
+    this.runningValues = data.running_values || {};
+    this.publicUrlStatus = data.public_url_status || null;
+    this.contentUrlStatus = data.content_url_status || null;
+    this.imageRegistryProvenance = data.image_registry_provenance || null;
+    this.observabilityExport = data.observability_export || null;
     this.sectionMetadata = data.section_metadata || null;
+    // The hub leaves a pinned public URL out of superseded_keys
+    // (computeSupersededKeys), so the list is shown as it is.
     this.supersededKeys = data.superseded_keys || null;
     this.deprecatedEnvKeys =
       data.deprecated_env_keys && data.deprecated_env_keys.length > 0
@@ -1628,22 +2417,51 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
         this.runtimeBrokers = Array.isArray(data) ? data : data.brokers || [];
-        // Normalize: if the stored value is a name or slug, resolve it to the broker ID
-        // so the dropdown selection matches.
-        if (this.defaultRuntimeBroker && this.runtimeBrokers.length > 0) {
-          const match = this.runtimeBrokers.find(
-            (b) =>
-              b.id === this.defaultRuntimeBroker ||
-              (b.name && b.name.toLowerCase() === this.defaultRuntimeBroker.toLowerCase()) ||
-              (b.slug && b.slug.toLowerCase() === this.defaultRuntimeBroker.toLowerCase())
-          );
-          if (match && match.id !== this.defaultRuntimeBroker) {
-            this.defaultRuntimeBroker = match.id;
-          }
-        }
+        this.normalizeDefaultRuntimeBroker();
       }
     } catch {
       // Non-critical — dropdown falls back to free-text input
+    }
+  }
+
+  /**
+   * Shows a stored default runtime broker given by name or slug as the
+   * broker's ID, so the dropdown selection matches. The ID is display
+   * only: when the value was not edited, the loaded value moves along with
+   * it, so a save does not rewrite the operator's name or slug as an ID
+   * (ptone/scion#3913).
+   */
+  private normalizeDefaultRuntimeBroker(): void {
+    const current = this.defaultRuntimeBroker;
+    if (!current || this.runtimeBrokers.length === 0) return;
+    const lower = current.toLowerCase();
+    const match = this.runtimeBrokers.find(
+      (b) =>
+        b.id === current ||
+        (b.name && b.name.toLowerCase() === lower) ||
+        (b.slug && b.slug.toLowerCase() === lower)
+    );
+    if (match && match.id !== current) {
+      if (current === this.loadedDefaultRuntimeBroker) {
+        this.loadedDefaultRuntimeBroker = match.id;
+      }
+      this.defaultRuntimeBroker = match.id;
+    }
+  }
+
+  // Hub-scoped service accounts, for the "Assign Service Account" option of
+  // the hub-wide default GCP identity mode. Scoped to "hub" only — a
+  // hub-wide default naming a project-scoped account would silently fail
+  // reachability checks in every project but the one that owns it.
+  private async loadHubGCPServiceAccounts(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/gcp-service-accounts?scope=hub');
+      if (res.ok) {
+        const data = (await res.json()) as { items?: GCPServiceAccount[] };
+        this.hubGCPServiceAccounts = (data.items || []).filter((sa) => sa.verified);
+      }
+    } catch {
+      // Non-critical — dropdown falls back to an empty list
     }
   }
 
@@ -1671,23 +2489,184 @@ export class ScionPageAdminServerConfig extends LitElement {
       : this.harnessConfigSelection;
   }
 
+  /**
+   * The runtimes to send on save: each entry as edited, plus null for each
+   * key the form removed from a loaded entry, so the hub clears it (the hub
+   * keeps a key a sent entry leaves out). An entry the form removed is left
+   * out, which deletes it.
+   */
+  private runtimesPayload(): Record<string, Record<string, unknown>> {
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      const entry: Record<string, unknown> = { ...rt };
+      const loaded = hasOwn(this.loadedRuntimes, name) ? this.loadedRuntimes[name] : undefined;
+      if (loaded) {
+        for (const key of Object.keys(loaded)) {
+          if (!hasOwn(entry, key) || entry[key] === undefined) entry[key] = null;
+        }
+      }
+      out[name] = entry;
+    }
+    return out;
+  }
+
+  /** The default resources as the form would send them. */
+  private get defaultResourcesInput(): ResourceSpecInput {
+    return {
+      requests: { cpu: this.defaultResCpuReq, memory: this.defaultResMemReq },
+      limits: { cpu: this.defaultResCpuLim, memory: this.defaultResMemLim },
+      disk: this.defaultResDisk,
+    };
+  }
+
+  /**
+   * Resource quantity findings for default_resources and every profile's
+   * resources (the same rules as the hub's save check, ptone/scion#6581).
+   */
+  private get resourceQuantityIssues(): QuantityIssues {
+    const all: QuantityIssues = { errors: [], warnings: [] };
+    const add = (path: string, spec: ResourceSpecInput | undefined): void => {
+      const r = validateResourceSpec(path, spec);
+      all.errors.push(...r.errors);
+      all.warnings.push(...r.warnings);
+    };
+    add('default_resources', this.defaultResourcesInput);
+    for (const [name, profile] of Object.entries(this.profiles)) {
+      add(`profiles.${name}.resources`, profile.resources);
+      const overrides = profile['harness_overrides'] as
+        | Record<string, { resources?: ResourceSpecInput }>
+        | undefined;
+      for (const [harness, ho] of Object.entries(overrides ?? {})) {
+        add(`profiles.${name}.harness_overrides.${harness}.resources`, ho?.resources);
+      }
+    }
+    // shared_dir_size on the entries that show it (ptone/scion#2649).
+    const sharedDirSize = (path: string, value: string | undefined): void => {
+      const message = sharedDirSizeError(value ?? '');
+      if (message) all.errors.push({ path, message });
+    };
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      if (hidesSharedDirFields(rt.type || '')) continue;
+      sharedDirSize(`runtimes.${name}.shared_dir_size`, rt.shared_dir_size);
+    }
+    for (const [name, profile] of Object.entries(this.profiles)) {
+      if (hidesSharedDirFields(this.profileRuntimeType(profile))) continue;
+      sharedDirSize(`profiles.${name}.shared_dir_size`, profile.shared_dir_size);
+    }
+    return all;
+  }
+
+  /** The type of the runtime a profile names; empty when unset, unknown or untyped. */
+  private profileRuntimeType(profile: V1ProfileConfig): string {
+    const name = profile.runtime;
+    if (!name || !hasOwn(this.runtimes, name)) return '';
+    return this.runtimes[name]?.type || '';
+  }
+
+  private get hasResourceQuantityErrors(): boolean {
+    return this.resourceQuantityIssues.errors.length > 0;
+  }
+
+  /** Inline resource quantity errors and warnings for one field path. */
+  private renderQuantityIssues(path: string): typeof nothing | TemplateResult {
+    const { errors, warnings } = issuesAt(this.resourceQuantityIssues, path);
+    if (errors.length === 0 && warnings.length === 0) return nothing;
+    return html`${errors.map(
+      (m) => html`<span class="field-error" data-quantity-error=${path}>${m}</span>`
+    )}${warnings.map(
+      (m) => html`<span class="hint field-warning" data-quantity-warning=${path}>${m}</span>`
+    )}`;
+  }
+
   private get hasHarnessConfigErrors(): boolean {
     return Object.keys(this.harnessConfigErrors).length > 0;
   }
 
-  private readOnlyReason(koanfKey: string): 'bootstrap' | 'env' | null {
-    if (this.settingsTier === 'db') {
-      return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
-    }
-    return this.envKeys.has(koanfKey) ? 'env' : null;
+  /**
+   * Hosted DB-backed hubs only accept Layer-1 keys, so everything else is
+   * read-only there. Workstation hubs (layer0_editable) also write Layer-0
+   * and file-only keys to settings.yaml, so only env-pinned keys are locked.
+   */
+  private get layer1Only(): boolean {
+    return this.settingsTier === 'db' && !this.layer0Editable;
   }
 
-  private renderReadOnlyBadge(reason: 'bootstrap' | 'env'): ReturnType<typeof html> {
+  private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
+    // The public URL is pinned by an operator setting on this node: the hub
+    // uses that value and ignores a saved one (ptone/scion#3905).
+    if (koanfKey === PUBLIC_URL_KEY && this.publicUrlStatus?.pinned_by) return 'pinned';
+    if (koanfKey === CLOUD_LOGGING_KEY && this.settingsTier === 'db') return 'startup';
+    if (this.layer1Only) {
+      return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
+    }
+    if (this.envKeys.has(koanfKey)) return 'env';
+    // On a workstation hub these are overridden at every start by the
+    // workstation defaults and server start flags, so editing them in
+    // settings.yaml has no effect.
+    if (this.layer0Editable && WORKSTATION_FLAG_MANAGED_KEYS.has(koanfKey)) return 'flag';
+    return null;
+  }
+
+  /**
+   * Agent-default fields the hub cannot save yet (ptone/scion#3067): shown
+   * read-only with a note, and never sent in a save payload.
+   */
+  private renderUnsavableField(displayValue: string): ReturnType<typeof html> {
+    return html`<span class="read-only-value">${displayValue || '—'}</span>
+      <span class="hint"
+        >Not editable here yet: the hub cannot save this setting (ptone/scion#3067).</span
+      >`;
+  }
+
+  private renderReadOnlyBadge(reason: ReadOnlyReason): ReturnType<typeof html> {
     const text =
-      reason === 'bootstrap'
-        ? '🔒 Managed via deployment configuration'
-        : '🔒 Set via environment variable';
+      reason === 'pinned'
+        ? `🔒 Set by ${this.publicUrlStatus?.pinned_by ?? 'an operator setting'}`
+        : reason === 'startup'
+          ? '🔒 Read at startup from settings.yaml or SCION_CLOUD_LOGGING'
+          : reason === 'bootstrap'
+            ? '🔒 Managed via deployment configuration'
+            : reason === 'flag'
+              ? '🔒 Set by workstation startup defaults / server flags'
+              : null;
+    if (text === null) return renderEnvLockBadge();
     return html`<span class="read-only-badge">${text}</span>`;
+  }
+
+  /**
+   * Runtime broker host. On a workstation hub an unset value (empty or
+   * 0.0.0.0) shows the address the broker binds to instead. An env-pinned
+   * value shows as loaded, with no effective hint: the page does not see
+   * the environment value.
+   */
+  private renderBrokerHostField(): ReturnType<typeof html> {
+    const onInput = (e: Event) => {
+      this.brokerHost = (e.target as HTMLInputElement).value;
+    };
+    if (!this.layer0Editable) {
+      return this.renderFieldValue(
+        'server.broker.host',
+        this.brokerHost || '0.0.0.0',
+        html`<sl-input value=${this.brokerHost || '0.0.0.0'} @sl-input=${onInput}></sl-input>`
+      );
+    }
+    if (this.readOnlyReason('server.broker.host') === 'env') {
+      return this.renderFieldValue('server.broker.host', this.brokerHost, html``);
+    }
+    const unset = isUnsetBrokerHost(this.brokerHost);
+    return html`${this.renderFieldValue(
+      'server.broker.host',
+      unset ? WORKSTATION_BROKER_HOST_DEFAULT : this.brokerHost,
+      html`<sl-input
+        value=${this.brokerHost}
+        placeholder=${WORKSTATION_BROKER_HOST_DEFAULT}
+        @sl-input=${onInput}
+      ></sl-input>`
+    )}${unset && !this.runningValues['server.broker.host']
+      ? html`<span class="hint broker-host-effective"
+          >Effective: ${WORKSTATION_BROKER_HOST_DEFAULT} (empty or 0.0.0.0 counts as unset)</span
+        >`
+      : ''}`;
   }
 
   private renderFieldValue(
@@ -1696,12 +2675,156 @@ export class ScionPageAdminServerConfig extends LitElement {
     editableTemplate: ReturnType<typeof html>
   ): ReturnType<typeof html> {
     const reason = this.readOnlyReason(koanfKey);
-    if (reason) {
-      return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value"
-          >${displayValue || '—'}</span
-        >`;
+    // A read-only field whose key the environment sets on this node (any
+    // reason but a pinned public URL, whose read-only value is already the
+    // one in effect).
+    // A masked entry carries no in-effect state, so it keeps the field's
+    // plain rendering (hasInEffect).
+    const found = reason && reason !== 'pinned' ? envValueFor(this.envValues, [koanfKey]) : null;
+    const env = found && hasInEffect(found.ev) ? found : null;
+    if (reason && env && env.ev.in_effect) {
+      // The value in effect is the environment value; a stored value that
+      // differs is shown only as a secondary line, and only when one exists.
+      return html`${this.renderReadOnlyBadge(reason)}${this.envBadgeTemplate()}<span
+          class="read-only-value env-value-primary"
+          >${formatEnvValue(env.ev) || '—'}</span
+        >${env.ev.saved_differs
+          ? this.renderSavedNotInEffect(koanfKey, displayValue)
+          : nothing}${this.renderFieldErrors(koanfKey)}`;
     }
-    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
+    if (reason && env) {
+      // The environment sets the key, but another value wins on this node,
+      // without the env lock text. Only a Layer-1 key on a DB-backed hub can
+      // lose to a saved value, which is the value shown and wins. Anything
+      // else loses to a start-up default or flag, whose value the page does
+      // not receive: the value shown is then only the configured one
+      // (settings.yaml or the default), labelled so it does not read as the
+      // value in effect.
+      const cause: ReadOnlyReason =
+        this.settingsTier === 'db' && this.layer1Keys.has(koanfKey) ? 'env' : 'flag';
+      const configuredLabel =
+        cause === 'flag'
+          ? html`<span class="hint env-value-configured-label"
+              >Configured value (settings.yaml or default), not the value in effect:</span
+            >`
+          : nothing;
+      return html`${reason === 'env'
+          ? nothing
+          : this.renderReadOnlyBadge(reason)}${this.envBadgeTemplate(
+          false,
+          cause
+        )}${this.renderRunningValueLine(koanfKey)}${configuredLabel}<span class="read-only-value"
+          >${displayValue || '—'}</span
+        >${this.renderEnvValueLine(env.ev, cause)}${this.renderFieldErrors(koanfKey)}`;
+    }
+    if (reason) {
+      const running = this.renderRunningValueLine(koanfKey);
+      return html`${this.renderReadOnlyBadge(reason)}${running}${running === nothing
+          ? nothing
+          : html`<span class="hint env-value-configured-label"
+              >Configured value (settings.yaml or default), not the value in effect:</span
+            >`}<span class="read-only-value">${displayValue || '—'}</span>${this.renderFieldErrors(
+          koanfKey
+        )}`;
+    }
+    // A key whose environment value is in effect is not superseded by the
+    // saved value, whatever superseded_keys says.
+    const own = envValueFor(this.envValues, [koanfKey]);
+    const envInEffect = own !== null && hasInEffect(own.ev) && own.ev.in_effect;
+    return html`${envInEffect
+      ? nothing
+      : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderRunningValueLine(
+      koanfKey
+    )}${this.renderFieldErrors(koanfKey)}`;
+  }
+
+  /**
+   * The value this node runs with for a key start-up sets (a workstation
+   * default or a start flag), when the server reports that it differs from
+   * the value shown (running_values, ptone/scion#3722). Nothing otherwise.
+   */
+  private renderRunningValueLine(koanfKey: string): typeof nothing | ReturnType<typeof html> {
+    const rv = this.runningValues[koanfKey];
+    if (!rv) return nothing;
+    const text = formatEnvValue({ value: rv.value }) || '—';
+    return html`<span class="env-value-in-effect running-value-in-effect"
+      >In effect on this node: <code>${text}</code> (start-up default or flag)</span
+    >`;
+  }
+
+  /**
+   * A switch for a tri-state boolean setting (ptone/scion#3724). While the
+   * key is unset (value null) the switch is drawn as unsetChecked and the
+   * hint says it is not set; toggling an unset switch back to that state
+   * leaves it unset, and "Use default" unsets a set switch. The save sends
+   * the key only when it differs from the loaded value (putTriState).
+   */
+  private renderTriStateSwitch(opts: {
+    key: string;
+    label: string;
+    value: boolean | null;
+    loaded: boolean | null;
+    unsetChecked: boolean;
+    unsetLabel: string;
+    set: (v: boolean | null) => void;
+  }): ReturnType<typeof html> {
+    const { key, label, value, loaded, unsetChecked, unsetLabel, set } = opts;
+    const onToggle = (on: boolean) => set(loaded === null && on === unsetChecked ? null : on);
+    const display = value === null ? unsetLabel : value ? 'Enabled' : 'Disabled';
+    return this.renderFieldValue(
+      key,
+      display,
+      html`${this.renderEnvBadge(key)}<sl-switch
+          data-tristate=${key}
+          ?checked=${value ?? unsetChecked}
+          @sl-change=${(e: Event) => onToggle((e.target as HTMLInputElement).checked)}
+          >${label}</sl-switch
+        >${value !== null
+          ? html`<sl-button
+              size="small"
+              variant="text"
+              data-tristate-default=${key}
+              @click=${() => set(null)}
+              >Use default</sl-button
+            >`
+          : html`<span class="hint" data-tristate-unset=${key}>${unsetLabel}</span>`}`
+    );
+  }
+
+  /**
+   * Service account value to save, or undefined to leave it out of the
+   * payload. The account only applies in "assign" mode, so it is cleared
+   * when the admin picks another mode in the form.
+   *
+   * When the mode itself is read-only (env-pinned or deployment-managed),
+   * the form mode is not the effective mode (the account field follows
+   * effectiveGCPIdentityMode), so the form mode must not drive clearing
+   * (ptone/scion#2720). In that case the account is sent only when the
+   * admin edited it. An unchanged account is left out, so the server
+   * neither clears it nor re-checks it on unrelated saves. In the db tier
+   * both GCP keys are in one settings section and lock together, so this
+   * branch is file-tier (env-pinned) in practice.
+   */
+  private gcpIdentitySAIDForPayload(ok: (key: string) => boolean): string | undefined {
+    const said = this.defaultGCPIdentitySAID || '';
+    if (!ok('default_gcp_identity_mode')) {
+      return said === this.loadedGCPIdentitySAID ? undefined : said;
+    }
+    return this.defaultGCPIdentityMode === 'assign' ? said : '';
+  }
+
+  /**
+   * The hub default GCP identity mode this node runs with: the environment
+   * value when env_values reports it in effect (a file-tier hub), else the
+   * form value (ptone/scion#3071). It decides whether the account field
+   * shows; the save still sends the mode only when the form may edit it.
+   */
+  private get effectiveGCPIdentityMode(): string {
+    const env = envValueFor(this.envValues, ['default_gcp_identity_mode']);
+    if (env && hasInEffect(env.ev) && env.ev.in_effect && typeof env.ev.value === 'string') {
+      return env.ev.value;
+    }
+    return this.defaultGCPIdentityMode;
   }
 
   private buildLayer1Payload(): Record<string, unknown> {
@@ -1711,7 +2834,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     // General — only Layer-1 top-level keys
     if (ok('default_template')) payload.default_template = this.defaultTemplate;
     if (ok('default_harness_config')) payload.default_harness_config = this.resolvedHarnessConfig;
-    if (ok('default_harness_auth')) payload.default_harness_auth = this.defaultHarnessAuth || '';
     if (ok('image_registry')) payload.image_registry = this.imageRegistry;
 
     // Default agent limits
@@ -1742,6 +2864,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       if (this.defaultResDisk) defaultResources.disk = this.defaultResDisk;
       payload.default_resources = defaultResources;
+    } else if (ok('default_resources')) {
+      // The server keeps an omitted key, so all-empty resources are sent
+      // as null to clear the stored value (ptone/scion#3719).
+      payload.default_resources = null;
     }
 
     // Default model settings
@@ -1752,17 +2878,26 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
-    if (ok('default_max_agent_role')) {
-      payload.default_max_agent_role = this.defaultMaxAgentRole || '';
-    }
-    if (ok('default_agent_role')) {
-      payload.default_agent_role = this.defaultAgentRole || '';
-    }
-    if (ok('default_runtime_broker')) {
+    if (
+      ok('default_runtime_broker') &&
+      this.defaultRuntimeBroker !== this.loadedDefaultRuntimeBroker
+    ) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
+    }
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
+    }
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
     const server: Record<string, unknown> = {};
@@ -1770,6 +2905,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Hub — only Layer-1 hub fields
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl;
+    this.addMonitoringDashboardUrl(hub, ok);
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -1785,15 +2921,31 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
-    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
-    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
+    for (const t of START_TIMINGS) {
+      if (ok(`server.hub.${t.key}`)) hub[t.key] = this.hubStartTimings[t.key];
+    }
+    // The GCP permission-check keys are sent only when changed: each change
+    // is checked and recorded by the server.
+    if (
+      ok('server.hub.gcp_iam_check_mode') &&
+      this.hubGcpIamCheckMode !== this.loadedGcpIamCheckMode
+    )
+      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (
+      ok('server.hub.gcp_iam_deny_unknown_policy') &&
+      this.hubGcpIamDenyUnknownPolicy !== this.loadedGcpIamDenyUnknownPolicy
+    )
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
+    this.addHubObservability(hub, ok);
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
     const auth: Record<string, unknown> = {};
     if (ok('server.auth.user_access_mode')) {
       auth.user_access_mode = this.authUserAccessMode;
+    }
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole;
     }
     if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
@@ -1809,60 +2961,258 @@ export class ScionPageAdminServerConfig extends LitElement {
     // all Layer-0, omitted
 
     // Preserve notification channels and GitHub App from raw config
-    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload)
-    if (this.rawConfig?.server?.notification_channels) {
-      server.notification_channels = this.rawConfig.server.notification_channels;
+    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload).
+    // A block still holding a masked secret is the unedited GET value: omit
+    // it so the server keeps what it has stored.
+    const ncDb = this.rawConfig?.server?.notification_channels;
+    if (ncDb && !containsMaskedValue(ncDb)) {
+      server.notification_channels = ncDb;
     }
-    if (this.rawConfig?.server?.github_app) {
-      server.github_app = this.rawConfig.server.github_app;
+    // github_app is echoed only once the card has loaded it (see
+    // githubAppLoaded); left out, the server keeps what it has stored.
+    const ghDb = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
+    if (ghDb && !containsMaskedValue(ghDb)) {
+      server.github_app = ghDb;
     }
 
     if (Object.keys(server).length > 0) payload.server = server;
 
-    // Telemetry — all Layer-1
+    // Telemetry — all Layer-1. The tri-state switches go in only when
+    // changed (see putTriState).
     if (ok('telemetry.enabled')) {
-      const telemetry: Record<string, unknown> = {
-        enabled: this.telemetryEnabled,
-      };
+      const telemetry: Record<string, unknown> = {};
+      putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
       if (ok('telemetry.cloud.enabled')) {
-        telemetry.cloud = {
-          enabled: this.telemetryCloudEnabled,
+        const cloud: Record<string, unknown> = {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
-          gcp_project_id: this.telemetryCloudGcpProjectId || undefined,
-          cloud_logging: this.telemetryCloudCloudLogging,
+          // null clears a stored project ID; an omitted key would keep it,
+          // because telemetry is merged key by key (ptone/scion#3717).
+          gcp_project_id: this.telemetryCloudGcpProjectId || null,
         };
+        putTriState(cloud, 'enabled', this.telemetryCloudEnabled, this.loadedTelemetryCloudEnabled);
+        // cloud_logging is never sent here: the hub reads it only at
+        // startup, and a database-backed hub refuses a changed value
+        // (ptone/scion#5664).
+        telemetry.cloud = cloud;
       }
       if (ok('telemetry.hub.enabled')) {
-        telemetry.hub = {
-          enabled: this.telemetryHubEnabled,
+        const hub: Record<string, unknown> = {
           report_interval: this.telemetryHubReportInterval,
         };
-      }
-      if (ok('telemetry.local.enabled')) {
-        telemetry.local = {
-          enabled: this.telemetryLocalEnabled,
-          file: this.telemetryLocalFile,
-          console: this.telemetryLocalConsole,
-        };
+        putTriState(hub, 'enabled', this.telemetryHubEnabled, this.loadedTelemetryHubEnabled);
+        telemetry.hub = hub;
       }
       payload.telemetry = telemetry;
     }
 
-    // Auto-expose ports — Layer-1
-    if (ok('auto_expose_ports.enabled')) {
-      payload.auto_expose_ports = {
-        enabled: this.autoExposePortsEnabled,
-      };
-    }
+    // Auto-expose ports, quotas, agent secrets — Layer-1 tri-state switches.
+    this.putTriStateSections(payload, ok);
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
-    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('runtimes')) payload.runtimes = this.runtimesPayload();
     if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
     if (ok('profiles')) payload.profiles = this.profiles;
 
+    return payload;
+  }
+
+  /**
+   * Adds the auto_expose_ports, quotas and agent_secrets sections, each
+   * only when its switch differs from the loaded value: null (Use default)
+   * clears the stored key, and an untouched unset switch is not written as
+   * an explicit false (ptone/scion#3724). ok is the caller's editability
+   * check.
+   */
+  private putTriStateSections(
+    payload: Record<string, unknown>,
+    ok: (key: string) => boolean
+  ): void {
+    const sections: Array<[string, string, string, boolean | null, boolean | null]> = [
+      [
+        'auto_expose_ports',
+        'enabled',
+        'auto_expose_ports.enabled',
+        this.autoExposePortsEnabled,
+        this.loadedAutoExposePortsEnabled,
+      ],
+      [
+        'quotas',
+        'enforce_broker_quotas',
+        'quotas.enforce_broker_quotas',
+        this.enforceBrokerQuotas,
+        this.loadedEnforceBrokerQuotas,
+      ],
+      [
+        'agent_secrets',
+        'user_scope_only',
+        'agent_secrets.user_scope_only',
+        this.agentSecretsUserScopeOnly,
+        this.loadedAgentSecretsUserScopeOnly,
+      ],
+    ];
+    for (const [section, field, key, value, loaded] of sections) {
+      if (!ok(key)) continue;
+      const block: Record<string, unknown> = {};
+      putTriState(block, field, value, loaded);
+      if (Object.keys(block).length > 0) payload[section] = block;
+    }
+  }
+
+  /**
+   * Adds the hub observability export switches to a hub payload block, each
+   * only when it changed: a switch stays unset until an admin sets it, and
+   * null (Use default) clears a stored switch so the earlier rule applies
+   * again. Both apply at the next hub restart (ptone/scion#4914).
+   */
+  private addHubObservability(hub: Record<string, unknown>, ok: (key: string) => boolean): void {
+    const obs: Record<string, unknown> = {};
+    if (ok(HUB_METRICS_ENABLED_KEY) && this.hubMetricsEnabled !== this.loadedHubMetricsEnabled) {
+      obs.metrics_enabled = this.hubMetricsEnabled;
+    }
+    if (ok(HUB_TRACING_ENABLED_KEY) && this.hubTracingEnabled !== this.loadedHubTracingEnabled) {
+      obs.tracing_enabled = this.hubTracingEnabled;
+    }
+    if (Object.keys(obs).length > 0) hub.observability = obs;
+  }
+
+  /**
+   * Adds server.hub.monitoring_dashboard_url to a hub payload block only
+   * when the user edited the field and the trimmed value differs from the
+   * loaded one. A cleared field is sent as "", which clears the setting.
+   */
+  private addMonitoringDashboardUrl(
+    hub: Record<string, unknown>,
+    ok: (key: string) => boolean
+  ): void {
+    if (!ok('server.hub.monitoring_dashboard_url') || !this.monitoringDashboardUrlTouched) return;
+    const value = this.hubMonitoringDashboardUrl.trim();
+    if (value === this.loadedMonitoringDashboardUrl) return;
+    hub.monitoring_dashboard_url = value;
+  }
+
+  /**
+   * The PUT body for the current hub: hosted DB-backed hubs get Layer-1
+   * keys only; workstation hubs get the Layer-1 payload plus the Layer-0 /
+   * file-only part, both with explicit empties ("", false, []) so a cleared
+   * field is cleared rather than kept. A hub without DB-backed settings
+   * keeps the legacy file payload.
+   */
+  private buildSavePayload(): Record<string, unknown> {
+    if (this.settingsTier !== 'db') return this.buildFilePayload();
+    let payload = this.buildLayer1Payload();
+    // Only the sections changed since load, each whole, with the revision
+    // read at load (0 for a section with no stored row): a section another
+    // admin changed meanwhile answers 409 instead of being overwritten
+    // (ptone/scion#3922). Without the schema mapping the full payload is
+    // sent, as before.
+    if (this.layer1Baseline && this.sectionKoanfPaths) {
+      const dirty = dirtySectionsPayload(
+        payload,
+        this.layer1Baseline,
+        this.sectionKoanfPaths,
+        this.loadedRevisions
+      );
+      payload = dirty.payload;
+      if (Object.keys(dirty.expectedRevisions).length > 0) {
+        payload.expected_revisions = dirty.expectedRevisions;
+      }
+    }
+    if (this.layer0Editable) mergePayload(payload, this.buildLayer0Payload());
+    return payload;
+  }
+
+  /**
+   * Layer-0 and file-only fields for a workstation save: only the leaves the
+   * user changed since the form was populated (layer0Snapshot), a field
+   * changed to empty sent as "" / false / []. Unchanged fields, including
+   * every default the form filled in for a key GET omitted, are not sent.
+   */
+  private buildLayer0Payload(): Record<string, unknown> {
+    return diffPayload(this.buildLayer0Candidate(), this.layer0Snapshot);
+  }
+
+  /**
+   * Every editable Layer-0 / file-only field with its current form value.
+   * Masked secrets still showing "********" are left out so the stored
+   * value is kept.
+   */
+  private buildLayer0Candidate(): Record<string, unknown> {
+    const payload: Record<string, unknown> = {};
+    const ok = (key: string) => this.readOnlyReason(key) === null;
+    const list = (v: string) =>
+      v
+        ? v
+            .split(',')
+            .map((x) => x.trim())
+            .filter(Boolean)
+        : [];
+
+    if (ok('active_profile')) payload.active_profile = this.activeProfile || '';
+    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || '';
+
+    const server: Record<string, unknown> = {};
+    if (ok('server.mode')) server.mode = this.serverMode || '';
+    if (ok('server.log_level')) server.log_level = this.logLevel || '';
+
+    const hub: Record<string, unknown> = {};
+    if (ok('server.hub.port')) hub.port = this.hubPort || 0;
+    if (ok('server.hub.host')) hub.host = this.hubHost || '';
+    if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
+    if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
+    if (Object.keys(hub).length > 0) server.hub = hub;
+
+    const broker: Record<string, unknown> = {};
+    if (ok('server.broker.enabled')) broker.enabled = this.brokerEnabled;
+    if (ok('server.broker.port')) broker.port = this.brokerPort || 0;
+    if (ok('server.broker.host')) broker.host = this.brokerHost || '';
+    if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
+    if (ok('server.broker.container_hub_endpoint'))
+      broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
+    if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
+    if (Object.keys(broker).length > 0) server.broker = broker;
+
+    const database: Record<string, unknown> = {};
+    if (ok('server.database.driver')) database.driver = this.dbDriver || '';
+    if (ok('server.database.url') && this.dbUrl !== '********') database.url = this.dbUrl || '';
+    if (Object.keys(database).length > 0) server.database = database;
+
+    const auth: Record<string, unknown> = {};
+    if (ok('server.auth.dev_mode')) auth.dev_mode = this.authDevMode;
+    if (ok('server.auth.dev_token') && this.authDevToken !== '********')
+      auth.dev_token = this.authDevToken || '';
+    if (Object.keys(auth).length > 0) server.auth = auth;
+
+    const storage: Record<string, unknown> = {};
+    if (ok('server.storage.provider')) storage.provider = this.storageProvider || '';
+    if (ok('server.storage.bucket')) storage.bucket = this.storageBucket || '';
+    if (ok('server.storage.local_path')) storage.local_path = this.storageLocalPath || '';
+    if (Object.keys(storage).length > 0) server.storage = storage;
+
+    const secrets: Record<string, unknown> = {};
+    if (ok('server.secrets.backend')) secrets.backend = this.secretsBackend || '';
+    if (ok('server.secrets.gcp_project_id'))
+      secrets.gcp_project_id = this.secretsGCPProjectId || '';
+    if (ok('server.secrets.gcp_replication_locations'))
+      secrets.gcp_replication_locations = list(this.secretsGCPReplicationLocations);
+    if (Object.keys(secrets).length > 0) server.secrets = secrets;
+
+    if (ok('server.message_broker.enabled')) {
+      const mb: Record<string, unknown> = { enabled: this.messageBrokerEnabled };
+      if (ok('server.message_broker.type')) mb.type = this.messageBrokerType || '';
+      server.message_broker = mb;
+    }
+    if (ok('server.native_chat.enabled')) {
+      server.native_chat = { enabled: this.nativeChatEnabled };
+    }
+    const oauth = this.rawConfig?.server?.oauth;
+    if (oauth && !containsMaskedValue(oauth)) server.oauth = oauth;
+
+    if (Object.keys(server).length > 0) payload.server = server;
     return payload;
   }
 
@@ -1870,15 +3220,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
 
-    // General
-    if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
-    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    // General — send "" (not `|| undefined`) so clearing a field reaches
+    // the backend as an explicit empty string, which deletes the key from
+    // settings.yaml. An omitted key means "no change". See ptone/scion#860
+    // and ptone/scion#2535.
+    if (ok('active_profile')) payload.active_profile = this.activeProfile || '';
+    if (ok('default_template')) payload.default_template = this.defaultTemplate || '';
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.resolvedHarnessConfig || undefined;
-    if (ok('default_harness_auth'))
-      payload.default_harness_auth = this.defaultHarnessAuth || undefined;
-    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
-    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
+      payload.default_harness_config = this.resolvedHarnessConfig || '';
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry || '';
+    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || '';
 
     // Default agent limits — send zero/empty values so the backend can clear
     // the field (delete from settings.yaml). Using `|| undefined` here would
@@ -1920,34 +3271,53 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
-    if (ok('default_max_agent_role')) {
-      payload.default_max_agent_role = this.defaultMaxAgentRole || undefined;
+    if (
+      ok('default_runtime_broker') &&
+      this.defaultRuntimeBroker !== this.loadedDefaultRuntimeBroker
+    ) {
+      payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
-    if (ok('default_agent_role')) {
-      payload.default_agent_role = this.defaultAgentRole || undefined;
+    // Sent unconditionally (not `|| undefined`): an explicit "" clears the
+    // field server-side (admin_settings.go's `DefaultTimezone *string`
+    // check), matching the default-agent-limits precedent above
+    // (ptone/scion#860). `|| undefined` would omit the key on clear and
+    // leave the stored value unchanged.
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
     }
-    if (ok('default_runtime_broker')) {
-      payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
+    // GCP identity defaults: same "" = delete contract. The service account
+    // only applies in "assign" mode, so it is cleared for any other mode
+    // (mirrors buildLayer1Payload).
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
-    // Server
+    // Server — file mode deep-merges each server section, so an omitted
+    // field keeps its stored value. Send every shown field, a cleared one
+    // as "" / 0 / [] (explicit empties delete the key), so clearing a field
+    // in the form still clears it in settings.yaml (ptone/scion#2938).
+    // Masked secrets still showing "********" are left out to keep them.
     const server: Record<string, unknown> = {};
-    if (ok('server.mode')) server.mode = this.serverMode || undefined;
-    if (ok('server.log_level')) server.log_level = this.logLevel || undefined;
-    if (ok('server.log_format')) server.log_format = this.logFormat || undefined;
+    if (ok('server.mode')) server.mode = this.serverMode || '';
+    if (ok('server.log_level')) server.log_level = this.logLevel || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
-    if (ok('server.hub.port') && this.hubPort) hub.port = this.hubPort;
-    if (ok('server.hub.host') && this.hubHost) hub.host = this.hubHost;
-    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
-    if (ok('server.hub.read_timeout') && this.hubReadTimeout)
-      hub.read_timeout = this.hubReadTimeout;
-    if (ok('server.hub.write_timeout') && this.hubWriteTimeout)
-      hub.write_timeout = this.hubWriteTimeout;
+    if (ok('server.hub.port')) hub.port = this.hubPort || 0;
+    if (ok('server.hub.host')) hub.host = this.hubHost || '';
+    if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl || '';
+    this.addMonitoringDashboardUrl(hub, ok);
+    if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
+    if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -1956,70 +3326,79 @@ export class ScionPageAdminServerConfig extends LitElement {
             .filter(Boolean)
         : [];
     }
-    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
-      hub.soft_delete_retention = this.hubSoftDeleteRetention;
+    if (ok('server.hub.soft_delete_retention'))
+      hub.soft_delete_retention = this.hubSoftDeleteRetention || '';
     if (ok('server.hub.soft_delete_retain_files'))
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
+    // Only a start timing the user changed is sent: a settings.yaml save
+    // that sends any start key is range-checked on the merged values, so
+    // sending them all would let a stored out-of-range value block an
+    // unrelated save (ptone/scion#3925).
+    for (const t of START_TIMINGS) {
+      const v = this.hubStartTimings[t.key];
+      if (ok(`server.hub.${t.key}`) && v !== this.loadedStartTimings[t.key]) hub[t.key] = v;
+    }
     if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
+    this.addHubObservability(hub, ok);
     server.hub = hub;
 
     // Broker
     const broker: Record<string, unknown> = {};
     if (ok('server.broker.enabled')) broker.enabled = this.brokerEnabled;
-    if (ok('server.broker.port') && this.brokerPort) broker.port = this.brokerPort;
-    if (ok('server.broker.host') && this.brokerHost) broker.host = this.brokerHost;
-    if (ok('server.broker.hub_endpoint') && this.brokerHubEndpoint)
-      broker.hub_endpoint = this.brokerHubEndpoint;
-    if (ok('server.broker.container_hub_endpoint') && this.brokerContainerHubEndpoint)
-      broker.container_hub_endpoint = this.brokerContainerHubEndpoint;
-    if (ok('server.broker.name') && this.brokerName) broker.broker_name = this.brokerName;
-    if (ok('server.broker.nickname') && this.brokerNickname)
-      broker.broker_nickname = this.brokerNickname;
+    if (ok('server.broker.port')) broker.port = this.brokerPort || 0;
+    if (ok('server.broker.host')) broker.host = this.brokerHost || '';
+    if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
+    if (ok('server.broker.container_hub_endpoint'))
+      broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
     // Database
     const database: Record<string, unknown> = {};
-    if (ok('server.database.driver') && this.dbDriver) database.driver = this.dbDriver;
-    if (ok('server.database.url') && this.dbUrl && this.dbUrl !== '********')
-      database.url = this.dbUrl;
+    if (ok('server.database.driver')) database.driver = this.dbDriver || '';
+    if (ok('server.database.url') && this.dbUrl !== '********') database.url = this.dbUrl || '';
     server.database = database;
 
     // Auth
     const auth: Record<string, unknown> = {};
     if (ok('server.auth.dev_mode')) auth.dev_mode = this.authDevMode;
-    if (ok('server.auth.dev_token') && this.authDevToken && this.authDevToken !== '********')
-      auth.dev_token = this.authDevToken;
-    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
+    if (ok('server.auth.dev_token') && this.authDevToken !== '********')
+      auth.dev_token = this.authDevToken || '';
+    if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+        ? this.authAuthorizedDomains
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
     }
-    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
-      auth.user_access_mode = this.authUserAccessMode;
+    if (ok('server.auth.user_access_mode')) {
+      auth.user_access_mode = this.authUserAccessMode || '';
+    }
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole || '';
     }
     server.auth = auth;
 
     // Storage
     const storage: Record<string, unknown> = {};
-    if (ok('server.storage.provider') && this.storageProvider)
-      storage.provider = this.storageProvider;
-    if (ok('server.storage.bucket') && this.storageBucket) storage.bucket = this.storageBucket;
-    if (ok('server.storage.local_path') && this.storageLocalPath)
-      storage.local_path = this.storageLocalPath;
+    if (ok('server.storage.provider')) storage.provider = this.storageProvider || '';
+    if (ok('server.storage.bucket')) storage.bucket = this.storageBucket || '';
+    if (ok('server.storage.local_path')) storage.local_path = this.storageLocalPath || '';
     server.storage = storage;
 
     // Secrets
     const secrets: Record<string, unknown> = {};
-    if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
-    if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
-      secrets.gcp_project_id = this.secretsGCPProjectId;
+    if (ok('server.secrets.backend')) secrets.backend = this.secretsBackend || '';
+    if (ok('server.secrets.gcp_project_id'))
+      secrets.gcp_project_id = this.secretsGCPProjectId || '';
     if (ok('server.secrets.gcp_replication_locations')) {
       secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
         ? this.secretsGCPReplicationLocations
@@ -2034,7 +3413,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.message_broker.enabled')) {
       server.message_broker = {
         enabled: this.messageBrokerEnabled,
-        type: ok('server.message_broker.type') ? this.messageBrokerType || undefined : undefined,
+        type: ok('server.message_broker.type') ? this.messageBrokerType || '' : undefined,
       };
     }
 
@@ -2043,25 +3422,33 @@ export class ScionPageAdminServerConfig extends LitElement {
       server.native_chat = { enabled: this.nativeChatEnabled };
     }
 
-    // Preserve notification channels, OAuth, and GitHub App from raw config
-    if (this.rawConfig?.server?.notification_channels) {
-      server.notification_channels = this.rawConfig.server.notification_channels;
+    // Preserve notification channels, OAuth, and GitHub App from raw config.
+    // A block still holding a masked secret is the unedited GET value: omit
+    // it so the server keeps what it has stored (file mode merges the server
+    // section key by key).
+    const ncFile = this.rawConfig?.server?.notification_channels;
+    if (ncFile && !containsMaskedValue(ncFile)) {
+      server.notification_channels = ncFile;
     }
-    if (this.rawConfig?.server?.oauth) {
-      server.oauth = this.rawConfig.server.oauth;
+    const oauthFile = this.rawConfig?.server?.oauth;
+    if (oauthFile && !containsMaskedValue(oauthFile)) {
+      server.oauth = oauthFile;
     }
-    if (this.rawConfig?.server?.github_app) {
-      server.github_app = this.rawConfig.server.github_app;
+    const ghFile = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
+    if (ghFile && !containsMaskedValue(ghFile)) {
+      server.github_app = ghFile;
     }
 
     payload.server = server;
 
-    // Telemetry
+    // Telemetry. The tri-state switches go in only when changed; the file
+    // save merges telemetry key by key, so an omitted key is kept.
     const telemetry: Record<string, unknown> = {};
-    if (ok('telemetry.enabled')) telemetry.enabled = this.telemetryEnabled;
+    if (ok('telemetry.enabled')) {
+      putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
+    }
     if (ok('telemetry.cloud.enabled')) {
-      telemetry.cloud = {
-        enabled: this.telemetryCloudEnabled,
+      const cloud: Record<string, unknown> = {
         endpoint: ok('telemetry.cloud.endpoint')
           ? this.telemetryCloudEndpoint || undefined
           : undefined,
@@ -2074,38 +3461,42 @@ export class ScionPageAdminServerConfig extends LitElement {
         gcp_project_id: ok('telemetry.cloud.gcp_project_id')
           ? this.telemetryCloudGcpProjectId || undefined
           : undefined,
-        cloud_logging: ok('telemetry.cloud.cloud_logging')
-          ? this.telemetryCloudCloudLogging
-          : undefined,
       };
+      putTriState(cloud, 'enabled', this.telemetryCloudEnabled, this.loadedTelemetryCloudEnabled);
+      if (ok('telemetry.cloud.cloud_logging')) {
+        putTriState(
+          cloud,
+          'cloud_logging',
+          this.telemetryCloudCloudLogging,
+          this.loadedTelemetryCloudCloudLogging
+        );
+      }
+      // An all-empty block is left out, so settings.yaml gets no empty
+      // cloud: {} section.
+      if (hasDefinedValue(cloud)) telemetry.cloud = cloud;
     }
     if (ok('telemetry.hub.enabled')) {
-      telemetry.hub = {
-        enabled: this.telemetryHubEnabled,
+      const hub: Record<string, unknown> = {
         report_interval: ok('telemetry.hub.report_interval')
           ? this.telemetryHubReportInterval || undefined
           : undefined,
       };
+      putTriState(hub, 'enabled', this.telemetryHubEnabled, this.loadedTelemetryHubEnabled);
+      if (hasDefinedValue(hub)) telemetry.hub = hub;
     }
-    if (ok('telemetry.local.enabled')) {
-      telemetry.local = {
-        enabled: this.telemetryLocalEnabled,
-        file: ok('telemetry.local.file') ? this.telemetryLocalFile || undefined : undefined,
-        console: ok('telemetry.local.console') ? this.telemetryLocalConsole : undefined,
-      };
+    if (Object.keys(telemetry).length > 0) {
+      // A file-mode save replaces the whole telemetry object, so echo the
+      // stored telemetry.local back to keep it (ptone/scion#4103).
+      if (this.storedTelemetryLocal) telemetry.local = this.storedTelemetryLocal;
+      payload.telemetry = telemetry;
     }
-    if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
 
-    // Auto-expose ports
-    if (ok('auto_expose_ports.enabled')) {
-      payload.auto_expose_ports = {
-        enabled: this.autoExposePortsEnabled,
-      };
-    }
+    // Auto-expose ports, quotas, agent secrets (tri-state switches)
+    this.putTriStateSections(payload, ok);
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
-    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('runtimes')) payload.runtimes = this.runtimesPayload();
     if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
     if (ok('profiles')) payload.profiles = this.profiles;
 
@@ -2117,6 +3508,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.successMessage = null;
     this.reloadResult = null;
     this.ignoredKeysNotice = null;
+    this.saveWarningsNotice = null;
     this.validationErrors = null;
     this.conflictInfo = null;
     this.safetyNetKeys = null;
@@ -2127,8 +3519,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.clearSaveErrors();
 
     try {
-      const payload =
-        this.settingsTier === 'db' ? this.buildLayer1Payload() : this.buildFilePayload();
+      // A workstation hub splits the full payload itself: Layer-1 keys go to
+      // the DB, the rest to settings.yaml.
+      const payload = this.buildSavePayload();
+      if (Object.keys(payload).filter((k) => k !== 'expected_revisions').length === 0) {
+        this.successMessage = 'No changes to save';
+        return;
+      }
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -2139,10 +3536,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         await this.handleSaveError(res);
         return;
       }
+      // The save can change what GET /api/v1/settings/public returns (chat
+      // toggle, telemetry and auto-expose defaults, hub agent defaults,
+      // agent_secrets.user_scope_only); drop this tab's cached copy.
+      invalidatePublicSettings();
 
       const result = (await res.json()) as {
         reload?: ReloadResult;
         ignored_keys?: string[];
+        warnings?: string[];
       };
       this.reloadResult = result.reload ?? null;
       const ignoredKeys =
@@ -2153,6 +3555,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.successMessage = 'Settings saved successfully';
       // Restore ignored_keys notice after loadConfig clears it
       this.ignoredKeysNotice = ignoredKeys;
+      this.saveWarningsNotice =
+        result.warnings && result.warnings.length > 0 ? result.warnings : null;
     } catch {
       this.error = 'Failed to save settings';
     } finally {
@@ -2161,42 +3565,121 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveError(res: Response): Promise<void> {
-    let body: Record<string, unknown>;
-    try {
-      body = (await res.json()) as Record<string, unknown>;
-    } catch {
-      this.error = 'Failed to save settings';
-      return;
-    }
+    // Both envelopes the hub sends are read here: flat {error: "<code>",
+    // ...} and the writeError helper's nested {error: {code, message,
+    // details}} (see shared/settings-save-errors.ts, ptone/scion#3923). A
+    // body that is not JSON, or JSON that is not an object (null, a bare
+    // string/number, an array), classifies as generic with no message, so
+    // it shows 'Failed to save settings'.
+    const err = await readSettingsSaveError(res, { sectionKoanfPaths: this.sectionKoanfPaths });
 
-    switch (body.error) {
-      case 'validation_failed':
-        this.validationErrors = (body.errors as Record<string, ValidationErrorDetail[]>) ?? null;
+    switch (err.kind) {
+      case 'validation':
+        this.validationErrors = err.fieldErrors;
         this.scrollToFirstError();
-        break;
+        return;
 
-      case 'revision_conflict':
+      case 'conflict':
         this.conflictInfo = {
-          message:
-            (body.message as string) || 'Settings have been changed since you loaded this page.',
-          conflicted: (body.conflicted as ConflictInfo['conflicted']) ?? [],
+          message: err.message || 'Settings have been changed since you loaded this page.',
+          conflicted: err.conflicted,
+          appliedKeys: err.appliedKeys,
+          pendingRestart: err.pendingRestart,
+          skipped: err.skipped,
         };
-        break;
+        return;
 
-      case 'layer0_rejected': {
-        const keys = (body.keys as string[]) ?? [];
-        this.safetyNetKeys = keys;
-        console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', keys);
-        break;
-      }
+      case 'layer0':
+        this.safetyNetKeys = err.keys;
+        console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', err.keys);
+        return;
 
-      default:
-        this.error =
-          (body.message as string) ||
-          (typeof body.error === 'string' ? body.error : null) ||
-          'An unexpected error occurred';
-        break;
+      case 'generic':
+        if (KEYS_REJECTED_CODES.has(err.code)) {
+          // Nothing was saved; name the offending keys, as the docs say.
+          const message = err.message || 'Some settings could not be saved.';
+          this.error = err.keys.length > 0 ? `${message} Keys: ${err.keys.join(', ')}` : message;
+          return;
+        }
+        // Generic message, plus the server's message text when it sent
+        // one (flat body.message or nested body.error.message).
+        this.error = genericSaveErrorText(err, 'Failed to save settings');
     }
+  }
+
+  /** Inline validation and deployment-managed messages for one field. */
+  private renderFieldErrors(koanfKey: string): typeof nothing | ReturnType<typeof html> {
+    const messages = [
+      ...fieldErrorMessages(this.validationErrors, koanfKey),
+      ...fieldErrorMessages(this.githubAppFieldErrors, koanfKey),
+    ];
+    const layer0Keys = [
+      ...(this.safetyNetKeys ?? []),
+      ...(this.githubAppSaveError?.kind === 'layer0' ? this.githubAppSaveError.keys : []),
+    ];
+    const layer0 = layer0Keys.some((k) => k === koanfKey || k.startsWith(`${koanfKey}.`));
+    if (messages.length === 0 && !layer0) return nothing;
+    // No role="alert" here: the section summary and the page banner already
+    // announce the errors.
+    return html`${renderFieldErrorMessages(messages, koanfKey)}${layer0
+      ? html`<span class="field-error" data-field-error=${koanfKey}
+          ><code>${koanfKey}</code> is managed by deployment configuration and cannot be changed
+          here.</span
+        >`
+      : nothing}`;
+  }
+
+  /**
+   * Validation entries from a failed GitHub App card save. The card's body
+   * uses the section's leaf names (app_id, private_key, ...), so a path
+   * that maps to no registered koanf path is placed under server.github_app.
+   *
+   * PUT /api/v1/github-app emits no validation, conflict or layer0 body
+   * today (only invalid_request and internal errors). This handling is kept
+   * so the card shows such errors at the field once the handler sends them,
+   * in the same shape as the server-config PUT (ptone/scion#3923).
+   */
+  private get githubAppFieldErrors(): SettingsFieldError[] {
+    const err = this.githubAppSaveError;
+    if (err?.kind !== 'validation') return [];
+    return err.fieldErrors.map((e) =>
+      e.key === null ? { ...e, key: fallbackFieldKey('server.github_app', e.path) } : e
+    );
+  }
+
+  private renderGitHubAppSaveError(): typeof nothing | ReturnType<typeof html> {
+    const err = this.githubAppSaveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') {
+      return renderConflictNotice(err, () => {
+        this.githubAppSaveError = null;
+        this.githubAppError = null;
+        this.githubAppSuccess = null;
+        this.githubAppPrivateKey = '';
+        this.githubAppWebhookSecret = '';
+        void this.loadGitHubAppConfig();
+      });
+    }
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return renderSectionErrorSummary(this.githubAppFieldErrors, 'github_app_card');
+  }
+
+  /**
+   * Validation entries for a settings section: those the server reported
+   * under the section, and those whose key is one of its koanf paths.
+   */
+  private sectionValidationErrors(sectionName: string): SettingsFieldError[] {
+    if (!this.validationErrors) return [];
+    const paths = this.sectionKoanfPaths?.[sectionName] ?? [];
+    return this.validationErrors.filter(
+      (e) =>
+        e.section === sectionName ||
+        (e.key !== null && paths.some((p) => e.key === p || e.key!.startsWith(`${p}.`)))
+    );
+  }
+
+  private renderSectionErrorSummary(sectionName: string): typeof nothing | ReturnType<typeof html> {
+    return renderSectionErrorSummary(this.sectionValidationErrors(sectionName), sectionName);
   }
 
   private scrollToFirstError(): void {
@@ -2220,7 +3703,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       ${this.loading ? nothing : this.renderEnvOverrideBanner()} ${this.renderDeprecatedEnvNotice()}
       ${this.renderSupersededPanel()} ${this.renderConflictBanner()}
       ${this.renderValidationErrors()} ${this.renderSafetyNetNotice()}
-      ${this.renderIgnoredKeysNotice()} ${this.renderResetConfirmDialog()}
+      ${this.renderIgnoredKeysNotice()} ${this.renderSaveWarningsNotice()}
+      ${this.renderResetConfirmDialog()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">
@@ -2260,14 +3744,139 @@ export class ScionPageAdminServerConfig extends LitElement {
    * env_overrides. Pass one or more koanf keys; badge renders if any match.
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
-    const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    if (!overridden) return nothing;
+    return renderKeysEnvBadge(this.envOverrides, this.envValues, koanfKeys);
+  }
+
+  /**
+   * The environment value of an editable field. In effect: the primary
+   * "In effect on this node" line, and the control below holds the saved
+   * value, which is not in effect here. Not in effect: a secondary line, the
+   * saved value winning.
+   */
+  private renderEnvValueLine(ev: EnvKeyValue, reason?: ReadOnlyReason): ReturnType<typeof html> {
+    return envValueLineView(ev, envCause(reason));
+  }
+
+  /**
+   * The stored value of a read-only field whose environment value is in
+   * effect, labelled as not in effect. Callers show it only when the server
+   * reports saved_differs. A Layer-1 key on a DB-backed hub is stored in the
+   * database; anything else in settings.yaml.
+   */
+  private renderSavedNotInEffect(koanfKey: string, displayValue: string): ReturnType<typeof html> {
+    const where =
+      this.settingsTier === 'db' && this.layer1Keys.has(koanfKey)
+        ? 'Saved value'
+        : 'settings.yaml value';
+    return html`<span class="hint env-value-saved"
+      >${where}, not in effect on this node: <code>${displayValue || '—'}</code></span
+    >`;
+  }
+
+  /**
+   * The stored content URL, read-only, with the status the hub reports for
+   * it (content_url_status): a badge and a one-line reason. Not shown when
+   * the hub reports no status.
+   */
+  private renderContentUrlStatus(): typeof nothing | ReturnType<typeof html> {
+    const st = this.contentUrlStatus;
+    if (!st) return nothing;
+    const t = contentUrlStatusText(st);
+    return html`<div class="form-field full-width content-url-status">
+      <label>Content URL</label>
+      <span class="hint">Read-only here; set through the server-config API</span>
+      <span class="read-only-value">${this.hubContentUrl || '—'}</span>
+      <sl-badge variant=${t.variant}>${t.badge}</sl-badge>
+      <span class="hint content-url-status-reason">${t.reason}</span>
+    </div>`;
+  }
+
+  /**
+   * The hub URL in effect on this hub and where it came from, as resolved at
+   * startup. Not shown when an operator setting pins the field (the
+   * read-only value is then the value in effect).
+   */
+  private renderPublicUrlInEffect(): typeof nothing | ReturnType<typeof html> {
+    const st = this.publicUrlStatus;
+    if (!st || st.pinned_by || !st.effective) return nothing;
+    return html`<span class="hint public-url-in-effect"
+      >In effect: <code>${st.effective}</code> (from ${st.source})</span
+    >`;
+  }
+
+  /**
+   * The one image_registry badge, from the server's provenance: how an
+   * environment variable sets the hub-wide value, and every Runtime Broker
+   * whose SCION_IMAGE_REGISTRY overrides it for its agents. It replaces the
+   * generic env-override badge for this key (ptone/scion#3916).
+   */
+  private renderImageRegistryBadge(): typeof nothing | ReturnType<typeof html> {
+    const lines = imageRegistryBadgeLines(this.imageRegistryProvenance, this.envOverrides);
+    if (lines.length === 0) return nothing;
     return html`
-      <span class="env-badge">
+      <span class="env-badge image-registry-badge">
         <sl-icon name="exclamation-triangle"></sl-icon>
-        Overridden by environment on this node
+        ${lines.map((l, i) => html`${i > 0 ? html`<br />` : nothing}${l}`)}
       </span>
     `;
+  }
+
+  /**
+   * The profiles section's env badge: profile image_registry keys are
+   * startup values a saved profile value replaces, so they get their own
+   * text; any other overridden profile key keeps the generic badge.
+   */
+  private renderProfilesEnvBadge(): typeof nothing | ReturnType<typeof html> {
+    const registryLine = profileImageRegistryEnvLine(this.envOverrides);
+    // The other profile keys get the same in-effect list as the runtimes
+    // section (env_values), or the generic badge without it.
+    const others = envValuesUnder(this.envValues, 'profiles').filter(
+      (e) => !e.key.endsWith('.image_registry')
+    );
+    const generic = hasOtherProfileEnvOverrides(this.envOverrides)
+      ? others.length > 0
+        ? this.renderEnvValuesList(others)
+        : this.envBadgeTemplate()
+      : nothing;
+    if (!registryLine) return generic;
+    return html`${generic}<span class="env-badge image-registry-badge">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        ${registryLine}
+      </span>`;
+  }
+
+  /** What a profile without a saved image_registry inherits, and from where. */
+  private renderProfileInheritedHint(
+    name: string,
+    saved: string | undefined
+  ): typeof nothing | ReturnType<typeof html> {
+    const hint = profileInheritedHint(this.imageRegistryProvenance, name, saved);
+    return hint ? html`<span class="hint image-registry-inherited">${hint}</span>` : nothing;
+  }
+
+  /**
+   * The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder.
+   * inEffect false (the server reports that a saved value wins over the
+   * environment value) says so instead of claiming an override.
+   */
+  private envBadgeTemplate(inEffect = true, reason?: ReadOnlyReason): ReturnType<typeof html> {
+    return envBadgeView(inEffect, envCause(reason));
+  }
+
+  /**
+   * Renders the env-override badge for a map-valued section (runtimes,
+   * profiles) whose env_overrides entries are leaf keys under the section
+   * (e.g. profiles.local.runtime from SCION_SERVER_PROFILES_LOCAL_RUNTIME).
+   */
+  private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
+    return envBadgeUnderView(this.envOverrides, this.envValues, prefix);
+  }
+
+  /** The section badge and the list of env_values entries of a map section. */
+  private renderEnvValuesList(
+    entries: Array<{ key: string; ev: EnvKeyValue }>
+  ): ReturnType<typeof html> {
+    return envValuesListView(entries);
   }
 
   /**
@@ -2305,7 +3914,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${meta.updated_at
           ? html`<span class="section-meta-item">
               <sl-icon name="clock"></sl-icon>
-              ${new Date(meta.updated_at).toLocaleString()}
+              ${formatInstantWithZone(meta.updated_at) || meta.updated_at}
             </span>`
           : nothing}
       </div>
@@ -2351,6 +3960,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           return 'settings.yaml';
         case 'server_env':
           return 'SCION_SERVER_*';
+        case 'default':
+          return 'built-in default';
         default:
           return s;
       }
@@ -2415,6 +4026,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.error = `Reset failed: ${errText}`;
         return;
       }
+      // Like a save, a reset can change GET /api/v1/settings/public.
+      invalidatePublicSettings();
       this.resetConfirmSection = null;
       await this.loadConfig();
       this.successMessage = `Section "${sectionName}" has been reset to deployment configuration.`;
@@ -2430,6 +4043,12 @@ export class ScionPageAdminServerConfig extends LitElement {
    * for managed sections in DB mode.
    */
   private renderSectionHeader(title: string, sectionName?: string): ReturnType<typeof html> {
+    return html`${this.renderSectionHeaderTitle(title, sectionName)}${sectionName
+      ? this.renderSectionErrorSummary(sectionName)
+      : nothing}`;
+  }
+
+  private renderSectionHeaderTitle(title: string, sectionName?: string): ReturnType<typeof html> {
     if (sectionName && this.canResetSection(sectionName)) {
       return html`
         <div class="section-header">
@@ -2505,25 +4124,46 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
-  private renderValidationErrors(): typeof nothing | ReturnType<typeof html> {
-    if (!this.validationErrors) return nothing;
-    const sections = Object.entries(this.validationErrors);
-    if (sections.length === 0) return nothing;
+  /** Renders the warnings the last save returned; the save went through. */
+  private renderSaveWarningsNotice(): typeof nothing | ReturnType<typeof html> {
+    if (!this.saveWarningsNotice || this.saveWarningsNotice.length === 0) return nothing;
     return html`
-      <div class="validation-errors">
+      <div class="ignored-keys-notice save-warnings-notice">
+        <strong>Saved with warnings:</strong>
+        <ul>
+          ${this.saveWarningsNotice.map((w) => html`<li>${w}</li>`)}
+        </ul>
+      </div>
+    `;
+  }
+
+  private renderValidationErrors(): typeof nothing | ReturnType<typeof html> {
+    if (!this.validationErrors || this.validationErrors.length === 0) return nothing;
+    // Group by the section the server named; entries without one (a nested
+    // validation_error naming no field) are listed under "General".
+    const groups = new Map<string, SettingsFieldError[]>();
+    for (const e of this.validationErrors) {
+      const name = e.section ?? 'General';
+      const list = groups.get(name) ?? [];
+      list.push(e);
+      groups.set(name, list);
+    }
+    return html`
+      <div class="validation-errors" role="alert">
         <div class="validation-errors-title">
           <sl-icon name="exclamation-circle"></sl-icon>
           Some settings could not be saved due to validation errors
         </div>
-        ${sections.map(
+        ${[...groups.entries()].map(
           ([section, errors]) => html`
             <div class="validation-errors-section">
               <div class="validation-errors-section-name">${section}</div>
               <ul class="validation-errors-list">
-                ${(errors as ValidationErrorDetail[]).map(
+                ${errors.map(
                   (err) => html`
                     <li>
-                      ${err.field ? html`<code>${err.field}</code>` : nothing} ${err.message || err}
+                      ${err.key || err.path ? html`<code>${err.key ?? err.path}</code>` : nothing}
+                      ${err.message}
                     </li>
                   `
                 )}
@@ -2531,6 +4171,54 @@ export class ScionPageAdminServerConfig extends LitElement {
             </div>
           `
         )}
+      </div>
+    `;
+  }
+
+  /**
+   * The saved keys of a settings save, as the success notice and the 409
+   * conflict banner both list them: applied to the running hub now, saved
+   * but taking effect only after a restart, and saved but not in use. One
+   * renderer, so the two cannot drift apart. An empty list renders nothing.
+   */
+  private renderSavedKeyLists(
+    applied: string[],
+    pending: string[],
+    skipped: SkippedKey[]
+  ): ReturnType<typeof html> {
+    return html`
+      ${applied.length > 0
+        ? html`<div class="applied applied-keys">Applied now: ${applied.join(', ')}</div>`
+        : nothing}
+      ${pending.length > 0
+        ? html`<div class="restart pending-restart">
+            Saved; applies after restart: ${pending.join(', ')}
+          </div>`
+        : nothing}
+      ${skipped.length > 0
+        ? html`<div class="skipped skipped-keys">
+            Saved but not applied:
+            <ul>
+              ${skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
+            </ul>
+          </div>`
+        : nothing}
+    `;
+  }
+
+  /**
+   * The keys the sections written before a 409 conflict saved
+   * (ptone/scion#4467): those sections stay saved, so a restart-required key
+   * among them must still be shown.
+   */
+  private renderConflictSavedKeys(c: ConflictInfo): typeof nothing | ReturnType<typeof html> {
+    if (c.appliedKeys.length === 0 && c.pendingRestart.length === 0 && c.skipped.length === 0) {
+      return nothing;
+    }
+    return html`
+      <div class="conflict-saved">
+        <div>Changes to the other sections were saved before the conflict:</div>
+        ${this.renderSavedKeyLists(c.appliedKeys, c.pendingRestart, c.skipped)}
       </div>
     `;
   }
@@ -2543,14 +4231,25 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-icon name="exclamation-triangle"></sl-icon>
           Settings have been changed since you loaded this page
         </div>
-        <div>Please reload to see the latest values before saving again.</div>
+        <div>
+          Reload to see the latest values, then make your changes again. Unsaved edits on this page
+          are discarded.
+        </div>
+        ${this.conflictInfo.conflicted.length > 0
+          ? html`<div class="conflict-banner-sections">
+              Changed: ${this.conflictInfo.conflicted.map((c) => html` <code>${c.section}</code>`)}
+            </div>`
+          : nothing}
+        ${this.renderConflictSavedKeys(this.conflictInfo)}
         <div class="conflict-banner-actions">
           <sl-button
             size="small"
             variant="warning"
             @click=${() => {
+              // Drop every save error and refetch, so the form shows only
+              // server state (populateForm resets each field).
+              this.clearSaveErrors();
               void this.loadConfig();
-              this.conflictInfo = null;
             }}
           >
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -2580,11 +4279,16 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderReloadInfo() {
     const r = this.reloadResult;
     if (!r) return nothing;
+    // With the key-level lists, the section-level applied list is replaced
+    // by them; only the settings.yaml changes applied live keep the line.
+    const keyLevel = r.applied_keys !== undefined || r.pending_restart !== undefined;
+    const reloaded = keyLevel ? (r.file_applied ?? []) : (r.applied ?? []);
     return html`
       <div class="reload-info">
-        ${r.applied && r.applied.length > 0
-          ? html`<div class="applied">Reloaded: ${r.applied.join(', ')}</div>`
+        ${reloaded.length > 0
+          ? html`<div class="applied">Reloaded: ${reloaded.join(', ')}</div>`
           : nothing}
+        ${this.renderSavedKeyLists(r.applied_keys ?? [], r.pending_restart ?? [], r.skipped ?? [])}
         ${r.requires_restart && r.requires_restart.length > 0
           ? html`<div class="restart">Requires restart: ${r.requires_restart.join(', ')}</div>`
           : nothing}
@@ -2597,6 +4301,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`
       <sl-tab-group
         @sl-tab-show=${(e: CustomEvent) => {
+          // The nested Agent Defaults tab group's sl-tab-show bubbles here;
+          // only this group's own events select a top-level tab
+          // (ptone/scion#4109).
+          if (e.target !== e.currentTarget) return;
           this.activeTab = (e.detail as { name: string }).name;
         }}
       >
@@ -2624,6 +4332,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab slot="nav" panel="gcp-identity" ?active=${this.activeTab === 'gcp-identity'}
           >GCP Identity</sl-tab
         >
+        <sl-tab slot="nav" panel="experiments" ?active=${this.activeTab === 'experiments'}
+          >Experiments</sl-tab
+        >
 
         <sl-tab-panel name="general">${this.renderGeneralTab()}</sl-tab-panel>
         <sl-tab-panel name="hub-server">${this.renderHubServerTab()}</sl-tab-panel>
@@ -2634,125 +4345,108 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab-panel name="telemetry">${this.renderTelemetryTab()}</sl-tab-panel>
         <sl-tab-panel name="github-app">${this.renderGitHubAppTab()}</sl-tab-panel>
         <sl-tab-panel name="gcp-identity">${this.renderGCPIdentityTab()}</sl-tab-panel>
+        <sl-tab-panel name="experiments">
+          <scion-admin-experiments
+            .active=${this.activeTab === 'experiments'}
+          ></scion-admin-experiments>
+        </sl-tab-panel>
       </sl-tab-group>
 
-      ${this.hasHarnessConfigErrors
-        ? html`<div class="error" style="margin-bottom:0.75rem;">
-            Cannot save: one or more harness config entries contain invalid JSON. Fix the errors on
-            the Runtimes &amp; Profiles tab before saving.
-          </div>`
+      ${this.activeTab !== 'experiments'
+        ? html`
+            ${this.hasHarnessConfigErrors
+              ? html`<div class="error" style="margin-bottom:0.75rem;">
+                  Cannot save: one or more harness config entries contain invalid JSON. Fix the
+                  errors on the Runtimes &amp; Profiles tab before saving.
+                </div>`
+              : nothing}
+            ${this.hasPlacementErrors
+              ? html`<div class="error placement-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the Kubernetes placement values marked as invalid
+                  (${this.placementIssues.errors.map((e) => e.path).join(', ')}).
+                </div>`
+              : nothing}
+            ${this.hasResourceQuantityErrors
+              ? html`<div class="error resource-quantity-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the resource values marked as invalid
+                  (${this.resourceQuantityIssues.errors.map((e) => e.path).join(', ')}).
+                </div>`
+              : nothing}
+            <div class="actions">
+              <sl-button
+                variant="primary"
+                ?loading=${this.saving}
+                ?disabled=${this.hasHarnessConfigErrors ||
+                this.hasResourceQuantityErrors ||
+                this.hasPlacementErrors}
+                @click=${() => {
+                  void this.handleSave();
+                }}
+              >
+                Save & Reload
+              </sl-button>
+              <sl-button
+                variant="default"
+                @click=${() => {
+                  void this.loadConfig();
+                }}
+              >
+                Reset
+              </sl-button>
+            </div>
+          `
         : nothing}
-      <div class="actions">
-        <sl-button
-          variant="primary"
-          ?loading=${this.saving}
-          ?disabled=${this.hasHarnessConfigErrors}
-          @click=${() => {
-            void this.handleSave();
-          }}
-        >
-          Save & Reload
-        </sl-button>
-        <sl-button
-          variant="default"
-          @click=${() => {
-            void this.loadConfig();
-          }}
-        >
-          Reset
-        </sl-button>
-      </div>
     `;
   }
 
   // ── Tab renderers ──
 
+  /**
+   * The read-only "Scion version: X (channel)" line. The version and channel
+   * come from update-status; before it loads, or when it cannot be read, the
+   * version falls back to the server-config build info and no channel is shown.
+   */
+  private renderVersionSummary() {
+    const version = this.updateStatus?.current.version || this.scionVersion;
+    const channel = this.updateStatus?.channel.effective ?? '';
+    return html`
+      <div class="version-summary">
+        ${version
+          ? html`<span class="version-line"
+              >Scion version: <strong>${version}</strong>${channel
+                ? html` (${channel})`
+                : nothing}</span
+            >`
+          : nothing}
+        <a class="manage-updates-link" href="/admin/maintenance">Manage updates &rarr;</a>
+      </div>
+    `;
+  }
+
   private renderVersionInfo() {
-    if (!this.scionVersion && !this.scionCommit) return nothing;
-    const r = this.updateCheckResult;
     return html`
       <div class="section">
         <h3 class="section-title">Scion Server Version</h3>
-        <div class="version-info">
-          ${this.scionVersion
-            ? html`<div class="version-item">
-                <span class="version-label">Version</span>
-                <span class="version-value">${this.scionVersion}</span>
-              </div>`
-            : nothing}
-          ${this.scionCommit
-            ? html`<div class="version-item">
-                <span class="version-label">Git Commit</span>
-                <span class="version-value"><code>${this.scionCommit}</code></span>
-              </div>`
-            : nothing}
-          ${this.scionBuildTime
-            ? html`<div class="version-item">
-                <span class="version-label">Build Time</span>
-                <span class="version-value">${this.scionBuildTime}</span>
-              </div>`
-            : nothing}
-          <div class="version-actions">
-            <sl-button
-              size="small"
-              variant="default"
-              ?loading=${this.updateCheckLoading}
-              @click=${() => this.checkForUpdates()}
-            >
-              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-              Check for Updates
-            </sl-button>
-          </div>
-        </div>
-        ${this.updateCheckError
-          ? html`<div class="update-error">${this.updateCheckError}</div>`
-          : nothing}
-        ${r && r.update_available
-          ? html`
-              <div class="update-banner">
-                <div class="update-banner-header">
-                  <sl-icon name="info-circle"></sl-icon>
-                  Update
-                  available${r.current_branch && r.current_branch !== 'main'
-                    ? html` on <code>${r.current_branch}</code>`
-                    : nothing}
-                  &mdash; ${r.commits_behind} new commit${r.commits_behind === 1 ? '' : 's'}
-                </div>
-                ${r.new_commits && r.new_commits.length > 0
-                  ? html`
-                      <div class="update-commits">
-                        ${r.new_commits.map(
-                          (c) => html`
-                            <div><span class="commit-hash">${c.hash}</span>${c.subject}</div>
-                          `
-                        )}
-                      </div>
-                    `
-                  : nothing}
-                <div class="update-banner-actions">
-                  <sl-button
-                    size="small"
-                    variant="primary"
-                    ?loading=${this.updateRunning}
-                    @click=${() => (this.showUpdateConfirm = true)}
-                  >
-                    <sl-icon slot="prefix" name="download"></sl-icon>
-                    Update Now
-                  </sl-button>
-                </div>
-              </div>
-            `
-          : nothing}
-        ${r && !r.update_available
-          ? html`<div class="update-current">
-              Server is up to
-              date${r.current_branch && r.current_branch !== 'main'
-                ? html` on <code>${r.current_branch}</code>`
-                : nothing}.
+        ${this.renderVersionSummary()}
+        ${this.scionCommit || this.scionBuildTime
+          ? html`<div class="version-info">
+              ${this.scionCommit
+                ? html`<div class="version-item">
+                    <span class="version-label">Git Commit</span>
+                    <span class="version-value"><code>${this.scionCommit}</code></span>
+                  </div>`
+                : nothing}
+              ${this.scionBuildTime
+                ? html`<div class="version-item">
+                    <span class="version-label">Build Time</span>
+                    <span class="version-value" title=${this.scionBuildTime}
+                      >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                    >
+                  </div>`
+                : nothing}
             </div>`
           : nothing}
       </div>
-      ${this.showUpdateConfirm ? this.renderUpdateConfirmDialog() : nothing}
     `;
   }
 
@@ -2799,22 +4493,6 @@ export class ScionPageAdminServerConfig extends LitElement {
               </sl-select>`
             )}
           </div>
-          <div class="form-field">
-            <label>Log Format</label>
-            ${this.renderFieldValue(
-              'server.log_format',
-              this.logFormat || 'text',
-              html`<sl-select
-                value=${this.logFormat || 'text'}
-                @sl-change=${(e: Event) => {
-                  this.logFormat = (e.target as HTMLSelectElement).value;
-                }}
-              >
-                <sl-option value="text">Text</sl-option>
-                <sl-option value="json">JSON</sl-option>
-              </sl-select>`
-            )}
-          </div>
           <div class="form-field full-width">
             <label>Image Registry</label>
             <span class="hint"
@@ -2823,7 +4501,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             ${this.renderFieldValue(
               'image_registry',
               this.imageRegistry,
-              html`${this.renderEnvBadge('image_registry')}<sl-input
+              html`${this.renderImageRegistryBadge()}<sl-input
                   value=${this.imageRegistry}
                   placeholder="ghcr.io/myorg"
                   @sl-input=${(e: Event) => {
@@ -2856,21 +4534,28 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderSectionMeta('agent_defaults')}
         <div class="agent-defaults-tabs">
           <sl-tab-group
+            class="agent-defaults-tab-group"
             @sl-tab-show=${(e: CustomEvent) => {
-              this.agentDefaultsTab = (e.detail as { name: string }).name;
+              if (e.target !== e.currentTarget) return;
+              this.agentDefaultsTab = agentDefaultsTabFromPanel(
+                (e.detail as { name: string }).name
+              );
             }}
           >
-            <sl-tab slot="nav" panel="general" ?active=${this.agentDefaultsTab === 'general'}
-              >General</sl-tab
-            >
-            <sl-tab slot="nav" panel="limits" ?active=${this.agentDefaultsTab === 'limits'}
-              >Limits</sl-tab
-            >
-            <sl-tab slot="nav" panel="resources" ?active=${this.agentDefaultsTab === 'resources'}
-              >Resources</sl-tab
-            >
+            ${AGENT_DEFAULTS_TABS.map(
+              ([tab, label]) =>
+                html`<sl-tab
+                  slot="nav"
+                  panel=${agentDefaultsPanelName(tab)}
+                  ?active=${this.agentDefaultsTab === tab}
+                  >${label}</sl-tab
+                >`
+            )}
 
-            <sl-tab-panel name="general">
+            <sl-tab-panel
+              name=${agentDefaultsPanelName('general')}
+              ?active=${this.agentDefaultsTab === 'general'}
+            >
               <div class="form-grid">
                 <div class="form-field">
                   <label>Default Template</label>
@@ -2940,8 +4625,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   : nothing}
                 <div class="form-field">
                   <label>Default Harness Auth</label>
-                  ${this.renderFieldValue(
-                    'default_harness_auth',
+                  ${this.renderUnsavableField(
                     this.defaultHarnessAuth
                       ? {
                           'api-key': 'Provider API Key',
@@ -2950,21 +4634,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           'vertex-ai': 'Vertex Model Garden',
                           none: 'No Authentication',
                         }[this.defaultHarnessAuth] || this.defaultHarnessAuth
-                      : 'None',
-                    html`${this.renderEnvBadge('default_harness_auth')}
-                      <sl-select
-                        .value=${this.defaultHarnessAuth}
-                        @sl-change=${(e: Event) => {
-                          this.defaultHarnessAuth = (e.target as HTMLSelectElement).value;
-                        }}
-                      >
-                        <sl-option value="">None</sl-option>
-                        <sl-option value="api-key">Provider API Key</sl-option>
-                        <sl-option value="oauth-token">OAuth Token</sl-option>
-                        <sl-option value="auth-file">Harness credential file</sl-option>
-                        <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
-                        <sl-option value="none">No Authentication</sl-option>
-                      </sl-select>`
+                      : 'None'
                   )}
                 </div>
                 <div class="form-field full-width">
@@ -2982,31 +4652,27 @@ export class ScionPageAdminServerConfig extends LitElement {
                   )}
                 </div>
                 <div class="form-field full-width">
-                  ${this.renderFieldValue(
-                    'telemetry.enabled',
-                    this.telemetryEnabled ? 'Enabled' : 'Disabled',
-                    html`${this.renderEnvBadge('telemetry.enabled')}<sl-switch
-                        ?checked=${this.telemetryEnabled}
-                        @sl-change=${(e: Event) => {
-                          this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-                        }}
-                        >Enable Telemetry</sl-switch
-                      >`
-                  )}
+                  ${this.renderTriStateSwitch({
+                    key: 'telemetry.enabled',
+                    label: 'Enable Telemetry',
+                    value: this.telemetryEnabled,
+                    loaded: this.loadedTelemetryEnabled,
+                    unsetChecked: false,
+                    unsetLabel: 'Not set (default applies)',
+                    set: (v) => (this.telemetryEnabled = v),
+                  })}
                   <span class="hint">Default opt-in state for new agents</span>
                 </div>
                 <div class="form-field full-width">
-                  ${this.renderFieldValue(
-                    'auto_expose_ports.enabled',
-                    this.autoExposePortsEnabled ? 'Enabled' : 'Disabled',
-                    html`${this.renderEnvBadge('auto_expose_ports.enabled')}<sl-switch
-                        ?checked=${this.autoExposePortsEnabled}
-                        @sl-change=${(e: Event) => {
-                          this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
-                        }}
-                        >Enable Auto-Expose Ports</sl-switch
-                      >`
-                  )}
+                  ${this.renderTriStateSwitch({
+                    key: 'auto_expose_ports.enabled',
+                    label: 'Enable Auto-Expose Ports',
+                    value: this.autoExposePortsEnabled,
+                    loaded: this.loadedAutoExposePortsEnabled,
+                    unsetChecked: false,
+                    unsetLabel: 'Not set (default applies)',
+                    set: (v) => (this.autoExposePortsEnabled = v),
+                  })}
                   <span class="hint"
                     >Automatically detect and expose listening TCP ports in agent containers</span
                   >
@@ -3115,23 +4781,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >Role assigned to new agents when not explicitly specified. Can be overridden
                     per-project.</span
                   >
-                  ${this.renderFieldValue(
-                    'default_agent_role',
-                    this.defaultAgentRole || 'Full (default)',
-                    html`${this.renderEnvBadge('default_agent_role')}<sl-select
-                        placeholder="Full (default)"
-                        clearable
-                        value=${this.defaultAgentRole}
-                        @sl-change=${(e: Event) => {
-                          this.defaultAgentRole = (e.target as HTMLSelectElement).value;
-                        }}
-                      >
-                        <sl-option value="none">None — No hub access</sl-option>
-                        <sl-option value="readonly">Read-only — Read-only access</sl-option>
-                        <sl-option value="baseline">Baseline — Standard access</sl-option>
-                        <sl-option value="full">Full — Full access</sl-option>
-                      </sl-select>`
-                  )}
+                  ${this.renderUnsavableField(this.defaultAgentRole || 'Full (default)')}
                 </div>
                 <div class="form-field">
                   <label>Default Maximum Agent Role</label>
@@ -3139,23 +4789,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >Default maximum role for agents in new projects. Can be overridden
                     per-project.</span
                   >
-                  ${this.renderFieldValue(
-                    'default_max_agent_role',
-                    this.defaultMaxAgentRole || 'Full (default)',
-                    html`${this.renderEnvBadge('default_max_agent_role')}<sl-select
-                        placeholder="Full (default)"
-                        clearable
-                        value=${this.defaultMaxAgentRole}
-                        @sl-change=${(e: Event) => {
-                          this.defaultMaxAgentRole = (e.target as HTMLSelectElement).value;
-                        }}
-                      >
-                        <sl-option value="none">None — No hub access</sl-option>
-                        <sl-option value="readonly">Read-only — Read-only access</sl-option>
-                        <sl-option value="baseline">Baseline — Standard access</sl-option>
-                        <sl-option value="full">Full — Full access</sl-option>
-                      </sl-select>`
-                  )}
+                  ${this.renderUnsavableField(this.defaultMaxAgentRole || 'Full (default)')}
                 </div>
                 <div class="form-field">
                   <label>Default Runtime Broker</label>
@@ -3189,10 +4823,114 @@ export class ScionPageAdminServerConfig extends LitElement {
                           ></sl-input>`
                   )}
                 </div>
+                <div class="form-field">
+                  <label>Default Timezone</label>
+                  <span class="hint"
+                    >Timezone (<code>TZ</code>) for agent containers that have no pinned timezone
+                    and no <code>TZ</code> environment variable. Empty means UTC. Does not affect
+                    how times are displayed.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_timezone',
+                    this.defaultTimezone || 'UTC (default)',
+                    html`${this.renderEnvBadge('default_timezone')}<scion-timezone-picker
+                        label="Default Timezone"
+                        placeholder="Search for a timezone..."
+                        empty-label="UTC"
+                        .value=${this.defaultTimezone}
+                        @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>) => {
+                          this.defaultTimezone = e.detail.timezone;
+                        }}
+                      ></scion-timezone-picker>`
+                  )}
+                  ${this.defaultTimezoneInvalid
+                    ? html`<div class="error">
+                        "${this.defaultTimezone}" is not a recognized timezone. Saving will be
+                        rejected.
+                      </div>`
+                    : nothing}
+                </div>
+                <div class="form-field">
+                  <label>Default GCP Identity Mode</label>
+                  <span class="hint"
+                    >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
+                    agent create request nor the project's default GCP identity setting names one.
+                    Passthrough set here applies only to agents on the hub's embedded broker; agents
+                    on any other broker get the runtime default: Block, or Passthrough on the
+                    Kubernetes runtime. Block set here applies on every runtime, Kubernetes
+                    included. Assign requires a verified hub-scoped service account and
+                    gcpIamCheckMode=enforce.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_gcp_identity_mode',
+                    this.defaultGCPIdentityMode ||
+                      'None (runtime default: Block; Passthrough on Kubernetes)',
+                    html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
+                        placeholder="None (runtime default: Block; Passthrough on Kubernetes)"
+                        clearable
+                        value=${this.defaultGCPIdentityMode}
+                        @sl-change=${(e: Event) => {
+                          const val = (e.target as HTMLSelectElement).value;
+                          this.defaultGCPIdentityMode = val;
+                          if (val !== 'assign') {
+                            this.defaultGCPIdentitySAID = '';
+                          }
+                        }}
+                      >
+                        <sl-option value="block">Block</sl-option>
+                        <sl-option value="passthrough">Passthrough</sl-option>
+                        <sl-option value="assign">Assign Service Account</sl-option>
+                      </sl-select>`
+                  )}
+                </div>
+                ${this.effectiveGCPIdentityMode === 'assign'
+                  ? html`
+                      <div class="form-field">
+                        <label>Default GCP Identity Service Account</label>
+                        <span class="hint"
+                          >Hub-scoped service account assigned to new agents when no project or
+                          request-level identity is set. Only verified hub-scoped accounts are
+                          shown. This default applies to any project and runtime profile that has no
+                          default of its own, so no mapping state is shown here; the agent create
+                          and configure pickers show it for the agent's Kubernetes profile.</span
+                        >
+                        ${this.renderFieldValue(
+                          'default_gcp_identity_service_account_id',
+                          this.defaultGCPIdentitySAID || 'None',
+                          html`${this.renderEnvBadge(
+                              'default_gcp_identity_service_account_id'
+                            )}<sl-select
+                              placeholder="Select a verified hub-scoped service account"
+                              clearable
+                              value=${this.defaultGCPIdentitySAID}
+                              @sl-change=${(e: Event) => {
+                                this.defaultGCPIdentitySAID = (e.target as HTMLSelectElement).value;
+                              }}
+                            >
+                              ${this.hubGCPServiceAccounts.length > 0
+                                ? this.hubGCPServiceAccounts.map(
+                                    (sa) => html`
+                                      <sl-option value=${sa.id}>
+                                        ${sa.displayName || sa.email}
+                                        <small>(${sa.email})</small>
+                                      </sl-option>
+                                    `
+                                  )
+                                : html`<sl-option value="" disabled
+                                    >No verified hub-scoped service accounts available</sl-option
+                                  >`}
+                            </sl-select>`
+                        )}
+                      </div>
+                    `
+                  : nothing}
               </div>
             </sl-tab-panel>
 
-            <sl-tab-panel name="limits">
+            <sl-tab-panel
+              name=${agentDefaultsPanelName('limits')}
+              ?active=${this.agentDefaultsTab === 'limits'}
+            >
               <div class="form-grid">
                 <div class="form-field">
                   <label>Default Max Turns</label>
@@ -3246,7 +4984,10 @@ export class ScionPageAdminServerConfig extends LitElement {
               </div>
             </sl-tab-panel>
 
-            <sl-tab-panel name="resources">
+            <sl-tab-panel
+              name=${agentDefaultsPanelName('resources')}
+              ?active=${this.agentDefaultsTab === 'resources'}
+            >
               ${this.renderFieldValue(
                 'default_resources',
                 [
@@ -3269,6 +5010,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResCpuReq = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.requests.cpu')}
                     </div>
                     <div class="form-field">
                       <label>Memory Request</label>
@@ -3279,6 +5021,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResMemReq = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.requests.memory')}
                     </div>
                     <div class="form-field">
                       <label>CPU Limit</label>
@@ -3289,6 +5032,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResCpuLim = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.limits.cpu')}
                     </div>
                     <div class="form-field">
                       <label>Memory Limit</label>
@@ -3299,6 +5043,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResMemLim = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.limits.memory')}
                     </div>
                     <div class="form-field full-width">
                       <label>Disk</label>
@@ -3309,6 +5054,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResDisk = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.disk')}
                     </div>
                   </div>`
               )}
@@ -3324,6 +5070,13 @@ export class ScionPageAdminServerConfig extends LitElement {
               <h3 class="section-title">Project Default Settings</h3>
               <div class="form-grid">
                 <div class="form-field full-width">
+                  ${
+                    // The toggle's value comes from /admin/project-defaults,
+                    // not this page's server-config GET, so this badge does
+                    // not go through renderEnvBadge (whose keys the
+                    // env-keys test checks against the GET's values).
+                    renderKeysEnvBadge(this.envOverrides, this.envValues, [SCRATCHPAD_KEY])
+                  }
                   <sl-switch
                     ?checked=${this.scratchpadEnabled}
                     ?disabled=${this.scratchpadLoading}
@@ -3342,6 +5095,52 @@ export class ScionPageAdminServerConfig extends LitElement {
             </div>
           `
         : nothing}
+
+      <!-- Card 4: Quotas -->
+      <div class="section">
+        <h3 class="section-title">Quotas</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            ${this.renderTriStateSwitch({
+              key: 'quotas.enforce_broker_quotas',
+              label: 'Enforce broker agent quotas',
+              value: this.enforceBrokerQuotas,
+              loaded: this.loadedEnforceBrokerQuotas,
+              unsetChecked: true,
+              unsetLabel: 'Not set (default: on)',
+              set: (v) => (this.enforceBrokerQuotas = v),
+            })}
+            <span class="hint"
+              >When off, agents can be started on a broker beyond its max_agents_per_broker cap.
+              Usage is still counted. Manage the per-broker cap from
+              <a href="/admin/quotas">Admin &gt; Quotas</a>.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <!-- Card: Agent Secrets -->
+      <div class="section">
+        <h3 class="section-title">Agent Secrets</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            ${this.renderTriStateSwitch({
+              key: 'agent_secrets.user_scope_only',
+              label: 'Restrict agent-written secrets to profile scope',
+              value: this.agentSecretsUserScopeOnly,
+              loaded: this.loadedAgentSecretsUserScopeOnly,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default: off)',
+              set: (v) => (this.agentSecretsUserScopeOnly = v),
+            })}
+            <span class="hint"
+              >When on, agents (including Capture Auth) can only store secrets in the user's
+              profile. Project-scope writes from agents are rejected. Existing project secrets are
+              not removed. Users can still manage project secrets.</span
+            >
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -3447,19 +5246,46 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public URL</label>
-            <span class="hint">Endpoint URL for agents to call back to the Hub</span>
+            <span class="hint"
+              >The Hub URL for agents, invite links and integrations. Applies after a restart.</span
+            >
             ${this.renderFieldValue(
-              'server.hub.public_url',
-              this.hubPublicUrl,
-              html`${this.renderEnvBadge('server.hub.public_url')}<sl-input
+              PUBLIC_URL_KEY,
+              this.publicUrlStatus?.pinned_by ? this.publicUrlStatus.effective : this.hubPublicUrl,
+              html`${this.renderEnvBadge(PUBLIC_URL_KEY)}<sl-input
                   value=${this.hubPublicUrl}
                   placeholder="https://hub.example.com"
                   @sl-input=${(e: Event) => {
                     this.hubPublicUrl = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
+            )}${this.renderPublicUrlInEffect()}
+          </div>
+          <div class="form-field full-width">
+            <label>Monitoring Dashboard URL</label>
+            <span class="hint"
+              >Optional. The Health page links to this dashboard; leave empty for no link</span
+            >
+            ${this.renderFieldValue(
+              'server.hub.monitoring_dashboard_url',
+              this.hubMonitoringDashboardUrl,
+              html`${this.renderEnvBadge('server.hub.monitoring_dashboard_url')}<sl-input
+                  value=${this.hubMonitoringDashboardUrl}
+                  placeholder="https://console.cloud.google.com/monitoring/dashboards/..."
+                  @sl-input=${(e: Event) => {
+                    this.hubMonitoringDashboardUrl = (e.target as HTMLInputElement).value;
+                    this.monitoringDashboardUrlTouched = true;
+                  }}
+                ></sl-input>
+                ${isHttpUrl(this.hubMonitoringDashboardUrl.trim()) ||
+                this.hubMonitoringDashboardUrl.trim() === ''
+                  ? nothing
+                  : html`<span class="hint monitoring-url-invalid"
+                      >Must be an absolute http:// or https:// URL</span
+                    >`}`
             )}
           </div>
+          ${this.renderContentUrlStatus()}
           <div class="form-field">
             <label>Read Timeout</label>
             ${this.renderFieldValue(
@@ -3578,11 +5404,155 @@ export class ScionPageAdminServerConfig extends LitElement {
             )}
           </div>
         </div>
+        ${this.renderStartTimings()}
       </div>
 
-      ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
-      ${this.renderCrossProjectMessagingSection()}
+      ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
+      ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
+      <scion-admin-chat-retention></scion-admin-chat-retention>
     `;
+  }
+
+  /**
+   * Agent start timing (server.hub.start_*, ptone/scion#3925): the start
+   * claim lease, the start deadline and the holds for a start whose outcome
+   * is unknown. Empty means the hub's coded default; the hub validates the
+   * ranges on save.
+   */
+  private renderStartTimings(): ReturnType<typeof html> {
+    return html`<div class="start-timings">
+      <label class="subsection-label">Agent Start</label>
+      <span class="hint"
+        >Timing of agent starts across hub nodes. Leave a field empty to use the default.</span
+      >
+      <div class="form-grid">
+        ${START_TIMINGS.map((t) => {
+          const key = `server.hub.${t.key}`;
+          const value = this.hubStartTimings[t.key];
+          return html`<div class="form-field" data-start-timing=${t.key}>
+            <label>${KOANF_KEY_LABELS[key]}</label>
+            <span class="hint">${t.hint}</span>
+            ${this.renderFieldValue(
+              key,
+              value || `${t.defaultValue} (default)`,
+              html`${this.renderEnvBadge(key)}<sl-input
+                  value=${value}
+                  placeholder=${t.defaultValue}
+                  @sl-input=${(e: Event): void => {
+                    this.hubStartTimings = {
+                      ...this.hubStartTimings,
+                      [t.key]: (e.target as HTMLInputElement).value,
+                    };
+                  }}
+                ></sl-input>`
+            )}
+          </div>`;
+        })}
+      </div>
+    </div>`;
+  }
+
+  /**
+   * The hub's own metrics and trace export: one switch per exporter (applies
+   * after a restart) and, read-only, the exporters as started with the
+   * export project and its source (ptone/scion#4914). The export project is
+   * not editable here.
+   */
+  private renderHubObservabilitySection(): ReturnType<typeof html> {
+    return html`
+      <div class="section hub-observability">
+        ${this.renderSectionHeader('Hub Observability Export', 'hub_observability')}
+        ${this.renderSectionMeta('hub_observability')}
+        <div class="form-grid">
+          ${this.renderHubExportSwitch('metrics')} ${this.renderHubExportSwitch('tracing')}
+          <div class="form-field full-width">
+            <label>Export Project</label>
+            ${this.renderHubExportProject()}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderHubExportSwitch(exporter: 'metrics' | 'tracing'): ReturnType<typeof html> {
+    const isMetrics = exporter === 'metrics';
+    const key = isMetrics ? HUB_METRICS_ENABLED_KEY : HUB_TRACING_ENABLED_KEY;
+    const value = isMetrics ? this.hubMetricsEnabled : this.hubTracingEnabled;
+    const loaded = isMetrics ? this.loadedHubMetricsEnabled : this.loadedHubTracingEnabled;
+    const running = this.observabilityExport?.[exporter];
+    const set = (v: boolean | null) => {
+      if (isMetrics) this.hubMetricsEnabled = v;
+      else this.hubTracingEnabled = v;
+    };
+    // An unset switch is drawn in the state the earlier rule gave at
+    // startup, or off when the hub did not report it; the label next to
+    // the toggle says the switch is unset either way.
+    const unsetChecked = running?.enabled ?? false;
+    const checked = value ?? unsetChecked;
+    // Toggling a switch that is not stored back to the state it showed
+    // while unset leaves it unset, so toggling twice sends nothing.
+    const onToggle = (on: boolean) => set(loaded === null && on === unsetChecked ? null : on);
+    const defaultRule = isMetrics
+      ? 'on when SCION_SERVER_HUB_GCPPROJECTID is set'
+      : 'on when SCION_TRACING_ENABLED and SCION_SERVER_HUB_GCPPROJECTID are set';
+    const defaultLabel = running
+      ? `Default (${running.enabled ? 'on' : 'off'})`
+      : 'Default (state not reported)';
+    const display = value === null ? defaultLabel : value ? 'Enabled' : 'Disabled';
+    return html`<div class="form-field full-width">
+      ${this.renderFieldValue(
+        key,
+        display,
+        html`${this.renderEnvBadge(key)}<sl-switch
+            class="hub-export-switch"
+            data-key=${key}
+            ?checked=${checked}
+            @sl-change=${(e: Event) => onToggle((e.target as HTMLInputElement).checked)}
+            >${isMetrics ? 'Export hub metrics' : 'Export hub traces'}</sl-switch
+          >${value !== null
+            ? html`<sl-button
+                size="small"
+                variant="text"
+                class="hub-export-default"
+                data-key=${key}
+                @click=${() => set(null)}
+                >Use default</sl-button
+              >`
+            : html`<span class="hint hub-export-default-state" data-key=${key}
+                >${defaultLabel}</span
+              >`}`
+      )}
+      <span class="hint hub-export-restart" data-key=${key}
+        >${value === null ? `Not set: ${defaultRule}. ` : ''}Applies after restart.</span
+      >
+      ${running
+        ? html`<span class="hint hub-export-in-effect" data-key=${key}
+            >In effect: ${running.enabled ? 'on' : 'off'} (${running.reason})</span
+          >`
+        : nothing}
+    </div>`;
+  }
+
+  /** The export project resolved at startup and its source; read-only. */
+  private renderHubExportProject(): ReturnType<typeof html> {
+    const project = this.observabilityExport?.project;
+    if (!this.observabilityExport) {
+      return html`<span class="hint hub-export-project">Not reported by this hub.</span>`;
+    }
+    if (!project?.id) {
+      return html`<span class="read-only-value hub-export-project">None resolved</span>
+        <span class="hint">${project?.detail ?? ''}</span>
+        <span class="hint hub-export-project-remedy"
+          >Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud. Not editable here.</span
+        >`;
+    }
+    return html`<span class="read-only-value hub-export-project"
+        ><code>${project.id}</code> (source: ${project.source})</span
+      >
+      <span class="hint"
+        >SCION_SERVER_HUB_GCPPROJECTID when set, else the project of the Google Cloud metadata
+        server. Not editable here.</span
+      >`;
   }
 
   private renderCrossProjectMessagingSection() {
@@ -3601,10 +5571,10 @@ export class ScionPageAdminServerConfig extends LitElement {
               >Allow agent messaging across projects</sl-switch
             >
             <span class="hint">
-              When enabled, agents in Hub mode can send direct messages to agents in other projects on
-              this Hub. The sender needs Hub mode; each destination project independently chooses
-              whether to accept external messages. Disabling takes effect for new cross-project checks
-              and delayed deliveries. Already delivered messages are not recalled.
+              When enabled, agents in Hub mode can send direct messages to agents in other projects
+              on this Hub. The sender needs Hub mode; each destination project independently chooses
+              whether to accept external messages. Disabling takes effect for new cross-project
+              checks and delayed deliveries. Already delivered messages are not recalled.
             </span>
             ${this.crossProjectMessagingError
               ? html`<div class="status-message error" style="margin-top: 0.5rem">
@@ -3643,6 +5613,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Runtimes', 'runtimes')} ${this.renderSectionMeta('runtimes')}
         ${runtimeReadOnly ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('runtimes')}
         ${runtimeNames.length === 0
           ? html`<p class="hint">No runtimes configured.</p>`
           : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
@@ -3683,6 +5654,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     const rt = this.runtimes[name];
     if (!rt) return nothing;
     const isCloudRun = rt.type === 'cloudrun' || rt.type === 'cloudrun-instances';
+    // Docker and podman cards leave out the Kubernetes-only fields, the ones a
+    // switch to that type clears (ptone/scion#2649).
+    const hideK8sFields = isNonKubernetesContainerType(rt.type || '');
     return html`
       <sl-card class="runtime-card">
         <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
@@ -3705,7 +5679,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               value=${rt.type || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
-                this.updateRuntimeField(name, 'type', (e.target as HTMLSelectElement).value);
+                void this.changeRuntimeType(name, e.target as HTMLSelectElement);
               }}
             >
               <sl-option value="docker">docker</sl-option>
@@ -3752,52 +5726,78 @@ export class ScionPageAdminServerConfig extends LitElement {
                     }}
                   ></sl-input>
                 </div>
-                <div class="form-field">
-                  <label>Namespace</label>
-                  <sl-input
-                    value=${rt.namespace || ''}
-                    ?disabled=${readOnly}
-                    @sl-input=${(e: Event) => {
-                      this.updateRuntimeField(
-                        name,
-                        'namespace',
-                        (e.target as HTMLInputElement).value
-                      );
-                    }}
-                  ></sl-input>
-                </div>
-                <div class="form-field">
-                  <sl-switch
-                    ?checked=${rt.gke || false}
-                    ?disabled=${readOnly}
-                    @sl-change=${(e: Event) => {
-                      this.updateRuntimeBool(name, 'gke', (e.target as HTMLInputElement).checked);
-                    }}
-                    >GKE cluster</sl-switch
-                  >
-                  <span class="hint">Enable GKE-specific features</span>
-                </div>
-                <div class="form-field">
-                  <sl-switch
-                    ?checked=${rt.list_all_namespaces || false}
-                    ?disabled=${readOnly}
-                    @sl-change=${(e: Event) => {
-                      this.updateRuntimeBool(
-                        name,
-                        'list_all_namespaces',
-                        (e.target as HTMLInputElement).checked
-                      );
-                    }}
-                    >List all namespaces</sl-switch
-                  >
-                  <span class="hint">List agents across all namespaces</span>
-                </div>
+                ${hideK8sFields
+                  ? nothing
+                  : html`
+                      <div class="form-field">
+                        <label>Namespace</label>
+                        <sl-input
+                          value=${rt.namespace || ''}
+                          ?disabled=${readOnly}
+                          @sl-input=${(e: Event) => {
+                            this.updateRuntimeField(
+                              name,
+                              'namespace',
+                              (e.target as HTMLInputElement).value
+                            );
+                          }}
+                        ></sl-input>
+                      </div>
+                      ${this.renderSharedDirFields(
+                        `runtimes.${name}`,
+                        rt.shared_dir_storage_class,
+                        rt.shared_dir_size,
+                        readOnly,
+                        (field, value) => this.updateRuntimeField(name, field, value)
+                      )}
+                      <div class="form-field">
+                        <sl-switch
+                          ?checked=${rt.gke || false}
+                          ?disabled=${readOnly}
+                          @sl-change=${(e: Event) => {
+                            this.updateRuntimeBool(
+                              name,
+                              'gke',
+                              (e.target as HTMLInputElement).checked
+                            );
+                          }}
+                          >GKE cluster</sl-switch
+                        >
+                        <span class="hint">Enable GKE-specific features</span>
+                      </div>
+                      <div class="form-field">
+                        <sl-switch
+                          ?checked=${rt.list_all_namespaces || false}
+                          ?disabled=${readOnly}
+                          @sl-change=${(e: Event) => {
+                            this.updateRuntimeBool(
+                              name,
+                              'list_all_namespaces',
+                              (e.target as HTMLInputElement).checked
+                            );
+                          }}
+                          >List all namespaces</sl-switch
+                        >
+                        <span class="hint">List agents across all namespaces</span>
+                      </div>
+                      <div class="form-field">
+                        <label>Safe to Evict</label>
+                        <span class="hint"
+                          >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false"
+                          annotation to agent pods; true adds nothing. A profile's value wins.</span
+                        >
+                        ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
+                          this.updateRuntimeSafeToEvict(name, v)
+                        )}
+                        ${this.renderSafeToEvictIgnored(this.isKubernetesRuntime(name))}
+                      </div>
+                    `}
               `
             : html`
                 <div class="form-field">
                   <label>GCP Project</label>
                   <sl-input
-                    value=${rt.cloudrun?.project || ''}
+                    value=${this.cloudRunFieldValue(rt, 'project')}
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
                       this.updateRuntimeCloudRun(
@@ -3811,7 +5811,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Region</label>
                   <sl-input
-                    value=${rt.cloudrun?.region || ''}
+                    value=${this.cloudRunFieldValue(rt, 'region')}
                     placeholder="e.g. us-central1"
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
@@ -3825,8 +5825,367 @@ export class ScionPageAdminServerConfig extends LitElement {
                 </div>
               `}
         </div>
+        ${this.isKubernetesRuntime(name) ? this.renderK8sPlacement(name, rt, readOnly) : nothing}
       </sl-card>
     `;
+  }
+
+  // Key/value rows being edited, per runtime and map field, so a row with
+  // an empty or duplicate key can exist while it is typed. The runtime's
+  // map is rebuilt from the rows on every edit (rows with an empty key are
+  // left out). Cleared on load.
+  private k8sRows = new Map<string, Array<[string, string]>>();
+
+  private mapRows(
+    name: string,
+    field: 'node_selector' | 'kubernetes_service_account_mappings'
+  ): Array<[string, string]> {
+    const id = `${name}\u0000${field}`;
+    let rows = this.k8sRows.get(id);
+    if (!rows) {
+      rows = Object.entries(this.runtimes[name]?.[field] ?? {});
+      this.k8sRows.set(id, rows);
+    }
+    return rows;
+  }
+
+  private setMapRows(
+    name: string,
+    field: 'node_selector' | 'kubernetes_service_account_mappings',
+    rows: Array<[string, string]>
+  ): void {
+    this.k8sRows.set(`${name}\u0000${field}`, rows);
+    const map: Record<string, string> = {};
+    for (const [k, v] of rows) if (k !== '') map[k] = v;
+    this.setRuntimeValue(name, field, Object.keys(map).length > 0 ? map : undefined);
+  }
+
+  /** Sets or removes one key of a runtime entry. */
+  private setRuntimeValue(name: string, field: keyof V1RuntimeConfig, value: unknown): void {
+    const updated = { ...this.runtimes };
+    const rt = { ...updated[name] } as Record<string, unknown>;
+    if (value === undefined || value === '') {
+      delete rt[field];
+    } else {
+      rt[field] = value;
+    }
+    updated[name] = rt;
+    this.runtimes = updated;
+  }
+
+  /**
+   * Placement and identity problems of every Kubernetes runtime entry, as
+   * the hub's save check sees them: a problem in a field the form changed
+   * (or on a new entry) is an error and blocks Save; one in a field still
+   * as loaded is a warning, as the hub accepts it with a save warning.
+   */
+  private get placementIssues(): { errors: PlacementIssue[]; warnings: PlacementIssue[] } {
+    const errors: PlacementIssue[] = [];
+    const warnings: PlacementIssue[] = [];
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      if (!this.isKubernetesRuntime(name)) continue;
+      const loaded = hasOwn(this.loadedRuntimes, name) ? this.loadedRuntimes[name] : undefined;
+      for (const issue of validateK8sRuntimeFields(name, rt)) {
+        const field = issue.path.slice(`runtimes.${name}.`.length) as keyof V1RuntimeConfig;
+        const same =
+          loaded !== undefined && JSON.stringify(loaded[field]) === JSON.stringify(rt[field]);
+        (same ? warnings : errors).push(issue);
+      }
+    }
+    for (const [name, rows] of this.k8sRows) {
+      const [rtName, field] = name.split('\u0000');
+      if (!hasOwn(this.runtimes, rtName) || !this.isKubernetesRuntime(rtName)) continue;
+      const keys = rows.map(([k]) => k);
+      if (keys.some((k, i) => k === '' && rows[i][1] !== '')) {
+        errors.push({
+          path: `runtimes.${rtName}.${field}`,
+          message: 'a row has a value but no key',
+        });
+      }
+      if (new Set(keys.filter((k) => k !== '')).size !== keys.filter((k) => k !== '').length) {
+        errors.push({ path: `runtimes.${rtName}.${field}`, message: 'the same key appears twice' });
+      }
+    }
+    return { errors, warnings };
+  }
+
+  private get hasPlacementErrors(): boolean {
+    return this.placementIssues.errors.length > 0;
+  }
+
+  /** Inline placement errors and warnings for one runtime field. */
+  private renderPlacementIssues(path: string): typeof nothing | TemplateResult {
+    const { errors, warnings } = this.placementIssues;
+    const e = errors.filter((i) => i.path === path);
+    const w = warnings.filter((i) => i.path === path);
+    if (e.length === 0 && w.length === 0) return nothing;
+    return html`${e.map(
+      (i) => html`<span class="field-error" data-placement-error=${path}>${i.message}</span>`
+    )}${w.map(
+      (i) =>
+        html`<span class="hint field-warning" data-placement-warning=${path}
+          >${i.message} (stored value; the hub saves it with a warning)</span
+        >`
+    )}`;
+  }
+
+  /** The Kubernetes placement and identity fields of a kubernetes runtime entry. */
+  private renderK8sPlacement(name: string, rt: V1RuntimeConfig, readOnly: boolean): TemplateResult {
+    const p = `runtimes.${name}`;
+    const tolerations = rt.tolerations ?? [];
+    // Event handlers read the list as it is when they run, not as rendered,
+    // so two edits between renders both apply.
+    const currentTolerations = (): Toleration[] =>
+      (this.runtimes[name]?.tolerations ?? []).map((x) => ({ ...x }));
+    const setTolerations = (next: Toleration[]) =>
+      this.setRuntimeValue(name, 'tolerations', next.length > 0 ? next : undefined);
+    const mapEditor = (
+      field: 'node_selector' | 'kubernetes_service_account_mappings',
+      keyPlaceholder: string,
+      valuePlaceholder: string
+    ) => {
+      const rows = this.mapRows(name, field);
+      return html`<div class="k8s-rows" data-k8s-field=${field}>
+        ${rows.map(
+          ([k, v], i) =>
+            html`<div class="k8s-row">
+              <sl-input
+                class="k8s-key"
+                size="small"
+                value=${k}
+                placeholder=${keyPlaceholder}
+                ?disabled=${readOnly}
+                @sl-input=${(e: Event) => {
+                  const next = this.mapRows(name, field).map((r) => [...r] as [string, string]);
+                  next[i][0] = (e.target as HTMLInputElement).value;
+                  this.setMapRows(name, field, next);
+                }}
+              ></sl-input>
+              <sl-input
+                class="k8s-value"
+                size="small"
+                value=${v}
+                placeholder=${valuePlaceholder}
+                ?disabled=${readOnly}
+                @sl-input=${(e: Event) => {
+                  const next = this.mapRows(name, field).map((r) => [...r] as [string, string]);
+                  next[i][1] = (e.target as HTMLInputElement).value;
+                  this.setMapRows(name, field, next);
+                }}
+              ></sl-input>
+              ${!readOnly
+                ? html`<sl-icon-button
+                    class="k8s-remove"
+                    name="x-lg"
+                    label="Remove"
+                    @click=${() =>
+                      this.setMapRows(
+                        name,
+                        field,
+                        this.mapRows(name, field).filter((_, j) => j !== i)
+                      )}
+                  ></sl-icon-button>`
+                : nothing}
+            </div>`
+        )}
+        ${!readOnly
+          ? html`<sl-button
+              class="k8s-add"
+              size="small"
+              @click=${() => this.setMapRows(name, field, [...this.mapRows(name, field), ['', '']])}
+              >Add</sl-button
+            >`
+          : nothing}
+      </div>`;
+    };
+    const textField = (
+      field: 'runtime_class_name' | 'kubernetes_block_service_account' | 'priority_class_name',
+      label: string,
+      placeholder: string,
+      hint: string
+    ) =>
+      html`<div class="form-field">
+        <label>${label}</label>
+        <sl-input
+          class="k8s-${field}"
+          value=${rt[field] ?? ''}
+          placeholder=${placeholder}
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) =>
+            this.setRuntimeValue(name, field, (e.target as HTMLInputElement).value)}
+        ></sl-input>
+        <span class="hint">${hint}</span>
+        ${this.renderPlacementIssues(`${p}.${field}`)}
+      </div>`;
+    return html`<details class="k8s-placement" ?open=${this.k8sSectionHasValues(rt)}>
+      <summary>Kubernetes placement and identity</summary>
+      <div class="form-grid">
+        <div class="form-field full-width">
+          <label>Node selector</label>
+          <span class="hint">Node labels agent pods must match (label key to value).</span>
+          ${mapEditor('node_selector', 'e.g. scion.dev/pool', 'e.g. agents')}
+          ${this.renderPlacementIssues(`${p}.node_selector`)}
+        </div>
+        <div class="form-field full-width">
+          <label>Tolerations</label>
+          <span class="hint">Taints agent pods tolerate. Exists matches any value.</span>
+          <div class="k8s-rows" data-k8s-field="tolerations">
+            ${tolerations.map(
+              (t, i) =>
+                html`<div class="k8s-row">
+                  <sl-input
+                    class="tol-key"
+                    size="small"
+                    value=${t.key ?? ''}
+                    placeholder="key"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].key = v;
+                      else delete next[i].key;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-operator"
+                    size="small"
+                    value=${t.operator || 'Equal'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      next[i].operator = (e.target as HTMLSelectElement).value;
+                      if (next[i].operator === 'Exists') delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="Equal">Equal</sl-option>
+                    <sl-option value="Exists">Exists</sl-option>
+                  </sl-select>
+                  <sl-input
+                    class="tol-value"
+                    size="small"
+                    value=${t.value ?? ''}
+                    placeholder="value"
+                    ?disabled=${readOnly || t.operator === 'Exists'}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].value = v;
+                      else delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-effect"
+                    size="small"
+                    value=${t.effect || 'any'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLSelectElement).value;
+                      if (v && v !== 'any') next[i].effect = v;
+                      else delete next[i].effect;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="any">any effect</sl-option>
+                    <sl-option value="NoSchedule">NoSchedule</sl-option>
+                    <sl-option value="PreferNoSchedule">PreferNoSchedule</sl-option>
+                    <sl-option value="NoExecute">NoExecute</sl-option>
+                  </sl-select>
+                  ${!readOnly
+                    ? html`<sl-icon-button
+                        class="k8s-remove"
+                        name="x-lg"
+                        label="Remove"
+                        @click=${() =>
+                          setTolerations(currentTolerations().filter((_, j) => j !== i))}
+                      ></sl-icon-button>`
+                    : nothing}
+                </div>`
+            )}
+            ${!readOnly
+              ? html`<sl-button
+                  class="k8s-add"
+                  size="small"
+                  @click=${() => setTolerations([...currentTolerations(), { operator: 'Equal' }])}
+                  >Add</sl-button
+                >`
+              : nothing}
+          </div>
+          ${this.renderPlacementIssues(`${p}.tolerations`)}
+        </div>
+        ${textField(
+          'runtime_class_name',
+          'Runtime class',
+          'e.g. gvisor',
+          'RuntimeClass for agent pods. A profile that sets one wins.'
+        )}
+        ${textField(
+          'priority_class_name',
+          'Priority class',
+          'e.g. agents-default',
+          'PriorityClass for agent pods; it must exist on the cluster.'
+        )}
+        <div class="form-field full-width">
+          <label>Service account mappings</label>
+          <span class="hint"
+            >GCP service account to Kubernetes ServiceAccount (Workload Identity), for GCP identity
+            mode Assign.</span
+          >
+          ${mapEditor(
+            'kubernetes_service_account_mappings',
+            'name@project.iam.gserviceaccount.com',
+            'Kubernetes ServiceAccount'
+          )}
+          ${this.renderPlacementIssues(`${p}.kubernetes_service_account_mappings`)}
+        </div>
+        ${textField(
+          'kubernetes_block_service_account',
+          'Block service account',
+          'e.g. agent-block',
+          'Kubernetes ServiceAccount a pod runs as in GCP identity mode Block.'
+        )}
+      </div>
+    </details>`;
+  }
+
+  /** Whether any Kubernetes placement or identity field holds a value (the section starts open then). */
+  private k8sSectionHasValues(rt: V1RuntimeConfig): boolean {
+    return (
+      Object.keys(rt.node_selector ?? {}).length > 0 ||
+      (rt.tolerations ?? []).length > 0 ||
+      !!rt.runtime_class_name ||
+      !!rt.priority_class_name ||
+      Object.keys(rt.kubernetes_service_account_mappings ?? {}).length > 0 ||
+      !!rt.kubernetes_block_service_account
+    );
+  }
+
+  /**
+   * Changes a runtime's type. When the switch would clear fields that hold
+   * a value (switching to or from Cloud Run clears the other group's
+   * fields), the fields are named and the change is confirmed first;
+   * Cancel puts the select back.
+   */
+  private async changeRuntimeType(name: string, select: HTMLSelectElement): Promise<void> {
+    const value = select.value;
+    const rt = this.runtimes[name];
+    if (!rt || (rt.type || '') === value) return;
+    const cleared = runtimeTypeSwitchClears(rt, value);
+    if (cleared.length > 0) {
+      const ok = await showConfirm(
+        `Changing runtime "${name}" to ${value} clears these fields:\n${cleared.join(', ')}\n\nThey are removed when you save.`,
+        { title: 'Change runtime type?', confirmText: 'Change type' }
+      );
+      if (!ok) {
+        select.value = rt.type || '';
+        this.requestUpdate();
+        return;
+      }
+    }
+    this.updateRuntimeField(name, 'type', value);
   }
 
   private updateRuntimeField(name: string, field: keyof V1RuntimeConfig, value: string): void {
@@ -3840,21 +6199,126 @@ export class ScionPageAdminServerConfig extends LitElement {
     // When switching type, clear fields that belong to the other type group
     // so stale values don't persist in the payload.
     if (field === 'type') {
-      const isCloudRun = value === 'cloudrun' || value === 'cloudrun-instances';
-      if (isCloudRun) {
-        // Switching to Cloud Run — clear container/k8s fields
-        delete rt.host;
-        delete rt.context;
-        delete rt.namespace;
-        delete rt.gke;
-        delete rt.list_all_namespaces;
-      } else {
-        // Switching away from Cloud Run — clear cloudrun sub-object
-        delete rt.cloudrun;
+      for (const key of runtimeTypeSwitchKeys(value)) {
+        delete (rt as Record<string, unknown>)[key];
+        // Drop the rows being edited for a cleared map field, so a switch
+        // back starts from the entry's (now empty) map.
+        this.k8sRows.delete(`${name}\u0000${key}`);
       }
     }
     updated[name] = rt;
     this.runtimes = updated;
+  }
+
+  /**
+   * Tri-state select for safe_to_evict: empty (unset, inherit), "false" or
+   * "true". Unset and true add nothing to the pod; only false annotates it.
+   */
+  private renderSafeToEvictSelect(
+    value: boolean | undefined,
+    readOnly: boolean,
+    onChange: (v: boolean | undefined) => void
+  ): TemplateResult {
+    const current = value === false ? 'false' : value === true ? 'true' : '';
+    return html`<sl-select
+      class="safe-to-evict"
+      placeholder="Not set"
+      clearable
+      value=${current}
+      ?disabled=${readOnly}
+      @sl-change=${(e: Event) => {
+        const v = (e.target as HTMLSelectElement).value;
+        onChange(v === 'false' ? false : v === 'true' ? true : undefined);
+      }}
+    >
+      <sl-option value="false">false</sl-option>
+      <sl-option value="true">true</sl-option>
+    </sl-select>`;
+  }
+
+  /**
+   * Whether a runtime entry is a Kubernetes runtime, using the same rule as
+   * the settings validation: its type, or its name when no type is set, is
+   * kubernetes, k8s or remote.
+   */
+  private isKubernetesRuntime(name: string): boolean {
+    const rt = this.runtimes[name];
+    return isKubernetesRuntimeType(rt?.type || name);
+  }
+
+  /** Label shown under the safe_to_evict select when it would be ignored. */
+  private renderSafeToEvictIgnored(isKubernetes: boolean): TemplateResult | typeof nothing {
+    if (isKubernetes) return nothing;
+    return html`<span class="hint safe-to-evict-ignored"
+      >Ignored: this runtime is not Kubernetes.</span
+    >`;
+  }
+
+  /**
+   * The shared-dir PVC inputs of a runtime or profile entry (ptone/scion#2649).
+   * path is the entry's koanf path (runtimes.NAME or profiles.NAME); an empty
+   * input removes the key through update.
+   */
+  private renderSharedDirFields(
+    path: string,
+    storageClass: string | undefined,
+    size: string | undefined,
+    readOnly: boolean,
+    update: (field: 'shared_dir_storage_class' | 'shared_dir_size', value: string) => void
+  ): TemplateResult {
+    return html`
+      <div class="form-field">
+        <label>Shared dir storage class</label>
+        <sl-input
+          class="shared-dir-storage-class"
+          value=${storageClass || ''}
+          placeholder="e.g. standard-rwx"
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) => {
+            update('shared_dir_storage_class', (e.target as HTMLInputElement).value);
+          }}
+        ></sl-input>
+        <span class="hint">Kubernetes only. Empty uses the cluster default.</span>
+      </div>
+      <div class="form-field">
+        <label>Shared dir size</label>
+        <sl-input
+          class="shared-dir-size"
+          value=${size || ''}
+          placeholder="e.g. 10Gi"
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) => {
+            update('shared_dir_size', (e.target as HTMLInputElement).value);
+          }}
+        ></sl-input>
+        <span class="hint">Kubernetes only. A Kubernetes quantity, such as 10Gi or 1Ti.</span>
+        ${this.renderQuantityIssues(`${path}.shared_dir_size`)}
+      </div>
+    `;
+  }
+
+  private updateRuntimeSafeToEvict(name: string, value: boolean | undefined): void {
+    const updated = { ...this.runtimes };
+    const rt = { ...updated[name] };
+    if (value === undefined) {
+      delete rt.safe_to_evict;
+    } else {
+      rt.safe_to_evict = value;
+    }
+    updated[name] = rt;
+    this.runtimes = updated;
+  }
+
+  private updateProfileSafeToEvict(name: string, value: boolean | undefined): void {
+    const updated = { ...this.profiles };
+    const profile = { ...updated[name] };
+    if (value === undefined) {
+      delete profile.safe_to_evict;
+    } else {
+      profile.safe_to_evict = value;
+    }
+    updated[name] = profile;
+    this.profiles = updated;
   }
 
   private updateRuntimeBool(
@@ -3867,19 +6331,30 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.runtimes = updated;
   }
 
-  private updateRuntimeCloudRun(name: string, field: 'project' | 'region', value: string): void {
+  // The hub reads cloudrun-instances runtimes from cloudrun_instances
+  // (project_id, region) and cloudrun runtimes from cloudrun
+  // (project_id, location).
+  private cloudRunFieldValue(rt: V1RuntimeConfig, field: CloudRunEditorField): string {
+    if (rt.type === 'cloudrun-instances') {
+      const ci = rt.cloudrun_instances;
+      return (field === 'project' ? ci?.project_id : ci?.region) || '';
+    }
+    const cr = rt.cloudrun;
+    return (field === 'project' ? cr?.project_id : cr?.location) || '';
+  }
+
+  private updateRuntimeCloudRun(name: string, field: CloudRunEditorField, value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
-    const cr = { ...(rt.cloudrun || {}) };
-    if (value) {
-      cr[field] = value;
+    if (rt.type === 'cloudrun-instances') {
+      setCloudRunKey(
+        rt,
+        'cloudrun_instances',
+        field === 'project' ? 'project_id' : 'region',
+        value
+      );
     } else {
-      delete cr[field];
-    }
-    if (Object.keys(cr).length > 0) {
-      rt.cloudrun = cr;
-    } else {
-      delete rt.cloudrun;
+      setCloudRunKey(rt, 'cloudrun', field === 'project' ? 'project_id' : 'location', value);
     }
     updated[name] = rt;
     this.runtimes = updated;
@@ -3908,6 +6383,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
         ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
+        ${this.renderProfilesEnvBadge()}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
@@ -3992,6 +6468,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderProfileInheritedHint(name, profile.image_registry)}
           </div>
           <div class="form-field">
             <label>Default Template</label>
@@ -4022,6 +6499,30 @@ export class ScionPageAdminServerConfig extends LitElement {
             ></sl-input>
           </div>
           <div class="form-field">
+            <label>Safe to Evict</label>
+            <span class="hint"
+              >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false" annotation
+              to agent pods; true adds nothing. Empty uses the runtime's value.</span
+            >
+            ${this.renderSafeToEvictSelect(profile.safe_to_evict, readOnly, (v) =>
+              this.updateProfileSafeToEvict(name, v)
+            )}
+            ${this.renderSafeToEvictIgnored(
+              !profile.runtime ||
+                !(profile.runtime in this.runtimes) ||
+                this.isKubernetesRuntime(profile.runtime)
+            )}
+          </div>
+          ${hidesSharedDirFields(this.profileRuntimeType(profile))
+            ? nothing
+            : this.renderSharedDirFields(
+                `profiles.${name}`,
+                profile.shared_dir_storage_class,
+                profile.shared_dir_size,
+                readOnly,
+                (field, value) => this.updateProfileField(name, field, value)
+              )}
+          <div class="form-field">
             <label>CPU Request</label>
             <sl-input
               value=${profile.resources?.requests?.cpu || ''}
@@ -4036,6 +6537,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.requests.cpu`)}
           </div>
           <div class="form-field">
             <label>Memory Request</label>
@@ -4052,6 +6554,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.requests.memory`)}
           </div>
           <div class="form-field">
             <label>CPU Limit</label>
@@ -4068,6 +6571,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.limits.cpu`)}
           </div>
           <div class="form-field">
             <label>Memory Limit</label>
@@ -4084,6 +6588,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.limits.memory`)}
           </div>
           <div class="form-field">
             <label>Disk</label>
@@ -4095,6 +6600,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateProfileDisk(name, (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.disk`)}
           </div>
         </div>
       </sl-card>
@@ -4195,6 +6701,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderSectionHeader('Harness Configs', 'harness_configs')}
         ${this.renderSectionMeta('harness_configs')}
         ${hcReadOnly ? html`${this.renderReadOnlyBadge(hcReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('harness_configs')}
         ${configNames.length === 0
           ? html`<p class="hint">No harness configs configured.</p>`
           : configNames.map((name) => this.renderHarnessConfigEntry(name, !!hcReadOnly))}
@@ -4361,16 +6868,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Host</label>
             <span class="hint">Requires restart</span>
-            ${this.renderFieldValue(
-              'server.broker.host',
-              this.brokerHost || '0.0.0.0',
-              html`<sl-input
-                value=${this.brokerHost || '0.0.0.0'}
-                @sl-input=${(e: Event) => {
-                  this.brokerHost = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
-            )}
+            ${this.renderBrokerHostField()}
           </div>
           <div class="form-field full-width">
             <label>Hub Endpoint</label>
@@ -4409,7 +6907,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Name</label>
             ${this.renderFieldValue(
-              'server.broker.name',
+              'server.broker.broker_name',
               this.brokerName || '—',
               html`<sl-input
                 value=${this.brokerName}
@@ -4422,7 +6920,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Nickname</label>
             ${this.renderFieldValue(
-              'server.broker.nickname',
+              'server.broker.broker_nickname',
               this.brokerNickname || '—',
               html`<sl-input
                 value=${this.brokerNickname}
@@ -4581,13 +7079,17 @@ export class ScionPageAdminServerConfig extends LitElement {
                   automatic (global) replication. Required when org policy
                   constraints/gcp.resourceLocations restricts global resources.</span
                 >
-                <sl-input
-                  value=${this.secretsGCPReplicationLocations}
-                  placeholder="e.g. northamerica-northeast1, us-east1"
-                  @sl-input=${(e: Event) => {
-                    this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>
+                ${this.renderFieldValue(
+                  'server.secrets.gcp_replication_locations',
+                  this.secretsGCPReplicationLocations,
+                  html`${this.renderEnvBadge('server.secrets.gcp_replication_locations')}<sl-input
+                      value=${this.secretsGCPReplicationLocations}
+                      placeholder="e.g. northamerica-northeast1, us-east1"
+                      @sl-input=${(e: Event) => {
+                        this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>`
+                )}
               </div>`
             : ''}
         </div>
@@ -4635,6 +7137,45 @@ export class ScionPageAdminServerConfig extends LitElement {
                     : ''}
                 </sl-alert>`
               : ''}
+          </div>
+          <div class="form-field full-width">
+            <label>Default User Role</label>
+            <div class="hint default-user-role-help">
+              <p>
+                <strong>Default role for new users.</strong> Applies when a user first signs in,
+                including invited and allow-listed users (their role is assigned at first sign-in,
+                not when the invite is created). Changing it does not affect users who have already
+                signed in. Users listed in Admin Emails are always admins.
+              </p>
+              <ul>
+                <li>
+                  <strong>Member:</strong> can create projects, and works in any project they are
+                  added to.
+                </li>
+                <li>
+                  <strong>Viewer:</strong> the same as Member, but
+                  <strong>cannot create projects</strong> (including cloning). Viewers can still be
+                  added to projects and work there according to their project role.
+                </li>
+              </ul>
+              <p>
+                This is also the role given to an admin who is removed from Admin Emails. Change an
+                individual user's role on <a href="/admin/users">Admin &gt; Users</a>.
+              </p>
+            </div>
+            ${this.renderFieldValue(
+              'server.auth.default_user_role',
+              this.authDefaultUserRole,
+              html`${this.renderEnvBadge('server.auth.default_user_role')}<sl-select
+                  value=${this.authDefaultUserRole}
+                  @sl-change=${(e: Event) => {
+                    this.authDefaultUserRole = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="member">Member</sl-option>
+                  <sl-option value="viewer">Viewer</sl-option>
+                </sl-select>`
+            )}
           </div>
         </div>
       </div>
@@ -4746,17 +7287,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Cloud Export (OTLP)</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'telemetry.cloud.enabled',
-              this.telemetryCloudEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.cloud.enabled')}<sl-switch
-                  ?checked=${this.telemetryCloudEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryCloudEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Cloud Export</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.cloud.enabled',
+              label: 'Enable Cloud Export',
+              value: this.telemetryCloudEnabled,
+              loaded: this.loadedTelemetryCloudEnabled,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryCloudEnabled = v),
+            })}
           </div>
           <div class="form-field full-width">
             <label>Endpoint</label>
@@ -4818,17 +7357,15 @@ export class ScionPageAdminServerConfig extends LitElement {
             )}
           </div>
           <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.cloud.cloud_logging',
-              this.telemetryCloudCloudLogging ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.cloud.cloud_logging')}<sl-switch
-                  ?checked=${this.telemetryCloudCloudLogging}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryCloudCloudLogging = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Cloud Logging</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.cloud.cloud_logging',
+              label: 'Enable Cloud Logging',
+              value: this.telemetryCloudCloudLogging,
+              loaded: this.loadedTelemetryCloudCloudLogging,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryCloudCloudLogging = v),
+            })}
           </div>
         </div>
       </div>
@@ -4837,17 +7374,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Hub Reporting</h3>
         <div class="form-grid">
           <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.hub.enabled',
-              this.telemetryHubEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.hub.enabled')}<sl-switch
-                  ?checked=${this.telemetryHubEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryHubEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Hub Reporting</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.hub.enabled',
+              label: 'Enable Hub Reporting',
+              value: this.telemetryHubEnabled,
+              loaded: this.loadedTelemetryHubEnabled,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryHubEnabled = v),
+            })}
           </div>
           <div class="form-field">
             <label>Report Interval</label>
@@ -4859,52 +7394,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                   placeholder="30s"
                   @sl-input=${(e: Event) => {
                     this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div class="section">
-        <h3 class="section-title">Local Debug Output</h3>
-        <div class="form-grid">
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.enabled',
-              this.telemetryLocalEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.enabled')}<sl-switch
-                  ?checked=${this.telemetryLocalEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Local Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.console',
-              this.telemetryLocalConsole ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.console')}<sl-switch
-                  ?checked=${this.telemetryLocalConsole}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Console Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Log File</label>
-            ${this.renderFieldValue(
-              'telemetry.local.file',
-              this.telemetryLocalFile || '—',
-              html`${this.renderEnvBadge('telemetry.local.file')}<sl-input
-                  value=${this.telemetryLocalFile}
-                  placeholder="/var/log/scion/telemetry.log"
-                  @sl-input=${(e: Event) => {
-                    this.telemetryLocalFile = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
             )}
@@ -4923,15 +7412,19 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>IAM Check Mode</label>
-            <sl-select
-              value=${this.hubGcpIamCheckMode}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="off">Off (policy-only gating)</sl-option>
-              <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_check_mode',
+              this.hubGcpIamCheckMode,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_check_mode')}<sl-select
+                  value=${this.hubGcpIamCheckMode}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="off">Off (policy-only gating)</sl-option>
+                  <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls whether GCP IAM actAs permission is verified when assigning a service account
               to an agent. When "off", assignment is gated by Hub policy only. When "enforce", the
@@ -4940,15 +7433,19 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Deny Policy Fallback</label>
-            <sl-select
-              value=${this.hubGcpIamDenyUnknownPolicy}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="fail-open">Fail Open (recommended)</sl-option>
-              <sl-option value="fail-closed">Fail Closed</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_deny_unknown_policy',
+              this.hubGcpIamDenyUnknownPolicy,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_deny_unknown_policy')}<sl-select
+                  value=${this.hubGcpIamDenyUnknownPolicy}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="fail-open">Fail Open (recommended)</sl-option>
+                  <sl-option value="fail-closed">Fail Closed</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls behavior when IAM deny policies cannot be fully evaluated (e.g., the Hub
               service account lacks org-level permissions to read deny policies). "Fail open" treats
@@ -5057,7 +7554,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     try {
       const res = await apiFetch('/api/v1/admin/gcp-quota');
       if (res.ok) {
-        this.gcpQuotaData = await res.json();
+        this.gcpQuotaData = (await res.json()) as GCPQuotaSummary;
       }
     } catch {
       // Non-critical
@@ -5079,7 +7576,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       <div class="section">
         ${this.renderSectionHeader('GitHub App Configuration', 'github_app')}
-        ${this.renderSectionMeta('github_app')}
+        ${this.renderGitHubAppSaveError()} ${this.renderSectionMeta('github_app')}
         <div class="form-grid">
           <div class="form-field">
             <label>App ID</label>
@@ -5134,6 +7631,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.githubAppPrivateKey = (e.target as HTMLTextAreaElement).value;
               }}
             ></sl-textarea>
+            ${this.renderFieldErrors('server.github_app.private_key')}
             ${this.githubAppHasPrivateKey
               ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
                   >Stored as hub secret: GITHUB_APP_PRIVATE_KEY</span
@@ -5158,6 +7656,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.githubAppWebhookSecret = (e.target as HTMLInputElement).value;
               }}
             ></sl-input>
+            ${this.renderFieldErrors('server.github_app.webhook_secret')}
             ${this.githubAppHasWebhookSecret
               ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
                   >Stored as hub secret: GITHUB_APP_WEBHOOK_SECRET</span
@@ -5223,18 +7722,27 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-button
             variant="primary"
             ?loading=${this.githubAppSaving}
+            ?disabled=${!this.githubAppLoaded}
+            data-action="save-github-app"
             @click=${() => this.handleSaveGitHubApp()}
           >
             <sl-icon slot="prefix" name="check-lg"></sl-icon>
             Save GitHub App Configuration
           </sl-button>
-          ${this.githubAppConfigured
-            ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                >Configured</span
+          ${!this.githubAppLoaded
+            ? html`<span
+                class="hint"
+                data-github-app-not-loaded
+                style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                >Cannot save: the GitHub App configuration did not load. Reload the page.</span
               >`
-            : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
-                >Not configured</span
-              >`}
+            : this.githubAppConfigured
+              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >Configured</span
+                >`
+              : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                  >Not configured</span
+                >`}
         </div>
       </div>
 
@@ -5312,6 +7820,54 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * Keeps the main save's baseline in step with the github_app echo the
+   * page rewrites after load (a GitHub App card save, or a reload of the
+   * card). The echo is not an edit of the main form, so the section must
+   * not count as changed on the next main save (ptone/scion#3922). No-op
+   * before the first baseline (the initial load takes it afterwards).
+   */
+  private syncGitHubAppBaseline(): void {
+    if (!this.layer1Baseline) return;
+    const server = this.buildLayer1Payload().server as Record<string, unknown> | undefined;
+    const current = server?.github_app;
+    const base = this.layer1Baseline;
+    if (current === undefined) {
+      const baseServer = base.server as Record<string, unknown> | undefined;
+      if (baseServer) delete baseServer.github_app;
+      return;
+    }
+    if (typeof base.server !== 'object' || base.server === null) base.server = {};
+    (base.server as Record<string, unknown>).github_app = JSON.parse(JSON.stringify(current));
+  }
+
+  /**
+   * Re-reads one section's revision from GET /api/v1/admin/server-config
+   * after a save made outside the main form changed it. Leaves the loaded
+   * revision as it was if the read fails (a later save then answers 409
+   * and the reload banner, which is safe).
+   */
+  private async refreshSectionRevision(section: string): Promise<void> {
+    if (this.settingsTier !== 'db') return;
+    try {
+      const res = await apiFetch('/api/v1/admin/server-config');
+      if (!res.ok) return;
+      const data = (await res.json()) as ServerConfigResponse;
+      const rev = revisionsFromMetadata(data.section_metadata)[section];
+      if (typeof rev === 'number') {
+        this.loadedRevisions = { ...this.loadedRevisions, [section]: rev };
+      }
+      if (this.sectionMetadata && data.section_metadata?.[section]) {
+        this.sectionMetadata = {
+          ...this.sectionMetadata,
+          [section]: data.section_metadata[section],
+        };
+      }
+    } catch {
+      // keep the loaded revision
+    }
+  }
+
   private async loadGitHubAppConfig(): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/github-app');
@@ -5331,20 +7887,25 @@ export class ScionPageAdminServerConfig extends LitElement {
           if (!this.rawConfig.server) {
             this.rawConfig.server = {};
           }
-          const ghApp: V1GitHubAppConfig = { webhooks_enabled: data.webhooks_enabled };
-          if (data.app_id) ghApp.app_id = data.app_id;
-          if (data.api_base_url) ghApp.api_base_url = data.api_base_url;
-          if (data.installation_url) ghApp.installation_url = data.installation_url;
-          this.rawConfig.server.github_app = ghApp;
+          this.rawConfig.server.github_app = githubAppEcho(
+            data.app_id,
+            data.api_base_url,
+            data.installation_url,
+            data.webhooks_enabled
+          );
         }
         // Clear write-only fields after load
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
+        this.githubAppLoaded = true;
+        this.syncGitHubAppBaseline();
       } else {
+        this.githubAppLoaded = false;
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
       }
-    } catch (e) {
-      // Non-critical — tab just shows unconfigured state
+    } catch {
+      this.githubAppLoaded = false;
+      this.githubAppError = 'Failed to load GitHub App configuration';
     }
   }
 
@@ -5480,16 +8041,23 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveGitHubApp(): Promise<void> {
+    // The fields hold defaults, not the stored config, until the load
+    // succeeds; saving them would clear the stored App (see githubAppLoaded).
+    if (!this.githubAppLoaded) return;
     this.githubAppSaving = true;
     this.githubAppError = null;
+    this.githubAppSaveError = null;
     this.githubAppSuccess = null;
 
     try {
+      // Every non-secret field is sent, so a cleared one goes as an
+      // explicit clear (0 or ""). The endpoint reads null as "keep the
+      // stored value", so null cannot be used here.
       const payload: Record<string, unknown> = {
-        app_id: this.githubAppId || undefined,
-        api_base_url: this.githubAppApiBaseUrl || undefined,
+        app_id: this.githubAppId || 0,
+        api_base_url: this.githubAppApiBaseUrl,
         webhooks_enabled: this.githubAppWebhooksEnabled,
-        installation_url: this.githubAppInstallationUrl || undefined,
+        installation_url: this.githubAppInstallationUrl,
       };
 
       // Only send secrets if the user provided new values
@@ -5507,8 +8075,18 @@ export class ScionPageAdminServerConfig extends LitElement {
       });
 
       if (!res.ok) {
-        const err = await extractApiError(res, 'Failed to save GitHub App configuration');
-        this.githubAppError = err;
+        const err = await readSettingsSaveError(res, {
+          sectionKoanfPaths: this.sectionKoanfPaths,
+          defaultSection: 'github_app',
+        });
+        if (err.kind === 'generic') {
+          this.githubAppError = genericSaveErrorText(
+            err,
+            'Failed to save GitHub App configuration'
+          );
+        } else {
+          this.githubAppSaveError = err;
+        }
         return;
       }
 
@@ -5518,12 +8096,19 @@ export class ScionPageAdminServerConfig extends LitElement {
         if (!this.rawConfig.server) {
           this.rawConfig.server = {};
         }
-        const ghApp: V1GitHubAppConfig = { webhooks_enabled: this.githubAppWebhooksEnabled };
-        if (this.githubAppId) ghApp.app_id = this.githubAppId;
-        if (this.githubAppApiBaseUrl) ghApp.api_base_url = this.githubAppApiBaseUrl;
-        if (this.githubAppInstallationUrl) ghApp.installation_url = this.githubAppInstallationUrl;
-        this.rawConfig.server.github_app = ghApp;
+        this.rawConfig.server.github_app = githubAppEcho(
+          this.githubAppId,
+          this.githubAppApiBaseUrl,
+          this.githubAppInstallationUrl,
+          this.githubAppWebhooksEnabled
+        );
       }
+      // The card's save bumped the github_app section's revision: re-read it
+      // BEFORE the card reload below, which re-baselines the echo. A save by
+      // someone else in between then leaves an older revision next to a
+      // newer echo, so a later main save of github_app fails safe with a
+      // 409, never a newer revision next to an older echo.
+      await this.refreshSectionRevision('github_app');
       // Reload to get fresh state (has_private_key, has_webhook_secret, configured)
       await this.loadGitHubAppConfig();
       // Reload installations if now configured
@@ -5537,91 +8122,23 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   }
 
-  // ── Update check ──
+  // ── Update status (read-only) ──
 
-  private async checkForUpdates(): Promise<void> {
-    this.updateCheckLoading = true;
-    this.updateCheckError = null;
-    this.updateCheckResult = null;
+  /**
+   * Loads the running version and effective channel for the read-only
+   * version line. A failure leaves updateStatus null: the line then shows the
+   * server-config version without a channel, and never guesses one.
+   */
+  private async loadUpdateStatus(): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/admin/maintenance/check-updates', {
-        method: 'POST',
-      });
-      if (!res.ok) {
-        this.updateCheckError = await extractApiError(res, 'Failed to check for updates');
-        return;
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status');
+      if (!res.ok) return;
+      const data = (await res.json()) as Partial<UpdateStatus> | null;
+      if (data?.current && typeof data.current.version === 'string' && data.channel) {
+        this.updateStatus = data as UpdateStatus;
       }
-      this.updateCheckResult = (await res.json()) as UpdateCheckResult;
     } catch {
-      this.updateCheckError = 'Failed to connect to server';
-    } finally {
-      this.updateCheckLoading = false;
-    }
-  }
-
-  private renderUpdateConfirmDialog() {
-    return html`
-      <sl-dialog
-        label="Update Server"
-        open
-        @sl-request-close=${() => (this.showUpdateConfirm = false)}
-      >
-        <div>
-          <p>
-            This will pull the latest code, rebuild the server, and
-            <strong>restart the service</strong>. You will temporarily lose connectivity.
-          </p>
-          <p>
-            Running agent containers are not affected and will continue working through the restart.
-          </p>
-          ${this.updateCheckResult
-            ? html`<p>
-                <strong>${this.updateCheckResult.commits_behind}</strong> new
-                commit${this.updateCheckResult.commits_behind === 1 ? '' : 's'} will be applied.
-              </p>`
-            : nothing}
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          @click=${() => (this.showUpdateConfirm = false)}
-          ?disabled=${this.updateRunning}
-          >Cancel</sl-button
-        >
-        <sl-button
-          slot="footer"
-          variant="warning"
-          ?loading=${this.updateRunning}
-          @click=${() => this.triggerUpdate()}
-        >
-          <sl-icon slot="prefix" name="download"></sl-icon>
-          Update &amp; Restart
-        </sl-button>
-      </sl-dialog>
-    `;
-  }
-
-  private async triggerUpdate(): Promise<void> {
-    this.updateRunning = true;
-    try {
-      const res = await apiFetch('/api/v1/admin/maintenance/operations/rebuild-server/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: {} }),
-      });
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, `HTTP ${res.status}`);
-        this.updateCheckError = errMsg;
-        return;
-      }
-      // Server will restart — the page will lose connectivity.
-      this.showUpdateConfirm = false;
-      this.updateCheckResult = null;
-      this.successMessage = 'Update started. The server will restart shortly.';
-    } catch {
-      this.updateCheckError = 'Failed to trigger update';
-    } finally {
-      this.updateRunning = false;
+      // Keep the server-config fallback.
     }
   }
 }

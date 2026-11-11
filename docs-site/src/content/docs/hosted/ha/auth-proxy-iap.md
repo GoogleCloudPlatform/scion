@@ -19,6 +19,11 @@ Only one mode is active at a time. When `auth.mode` is `proxy`, the OAuth login 
 
 Choose **proxy / IAP** when the Hub is already fronted by IAP (e.g., on Cloud Run with IAP enabled, or behind a GCE/GKE IAP-protected backend service) and you want to eliminate a separate OAuth integration.
 
+Two verified proxy providers are available, selected by `auth.proxy.provider`:
+
+- **`iap`** — Google IAP. Covered by most of this guide.
+- **`jwt`** — any authenticating proxy that forwards a signed JWT. See [Generic JWT proxy provider](#generic-jwt-proxy-provider).
+
 ## Inbound: human IAP authentication
 
 ### How it works
@@ -40,6 +45,16 @@ The proxy authenticator runs **after** higher-priority app-layer credentials:
 4. **Proxy authenticator** (IAP assertion) — runs only when no app-layer credential matched
 
 This means agents and brokers traversing IAP are identified by their own credentials, not by the IAP service-account assertion.
+
+### Browser requests that change state
+
+In proxy mode, state-changing API requests from browsers are checked for the Hub's expected request properties. Browser `POST` requests with a body are also checked for the expected content type (JSON, multipart on file upload routes, browser policy reports on the report route). Requests that do not match get `403 Forbidden` or `415 Unsupported Media Type`. Requests from Scion's own clients (agents, brokers and the CLI) are unaffected.
+
+The front proxy must pass the public `Host` header through unchanged. IAP does this by default.
+
+### Port proxy behind the front proxy
+
+Behind a front proxy, how the follow-on requests of a page opened through the [port proxy](/scion/hosted/user/port-forwarding/) are handled depends on the front proxy's configuration, so multi-file pages opened through the port proxy may not work reliably. Point users to `scion tunnel` for full-fidelity access.
 
 ### Configuration
 
@@ -92,7 +107,7 @@ During startup in Hosted HA mode, Scion performs strict preflight checks to vali
 2. **Format Enforcement**: The audience path must follow either the Cloud Run format or the GCLB/GKE backend service format. Other formats are rejected (fail-closed) with a detailed startup error.
 3. **Endpoint Derivation Warning**:
    - For **Cloud Run** audiences, Scion can automatically derive the Hub's public URL format from the audience.
-   - For **GCLB/GKE** backend-service audiences, Scion *cannot* automatically derive the public endpoint URL because a backend service ID does not contain regional or routing information. You **must explicitly configure the public URL** using the `SCION_SERVER_BASE_URL` environment variable (or `server.hub.public_url` / `SCION_SERVER_HUB_PUBLIC_URL`). If missing, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents:
+   - For **GCLB/GKE** backend-service audiences, Scion *cannot* automatically derive the public endpoint URL because a backend service ID does not contain regional or routing information. You **must explicitly configure the public URL** using the `SCION_SERVER_BASE_URL` environment variable (or `server.hub.public_url` / `SCION_SERVER_HUB_ENDPOINT`). If missing, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents:
      ```
      Warning: hosted HA deployment has no explicit hub base URL; falling back to http://localhost:8080, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.
      ```
@@ -121,7 +136,7 @@ Provisioning in proxy mode works identically to OAuth — lazy, allow-list-gated
 - **`open`**: any verified email is allowed.
 - **`domain_restricted`**: email domain must be in `authorized_domains`.
 - **`invite_only`**: email must be pre-registered (via admin invite-code flow).
-- **Additive-Only `admin_emails` Floor**: Emails in the `admin_emails` configuration are granted the `admin` role automatically. This setting is strictly additive (acts as a floor, not a ceiling): it never overwrites or demotes roles that have been explicitly promoted or changed via the Admin UI/API, which are stored in the database and preserved verbatim across logins/refreshes.
+- **Roles**: Emails in `admin_emails` are granted the `admin` role automatically. Other new users get `server.auth.default_user_role` (`member` or `viewer`). An admin granted by `admin_emails` who is removed from the list is demoted to the default role; admins promoted through the Admin UI/API are not. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) and [AdminEmails and UI-promoted admins](/scion/hosted/ha/permissions/#adminemails-and-ui-promoted-admins).
 - If not permitted, the request returns **403**. Deleted users are rejected with **401** or **403**, and suspended users are rejected with **403** (even though upstream IAP may authenticate them).
 - **Database-Backed Token Refresh**: The token refresh endpoint reads the user's active role directly from the database rather than relying on stale session cache, ensuring UI-based role promotions take effect immediately.
 
@@ -133,6 +148,62 @@ In proxy mode, the Hub does not own the session. The `/auth/logout` endpoint:
 
 - **Browser requests**: redirect to `/_gcp_iap/clear_login_cookie` (IAP's cookie-clearing endpoint).
 - **API requests**: return `200 OK` with `{"success": true, "message": "proxy mode: session is managed by the authenticating proxy"}`.
+
+The browser redirect is the same for every proxy provider. With `provider: jwt`, `/_gcp_iap/clear_login_cookie` is a path on your own proxy, so sign-out depends on how that proxy handles it.
+
+## Generic JWT proxy provider
+
+Use `provider: jwt` when the Hub sits behind a bespoke authenticating proxy rather than Google IAP. The proxy must forward a JWT signed with an asymmetric key. The Hub verifies the signature, validates the claims, and then provisions the user exactly as described in [User provisioning](#user-provisioning). The [middleware precedence](#middleware-precedence) is the same as for IAP.
+
+```yaml
+server:
+  auth:
+    mode: proxy
+    proxy:
+      provider: jwt
+      jwt:
+        header: X-Auth-Proxy-JWT     # default
+        algorithm: RS256             # required; asymmetric algorithms only
+        issuer: https://auth.example.com
+        audience: scion-hub
+
+        # Exactly one key source:
+        jwks_url: https://auth.example.com/.well-known/jwks.json
+        # jwks_file: /etc/scion/proxy-jwks.json
+        # public_key_file: /etc/scion/proxy-signing-key.pem
+
+        # Optional claim mapping (OIDC-standard defaults shown):
+        claims:
+          email: email
+          subject: sub
+          display_name: name
+          domain: hd
+    user_access_mode: domain_restricted
+    authorized_domains:
+      - example.com
+```
+
+### Key sources
+
+Configure exactly one key source. If none or more than one is set, the Hub refuses to start.
+
+| Key source | Behavior |
+|------------|----------|
+| `public_key_file` | A single PEM public key (PKIX, PKCS1, or an X.509 certificate), read at startup and applied to every token regardless of `kid`. |
+| `jwks_url` | A remote JWKS endpoint. Keys are matched by `kid` and cached. The cache refreshes hourly in the background and immediately when a token carries an unknown `kid`. Fetches are debounced to at most one attempt every 5 seconds. If a refresh fails, the last-good key set is still served. This matches the IAP provider. |
+| `jwks_file` | A local JWKS JSON document, read at startup. Keys are matched by `kid`, and keys without a `kid` are ignored. The file must contain at least one usable keyed entry. Changes take effect only after a restart. |
+
+Missing or malformed key files are reported at startup, not on the first request.
+
+### Validation rules
+
+- **Algorithm pinning.** Only the configured `algorithm` is accepted. Symmetric (`HS*`) algorithms are rejected at startup.
+- **Issuer and audience** are checked only when `issuer` and `audience` are set. Set both in production. Without an audience, the Hub accepts any token the proxy's key has signed, including tokens minted for other services.
+- **Expiry.** `exp` is required. `exp` and `iat` (if present) are checked with ±30 seconds of clock skew.
+- **Identity claims.** The email claim is required and is lowercased. If the subject claim is missing, the email is used as the subject. Display name and domain are optional.
+- A request without the configured header falls through to the normal unauthenticated handling. A request whose header holds an invalid JWT is rejected.
+
+As with IAP, the Hub must be reachable only through the proxy. Use network controls to keep clients from reaching it directly.
 
 ## Outbound: agent transport auth
 
@@ -157,7 +228,15 @@ When transport auth is configured, the Hub injects these environment variables i
 |----------|-------------|
 | `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for (IAP client ID or hub URL). |
-| `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+| `SCION_TRANSPORT_TOKEN_EXPIRY` | Expiry of the initial token, in RFC 3339 format. Bootstrap only: `sciontool init` removes it together with `SCION_TRANSPORT_TOKEN`, because it goes stale after the first refresh. |
+
+`SCION_TRANSPORT_TOKEN` only bootstraps the agent. At startup, `sciontool init` writes it to `~/.scion/transport-token` (mode `0600`, owned by the agent user) and removes it from the environment that the harness and its child processes inherit. Children get `SCION_TRANSPORT_TOKEN_FILE`, which points at that file. Each token refresh rewrites the file, and every in-agent hub client (hooks, `sciontool` subcommands, the in-agent `scion` CLI) re-reads it when it changes. So these clients keep working after the initial token expires, which takes about an hour.
+
+If `sciontool init` cannot write the file, it logs an error and leaves `SCION_TRANSPORT_TOKEN` in the environment. In-agent clients then use that value until it expires, and hub calls from child processes fail after about an hour. A file is used only when the agent was given a transport token (`SCION_TRANSPORT_TOKEN` or `SCION_TRANSPORT_TOKEN_FILE` is set); a stale file left in a persisted home is removed at startup when neither is set.
+
+A root shell opened with `docker exec` or `kubectl exec` does not inherit `SCION_TRANSPORT_TOKEN_FILE`. Run `. ~/.scion/scion-env` (as the agent user, or with the agent's home path) to get the same hub environment as the harness. That file exports `SCION_TRANSPORT_TOKEN_FILE`.
+
+On the Kubernetes runtime, `SCION_TRANSPORT_TOKEN` comes from the agent's per-agent Secret through `secretKeyRef`, not from a plain value in the Pod spec. See [Hub Transport Credential](/scion/hosted/ha/kubernetes/#hub-transport-credential). Other runtimes set it as a regular environment variable.
 
 ### Refresh response: `tokens[]` array
 
@@ -187,13 +266,39 @@ The agent token refresh endpoint (`POST /api/v1/agents/{id}/token/refresh`) retu
 
 The `transport` entry is only present when `auth.transport` is configured on the Hub. Old clients ignore `tokens[]`; new clients consume both layers.
 
+If the Hub is configured to mint transport tokens but cannot mint one (for example, the Hub's service account has lost `roles/iam.serviceAccountTokenCreator` on the transport SA), the refresh still succeeds with the app token, the `transport` entry is omitted, and the response carries a `transportError` field with a fixed, generic description. The underlying error stays in the Hub's logs. An agent that uses a hub-provided transport token logs the failure and records the transport outcome of each refresh (`refreshed`, `failed` or `absent`) in `~/.scion/transport-token.status`, which `sciontool doctor` reports. Agents that do not use a hub-provided transport token (metadata mode, or no transport) ignore transport entries and record nothing. An agent in a proxy mode that started without a transport token counts as using one: it records outcomes, and it adopts the first transport entry it receives. The file never contains a token, and it is removed with the transport token file when an agent starts without a transport token.
+
+### Recovering with `reset-auth`
+
+`scion agent reset-auth <agent>` also pushes a fresh transport token when the Hub mints them. The broker writes it to `~/.scion/transport-token` next to the agent token, and `sciontool init` reloads it straight away and records the outcome `reset`, so doctor no longer shows an earlier failed refresh as the latest event. A value that cannot be parsed is not adopted: the agent keeps its current credential, restores the file from it, and records the reset as failed. If the agent has no credential yet (it started without a transport token in a proxy mode), the file is removed instead. This recovers an agent whose transport token has already expired, since that agent's own refresh can no longer get through the platform guard. If the Hub cannot mint a transport token, the reset still replaces the agent token.
+
+### Agents that started without a transport token
+
+If the Hub cannot mint a transport token at dispatch time, the agent starts without one. The Hub still sets `SCION_TRANSPORT_MODE` whenever it is configured to mint transport tokens. In a proxy mode (`iap` or `cloudrun_invoker`), such an agent adopts the first transport token it receives later, either from a token refresh or from `reset-auth`. That token is written to `~/.scion/transport-token` through the same path as a normal refresh, and it is picked up without a restart: sciontool's hub clients (including the long-lived one in the agent's init process) re-read the file, and every new in-agent hub client uses it, including clients created by processes that were already running. Until then, requests carry no transport header, and `sciontool doctor` reports that no transport credential has been received. Because the platform guard usually blocks the agent's own refresh until it has a credential, `reset-auth` is the usual way to recover. Without a proxy mode, the agent ignores a transport token that arrives after start.
+
+### Diagnosing with `sciontool doctor`
+
+Inside the agent, `sciontool doctor` has a **Transport Auth** section that shows:
+
+- the header mode (`SCION_TRANSPORT_MODE`) and the header it uses, plus a shortened form of the audience (enough to spot a mismatch);
+- which credential is in use (the refreshed file or the bootstrap value) and when it expires. The check fails if that credential has expired, cannot be parsed, or none is available, and warns when it is within the refresh margin;
+- the expiry of the bootstrap value and of the file side by side, and when the file was last written;
+- the transport outcome of the last refresh, or of the last `reset-auth`.
+
+When `~/.scion/transport-token` is replaced by rename during a read, the file reader retries up to three reads in total; if all three encounter an unlinked file during back-to-back refreshes, it keeps the value from its last successful read if that read is at most two seconds old and has a parsed expiry in the future, and `sciontool doctor` reports that state (`FileRetained`).
+
+Doctor never prints token values. Its authentication checks tell a rejection by the platform proxy (a non-JSON 401/403, or a redirect to Google sign-in) apart from a rejection by the Hub (a JSON error), and the remediation differs: for a proxy rejection, run `reset-auth` and check the transport mode and audience; for a Hub rejection, the agent token itself is invalid. Doctor does not follow redirects. Redirects are shown only as their scheme and host, never with their query string. A redirect to any other host means authentication could not be confirmed, and it counts as a failed check; it usually means `SCION_HUB_ENDPOINT` is not the hub's final URL. A 404 on `/healthz` can come from the platform rather than the Hub, since some platforms (for example Cloud Run) reserve that path.
+
 ### Agent-side token source selection
 
 The agent (`pkg/sciontool/hub`) selects an OIDC token source automatically:
 
-1. **`SCION_TRANSPORT_TOKEN` env var set** → **Injected mode**: uses the hub-provided token from dispatch, refreshed via `tokens[]` on subsequent refresh calls.
+1. **`SCION_TRANSPORT_TOKEN_FILE` or `SCION_TRANSPORT_TOKEN` set** → **Injected mode**: reads the refreshed file, with the env value as bootstrap fallback. The hub-provided token from dispatch is refreshed via `tokens[]` on subsequent refresh calls and shared with other processes through the file. Whichever of the file and the env value expires later is used. Outside a proxy mode, the file alone does not select this mode.
 2. **Running on GCP (metadata server available)** → **Metadata mode**: fetches OIDC from the GCE metadata server using the ambient SA identity (the PR #307 pattern). Audience is set via `SCION_HUB_OIDC_AUDIENCE` or defaults to the hub URL.
-3. **Neither** → No OIDC transport (agent uses plain HTTP).
+3. **`SCION_TRANSPORT_MODE` is a proxy mode (`iap` or `cloudrun_invoker`)** → **File-backed mode with no bootstrap value**, for an agent that started without a transport token. The `sciontool` hub client always selects this mode in a proxy mode. It sends no transport header until a refresh or `reset-auth` delivers a token, which is then written to `~/.scion/transport-token`. Other clients built with `transportauth.FromEnv`, such as the in-agent `scion` CLI and doctor, select it only once that file exists. See [Agents that started without a transport token](#agents-that-started-without-a-transport-token).
+4. **None of the above** → No OIDC transport (agent uses plain HTTP).
+
+The header follows `SCION_TRANSPORT_MODE` in every in-agent client: `iap` sends `Proxy-Authorization`, `cloudrun_invoker` sends `X-Serverless-Authorization`, and anything else sends `Authorization`.
 
 Injected mode (option 1) is the recommended path for IAP deployments — it decouples agent transport auth from the agent's own GCP identity.
 
@@ -250,6 +355,10 @@ The Hub uses a dedicated service account solely for transport-layer auth. The Hu
 |-----------|------|--------|
 | Hub's runtime SA | `roles/iam.serviceAccountTokenCreator` | Transport SA (`platform_auth_sa`) |
 | Transport SA | IAP-secured web user **or** Cloud Run invoker | The Hub's backend service |
+
+### Seeing requests IAP rejects
+
+When IAP enforces access directly on a Cloud Run service (for example, the IAP proxy in front of a single-node Hub), a request IAP rejects never reaches the container. It does not appear in the Cloud Run service's logs or the Hub's logs. To see IAP's own authorization decisions, enable **Data Access** audit logs (**Data Read**) for the `iap.googleapis.com` service, then filter Cloud Logging on `protoPayload.serviceName="iap.googleapis.com"` and `protoPayload.authorizationInfo.granted=false`. A mismatched `auth.proxy.iap.audience` is different: IAP passes the request through and the Hub rejects it, so it does show up in the Hub's logs. For step-by-step Console and `auditConfigs` instructions, see [Requests IAP rejects never reach Cloud Run or the Hub logs](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#requests-iap-rejects-never-reach-cloud-run-or-the-hub-logs) in the repository.
 
 ## Security notes
 
@@ -362,7 +471,7 @@ server:
 ### 6. Verify
 
 1. Access the Hub URL in a browser — IAP should prompt for Google login, then the Hub should show your identity.
-2. Dispatch an agent and verify it can communicate back to the Hub (check agent logs for OIDC transport messages).
+2. Dispatch an agent and verify it can communicate back to the Hub (check agent logs for OIDC transport messages, or run `sciontool doctor` inside the agent).
 3. Check Hub logs for `Proxy auth configured: provider=iap` and `Transport auth configured: mode=iap` at startup.
 
 ### Reference scripts
@@ -409,6 +518,58 @@ The `scion attach` flow resolves transport-layer authentication **before** check
 - If no transport source is configured, the command falls back to requiring a standard Hub access token (via `scion hub auth login` or `SCION_HUB_TOKEN`).
 
 This unblocks seamless interactive attachments to agents executing under IAP-secured Hubs.
+
+## Workstation CLI access (a person)
+
+A browser follows IAP's Google sign-in page; the `scion` CLI cannot. Against a Hub behind IAP, `scion hub auth login` stops with an error that says the Hub appears to be behind IAP, instead of trying to decode the sign-in page. If the CLI already sent a transport token and IAP rejected it, the error says so instead.
+
+The CLI recognises IAP by its `X-Goog-IAP-Generated-Response` header, by its plain-text `Invalid IAP credentials` 401 or 403, or by a redirect to `accounts.google.com`. With IAP [external identities](https://cloud.google.com/iap/docs/enable-external-identities), the sign-in page is on another host, so the CLI reports only that the Hub returned an HTML page instead of a JSON response. The same transport setup applies.
+
+A person's CLI uses the same dual-layer model as agents:
+
+| Layer | Credential | How the CLI gets it |
+|-------|------------|---------------------|
+| **Outer (transport)** | Google OIDC ID token for a service account, audience = the IAP OAuth client ID, with the email claim | `SCION_TRANSPORT_MODE=iap` plus `SCION_TRANSPORT_TOKEN_FILE` (or `SCION_TRANSPORT_TOKEN`), sent as `Proxy-Authorization` |
+| **Inner (app)** | [User access token](/scion/hosted/user/personal-access-tokens/) (UAT) | `SCION_HUB_TOKEN`, sent as `Authorization: Bearer` |
+
+The Hub identifies the person by the UAT; the service account only gets the request through IAP (see [Middleware precedence](#middleware-precedence)). A user account's own ID token does not carry the IAP client ID as its audience, so the transport token is minted by impersonating a service account.
+
+**One-time IAM setup:**
+
+- The service account needs the **IAP-secured Web App User** role (`roles/iap.httpsResourceAccessor`) on the IAP-protected resource.
+- Each CLI user needs `roles/iam.serviceAccountOpenIdTokenCreator` on that service account. `roles/iam.serviceAccountTokenCreator` (Service Account Token Creator) also works but grants more.
+- Each CLI user needs a UAT, created in the web UI through the browser.
+
+**Find the audience.** It is the project's IAP OAuth client ID. For a custom OAuth client (an HA deployment), it is the client ID you created. Otherwise, read it from the project's IAP settings:
+
+```bash
+CLIENT_ID="$(gcloud iap settings get --project=PROJECT_ID \
+  --resource-type=iap_web --format='value(accessSettings.oauthSettings.clientId)')"
+```
+
+This is not the `auth.proxy.iap.audience` value, which is the audience of the assertion IAP sends to the Hub.
+
+**Each session:**
+
+```bash
+mkdir -p ~/.scion
+# Write to a private temp file, then rename it into place, so the CLI never
+# reads a partly written token.
+tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
+gcloud auth print-identity-token \
+  --impersonate-service-account=SA_EMAIL \
+  --audiences="$CLIENT_ID" \
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token || rm -f "$tmp"
+
+export SCION_TRANSPORT_MODE=iap
+export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token
+export SCION_HUB_TOKEN=scion_pat_...
+export SCION_HUB_ENDPOINT=https://HUB_IAP_URL
+```
+
+The ID token expires after about an hour. Re-run `gcloud` to refresh the file; the CLI re-reads it when it changes. The token file must be a regular file, not a symbolic link. A stored interactive login takes precedence over `SCION_HUB_TOKEN`.
+
+For the single-node VM deployment, the [single-node VM guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#cli-access-via-iap) has the full command sequence with that deployment's resource names. That guide also describes the alternative of running the CLI on the Hub VM over IAP SSH.
 
 ## Brokers behind IAP
 
@@ -496,7 +657,7 @@ env:
 
 #### Credentials-file fields
 
-The broker credentials file (written by `scion hub brokers register`) can also store transport settings per hub connection:
+The broker credentials file (`~/.scion/hub-credentials/<name>.json`, written by `scion runtime-broker register`) can also store transport settings per hub connection:
 
 ```json
 {
@@ -516,7 +677,7 @@ Per-connection placement in the credentials file exists for the **multi-hub scen
 
 ### Broker registration without PAT (proxy-auth mode)
 
-With transport auth configured, `scion hub brokers register` works through IAP natively — no Personal Access Token (PAT) or hub token is needed. The broker authenticates via the IAP assertion of its service account identity.
+With transport auth configured, `scion runtime-broker register` works through IAP natively — no Personal Access Token (PAT) or hub token is needed. The broker authenticates via the IAP assertion of its service account identity.
 
 When the Hub is in `proxy` auth mode and the broker has a valid transport token source (Workload Identity), the registration command:
 
@@ -528,62 +689,22 @@ This retires the manual `install-broker.sh` curl-from-a-pod workaround.
 
 The `register` command also persists `transportMode` and `transportAudience` into the credentials file automatically, so the broker daemon inherits them on startup.
 
-### Registration Job manifest
+### Registering the broker Deployment
 
-Instead of manual shell scripts, use a Kubernetes Job to register the broker. The Job runs with the broker's KSA (which has Workload Identity configured) and the transport environment variables:
+Instead of manual shell scripts, run the registration in the broker pod itself. `scion runtime-broker register` first checks that the broker server answers on its local port, so it has to run where the broker is reachable on `localhost`. The broker pod already has the broker's KSA (with Workload Identity) and the transport environment variables, and writes the credentials to the broker's own `~/.scion` volume:
 
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: register-broker
-  namespace: scion
-spec:
-  template:
-    metadata:
-      labels:
-        app: scion-broker-register
-    spec:
-      serviceAccountName: scion-broker  # KSA with Workload Identity annotation
-      restartPolicy: Never
-      containers:
-        - name: register
-          image: YOUR_SCION_IMAGE
-          env:
-            # Env vars enable the scion binary to traverse IAP for the
-            # registration HTTP request itself.
-            - name: SCION_TRANSPORT_MODE
-              value: "iap"
-            - name: SCION_TRANSPORT_AUDIENCE
-              value: "1234567890-abc.apps.googleusercontent.com"
-          volumeMounts:
-            - name: broker-credentials
-              mountPath: /home/scion/.scion
-          command:
-            - scion
-            - hub
-            - brokers
-            - register
-            - --name
-            - my-broker
-            # CLI flags ensure transport values are persisted to the
-            # credentials file for the broker daemon to inherit.
-            - --transport-mode
-            - iap
-            - --transport-audience
-            - "1234567890-abc.apps.googleusercontent.com"
-            - https://hub.example.com
-      volumes:
-        # The credentials file must persist beyond the Job pod so the
-        # broker Deployment can read it. Use a PVC, a Secret, or any
-        # shared volume accessible to the broker Deployment.
-        - name: broker-credentials
-          persistentVolumeClaim:
-            claimName: broker-credentials  # replace with your PVC
-  backoffLimit: 2
+```bash
+kubectl -n scion exec -it deploy/scion-broker -- \
+  scion runtime-broker register --global \
+    --hub https://hub.example.com \
+    --name my-broker \
+    --transport-mode iap \
+    --transport-audience "1234567890-abc.apps.googleusercontent.com"
 ```
 
-After the Job completes, the credentials file is written to the shared volume. The broker Deployment (mounting the same volume, with the same KSA and transport env vars) picks up the credentials on startup.
+Answer the confirmation prompts in the terminal. (`--yes` accepts every prompt, including adding the broker as a provider for a Hub project named `global`, which is created if it does not exist.) The CLI flags persist the transport values to the credentials file, so the broker inherits them on later starts. Add `--port <port>` if the broker does not listen on 9800.
+
+Keep the broker's `~/.scion` on a persistent volume, so the credentials survive pod restarts. If the broker started without a Hub endpoint configured, restart it after registering (`kubectl -n scion rollout restart deploy/scion-broker`) so it connects with the new credentials.
 
 ### GKE deployment summary
 
@@ -593,4 +714,4 @@ After the Job completes, the credentials file is written to the shared volume. T
 | 2 | Create a broker GSA; grant `roles/iap.httpsResourceAccessor` on the Hub backend service |
 | 3 | Bind KSA ↔ GSA via Workload Identity annotation on the broker's Kubernetes service account |
 | 4 | Broker Deployment env: `SCION_TRANSPORT_MODE=iap`, `SCION_TRANSPORT_AUDIENCE=<custom client id>` |
-| 5 | One-time registration Job (same KSA) runs `scion hub brokers register` — no curl scripts |
+| 5 | One-time `scion runtime-broker register` in the broker pod (same KSA) — no curl scripts |

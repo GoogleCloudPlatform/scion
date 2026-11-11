@@ -18,7 +18,8 @@ import (
 // the env overlay output.
 type HarnessManifestRequirement struct {
 	// Required is true when manifest.json exists with a container-script
-	// provisioner. When true, pre-start hook failures must abort startup
+	// provisioner (or the unusable legacy "builtin" one, reported with an
+	// error). When true, pre-start hook failures must abort startup
 	// because the child harness will be misconfigured otherwise.
 	Required bool
 
@@ -54,6 +55,7 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 	// Parse the minimal shape we care about. Future fields are ignored.
 	var manifest struct {
 		HarnessConfig struct {
+			Harness     string `json:"harness"`
 			Provisioner *struct {
 				Type             string   `json:"type"`
 				LifecycleEvents  []string `json:"lifecycle_events"`
@@ -73,9 +75,24 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 		return HarnessManifestRequirement{}, nil
 	}
 
-	// Builtin provisioners do not require pre-start provisioning.
+	// The legacy "builtin" provisioner has no implementation any more
+	// (harnesses/README.md), so nothing would provision the harness. The
+	// broker refuses such a harness-config before the container is created
+	// (harness.ErrUnusableProvisioner); this check covers a manifest staged
+	// by an older broker. Abort startup instead of booting a harness without
+	// its provisioning (ptone/scion#611).
 	if prov.Type == "builtin" {
-		return HarnessManifestRequirement{BundleDir: bundleDir}, nil
+		// The manifest carries the harness type, not the harness-config
+		// name, so the fix names the harness-config generically.
+		harnessType := manifest.HarnessConfig.Harness
+		subject := "the agent's harness-config"
+		reinstall := ""
+		if harnessType != "" {
+			subject = fmt.Sprintf("a harness-config of harness type %q", harnessType)
+			reinstall = fmt.Sprintf(", a reinstall from harnesses/%s,", harnessType)
+		}
+		return HarnessManifestRequirement{Required: true, BundleDir: bundleDir},
+			fmt.Errorf("%s is staged with provisioner.type \"builtin\", which is no longer supported; repair the agent's harness-config (`scion harness-config upgrade <harness-config> --activate-script` for a global one%s or set provisioner.type: container-script with a provisioner.command in its config.yaml), then restart the agent", subject, reinstall)
 	}
 
 	// pre-start participation is the default for container-script. If the

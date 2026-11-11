@@ -1,0 +1,23 @@
+=== RUN   TestNested
+    toy_test.go:67: parent before
+=== RUN   TestNested/a
+    toy_test.go:69: a log
+=== RUN   TestNested/a/deep
+    toy_test.go:70: deep boom
+        line2
+=== NAME  TestNested/a
+    toy_test.go:71: a after
+=== NAME  TestNested
+    toy_test.go:73: parent after
+=== RUN   TestNested/b
+    toy_test.go:74: b boom
+=== RUN   TestNested/c
+    toy_test.go:75: c passes
+=== NAME  TestNested
+    toy_test.go:76: parent fail
+--- FAIL: TestNested (0.00s)
+    --- FAIL: TestNested/a (0.00s)
+        --- FAIL: TestNested/a/deep (0.00s)
+    --- FAIL: TestNested/b (0.00s)
+    --- PASS: TestNested/c (0.00s)
+FAIL

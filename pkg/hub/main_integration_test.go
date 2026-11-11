@@ -20,12 +20,16 @@ import (
 	"os"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 )
 
+// TestMain isolates $HOME (see testutil.IsolateHome) in addition to the
+// existing ent test database setup, so integration-tagged pkg/hub tests
+// keep scion state off the real developer/agent HOME (ptone/scion#2417),
+// and starts the same memory guard as the non-integration TestMain.
+//
+// The steps live in hubtestutil.RunTestMain (internal/hubtestutil/runtestmain_integration.go),
+// which the pkg/hub area packages' generated TestMains also call.
 func TestMain(m *testing.M) {
-	enttest.MainSetup()
-	code := m.Run()
-	enttest.MainTeardown()
-	os.Exit(code)
+	os.Exit(hubtestutil.RunTestMain(m))
 }

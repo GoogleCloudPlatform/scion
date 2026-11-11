@@ -92,6 +92,37 @@ When writing a brief, make the Reporting row explicit enough that the agent
 knows who to message for decisions. If different questions go to different
 people, say so.
 
+### Waiting for the agent to start
+
+In Hub mode `scion start` waits until the agent is running (or its launch
+fails) only when the Hub launches the agent asynchronously, after a workspace
+upload, or with `--attach`. Otherwise it returns as soon as the Hub answers, and
+the agent may still be provisioning — check with `scion look <name>` or
+`scion list` before relying on it. When it waits, the default wait is the
+Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does
+not report one.
+
+- Pass `--wait-timeout <duration>` (for example `--wait-timeout 15m`) to wait
+  longer — needed if the Hub's launch timeout has been raised.
+- An exit status of 0 does not always mean the agent is running. When the
+  Hub accepted the launch but the wait could not follow it to running (the
+  wait timed out, or the agent's status is not readable with your
+  credential), `scion start` prints "accepted by Hub and launching" (with
+  `--format json`, the result carries a `launchNote` detail) and exits 0.
+  The launch keeps going and may still fail: check with `scion list` or
+  `scion look <name>` before relying on the agent. Do not retry the start
+  under a new name; that leaves a duplicate agent.
+- If the wait timed out, re-run `scion start <name>` to resume waiting; it
+  does not start a second agent.
+- Pass `--no-wait` to return as soon as the Hub accepts the launch; check
+  progress later with `scion look <name>` or `scion list`.
+- If the error says the create did not complete, the agent cannot be
+  restarted: delete it with `scion delete <name>` and create it again with
+  `scion start` using the same template and task (both are shown in the
+  error). If soft-delete retention is enabled on the Hub, the name stays
+  reserved until the agent is deleted with force=true or purged; until then,
+  use a new name.
+
 For shell-escaping rules when passing prompts, see the `scion-cli-operations` skill —
 do not improvise quoting.
 
@@ -107,4 +138,4 @@ scion start <name> --non-interactive --model medium
 
 For troubleshooting agents that are stalled, have hit an error, or are stuck see references/troubleshooting.md
 
-For agent lifecycle rules — when to delete, when to stop, and who may authorize deletion — see references/agent-lifecycle.md
+For agent lifecycle rules — when to delete, when to stop, who may authorize deletion, and how to reincarnate or move an agent to another broker — see references/agent-lifecycle.md

@@ -413,6 +413,86 @@ func TestProxyAuth_DeletedUser_ClearsSession(t *testing.T) {
 	assert.Equal(t, "/login", rec2.Header().Get("Location"))
 }
 
+// TestProxyAuth_PlatformAuthSA_Denied covers the web proxy-auth path's own
+// find-or-create (it does not go through Server.provisionUser, so it carries
+// an independent check): the configured transport service account arriving
+// as a verified proxy identity must be denied, must not get a user row, and
+// must not get a session or Hub tokens issued.
+func TestProxyAuth_PlatformAuthSA_Denied(t *testing.T) {
+	const sa = "transport-sa@example.iam.gserviceaccount.com"
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   sa,
+			Domain:  "example.iam.gserviceaccount.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		PlatformAuthSA:     sa,
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
+	ws.SetStore(st)
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Result().Cookies(),
+		"no session (and therefore no Hub access/refresh token) should be issued for the configured service account")
+
+	_, lookupErr := st.GetUserByEmail(context.Background(), sa)
+	assert.ErrorIs(t, lookupErr, store.ErrNotFound,
+		"no user row should be created for the configured service account")
+}
+
+// TestProxyAuth_NormalUser_UnaffectedByPlatformAuthSA is a regression check:
+// configuring a platform auth SA does not change proxy-auth provisioning for
+// any other identity.
+func TestProxyAuth_NormalUser_UnaffectedByPlatformAuthSA(t *testing.T) {
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "proxy-user@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		PlatformAuthSA:     "transport-sa@example.iam.gserviceaccount.com",
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{adminEmails: []string{}})
+	ws.SetStore(st)
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	handler := ws.Handler()
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.NotEqual(t, http.StatusForbidden, rec.Code)
+	assert.NotEmpty(t, rec.Result().Cookies(), "a normal user should get a session")
+
+	created, err := st.GetUserByEmail(context.Background(), "proxy-user@example.com")
+	require.NoError(t, err, "a normal user should still be provisioned")
+	assert.Equal(t, "proxy-user@example.com", created.Email)
+}
+
 func TestProxyAuth_NewLogin_SuspendedUser_ServesPage(t *testing.T) {
 	// Verifies that proxy mode serves the suspended page when a known
 	// suspended user attempts to login through proxy auth (no existing session).
@@ -465,7 +545,7 @@ func TestDevAuthFixture_DefaultStore_ReachesHandler(t *testing.T) {
 	// authoritative store with an active DevUserID record so that the
 	// suspended-user middleware passes through to the handler.
 	ws := newDevAuthWebServer(t)
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -482,11 +562,10 @@ func TestDevAuthFixture_SuspendedDevUser_ShortCircuits(t *testing.T) {
 	// When the dev user is marked suspended in the authoritative store,
 	// the middleware must short-circuit with the suspended page.
 	ws := newDevAuthWebServer(t)
+	handler := devSignedIn(t, ws)
 	// Suspend the dev user in the fixture store.
 	devStore := ws.store.(*proxyAuthStore)
 	devStore.users[DevUserID].Status = store.UserStatusSuspended
-
-	handler := ws.Handler()
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -502,8 +581,8 @@ func TestDevAuthFixture_StoreError_FailsClosed(t *testing.T) {
 	// When the authoritative store returns a transient error, the
 	// middleware must fail closed (500) — never pass through.
 	ws := newDevAuthWebServer(t)
+	handler := devSignedIn(t, ws)
 	ws.store = &transientErrorStore{userID: DevUserID}
-	handler := ws.Handler()
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -520,12 +599,12 @@ func TestDevAuthFixture_StoreError_FailsClosed(t *testing.T) {
 
 func TestSuspendedUserMiddleware_NilStore_FailsClosed_Browser(t *testing.T) {
 	// Need a session but no store — the middleware must fail closed.
-	// Use dev auth which auto-creates a session without needing a store
-	// for the auth step, but the suspended-user middleware will see nil store.
+	// Sign in with dev auth first; then the suspended-user middleware
+	// sees a nil store.
 	wsWithDevAuth := newDevAuthWebServer(t, func(cfg *WebServerConfig) {})
+	handlerNoStore := devSignedIn(t, wsWithDevAuth)
 	// Explicitly clear the default dev-auth store to exercise the nil-store path.
 	wsWithDevAuth.store = nil
-	handlerNoStore := wsWithDevAuth.Handler()
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -540,9 +619,9 @@ func TestSuspendedUserMiddleware_NilStore_FailsClosed_Browser(t *testing.T) {
 
 func TestSuspendedUserMiddleware_NilStore_FailsClosed_JSON(t *testing.T) {
 	wsWithDevAuth := newDevAuthWebServer(t, func(cfg *WebServerConfig) {})
+	handlerNoStore := devSignedIn(t, wsWithDevAuth)
 	// Explicitly clear the default dev-auth store to exercise the nil-store path.
 	wsWithDevAuth.store = nil
-	handlerNoStore := wsWithDevAuth.Handler()
 
 	req := httptest.NewRequest("GET", "/events?sub=project.123.>", nil)
 	req.Header.Set("Accept", "text/event-stream")
@@ -1203,24 +1282,3 @@ func (s *transientErrorStore) AddGroupMember(_ context.Context, _ *store.GroupMe
 // ---------------------------------------------------------------------------
 // Helper: loginSession creates a session cookie for a test user.
 // ---------------------------------------------------------------------------
-
-func loginSession(t *testing.T, ws *WebServer, userID, email, role string) []*http.Cookie {
-	t.Helper()
-
-	// Create a synthetic request and set up the session.
-	req := httptest.NewRequest("GET", "/", nil)
-	rec := httptest.NewRecorder()
-
-	session, err := ws.sessionStore.Get(req, webSessionName)
-	require.NoError(t, err)
-
-	session.Values[sessKeyUserID] = userID
-	session.Values[sessKeyUserEmail] = email
-	session.Values[sessKeyUserName] = "Test User"
-	session.Values[sessKeyUserAvatar] = ""
-	session.Values[sessKeyUserRole] = role
-
-	require.NoError(t, session.Save(req, rec))
-
-	return rec.Result().Cookies()
-}

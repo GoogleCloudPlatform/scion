@@ -15,7 +15,7 @@
 
 set -e
 
-# Ensure Hub is enabled for the grove
+# Ensure Hub is enabled for the project
 cd /Users/user/src/cli-projects/qa-scion
 
 scion hub enable
@@ -49,7 +49,7 @@ echo -e "\n[2] Syncing template to Hub..."
 scion template sync test-phase2 \
   --from /tmp/test-template \
   --harness claude \
-  --scope grove
+  --scope project
 
 # 3. List templates to verify creation
 echo -e "\n[3] Listing templates..."

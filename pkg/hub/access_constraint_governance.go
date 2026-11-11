@@ -16,18 +16,20 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // ---------------------------------------------------------------------------
-// GovernanceService — transactional boundary mutation governance (B5)
+// GovernanceService — transactional boundary mutation governance
 // ---------------------------------------------------------------------------
 
-// GovernanceService wraps B3's PreviewService with transactional commit.
+// GovernanceService wraps PreviewService with transactional commit.
 // Every boundary create/update/delete and every adjacent-domain change that
 // could relax a boundary must go through this service to enforce:
 //   - Preview token validation (single-use, actor/draft/state-bound)
@@ -37,14 +39,22 @@ import (
 //   - Server-classified relaxation authority
 //   - Atomic commit or full rollback
 type GovernanceService struct {
-	store   store.Store
-	preview *PreviewService
-	authz   *AuthzService
-	logger  *slog.Logger
+	store     store.Store
+	preview   *PreviewService
+	authz     *AuthzService
+	logger    *slog.Logger
+	auditSink auditevent.Sink
 
-	// auditWriter writes durable audit entries for every boundary mutation.
-	// If nil, audit logging is disabled (should only happen in legacy tests).
-	auditWriter *BoundaryAuditWriter
+	// deleteAuditSink receives the access_boundary/delete structured-log
+	// event after a delete commits. initBoundaryServices sets it to a sink
+	// over the server's shared asynchronous audit writer. Records through it
+	// are async and best-effort, not persisted: queue-full, oversize and
+	// closed-writer rejections are counted, but a record is silently not
+	// emitted (and not counted) when the process log level is above info.
+	// When nil (test constructions), DELETE falls back to auditSink. CREATE
+	// always uses auditSink; UPDATE and recovery write history only and emit
+	// nothing.
+	deleteAuditSink auditevent.Sink
 
 	// eventBus publishes invalidation events after successful mutations.
 	// If nil, no events are published.
@@ -56,13 +66,20 @@ type GovernanceService struct {
 
 // NewGovernanceService creates a new GovernanceService.
 func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzService, logger *slog.Logger) *GovernanceService {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	auditSink, err := auditevent.NewSlogSink(logger)
+	if err != nil {
+		panic(fmt.Sprintf("initialize access-boundary audit sink: %v", err))
+	}
 	return &GovernanceService{
-		store:       s,
-		preview:     preview,
-		authz:       authz,
-		logger:      logger,
-		auditWriter: NewBoundaryAuditWriter(logger),
-		nowFunc:     time.Now,
+		store:     s,
+		preview:   preview,
+		authz:     authz,
+		logger:    logger,
+		auditSink: auditSink,
+		nowFunc:   time.Now,
 	}
 }
 
@@ -72,12 +89,18 @@ func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzSe
 
 // commitEventTypes maps operation names to their corresponding event type
 // constants. Used by the commit path instead of string concatenation to
-// ensure we use the canonical constants (R3).
+// ensure we use the canonical constants.
 var commitEventTypes = map[string]string{
 	"create": EventBoundaryCreated,
 	"update": EventBoundaryUpdated,
 	"delete": EventBoundaryDeleted,
 }
+
+const accessBoundaryAuditSinkFailureCode = "audit_sink_emit_failed"
+
+// accessBoundaryAuditBuildFailureCode marks a committed delete whose
+// structured-log event could not be built (so nothing was dispatched).
+const accessBoundaryAuditBuildFailureCode = "audit_event_build_failed"
 
 // CommitRequest describes a boundary mutation to be committed after preview.
 type CommitRequest struct {
@@ -97,7 +120,7 @@ type CommitRequest struct {
 	PreviewToken string
 
 	// PreviewID is the semantic preview identifier from the PreviewResult.
-	// Populated from the preview validation step (B3) rather than being
+	// Populated from the preview token validation rather than being
 	// extracted by slicing the opaque token.
 	PreviewID string
 
@@ -108,6 +131,53 @@ type CommitRequest struct {
 
 	// Actor is the principal requesting the mutation.
 	Actor PrincipalContext
+
+	// AuditRequest is trusted request metadata for the structured audit
+	// envelope. It is nil for non-HTTP operations and tests without request
+	// middleware.
+	AuditRequest *auditevent.RequestRef
+
+	// Credential is the identity the request is sent with. The commit
+	// re-checks judge the actor's authority within its limits (a user
+	// access token's selectors), and a commit sent with a user access
+	// token may not relax a boundary. Nil for a caller with no request
+	// credential.
+	Credential Identity
+}
+
+// errTokenRelaxationSessionOnly refuses a commit that relaxes a boundary
+// (delete, or an update that adds permissions, changes subject or scope,
+// or narrows or adds its time window) when it is sent with a user access
+// token: relaxing a boundary needs a session.
+var errTokenRelaxationSessionOnly = errors.New("relaxing an access constraint requires an interactive session")
+
+// commitSentWithToken reports whether the commit is sent with a user access
+// token, by its credential identity or by the request credential kind.
+func commitSentWithToken(ctx context.Context, req CommitRequest) bool {
+	if req.Credential != nil && !isNilIdentity(req.Credential) && IsScopedUserIdentity(req.Credential) {
+		return true
+	}
+	return GetCredentialContextFromContext(ctx).Kind == CredentialKindUAT
+}
+
+// commitActorPermissions returns the actor's effective permissions at the
+// scope, within the limits of the request credential: a user access token's
+// selectors are intersected as CanDelegate does
+// (intersectCredentialCaveats); a session carries no limits.
+func (gs *GovernanceService) commitActorPermissions(ctx context.Context, req CommitRequest, scopeType, scopeID string) ([]string, error) {
+	perms, err := gs.authz.getEffectivePermissions(
+		ctx,
+		NormalizePrincipalType(string(req.Actor.Kind)),
+		req.Actor.ID,
+		scopeType, scopeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if req.Credential != nil && !isNilIdentity(req.Credential) {
+		perms = gs.authz.intersectCredentialCaveats(req.Credential, perms)
+	}
+	return perms, nil
 }
 
 // CommitResult is the outcome of a successful commit.
@@ -121,9 +191,16 @@ type CommitResult struct {
 	// Classification is the server-determined mutation direction.
 	Classification string
 
-	// AuditID is the ID of the durable audit entry for this mutation.
-	// Always non-empty on success — no authority change returns without
-	// a persisted audit ID.
+	// AuditID identifies the audit record of this mutation (a UUID).
+	// For create and update it is the event ID of the
+	// access_constraint_history row committed with the mutation. For delete
+	// it is the event ID assigned to the post-commit structured-log event:
+	// not a persisted record and not retrievable through any API, because the
+	// constraint's history is deleted with it. A non-empty delete AuditID
+	// does not guarantee the event was written: a dispatch failure is logged
+	// with this event_id, and the event is silently dropped when the process
+	// log level is above info. For a delete it is empty if the event could
+	// not be built or no sink is configured.
 	AuditID string
 }
 
@@ -147,26 +224,44 @@ func (e *GovernanceError) Error() string {
 //
 // Transaction steps:
 //
-//	a. Validate the preview token (B3's ValidateToken)
+//	a. Validate the preview token (PreviewService.ValidateToken)
 //	b. Re-read the boundary (if update/delete) and verify revision matches
-//	c. Re-read relevant state: role bindings, group memberships, principal
-//	   status, permission registry — scoped to the subject/scope under change
-//	d. Compare state fingerprint to the preview's fingerprint
-//	e. If state changed: reject with stale_authorization_preview
+//	c. Re-read the constraint state the preview was bound to: the total
+//	   constraint count and the (id, revision, updated_at) of every
+//	   constraint in the draft's scope. Role bindings, group memberships and
+//	   principal status are NOT part of this fingerprint.
+//	d. Compare that constraint-state fingerprint to the preview's
+//	e. If it changed: reject with preview_state_mismatch
 //	f. Re-authorize the actor: verify they still hold access_constraint.admin
-//	g. For relaxations: verify the actor holds sufficient authority over the
-//	   permissions being restored (server classification chooses the path)
+//	g. For relaxations and time-window changes: verify the actor holds
+//	   authority over the permissions the change requires (server
+//	   classification and the stored window choose the path). Order: a
+//	   relaxation sent with a user access token is refused as session only;
+//	   then the stored constraint of an update or delete is loaded once;
+//	   then a token update whose window does not cover the stored one is
+//	   refused as session only; then the authority check runs
 //	h. Enforce lockout: at least one active direct user retains
 //	   access_constraint.admin at the relevant scope
 //	i. Apply the mutation (create/update/delete)
 //	j. Commit the transaction
 func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req CommitRequest) (*CommitResult, error) {
+	ctx = withAccessBoundaryAuditOperation(ctx)
 	now := gs.nowFunc()
+
+	// An update applies to the draft's ID, and every check below runs
+	// against req.ConstraintID: the two must name the same constraint.
+	// Refused before the token is validated, so the token is not consumed.
+	if req.Operation == "update" && (req.Draft == nil || req.ConstraintID == "" || req.Draft.ID != req.ConstraintID) {
+		return nil, &GovernanceError{
+			Code:    ErrCodeInvalidRequest,
+			Message: "an update draft must name the target constraint",
+		}
+	}
 
 	// Step a: Validate the preview token.
 	if err := gs.preview.ValidateToken(
 		ctx, req.PreviewToken, req.Actor, req.Operation,
-		req.Draft, req.BaseRevision,
+		req.ConstraintID, req.Draft, req.BaseRevision,
 	); err != nil {
 		if tve, ok := err.(*TokenValidationError); ok {
 			return nil, &GovernanceError{
@@ -191,9 +286,39 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		return nil, fmt.Errorf("classification failed: %w", err)
 	}
 
-	// Step g: For relaxations, verify the actor has sufficient authority.
-	if classification == ClassificationRelax || classification == ClassificationMixed {
-		if err := gs.checkRelaxationAuthority(ctx, req, scopeType, scopeID); err != nil {
+	// Step g: For relaxations and time-window changes, verify the actor has
+	// sufficient authority. A relaxation sent with a user access token is
+	// refused first: it needs a session.
+	relaxes := classification == ClassificationRelax || classification == ClassificationMixed
+	if relaxes && commitSentWithToken(ctx, req) {
+		return nil, errTokenRelaxationSessionOnly
+	}
+
+	// The stored constraint of an update or delete, loaded once for the
+	// time-window and authority checks below.
+	var stored *store.AccessConstraint
+	if req.ConstraintID != "" && (req.Operation == "update" || req.Operation == "delete") {
+		stored, err = gs.store.GetAccessConstraint(ctx, req.ConstraintID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load stored constraint: %w", err)
+		}
+	}
+	windowUpdate := req.Operation == "update" && req.Draft != nil && stored != nil
+
+	// A user access token may not narrow or add a constraint's time window:
+	// the constraint is inactive outside its window, so an update whose
+	// window does not cover the stored one relaxes the boundary and needs a
+	// session.
+	if windowUpdate && commitSentWithToken(ctx, req) && !constraintWindowCovers(req.Draft, stored) {
+		return nil, errTokenRelaxationSessionOnly
+	}
+
+	// Any change to the time window (a bound added, removed or moved, in
+	// either direction) needs the relaxation authority whatever the
+	// classification, for session and token commits alike.
+	windowChanged := windowUpdate && constraintWindowChanged(req.Draft, stored)
+	if relaxes || windowChanged {
+		if err := gs.checkRelaxationAuthority(ctx, req, stored, scopeType, scopeID); err != nil {
 			return nil, err
 		}
 	}
@@ -205,64 +330,26 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 
-	// Steps b, i, j: Re-read, apply mutation, and commit.
-	//
-	// KNOWN LIMITATION — TOCTOU window between governance checks and store
-	// mutation:
-	//
-	// The checks above (token validation, re-authorization, lockout,
-	// relaxation authority) and the store mutation below are separate
-	// operations — there is no wrapping database transaction. The Store
-	// interface does not expose a RunInTx(ctx, func(tx Store) error) method,
-	// so a true atomic check-then-mutate is architecturally impossible
-	// without interface changes.
-	//
-	// What mitigates the window:
-	//   - The preview token's state fingerprint detects most concurrent
-	//     modifications (stale token → reject).
-	//   - For updates, the store-level revision check rejects concurrent
-	//     writes to the same constraint.
-	//
-	// What the mitigations do NOT catch:
-	//   - Concurrent creates: two goroutines can both pass the fingerprint
-	//     check before either commits, and both succeed.
-	//   - Adjacent state changes: admin role bindings removed concurrently
-	//     between the lockout check and the mutation.
-	//
-	// Under single-instance deployment the TOCTOU window is narrow. Under
-	// multi-instance deployment this gap must be closed.
-	//
-	// TODO: Add Store.RunInTx(ctx context.Context, fn func(tx Store) error)
-	// error so governance can wrap checks + mutation in one database
-	// transaction.
-	//
-	// beforeState captures the constraint state prior to mutation so that the
-	// compensating action below can restore it on audit failure.
-	var beforeState *store.AccessConstraint
+	// Steps b, i, j: apply the mutation. CREATE and UPDATE persist their
+	// purpose-specific history row from one typed envelope in the same
+	// transaction as the mutation. DELETE cascades the constraint's history,
+	// so it writes no row; it emits one structured-log event after commit.
+	var deletedState *store.AccessConstraint
 	var result *CommitResult
+	var committedAuditEvent *auditevent.EnvelopeV1
 	switch req.Operation {
 	case "create":
-		created, err := gs.store.CreateAccessConstraint(ctx, req.Draft)
+		createResult, event, err := gs.createAccessConstraintWithAudit(ctx, req, classification)
 		if err != nil {
 			return nil, fmt.Errorf("create failed: %w", err)
 		}
-		result = &CommitResult{
-			Constraint:     created,
-			Operation:      "create",
-			Classification: classification,
-		}
+		result = createResult
+		committedAuditEvent = &event
 
 	case "update":
-		// Capture the before-state so we can restore on audit failure.
-		existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
+		updateResult, err := gs.updateAccessConstraintWithAudit(ctx, req, classification)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load constraint before update: %w", err)
-		}
-		beforeState = existing
-
-		updated, err := gs.store.UpdateAccessConstraint(ctx, req.Draft, req.BaseRevision)
-		if err != nil {
-			if err == store.ErrRevisionConflict {
+			if errors.Is(err, store.ErrRevisionConflict) {
 				return nil, &GovernanceError{
 					Code:    ErrCodeStaleAuthorizationPreview,
 					Message: "constraint was modified by another operation since preview",
@@ -270,14 +357,11 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 			}
 			return nil, fmt.Errorf("update failed: %w", err)
 		}
-		result = &CommitResult{
-			Constraint:     updated,
-			Operation:      "update",
-			Classification: classification,
-		}
+		result = updateResult
 
 	case "delete":
-		// Re-read to verify revision and capture before-state for rollback.
+		// Re-read to verify the revision and capture the deleted state for
+		// the post-commit log event.
 		existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load constraint for delete: %w", err)
@@ -288,7 +372,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 				Message: fmt.Sprintf("constraint revision %d does not match expected %d", existing.Revision, req.BaseRevision),
 			}
 		}
-		beforeState = existing
+		deletedState = existing
 		if err := gs.store.DeleteAccessConstraint(ctx, req.ConstraintID); err != nil {
 			return nil, fmt.Errorf("delete failed: %w", err)
 		}
@@ -304,47 +388,27 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 
-	// Write the durable audit entry. If this fails the mutation is considered
-	// unsuccessful — no authority change returns without a persisted audit ID.
-	//
-	// Compensating actions on audit failure:
-	//   - create: delete the newly-created constraint
-	//   - update: restore the before-state
-	//   - delete: re-create from the before-state
-	//
-	// TODO: Replace compensating actions with true atomic commit when
-	// Store.RunInTx is added — compensating actions have a second failure
-	// window (the compensating write itself can fail).
-	if gs.auditWriter != nil {
-		constraintID := req.ConstraintID
-		if result.Constraint != nil && constraintID == "" {
-			constraintID = result.Constraint.ID
+	// The create event crosses the configured structured-log boundary only
+	// after the live row and history transaction commits. Dispatch failure is
+	// observable but cannot make the committed command untrue.
+	if committedAuditEvent != nil && gs.auditSink != nil {
+		if err := gs.auditSink.Emit(ctx, *committedAuditEvent); err != nil {
+			gs.logger.ErrorContext(ctx, "failed to dispatch committed access boundary audit event",
+				"event_id", committedAuditEvent.EventID,
+				"constraint_id", result.Constraint.ID,
+				"failure_code", accessBoundaryAuditSinkFailureCode,
+			)
 		}
+	}
 
-		var afterRevision int64
-		if result.Constraint != nil {
-			afterRevision = result.Constraint.Revision
-		}
-
-		auditID, auditErr := gs.auditWriter.WriteAuditEntry(ctx, AuditRequest{
-			ConstraintID:   constraintID,
-			Operation:      req.Operation,
-			ActorID:        req.Actor.ID,
-			CorrelationID:  correlationIDFromContext(ctx),
-			BeforeRevision: req.BaseRevision,
-			AfterRevision:  afterRevision,
-			Classification: classification,
-			PreviewID:      req.PreviewID,
-			DraftHash:      req.DraftHash,
-			ImpactCounts:   computeImpactCounts(req, beforeState),
-		})
-		if auditErr != nil {
-			// Audit write failed — execute compensating action to undo the
-			// mutation so no unaudited authority change persists.
-			gs.compensateAuditFailure(ctx, req, result, beforeState)
-			return nil, fmt.Errorf("audit write failed: %w", auditErr)
-		}
-		result.AuditID = auditID
+	// The delete event is a structured-log record only. It is built and
+	// dispatched after the delete commits, so neither a build nor a dispatch
+	// failure can undo or compensate the delete; each is logged with its own
+	// failure code. Its event ID is returned as the delete's AuditID:
+	// it identifies a log event, is not retrievable through any API, and is
+	// not backed by history (the constraint's history cascaded with it).
+	if req.Operation == "delete" && deletedState != nil {
+		gs.emitAccessConstraintDeleteEvent(ctx, req, deletedState, result)
 	}
 
 	// Publish invalidation event after successful commit (outside transaction).
@@ -379,69 +443,32 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	return result, nil
 }
 
-// ---------------------------------------------------------------------------
-// Compensating actions for audit failure (R1)
-// ---------------------------------------------------------------------------
-
-// compensateAuditFailure undoes the store mutation when the subsequent audit
-// write fails, so that no unaudited authority change persists. Each operation
-// has a specific compensating action:
-//   - create: delete the newly-created constraint
-//   - update: restore the previous revision from beforeState
-//   - delete: re-create the constraint from beforeState
-//
-// Compensating actions are best-effort: if the compensating write itself fails
-// the inconsistency is logged. This is acceptable because the alternative
-// (leaving unaudited mutations) is worse, and the window is narrow.
-//
-// TODO: This entire method becomes unnecessary when Store.RunInTx is added,
-// because the audit write and data mutation will share a single transaction.
-func (gs *GovernanceService) compensateAuditFailure(ctx context.Context, req CommitRequest, result *CommitResult, beforeState *store.AccessConstraint) {
-	switch req.Operation {
-	case "create":
-		// Compensating action: delete the newly-created constraint.
-		if result.Constraint != nil {
-			if err := gs.store.DeleteAccessConstraint(ctx, result.Constraint.ID); err != nil {
-				gs.logger.Error("compensating delete failed after audit failure — unaudited create persists",
-					"constraint_id", result.Constraint.ID,
-					"error", err,
-				)
-			} else {
-				gs.logger.Info("compensating delete succeeded — rolled back unaudited create",
-					"constraint_id", result.Constraint.ID,
-				)
-			}
-		}
-
-	case "update":
-		// Compensating action: restore the before-state.
-		if beforeState != nil {
-			if _, err := gs.store.UpdateAccessConstraint(ctx, beforeState, 0); err != nil {
-				gs.logger.Error("compensating update failed after audit failure — unaudited update persists",
-					"constraint_id", req.ConstraintID,
-					"error", err,
-				)
-			} else {
-				gs.logger.Info("compensating update succeeded — restored previous revision",
-					"constraint_id", req.ConstraintID,
-				)
-			}
-		}
-
-	case "delete":
-		// Compensating action: re-create the constraint from before-state.
-		if beforeState != nil {
-			if _, err := gs.store.CreateAccessConstraint(ctx, beforeState); err != nil {
-				gs.logger.Error("compensating re-create failed after audit failure — unaudited delete persists",
-					"constraint_id", req.ConstraintID,
-					"error", err,
-				)
-			} else {
-				gs.logger.Info("compensating re-create succeeded — restored deleted constraint",
-					"constraint_id", req.ConstraintID,
-				)
-			}
-		}
+// emitAccessConstraintDeleteEvent builds and dispatches the
+// access_boundary/delete event for a committed delete and sets
+// result.AuditID to its event ID. Failures are logged and never returned.
+func (gs *GovernanceService) emitAccessConstraintDeleteEvent(ctx context.Context, req CommitRequest, deleted *store.AccessConstraint, result *CommitResult) {
+	sink := gs.deleteAuditSink
+	if sink == nil {
+		sink = gs.auditSink
+	}
+	if sink == nil {
+		return
+	}
+	event, err := buildAccessConstraintDeleteEvent(ctx, req, deleted, result.Classification)
+	if err != nil {
+		gs.logger.ErrorContext(ctx, "failed to build committed access boundary delete audit event",
+			"constraint_id", deleted.ID,
+			"failure_code", accessBoundaryAuditBuildFailureCode,
+		)
+		return
+	}
+	result.AuditID = event.EventID
+	if err := sink.Emit(ctx, event); err != nil {
+		gs.logger.ErrorContext(ctx, "failed to dispatch committed access boundary audit event",
+			"event_id", event.EventID,
+			"constraint_id", deleted.ID,
+			"failure_code", accessBoundaryAuditSinkFailureCode,
+		)
 	}
 }
 
@@ -449,17 +476,13 @@ func (gs *GovernanceService) compensateAuditFailure(ctx context.Context, req Com
 // Re-authorization
 // ---------------------------------------------------------------------------
 
-// reauthorizeActor verifies the actor still holds access_constraint.admin.
-// Uses getEffectivePermissions instead of Decide to avoid requiring a full
-// Identity object — the governance service operates at the principal level.
+// reauthorizeActor verifies the actor still holds access_constraint.admin,
+// within the limits of the request credential (commitActorPermissions).
+// Uses getEffectivePermissions instead of Decide: the governance service
+// operates at the principal level.
 func (gs *GovernanceService) reauthorizeActor(ctx context.Context, req CommitRequest) error {
 	scopeType, scopeID := gs.resolveScope(ctx, req)
-	actorPerms, err := gs.authz.getEffectivePermissions(
-		ctx,
-		NormalizePrincipalType(string(req.Actor.Kind)),
-		req.Actor.ID,
-		scopeType, scopeID,
-	)
+	actorPerms, err := gs.commitActorPermissions(ctx, req, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeMutationPermissionLost,
@@ -553,20 +576,35 @@ func (gs *GovernanceService) classifyOperation(ctx context.Context, req CommitRe
 	return ClassificationTighten, nil // No permission changes = default to tighten.
 }
 
+// constraintWindowChanged reports whether proposed and existing differ in
+// NotBefore or ExpiresAt: a bound set on one side only, or set to different
+// instants. Instants are compared exactly (time.Equal, any time zone), so a
+// bound moved by less than a second is a change; no rounding is applied.
+func constraintWindowChanged(proposed, existing *store.AccessConstraint) bool {
+	return !timeBoundEqual(proposed.NotBefore, existing.NotBefore) ||
+		!timeBoundEqual(proposed.ExpiresAt, existing.ExpiresAt)
+}
+
+// timeBoundEqual reports whether two optional time bounds are both unset or
+// both set to the same instant.
+func timeBoundEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
+
 // ---------------------------------------------------------------------------
 // Relaxation authority
 // ---------------------------------------------------------------------------
 
-// checkRelaxationAuthority verifies the actor has sufficient authority over
-// the permissions being restored by a relaxation.
-func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req CommitRequest, scopeType, scopeID string) error {
-	// Get the actor's effective permissions at the relevant scope.
-	actorPerms, err := gs.authz.getEffectivePermissions(
-		ctx,
-		NormalizePrincipalType(string(req.Actor.Kind)),
-		req.Actor.ID,
-		scopeType, scopeID,
-	)
+// checkRelaxationAuthority verifies the actor holds every permission a
+// relaxation or a time-window change requires. stored is the constraint
+// being updated or deleted (nil for create).
+func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req CommitRequest, stored *store.AccessConstraint, scopeType, scopeID string) error {
+	// Get the actor's effective permissions at the relevant scope, within
+	// the request credential's limits.
+	actorPerms, err := gs.commitActorPermissions(ctx, req, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeInsufficientRelaxationAuthority,
@@ -579,11 +617,11 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 		actorPermSet[p] = struct{}{}
 	}
 
-	// Determine which permissions are being restored (relaxed).
-	var restoredPerms []string
+	// Determine which permissions the change requires authority over.
+	var requiredPerms []string
 	if req.Operation == "delete" {
 		// Delete restores all permissions the boundary was removing. Ideally
-		// restoredPerms would contain every permission NOT in the boundary's
+		// requiredPerms would contain every permission NOT in the boundary's
 		// max set (the permissions the boundary was restricting), but we lack
 		// a full permission registry to enumerate "everything else."
 		//
@@ -593,31 +631,33 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 		// to them (and more). If the actor does not even hold authority over
 		// the permissions the boundary explicitly allows, they should not be
 		// able to remove the boundary.
-		if req.ConstraintID != "" {
-			existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
-			if err == nil {
-				restoredPerms = append(restoredPerms, existing.MaximumPermissions...)
+		if stored != nil {
+			requiredPerms = append(requiredPerms, stored.MaximumPermissions...)
+		}
+	} else if req.Operation == "update" && req.Draft != nil && stored != nil {
+		// Permissions being added to the max set are being "relaxed" (restored).
+		storedSet := make(map[string]struct{}, len(stored.MaximumPermissions))
+		for _, p := range stored.MaximumPermissions {
+			storedSet[p] = struct{}{}
+		}
+		for _, p := range req.Draft.MaximumPermissions {
+			if _, ok := storedSet[p]; !ok {
+				requiredPerms = append(requiredPerms, p)
 			}
 		}
-	} else if req.Operation == "update" && req.Draft != nil {
-		// Permissions being added to the max set are being "relaxed" (restored).
-		existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
-		if err == nil {
-			existingSet := make(map[string]struct{}, len(existing.MaximumPermissions))
-			for _, p := range existing.MaximumPermissions {
-				existingSet[p] = struct{}{}
-			}
-			for _, p := range req.Draft.MaximumPermissions {
-				if _, ok := existingSet[p]; !ok {
-					restoredPerms = append(restoredPerms, p)
-				}
-			}
+		// Any change to the time window, in either direction, needs the
+		// same authority as delete: every permission in the stored
+		// constraint's max set. One rule covers every change to when a
+		// boundary applies; a narrowed or added window lifts the boundary
+		// outside it, and a widened or removed window re-times it.
+		if constraintWindowChanged(req.Draft, stored) {
+			requiredPerms = append(requiredPerms, stored.MaximumPermissions...)
 		}
 	}
 
-	// The actor must hold each permission being restored.
+	// The actor must hold each permission the change requires.
 	var missingPerms []string
-	for _, p := range restoredPerms {
+	for _, p := range requiredPerms {
 		if _, ok := actorPermSet[p]; !ok {
 			missingPerms = append(missingPerms, p)
 		}
@@ -626,7 +666,7 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 	if len(missingPerms) > 0 {
 		return &GovernanceError{
 			Code:    ErrCodeInsufficientRelaxationAuthority,
-			Message: fmt.Sprintf("actor lacks authority over %d permission(s) being restored", len(missingPerms)),
+			Message: fmt.Sprintf("actor lacks authority over %d permission(s) this change requires", len(missingPerms)),
 			Details: map[string]interface{}{
 				"missingPermissionIds": missingPerms,
 			},
@@ -694,7 +734,7 @@ func (gs *GovernanceService) enforceLockout(ctx context.Context, req CommitReque
 }
 
 // ---------------------------------------------------------------------------
-// Adjacent-domain governance gates (B5 §4)
+// Adjacent-domain governance gates
 // ---------------------------------------------------------------------------
 
 // AdjacentDomainCheck is the result of checking whether an adjacent-domain
@@ -771,99 +811,124 @@ func (gs *GovernanceService) CheckRoleBindingChange(ctx context.Context, binding
 	}, nil
 }
 
-// CheckUserSuspension checks whether suspending or deleting a user requires
-// boundary review. Returns security_review_required if the user is the last
-// constraint admin.
-func (gs *GovernanceService) CheckUserSuspension(ctx context.Context, userID string) (*AdjacentDomainCheck, error) {
-	// Check if the user holds access_constraint.admin via any role binding.
-	isAdmin, err := gs.isConstraintAdmin(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check admin status: %w", err)
-	}
-
-	if !isAdmin {
-		return &AdjacentDomainCheck{ReviewRequired: false}, nil
-	}
-
-	return &AdjacentDomainCheck{
-		ReviewRequired: true,
-		Message:        fmt.Sprintf("user %s holds constraint admin permission; suspension/deletion requires lockout invariant verification", userID),
-	}, nil
-}
-
 // ---------------------------------------------------------------------------
-// Atomic RoleBinding replacement (B5 §5)
+// RoleBinding replacement in one transaction
 // ---------------------------------------------------------------------------
 
-// ReplaceRoleBinding atomically replaces a role binding so grant downgrades
-// never leave both old and new bindings active simultaneously.
+// ReplaceRoleBinding replaces a role binding in one transaction, so a
+// grant downgrade never leaves both the old and the new binding active.
+// When the old role carries access_constraint.admin, the replacement runs
+// the lockout check (checkRoleBindingRemovalAdminLockout) on the old
+// binding's scope unless the new binding keeps that admin: its role
+// carries access_constraint.admin, it names the same principal at the
+// same scope, and its validity window covers the old one
+// (bindingWindowCovers). The check takes the admin-guard lock, the same
+// lock the user and role-binding removal paths take, so it reads the
+// state the transaction then writes. As with a binding delete, the new
+// binding does not count as a remaining admin: to hand the only admin
+// role at a scope to another principal or scope, add the new binding
+// first, then remove the old one.
 func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingID string, newBinding *store.RoleBinding, previewToken string) (*store.RoleBinding, error) {
-	// Load existing binding.
-	existing, err := gs.store.GetRoleBinding(ctx, oldBindingID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load existing binding: %w", err)
-	}
-
-	// Check if the old binding's role includes access_constraint.admin.
-	oldRD, err := gs.store.GetRoleDefinition(ctx, existing.RoleDefinitionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load old role definition: %w", err)
-	}
-
-	oldHasAdmin := roleHasConstraintAdmin(oldRD)
-
-	// Check if new binding's role includes access_constraint.admin.
-	newRD, err := gs.store.GetRoleDefinition(ctx, newBinding.RoleDefinitionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load new role definition: %w", err)
-	}
-
-	newHasAdmin := roleHasConstraintAdmin(newRD)
-
-	// If downgrading from admin, enforce lockout invariant.
-	if oldHasAdmin && !newHasAdmin {
-		if err := gs.enforceRoleBindingLockout(ctx, existing); err != nil {
-			return nil, err
+	var created *store.RoleBinding
+	err := gs.store.WithTx(ctx, func(tx store.Store) error {
+		existing, err := tx.GetRoleBinding(ctx, oldBindingID)
+		if err != nil {
+			return fmt.Errorf("failed to load existing binding: %w", err)
 		}
-	}
 
-	// Create new binding first, then delete old one.
-	//
-	// Order rationale: create-then-delete means the failure mode is "both
-	// bindings active" (overly permissive but detectable and recoverable)
-	// rather than "zero bindings" (data loss). This is a strictly better
-	// failure mode given that the Store interface lacks transaction support.
-	//
-	// TODO: Migrate to a true atomic swap when Store gains RunInTx support.
-	created, err := gs.store.CreateRoleBinding(ctx, newBinding)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create replacement binding: %w", err)
-	}
-
-	if err := gs.store.DeleteRoleBinding(ctx, oldBindingID); err != nil {
-		// Compensating action: delete the newly created binding to prevent
-		// inconsistent state where both old and new bindings are active.
-		if delErr := gs.store.DeleteRoleBinding(ctx, created.ID); delErr != nil {
-			gs.logger.Error("failed to roll back new binding after old-binding delete failure; both bindings now active",
-				"old_binding_id", oldBindingID, "new_binding_id", created.ID,
-				"delete_error", err, "rollback_error", delErr)
-		} else {
-			gs.logger.Warn("rolled back new binding after old-binding delete failure",
-				"old_binding_id", oldBindingID, "new_binding_id", created.ID, "error", err)
+		oldRD, err := tx.GetRoleDefinition(ctx, existing.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("failed to load old role definition: %w", err)
 		}
-		return nil, fmt.Errorf("failed to delete old binding: %w", err)
-	}
+		newRD, err := tx.GetRoleDefinition(ctx, newBinding.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("failed to load new role definition: %w", err)
+		}
 
+		// Removing or moving an admin binding must leave a constraint
+		// admin at the old binding's scope.
+		keepsAdmin := roleHasConstraintAdmin(newRD) &&
+			newBinding.PrincipalType == existing.PrincipalType &&
+			newBinding.PrincipalID == existing.PrincipalID &&
+			newBinding.ScopeType == existing.ScopeType &&
+			newBinding.ScopeID == existing.ScopeID &&
+			bindingWindowCovers(newBinding, existing)
+		if roleHasConstraintAdmin(oldRD) && !keepsAdmin {
+			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, gs.nowFunc(), existing); err != nil {
+				return err
+			}
+		}
+
+		// The create and the delete commit together or not at all.
+		created, err = tx.CreateRoleBinding(ctx, newBinding)
+		if err != nil {
+			return fmt.Errorf("failed to create replacement binding: %w", err)
+		}
+		if err := tx.DeleteRoleBinding(ctx, oldBindingID); err != nil {
+			return fmt.Errorf("failed to delete old binding: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return created, nil
 }
 
-// enforceRoleBindingLockout checks whether removing an admin role binding
-// would violate the lockout invariant.
-func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, binding *store.RoleBinding) error {
-	now := gs.nowFunc()
+// bindingWindowCovers reports whether outer is active (isBindingActive)
+// at every time inner is: outer's NotBefore is unset or no later than
+// inner's, and outer's ExpiresAt is unset or no earlier than inner's,
+// where an inner binding with no expiry needs an outer one with none.
+func bindingWindowCovers(outer, inner *store.RoleBinding) bool {
+	return timeWindowCovers(outer.NotBefore, outer.ExpiresAt, inner.NotBefore, inner.ExpiresAt)
+}
 
-	// Resolve all admin users at the binding's scope.
-	adminUsers, err := gs.preview.resolveAdminUsers(ctx, binding.ScopeType, binding.ScopeID)
+// constraintWindowCovers reports whether the outer constraint's time window
+// covers the inner one: the outer constraint is active whenever the inner
+// one is. A nil bound is unbounded.
+func constraintWindowCovers(outer, inner *store.AccessConstraint) bool {
+	return timeWindowCovers(outer.NotBefore, outer.ExpiresAt, inner.NotBefore, inner.ExpiresAt)
+}
+
+// timeWindowCovers reports whether the window [outerNotBefore, outerExpiresAt]
+// covers [innerNotBefore, innerExpiresAt]. A nil bound is unbounded.
+func timeWindowCovers(outerNotBefore, outerExpiresAt, innerNotBefore, innerExpiresAt *time.Time) bool {
+	if outerNotBefore != nil && (innerNotBefore == nil || outerNotBefore.After(*innerNotBefore)) {
+		return false
+	}
+	if outerExpiresAt != nil && (innerExpiresAt == nil || outerExpiresAt.Before(*innerExpiresAt)) {
+		return false
+	}
+	return true
+}
+
+// adminRemoval describes the constraint-admin authority a mutation takes
+// away. Exactly one field is set.
+type adminRemoval struct {
+	// userID is a user who loses all authority (suspension or deletion).
+	userID string
+	// userAction names the user change for the refusal message.
+	userAction userRemovalAction
+	// bindings are role bindings at one scope, each carrying
+	// access_constraint.admin, being removed or downgraded together.
+	bindings []*store.RoleBinding
+}
+
+// checkConstraintAdminLockout is the single lockout check for the
+// changes that can remove a constraint admin: suspending a user, deleting
+// a user, and removing or downgrading an admin role binding. It returns a
+// *GovernanceError with ErrCodeConstraintAdminLockout when the change
+// would leave the scope with no active user holding
+// access_constraint.admin, now or once scheduled constraints activate.
+// Only active users with a binding active at now count
+// (resolveConstraintAdminUsers). At the activation time of a scheduled
+// constraint, an admin counts only through an admin binding at the scope
+// still valid at that time.
+//
+// st may be a transaction handle so the check reads the same state the
+// caller then writes.
+func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.Time, scopeType, scopeID string, rm adminRemoval) error {
+	adminUsers, inactiveOnly, err := resolveConstraintAdmins(ctx, st, now, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,
@@ -871,54 +936,52 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 		}
 	}
 
-	// Zero admins = conflict, not pass.
-	if len(adminUsers) == 0 {
+	if rm.userID != "" {
+		// A user who is not an active admin here removes no admin
+		// authority from this scope. A user whose admin bindings here
+		// are all outside their activation window (inactiveOnly) still
+		// has the scope judged, over the active admins.
+		isAdmin := inactiveOnly[rm.userID]
+		for _, au := range adminUsers {
+			if au.userID == rm.userID {
+				isAdmin = true
+				break
+			}
+		}
+		if !isAdmin {
+			return nil
+		}
+	} else if len(adminUsers) == 0 {
+		// Zero admins = conflict, not pass.
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,
 			Message: "no constraint admins found; cannot remove admin role binding",
 		}
 	}
 
-	// Count admins that would survive if this binding is removed.
-	surviving := 0
-	for _, au := range adminUsers {
-		// The user bound by this binding would lose admin if this is their
-		// only admin binding.
-		if binding.PrincipalType == "user" && au.userID == binding.PrincipalID {
-			// Check if user has other admin bindings.
-			otherBindings, err := gs.store.ListRoleBindingsForPrincipals(ctx,
-				[]store.PrincipalRef{{Type: "user", ID: au.userID}}, nil, nil)
-			if err != nil {
-				continue
-			}
-			hasOtherAdmin := false
-			for _, ob := range otherBindings {
-				if ob.ID == binding.ID {
-					continue
-				}
-				rd, err := gs.store.GetRoleDefinition(ctx, ob.RoleDefinitionID)
-				if err != nil {
-					continue
-				}
-				if roleHasConstraintAdmin(rd) {
-					hasOtherAdmin = true
-				}
-				if hasOtherAdmin {
-					break
-				}
-			}
-			if hasOtherAdmin {
-				surviving++
-			}
-			continue
+	// A binding removal is judged against the other bindings at the
+	// binding's own scope. A read failure counts every admin as losing
+	// authority, so the check fails closed.
+	var scopeBindings []*store.RoleBinding
+	scopeReadOK := true
+	if len(rm.bindings) > 0 {
+		if scopeBindings, err = st.ListRoleBindingsForScope(ctx, scopeType, scopeID); err != nil {
+			scopeReadOK = false
 		}
-		surviving++
 	}
 
-	if surviving == 0 {
+	// Admins that keep access_constraint.admin after the change.
+	var surviving []adminUserInfo
+	for _, au := range adminUsers {
+		if !adminLosesAuthority(ctx, st, now, au, rm, scopeBindings, scopeReadOK) {
+			surviving = append(surviving, au)
+		}
+	}
+
+	if len(surviving) == 0 {
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,
-			Message: "removing this role binding would leave zero constraint admins",
+			Message: rm.lockoutMessage(""),
 		}
 	}
 
@@ -927,7 +990,7 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 	// restrict admin permissions. Use IsActiveInMostRestrictiveState to
 	// include future-activating constraints in the evaluation, matching
 	// the approach in assessLockout.
-	constraints, err := gs.store.ListConstraintsForScope(ctx, binding.ScopeType, binding.ScopeID)
+	constraints, err := st.ListConstraintsForScope(ctx, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,
@@ -958,57 +1021,284 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 		restricting = append(restricting, c)
 	}
 
-	if len(restricting) > 0 {
-		// Re-evaluate surviving admins against scheduled constraints.
-		scheduledSurviving := 0
-		for _, au := range adminUsers {
-			// Skip the user whose binding is being removed (if they lost admin above).
-			if binding.PrincipalType == "user" && au.userID == binding.PrincipalID {
-				// Check if they had other admin bindings.
-				otherBindings, lookupErr := gs.store.ListRoleBindingsForPrincipals(ctx,
-					[]store.PrincipalRef{{Type: "user", ID: au.userID}}, nil, nil)
-				if lookupErr != nil {
-					continue
-				}
-				hasOtherAdmin := false
-				for _, ob := range otherBindings {
-					if ob.ID == binding.ID {
-						continue
-					}
-					rd, rdErr := gs.store.GetRoleDefinition(ctx, ob.RoleDefinitionID)
-					if rdErr != nil {
-						continue
-					}
-					if roleHasConstraintAdmin(rd) {
-						hasOtherAdmin = true
-						break
-					}
-				}
-				if !hasOtherAdmin {
-					continue // This user lost admin — skip.
-				}
-			}
-
-			// Check if any restricting constraint matches this user.
-			if !constraintsBlockUser(restricting, au) {
-				scheduledSurviving++
-			}
+	if len(restricting) == 0 {
+		return nil
+	}
+	scheduledSurviving := 0
+	for _, au := range surviving {
+		if !constraintsBlockUser(restricting, au) {
+			scheduledSurviving++
 		}
-
-		if scheduledSurviving == 0 {
-			return &GovernanceError{
-				Code:    ErrCodeConstraintAdminLockout,
-				Message: "removing this role binding would leave zero constraint admins when scheduled constraints activate",
-			}
+	}
+	if scheduledSurviving == 0 {
+		return &GovernanceError{
+			Code:    ErrCodeConstraintAdminLockout,
+			Message: rm.lockoutMessage(" when scheduled constraints activate"),
 		}
 	}
 
+	// At each later activation time, a remaining admin counts only
+	// through an admin binding at the scope still valid at that time
+	// (isBindingActive at the activation time).
+	var activations []time.Time
+	for _, c := range restricting {
+		if c.NotBefore == nil || !c.NotBefore.After(now) {
+			continue
+		}
+		dup := false
+		for _, at := range activations {
+			dup = dup || at.Equal(*c.NotBefore)
+		}
+		if !dup {
+			activations = append(activations, *c.NotBefore)
+		}
+	}
+	if len(activations) == 0 {
+		return nil
+	}
+	if len(rm.bindings) == 0 {
+		scopeBindings, err = st.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+		scopeReadOK = err == nil
+	}
+	if !scopeReadOK {
+		return &GovernanceError{
+			Code:    ErrCodeConstraintAdminLockout,
+			Message: "failed to load role bindings for scheduled-state lockout check",
+		}
+	}
+	removed := removedBindingIDs(rm)
+	for _, at := range activations {
+		survivesAt := false
+		for _, au := range surviving {
+			if adminHoldsAt(ctx, st, at, au, removed, scopeBindings) &&
+				!constraintsBlockUser(restricting, au) {
+				survivesAt = true
+				break
+			}
+		}
+		if !survivesAt {
+			return &GovernanceError{
+				Code:    ErrCodeConstraintAdminLockout,
+				Message: rm.lockoutMessage(" when scheduled constraints activate"),
+			}
+		}
+	}
 	return nil
+}
+
+// userRemovalAction is the user change that removes admin authority.
+type userRemovalAction int
+
+const (
+	userRemovalSuspend userRemovalAction = iota
+	userRemovalDelete
+)
+
+// lockoutMessage returns the refusal message, naming the action.
+func (rm adminRemoval) lockoutMessage(suffix string) string {
+	action := "removing this role binding"
+	if rm.userID != "" {
+		action = "suspending this user"
+		if rm.userAction == userRemovalDelete {
+			action = "deleting this user"
+		}
+	}
+	return action + " would leave zero constraint admins" + suffix
+}
+
+// adminLosesAuthority reports whether the admin au loses
+// access_constraint.admin through the removal rm. For a binding removal,
+// au loses it when a removed binding covers au (a user binding for au, or
+// a group binding for one of au's effective groups) and no binding in
+// scopeBindings, the bindings at the removed bindings' scope, that is not
+// itself removed, is active at now (isBindingActive), covers au and
+// carries access_constraint.admin. A binding that is not yet valid or
+// has expired keeps no admin. When scopeReadOK is false the scope
+// bindings could not be read and every covered admin counts as a loss,
+// so the check fails closed.
+func adminLosesAuthority(ctx context.Context, st store.Store, now time.Time, au adminUserInfo, rm adminRemoval, scopeBindings []*store.RoleBinding, scopeReadOK bool) bool {
+	if rm.userID != "" {
+		return au.userID == rm.userID
+	}
+	covered := false
+	for _, b := range rm.bindings {
+		covered = covered || bindingCoversAdmin(b, au)
+	}
+	if !covered {
+		return false
+	}
+	if !scopeReadOK {
+		return true
+	}
+	return !adminHoldsAt(ctx, st, now, au, removedBindingIDs(rm), scopeBindings)
+}
+
+// removedBindingIDs returns the IDs of the bindings rm removes.
+func removedBindingIDs(rm adminRemoval) map[string]bool {
+	removed := make(map[string]bool, len(rm.bindings))
+	for _, b := range rm.bindings {
+		removed[b.ID] = true
+	}
+	return removed
+}
+
+// adminHoldsAt reports whether a binding in scopeBindings that is not in
+// removed is active at at (isBindingActive), covers au and carries
+// access_constraint.admin. A binding whose role cannot be read keeps no
+// admin, so the check fails closed.
+func adminHoldsAt(ctx context.Context, st store.Store, at time.Time, au adminUserInfo, removed map[string]bool, scopeBindings []*store.RoleBinding) bool {
+	for _, b := range scopeBindings {
+		if removed[b.ID] || !isBindingActive(b, at) || !bindingCoversAdmin(b, au) {
+			continue
+		}
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			continue // fail closed: an unreadable role keeps no admin
+		}
+		if roleHasConstraintAdmin(rd) {
+			return true
+		}
+	}
+	return false
+}
+
+// bindingCoversAdmin reports whether b grants its role to au, directly or
+// through one of au's effective groups.
+func bindingCoversAdmin(b *store.RoleBinding, au adminUserInfo) bool {
+	switch b.PrincipalType {
+	case "user":
+		return b.PrincipalID == au.userID
+	case "group":
+		for _, gid := range au.groupIDs {
+			if gid == b.PrincipalID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// checkUserRemovalAdminLockout runs checkConstraintAdminLockout for every
+// scope at which userID holds access_constraint.admin, directly or through
+// a group. The suspend and delete user paths call it before the change.
+//
+// st must be the WithTx handle. The check first takes the admin-guard
+// lock (lockConstraintAdminGuard) so that it reads admin bindings and
+// user status only after any concurrent suspend or delete commits.
+func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, userID string, action userRemovalAction) error {
+	if err := lockConstraintAdminGuard(ctx, st); err != nil {
+		return err
+	}
+
+	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
+	groups, err := st.GetEffectiveGroups(ctx, userID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("resolve groups for constraint-admin lockout check: %w", err)
+	}
+	for _, gid := range groups {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+	}
+
+	bindings, err := st.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return fmt.Errorf("list bindings for constraint-admin lockout check: %w", err)
+	}
+	// Unclamped read: a test identity is never a constraint admin through
+	// a system-scoped grant. No authorization service is wired here, so an
+	// admin-kind test identity gets no authority from the clamps either
+	// (it never counts as a constraint admin).
+	bindings, err = clampTestIdentityBindings(ctx, st, nil, principals, bindings)
+	if err != nil {
+		return err
+	}
+
+	type scopeKey struct{ scopeType, scopeID string }
+	checked := make(map[scopeKey]bool)
+	for _, b := range bindings {
+		key := scopeKey{b.ScopeType, b.ScopeID}
+		if checked[key] {
+			continue
+		}
+		// A binding whose role definition no longer exists grants
+		// nothing; any other read error refuses the change.
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+		}
+		if !roleHasConstraintAdmin(rd) {
+			continue
+		}
+		checked[key] = true
+		if err := checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{userID: userID, userAction: action}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkRoleBindingRemovalAdminLockout runs checkConstraintAdminLockout
+// for role bindings at one scope about to be deleted together. Only the
+// bindings whose role carries access_constraint.admin are counted; with
+// none it is a no-op. Otherwise it first takes the admin-guard lock
+// (lockConstraintAdminGuard) so the check serializes with user suspend
+// and delete; a caller that took it already re-takes it at no cost. The
+// role-binding delete and replace paths call it inside their transaction,
+// before the write; st must be that handle.
+func checkRoleBindingRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, bs ...*store.RoleBinding) error {
+	var adminBindings []*store.RoleBinding
+	for _, b := range bs {
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+		}
+		if roleHasConstraintAdmin(rd) {
+			adminBindings = append(adminBindings, b)
+		}
+	}
+	if len(adminBindings) == 0 {
+		return nil
+	}
+	if err := lockConstraintAdminGuard(ctx, st); err != nil {
+		return err
+	}
+	b := adminBindings[0]
+	return checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{bindings: adminBindings})
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// lockConstraintAdminGuard takes the transaction-scoped admin-guard lock
+// on the super-admin role definition row before a user-removal lockout
+// check.
+//
+// Why: Ent transactions run at READ COMMITTED on PostgreSQL, so two
+// concurrent suspends (or a suspend and a delete) of the last two admins
+// at a scope could each see the other admin still active and both
+// commit. Holding this lock until commit serializes them. It is the same
+// lock checkLastSuperAdminTx takes, so suspend, delete and super-admin
+// demotion serialize together. Lock order: it is the only lock these
+// paths take, and each takes it before writing any row; deleteUser takes
+// it first in checkLastSuperAdminTx and again here, which is a no-op for
+// the same transaction. On SQLite writes are already serialized and the
+// call is an existence check.
+func lockConstraintAdminGuard(ctx context.Context, st store.Store) error {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		return fmt.Errorf("resolve admin-guard role definition: %w", err)
+	}
+	if rd == nil {
+		return fmt.Errorf("resolve admin-guard role definition: %w", store.ErrNotFound)
+	}
+	if err := st.LockRoleDefinitionForAdminGuard(ctx, rd.ID); err != nil {
+		return fmt.Errorf("acquire admin-guard lock: %w", err)
+	}
+	return nil
+}
 
 // roleHasConstraintAdmin checks whether a role definition includes the
 // access_constraint.admin permission.
@@ -1074,20 +1364,35 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 	// Get role bindings for this user.
 	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
 
-	// Also include group-expanded bindings.
+	// Also include group-expanded bindings. A group-resolution failure is
+	// returned rather than ignored: evaluating only the direct bindings
+	// would understate (or, with the test-identity clamp, misjudge) the
+	// user's authority. A user with no groups is not an error.
 	groups, err := gs.store.GetEffectiveGroups(ctx, userID)
-	if err == nil {
-		for _, gid := range groups {
-			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-		}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("resolve groups for constraint-admin check: %w", err)
+	}
+	for _, gid := range groups {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
 
 	bindings, err := gs.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 	if err != nil {
 		return false, err
 	}
+	// Unclamped read: apply the test-identity grant clamp, so a test
+	// identity is never a constraint admin through a system-scoped grant.
+	bindings, err = clampTestIdentityBindings(ctx, gs.store, gs.authz, principals, bindings)
+	if err != nil {
+		return false, err
+	}
 
+	// Only active bindings count (activation window: isBindingActive).
+	now := time.Now()
 	for _, b := range bindings {
+		if !isBindingActive(b, now) {
+			continue
+		}
 		rd, err := gs.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue
@@ -1118,47 +1423,3 @@ func correlationIDFromContext(ctx context.Context) string {
 type contextKey string
 
 const correlationIDKey contextKey = "correlation_id"
-
-// computeImpactCounts derives impact counts from the commit request and the
-// before-state of the constraint. beforeState may be nil for creates.
-func computeImpactCounts(req CommitRequest, beforeState *store.AccessConstraint) ImpactCounts {
-	counts := ImpactCounts{}
-
-	// Build sets for before and after permissions.
-	beforePerms := make(map[string]struct{})
-	if beforeState != nil {
-		for _, p := range beforeState.MaximumPermissions {
-			beforePerms[p] = struct{}{}
-		}
-	}
-
-	afterPerms := make(map[string]struct{})
-	if req.Draft != nil {
-		for _, p := range req.Draft.MaximumPermissions {
-			afterPerms[p] = struct{}{}
-		}
-	}
-
-	// PermissionsAdded: permissions in after that are not in before.
-	for p := range afterPerms {
-		if _, ok := beforePerms[p]; !ok {
-			counts.PermissionsAdded++
-		}
-	}
-
-	// PermissionsRemoved: permissions in before that are not in after.
-	// For delete (Draft is nil, afterPerms is empty), all before-state
-	// permissions are removed.
-	for p := range beforePerms {
-		if _, ok := afterPerms[p]; !ok {
-			counts.PermissionsRemoved++
-		}
-	}
-
-	// TODO: Populate AffectedPrincipals from the preview result when the
-	// preview engine exposes a principal count in its response. The preview
-	// result's Impact.TotalAffected field contains this data but is not yet
-	// threaded through to the commit path.
-
-	return counts
-}

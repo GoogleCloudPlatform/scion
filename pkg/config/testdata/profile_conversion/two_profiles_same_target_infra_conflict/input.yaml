@@ -1,0 +1,20 @@
+schema_version: "1"
+server:
+  shared_dir_storage:
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: share-1
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+profiles:
+  shared:
+    runtime: cluster
+    shared_dir_storage_backend: nfs
+    shared_dir_size: 20Gi
+  scratch:
+    runtime: cluster
+    shared_dir_storage_backend: local
+    shared_dir_size: 50Gi

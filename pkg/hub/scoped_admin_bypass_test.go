@@ -41,24 +41,6 @@ func federatedAdminIdentity() *FederatedUserIdentity {
 	return NewFederatedUserIdentity("https://issuer.example", "admin", "admin@example.com", "Admin", "admin", nil)
 }
 
-// bindableFederatedAdmin is a federated identity whose ID is a local UUID so a
-// test can grant an ordinary policy and reach a direct bypass branch. Production
-// federation IDs intentionally include the issuer and are not bindable locally.
-type bindableFederatedAdmin struct {
-	UserIdentity
-	issuerURL string
-}
-
-func (f *bindableFederatedAdmin) Type() string      { return "federated_user" }
-func (f *bindableFederatedAdmin) IssuerURL() string { return f.issuerURL }
-
-func newBindableFederatedAdmin(id string) *bindableFederatedAdmin {
-	return &bindableFederatedAdmin{
-		UserIdentity: NewAuthenticatedUser(id, "admin@example.com", "Admin", "admin", "api"),
-		issuerURL:    "https://issuer.example",
-	}
-}
-
 func TestAdminModeMiddlewareRejectsScopedAdmin(t *testing.T) {
 	middleware := adminModeMiddleware(NewMaintenanceState(true, ""))(passthrough)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
@@ -87,6 +69,7 @@ func TestBrokerSecretRotationRejectsScopedAdmin(t *testing.T) {
 	broker := &store.RuntimeBroker{ID: tid("broker-1"), Name: "Broker", Slug: "broker-1", CreatedBy: tid("different-owner")}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+	req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 	req = req.WithContext(contextWithIdentity(req.Context(), scopedAdminIdentity()))
 	rec := httptest.NewRecorder()
 
@@ -149,6 +132,7 @@ func TestFederatedAdminCannotUseDirectAdminShortcuts(t *testing.T) {
 		broker := &store.RuntimeBroker{ID: tid("fed-broker-1"), Name: "Broker", Slug: "fed-broker-1", CreatedBy: tid("different-owner")}
 		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+		req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 		req = req.WithContext(contextWithIdentity(req.Context(), federatedAdminIdentity()))
 		rec := httptest.NewRecorder()
 

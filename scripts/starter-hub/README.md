@@ -26,6 +26,11 @@ file paths from two primary variables:
 | `REGION` | `us-central1` | GCP region for GKE and resource locations |
 | `ZONE` | `us-central1-a` | GCP zone for the GCE VM instance |
 | `MACHINE_TYPE` | *(derived)* | Compute machine type to use (overrides `SIZE_CHOICE`) |
+| `CERT_EMAIL` | *(none, required)* | Contact address Let's Encrypt uses for certificate notices, for example `admin@example.com`. `gce-certs.sh` and `gce-demo-deploy.sh` stop with an error if it is empty (unless `SKIP_TLS=true`). |
+| `DNS_ZONE_DESCRIPTION` | `Scion Hub zone for <CERT_DOMAIN>` | Description `gce-certs.sh` sets on a new Cloud DNS zone |
+| `SKIP_TLS` | `false` | Set to `true` for a Hub behind an upstream TLS terminator: `gce-demo-deploy.sh` skips `gce-certs.sh`, and `gce-start-hub.sh` skips the Caddy/TLS step (same as `--no-tls`). The base URL that takes effect (a `SCION_SERVER_BASE_URL` in `hub.env`, which must agree with `HUB_BASE_URL` if both are set, else `HUB_BASE_URL`) must then be the terminator's `https://` URL: both scripts stop before provisioning or uploading anything otherwise, because the Hub refuses to start with an `http` base URL on a non-loopback listener. Nothing creates a DNS record in this mode. |
+| `HUB_BASE_URL` | `https://<HUB_DOMAIN>`; with `SKIP_TLS=true`, required (`https://`) unless `hub.env` sets an `https://` `SCION_SERVER_BASE_URL` | Base URL `gce-start-hub.sh --full` writes into the systemd unit as `SCION_SERVER_BASE_URL`. A `SCION_SERVER_BASE_URL` in `hub.env` takes precedence. Behind an upstream TLS terminator, use the `https://` URL that clients use. |
+| `HEALTH_CHECK_INSECURE` | `false` | Set to `true` to skip TLS certificate verification in the final HTTPS health check (same as `--insecure-health-check`). Only for a self-signed or test certificate. |
 
 To stand up a second hub (e.g., "staging"):
 
@@ -92,10 +97,48 @@ To also re-upload config files, update systemd/Caddy, and refresh GKE credential
 ./scripts/starter-hub/gce-start-hub.sh --full
 ```
 
+Behind an upstream TLS terminator, skip the Caddy/TLS step (no Caddyfile, no
+Caddy install, no HTTPS health check) and give the terminator's `https://` URL;
+the script stops without it, because the Hub refuses an `http` base URL on a
+non-loopback listener:
+
+```bash
+HUB_BASE_URL=https://hub.example.com ./scripts/starter-hub/gce-start-hub.sh --full --no-tls
+```
+
+The final health check verifies the TLS certificate of `https://<HUB_DOMAIN>`.
+For a self-signed or test certificate only, add `--insecure-health-check`.
+Run `gce-start-hub.sh --help` for all options.
+
 To wipe the hub database on restart:
 
 ```bash
 ./scripts/starter-hub/gce-start-hub.sh --reset-db
+```
+
+## Certificate renewal
+
+certbot renews the certificate through `certbot.timer`. Caddy reads the
+certificate only when it starts or reloads. `gce-certs.sh` therefore runs
+`fix-tls-rotation.sh` on the VM, which installs a certbot deploy hook that
+reloads Caddy after each renewal. To repair a hub set up before this change,
+copy the script to the VM and run it with `sudo`. Use `--check` (read-only)
+and `--dry-run` first, then run it without a flag. The script always
+installs its own hook; another hook that also reloads Caddy is reported as
+a note (a double reload is harmless), and you may move it aside yourself.
+A non-zero exit from the script stops `gce-certs.sh`. See *Certificate renewal* in
+`docs-site/src/content/docs/hosted/single-node/hub-setup-gce.md`.
+
+## Tests
+
+`tests/run.sh` runs the script tests against stub `gcloud`, `curl`, and
+`sleep` commands, and runs `fix-tls-rotation.sh` against a fake root with stub
+`systemctl`, `certbot`, `caddy`, `runuser`, `id`, and `openssl s_client`
+(`tests/lib-tls`). It
+never contacts GCP and needs only bash and openssl:
+
+```bash
+./scripts/starter-hub/tests/run.sh
 ```
 
 ## Teardown

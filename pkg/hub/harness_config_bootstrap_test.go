@@ -18,12 +18,17 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/resources"
 )
 
 func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
@@ -32,25 +37,6 @@ func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, 
 
 func (s *Server) importHarnessConfigsFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
 	return s.importFromWorkspace(ctx, project, workspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
-}
-
-// makeHarnessConfigDir creates a temp harness-configs directory with a single
-// config subdirectory containing config.yaml and optional extra files.
-// Returns the parent harness-configs directory.
-func makeHarnessConfigDir(t *testing.T, configName string, files map[string]string) string {
-	t.Helper()
-	parentDir := t.TempDir()
-	configDir := filepath.Join(parentDir, configName)
-	for relPath, content := range files {
-		full := filepath.Join(configDir, relPath)
-		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return parentDir
 }
 
 func TestBootstrapHarnessConfigsFromDir_ImportsConfigs(t *testing.T) {
@@ -137,6 +123,106 @@ func TestBootstrapHarnessConfigsFromDir_PersistsConfigImage(t *testing.T) {
 	}
 	if hc.Config == nil || hc.Config.Image != "scion-claude:v2" {
 		t.Errorf("expected Config.Image = %q after re-sync, got %+v", "scion-claude:v2", hc.Config)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_PersistsModelAliases is a regression
+// test for ptone/scion#2365: the hub used to never persist a config.yaml's
+// model_aliases (or default model) onto the stored HarnessConfig record, so
+// resolveModelAliasForAgent always fell through to the alias table baked
+// into the hub binary at build time — meaning an alias update in
+// config.yaml had no effect until the hub itself was rebuilt/redeployed.
+// This verifies the extraction happens on both initial import and re-sync.
+func TestBootstrapHarnessConfigsFromDir_PersistsModelAliases(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "codex", map[string]string{
+		"config.yaml": "harness: codex\nmodel: medium\n" +
+			"model_aliases:\n  small: gpt-6-luna\n  medium: gpt-6.1-sol\n  large: gpt-6.1-sol\n",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "codex", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.Config == nil {
+		t.Fatal("expected Config to be populated after bootstrap, got nil")
+	}
+	if hc.Config.Model != "medium" {
+		t.Errorf("expected Config.Model = %q, got %q", "medium", hc.Config.Model)
+	}
+	wantAliases := map[string]string{"small": "gpt-6-luna", "medium": "gpt-6.1-sol", "large": "gpt-6.1-sol"}
+	if !reflect.DeepEqual(hc.Config.ModelAliases, wantAliases) {
+		t.Errorf("expected Config.ModelAliases = %+v, got %+v", wantAliases, hc.Config.ModelAliases)
+	}
+
+	// Re-sync with updated aliases (as if the user edited config.yaml to
+	// point "large" at a new model) and verify the stored record picks up
+	// the change rather than keeping the value from the first sync.
+	if err := os.WriteFile(filepath.Join(dir, "codex", "config.yaml"),
+		[]byte("harness: codex\nmodel: medium\n"+
+			"model_aliases:\n  small: gpt-6-luna\n  medium: gpt-6.1-sol\n  large: gpt-6.1-astra\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	hc, err = s.GetHarnessConfigBySlug(ctx, "codex", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.Config == nil || hc.Config.ModelAliases["large"] != "gpt-6.1-astra" {
+		t.Errorf("expected Config.ModelAliases[large] = %q after re-sync, got %+v", "gpt-6.1-astra", hc.Config)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_ClearsModelAliasesWhenConfigYAMLSilent
+// pins the clear-on-absent rule (ptone/scion#4219): config.yaml is the only
+// source of the derived fields, so a value staged directly in the row does
+// not survive a re-sync of a config.yaml without model_aliases.
+func TestBootstrapHarnessConfigsFromDir_ClearsModelAliasesWhenConfigYAMLSilent(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "custom", map[string]string{
+		"config.yaml": "harness: custom\nimage: scion-custom:v1\n",
+	})
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "custom", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc.Config.ModelAliases = map[string]string{"large": "manually-set-model"}
+	if err := setHarnessConfigContentForTest(ctx, s, hc); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "custom", "config.yaml"),
+		[]byte("harness: custom\nimage: scion-custom:v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	got, err := s.GetHarnessConfigBySlug(ctx, "custom", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config == nil || got.Config.Image != "scion-custom:v2" {
+		t.Fatalf("expected Config.Image from config.yaml, got %+v", got.Config)
+	}
+	if len(got.Config.ModelAliases) != 0 {
+		t.Errorf("expected ModelAliases cleared by a config.yaml without model_aliases, got %+v", got.Config.ModelAliases)
 	}
 }
 
@@ -244,10 +330,11 @@ func TestBootstrapHarnessConfigsFromDir_SkipsUnchanged(t *testing.T) {
 	}
 }
 
-// TestSyncHarnessConfig_PreservesTypedConfig guards the ResourceStore
-// record↔model round-trip for harness-configs: a content-changing sync must
-// leave the typed HarnessConfigData payload intact.
-func TestSyncHarnessConfig_PreservesTypedConfig(t *testing.T) {
+// TestSyncHarnessConfig_DerivesTypedConfig guards the harness-config
+// record round-trip (ptone/scion#4219): a content-changing sync replaces the
+// typed HarnessConfigData with what config.yaml gives (a value only the row
+// held is cleared), and leaves the metadata alone.
+func TestSyncHarnessConfig_DerivesTypedConfig(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -264,6 +351,9 @@ func TestSyncHarnessConfig_PreservesTypedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	hc.Config = &store.HarnessConfigData{Image: "scion-claude:latest", Model: "opus"}
+	if err := setHarnessConfigContentForTest(ctx, s, hc); err != nil {
+		t.Fatal(err)
+	}
 	hc.DisplayName = "Claude Config"
 	if err := s.UpdateHarnessConfig(ctx, hc); err != nil {
 		t.Fatal(err)
@@ -282,21 +372,22 @@ func TestSyncHarnessConfig_PreservesTypedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Config == nil {
-		t.Fatal("expected typed Config to survive sync, got nil")
-	}
-	if got.Config.Model != "opus" {
-		t.Errorf("typed Config not preserved: got %+v", got.Config)
+	want := &store.HarnessConfigData{Harness: "claude", Image: "scion-claude:v2", User: "scion"}
+	if !reflect.DeepEqual(got.Config, want) {
+		t.Errorf("Config = %+v, want %+v (derived from config.yaml only)", got.Config, want)
 	}
 	if got.DisplayName != "Claude Config" {
 		t.Errorf("expected DisplayName preserved, got %q", got.DisplayName)
 	}
 }
 
-// TestSyncHarnessConfig_ReconcilesRemovedFiles verifies harness-configs gained
-// stale-object reconcile on sync by routing through the shared ResourceStore
-// (previously harness-config sync left removed files lingering in storage).
-func TestSyncHarnessConfig_ReconcilesRemovedFiles(t *testing.T) {
+// TestSyncHarnessConfig_RemovedFilesLeaveTheManifest verifies that a file
+// removed from a harness-config directory leaves the row's manifest on the
+// next sync, so it is no longer hydrated. The sync deletes nothing: the
+// removed file's blob stays for in-flight hydrations until the blob garbage
+// collector removes it (ptone/scion#4219 part 2, which replaces the prefix
+// reconcile, ptone/scion#3170).
+func TestSyncHarnessConfig_RemovedFilesLeaveTheManifest(t *testing.T) {
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -313,7 +404,11 @@ func TestSyncHarnessConfig_ReconcilesRemovedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stalePath := hc.StoragePath + "/home/.stale"
+	staleEntry, ok := templateFileByPath(hc.Files, "home/.stale")
+	if !ok {
+		t.Fatal("expected home/.stale in the manifest after bootstrap")
+	}
+	stalePath := srv.harnessConfigObjectPath(hc, staleEntry)
 	if _, ok := stor.objects[stalePath]; !ok {
 		t.Fatalf("expected %q in storage after bootstrap", stalePath)
 	}
@@ -330,8 +425,15 @@ func TestSyncHarnessConfig_ReconcilesRemovedFiles(t *testing.T) {
 		t.Fatalf("second bootstrap failed: %v", err)
 	}
 
-	if _, ok := stor.objects[stalePath]; ok {
-		t.Errorf("expected stale object %q to be reconciled (deleted) from storage", stalePath)
+	after, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := templateFileByPath(after.Files, "home/.stale"); ok {
+		t.Error("the removed file is still in the manifest after the sync")
+	}
+	if _, ok := stor.objects[stalePath]; !ok {
+		t.Errorf("the sync deleted %q; removed files are left to the blob garbage collector", stalePath)
 	}
 }
 
@@ -575,5 +677,261 @@ func TestImportHarnessConfigsFromWorkspace_Reimport(t *testing.T) {
 	}
 	if result.TotalCount != 1 {
 		t.Fatalf("expected 1 harness-config after re-import, got %d", result.TotalCount)
+	}
+}
+
+func TestBootstrapHarnessConfigsFromDir_SkipsBackupAndTempFiles(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "claude", map[string]string{
+		"config.yaml":                       "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+		"dialect.yaml":                      "dialect: claude\n",
+		"config.yaml.bak.20261003T193320Z":  "old\n",
+		"provision.py.bak.20261003T193320Z": "old\n",
+		".provision.py.tmp-123456":          "partial\n",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range hc.Files {
+		got = append(got, f.Path)
+	}
+	want := []string{"config.yaml", "dialect.yaml"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("manifest files = %v, want %v", got, want)
+	}
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 objects in storage, got %d", len(stor.objects))
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_DeletedBuiltinStaysDeleted covers AC1 of
+// ptone/scion#3544 on the workstation path: the built-in is re-materialized on
+// disk every start (UpdateDefaultTemplates(true)), but a deleted built-in is
+// not re-imported into the hub.
+func TestBootstrapHarnessConfigsFromDir_DeletedBuiltinStaysDeleted(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	hcDir := filepath.Join(globalDir, "harness-configs")
+	const victim = "claude"
+
+	materialize := func() {
+		t.Helper()
+		if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+	}
+
+	materialize()
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, hcDir); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	hc, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatalf("built-in %q not imported: %v", victim, err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart twice: disk is re-materialized, then bootstrapped.
+	for i := range 2 {
+		materialize()
+		if _, err := os.Stat(filepath.Join(hcDir, victim, "config.yaml")); err != nil {
+			t.Fatalf("restart %d: expected %q re-materialized on disk: %v", i, victim, err)
+		}
+		if err := srv.BootstrapHarnessConfigsFromDir(ctx, hcDir); err != nil {
+			t.Fatalf("restart %d bootstrap: %v", i, err)
+		}
+		if _, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, ""); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("restart %d: deleted built-in %q was re-imported (err=%v)", i, victim, err)
+		}
+	}
+
+	result, _ := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	if got, want := result.TotalCount, len(resources.BuiltinHarnessConfigNames())-1; got != want {
+		t.Errorf("harness configs after restarts: got %d, want %d", got, want)
+	}
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.HarnessConfigs, allBuiltinHarnessConfigSlugs()) {
+		t.Errorf("ledger harness_configs = %+v, want every built-in", doc)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_UserDirStillImported verifies that a
+// non-built-in directory keeps today's behaviour: disk is its source of
+// truth, so deleting the row and leaving the directory re-imports it. It is
+// never added to the ledger.
+func TestBootstrapHarnessConfigsFromDir_UserDirStillImported(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	const name = "my-custom-config"
+
+	dir := makeHarnessConfigDir(t, name, map[string]string{
+		"config.yaml": "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+	})
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	hc, err := s.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatalf("user config not imported: %v", err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatalf("user config not re-imported after delete: %v", err)
+	}
+	if again.ID == hc.ID {
+		t.Error("expected a new row after re-import")
+	}
+	if doc := readBuiltinSeedLedgerDoc(t, s); doc != nil {
+		t.Errorf("non-built-in import wrote the ledger: %+v", doc)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_CorruptLedgerFailsClosedForBuiltins
+// verifies that an unreadable ledger row does not stop user dirs from being
+// imported, does not let a deleted built-in come back, is not overwritten,
+// and is reported as an error.
+func TestBootstrapHarnessConfigsFromDir_CorruptLedgerFailsClosedForBuiltins(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	hcDir := filepath.Join(globalDir, "harness-configs")
+	const victim = "claude"
+	const userName = "my-custom-config"
+
+	if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, hcDir); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	hc, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the ledger row (non-JSON value) and add a user dir.
+	if _, err := s.UpsertHubSetting(ctx, builtinSeedLedgerSection, json.RawMessage(`"not-a-ledger"`),
+		"test", -1, "seeded"); err != nil {
+		t.Fatalf("corrupt ledger: %v", err)
+	}
+	corrupt, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	userDir := filepath.Join(hcDir, userName)
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:latest\nuser: scion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Edit an existing built-in on disk: it must still be synced.
+	const synced = "codex"
+	syncedBefore, err := s.GetHarnessConfigBySlug(ctx, synced, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(hcDir, synced, "config.yaml"), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n# edited locally\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	err = srv.BootstrapHarnessConfigsFromDir(ctx, hcDir)
+	if err == nil {
+		t.Fatal("expected an error for an unreadable ledger")
+	}
+	syncedAfter, err := s.GetHarnessConfigBySlug(ctx, synced, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if syncedAfter.ContentHash == syncedBefore.ContentHash {
+		t.Errorf("existing built-in %q was not synced with a corrupt ledger (content hash unchanged)", synced)
+	}
+	if _, err := s.GetHarnessConfigBySlug(ctx, userName, store.HarnessConfigScopeGlobal, ""); err != nil {
+		t.Errorf("user dir not imported with a corrupt ledger: %v", err)
+	}
+	if _, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted built-in %q re-created with a corrupt ledger (err=%v)", victim, err)
+	}
+	after, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if after.Revision != corrupt.Revision || string(after.Value) != string(corrupt.Value) {
+		t.Errorf("corrupt ledger row was overwritten: rev %d -> %d, value %s", corrupt.Revision, after.Revision, after.Value)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_MarksExistingBuiltinWhenSyncFails
+// verifies that an existing built-in row counts as seeded even if its content
+// sync fails (mark before sync, same rule as the hosted path): after a failed
+// sync the name is in the ledger, so deleting the row sticks.
+func TestBootstrapHarnessConfigsFromDir_MarksExistingBuiltinWhenSyncFails(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	const name = "claude"
+
+	dir := makeHarnessConfigDir(t, name, map[string]string{
+		"config.yaml": "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+	})
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a hub that predates the ledger.
+	if err := s.DeleteHubSetting(ctx, builtinSeedLedgerSection); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change the content so the sync must upload, and make uploads fail.
+	if err := os.WriteFile(filepath.Join(dir, name, "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:v2\nuser: scion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetStorage(&failingUploadStorage{mockStorage: stor})
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap with failing sync: %v", err)
+	}
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.HarnessConfigs, []string{name}) {
+		t.Fatalf("ledger after failed sync = %+v, want harness_configs [%s]", doc, name)
+	}
+
+	// Delete the row, then bootstrap with a working sync: it stays deleted.
+	srv.SetStorage(stor)
+	hc, err := s.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted built-in %q re-created (err=%v)", name, err)
 	}
 }

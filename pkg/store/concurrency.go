@@ -104,6 +104,31 @@ const (
 	// operations and ensures no server is running during recovery.
 	LockRecoveryAuthz AdvisoryLockKey = 0x5C100020
 
+	// LockReincarnationSweep guards the periodic replica-safe sweep that
+	// fails stale non-terminal `scion reincarnate` records and agent
+	// reincarnation_state left behind by a replica that crashed or
+	// restarted mid-migration (design §3.7).
+	LockReincarnationSweep AdvisoryLockKey = 0x5C100022
+
+	// LockStartClaimReaper guards the periodic start-claim reaper, which
+	// demotes start claims whose lease expired and releases unconfirmed
+	// claims once the runtime shows the start's outcome.
+	LockStartClaimReaper AdvisoryLockKey = 0x5C100024
+
+	// LockMembershipStandingSweep guards the periodic full membership
+	// standing sweep that asks the hub to re-evaluate users whose project
+	// access may have ended.
+	LockMembershipStandingSweep AdvisoryLockKey = 0x5C100026
+
+	// LockMembershipExpiryScan guards the periodic scan for expired project
+	// role bindings. It is separate from LockMembershipStandingSweep so the
+	// two tasks, which can fire on the same tick, never skip each other.
+	LockMembershipExpiryScan AdvisoryLockKey = 0x5C100027
+
+	// LockMembershipStopRetry guards the periodic retry of container stops
+	// for held agents, so one replica sends them per tick.
+	LockMembershipStopRetry AdvisoryLockKey = 0x5C100028
+
 	// LockInlineSecretsMigration guards the one-shot migration of inline
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011
@@ -142,20 +167,42 @@ const (
 	// after upstream added it; renumbered to 0x5C100017.
 	LockNotificationDispatchSweep AdvisoryLockKey = 0x5C100017
 
-	// LockWorkspaceProvision is the CLASS ID for per-project workspace
-	// provisioning locks. It is used with the two-int advisory lock form
-	// pg_try_advisory_lock(classid, objid), where classid is this constant
-	// and objid is a stable hash of the project ID. This guards the NFS
-	// first-access provisioning flow (design §7, risk RN1): only one
-	// broker across all nodes may clone/provision a project's workspace at
-	// a time, while different projects lock independently.
+	// LockReleaseUpdateCheck guards the scheduled release update check so only
+	// one replica per tick checks for a new binary release (binary-tier
+	// deployments). See design doc §6 "Scheduled Update Check".
+	LockReleaseUpdateCheck AdvisoryLockKey = 0x5C100018
+
+	// LockFailedMessageRetention guards the periodic purge of messages in
+	// dispatch_state="failed" that have exceeded the configured retention
+	// window (messaging.failed_message_retention_days).
+	LockFailedMessageRetention AdvisoryLockKey = 0x5C100019
+
+	// LockAgentLaunchDeadline guards RunLaunchReaperTick, the T1 async-create
+	// launch reaper (design t1-async-create-v11.md §3.7). Unlike every other
+	// key in this block it is NOT taken through the AdvisoryLocker interface:
+	// the reaper needs a transaction-scoped pg_try_advisory_xact_lock (so the
+	// lock and every statement of the tick share one connection and are
+	// released together at commit/rollback), which AdvisoryLocker's
+	// session-level, dedicated-connection TryAdvisoryLock cannot express. The
+	// constant is registered here only so the numeric key is allocated
+	// centrally and cannot collide with another lock; RunLaunchReaperTick
+	// issues `SELECT pg_try_advisory_xact_lock($1)` against it directly on its
+	// own hand-built *sql.Tx.
+	LockAgentLaunchDeadline AdvisoryLockKey = 0x5C10001A
+
+	// Retired per-object class ID values. They are reserved and must not be
+	// reused for another lock:
+	//   - 0x5C101001: per-project workspace provisioning (NFS first access).
+	//     Workspace provisioning serializes with a file lock on the shared
+	//     filesystem instead (see pkg/provision).
+	//   - 0x5C101003: per-agent start of an agent whose home is on NFS. Starts
+	//     are serialized by the hub start claim instead.
 	//
-	// The value is intentionally in a different range (0x5C10_1001) from
-	// the singleton keys above (0x5C10_0001..0005) to avoid collisions
-	// when the two-int lock form's classid is compared against the
-	// single-int form's key — Postgres treats them as separate namespaces,
-	// but keeping them visually distinct aids debugging.
-	LockWorkspaceProvision AdvisoryLockKey = 0x5C101001
+	// Per-object class IDs are intentionally in a different range
+	// (0x5C10_1xxx) from the singleton keys (0x5C10_0xxx) to avoid
+	// collisions when the two-int lock form's classid is compared against
+	// the single-int form's key — Postgres treats them as separate
+	// namespaces, but keeping them visually distinct aids debugging.
 
 	// LockQuotaEnforcement is the CLASS ID for per-scope quota enforcement
 	// locks. It is used with the two-int advisory lock form
@@ -164,6 +211,82 @@ const (
 	// quota checks for the same scope so that the "check count + reserve"
 	// sequence is atomic, preventing over-allocation.
 	LockQuotaEnforcement AdvisoryLockKey = 0x5C101002
+
+	// LockBrokerQuotaReconcile guards the periodic (and startup, tick 0)
+	// reconcile of stale max_agents_per_broker reservations (ptone/scion#1963)
+	// — rows left with released_at IS NULL for agents that are no longer in a
+	// counted phase (stopped/suspended/error) or no longer exist.
+	LockBrokerQuotaReconcile AdvisoryLockKey = 0x5C100021
+
+	// LockConduitRegistryReap guards the conduit registry maintenance
+	// singleton (design v2.4 §3.4): ReapStaleRelays, ReapStaleSessions and
+	// PruneRelayInstances run together under this one lock, as the registry
+	// requires.
+	LockConduitRegistryReap AdvisoryLockKey = 0x5C100023
+
+	// LockBrokerJoinTokenCleanup guards the periodic removal of expired
+	// broker join tokens.
+	LockBrokerJoinTokenCleanup AdvisoryLockKey = 0x5C100025
+
+	// LockTelegramSchema serializes the Telegram plugin's Postgres schema
+	// creation so replicas starting together against one database do not
+	// run the CREATE IF NOT EXISTS statements concurrently.
+	LockTelegramSchema AdvisoryLockKey = 0x5C100029
+
+	// LockNotificationOrphanGC guards the periodic removal of acknowledged
+	// notifications whose agent and subscription are both gone.
+	LockNotificationOrphanGC AdvisoryLockKey = 0x5C10002A
+
+	// LockHubInstancePrune guards the hourly hub-instance registry prune
+	// (health dashboard F3 design §5.11), so one replica per tick deletes
+	// hub_instances rows past the 24 h retention.
+	LockHubInstancePrune AdvisoryLockKey = 0x5C10002B
+	// LockTestIdentityIssuance serializes test identity issuance
+	// (UserStore.LockTestFixtureIssuance) so the per-issuer and hub-wide
+	// live-identity caps are checked and applied atomically. Like
+	// LockAgentLaunchDeadline it is a transaction-scoped
+	// pg_advisory_xact_lock, not taken through AdvisoryLocker.
+	LockTestIdentityIssuance AdvisoryLockKey = 0x5C10002C
+	// LockTestIdentityReaper guards the periodic test identity expiry
+	// reaper (ptone/scion#4240, Phase 3b), so one replica per tick holds
+	// expired identities' agents and purges what each one created.
+	LockTestIdentityReaper AdvisoryLockKey = 0x5C10002D
+
+	// LockChatRetention guards the chat message retention sweeper
+	// ("chat-retention"), so one replica per tick walks and purges messages
+	// older than the hub-wide retention window. The sweep cursor lives in the
+	// database, so a failover resumes where the last holder stopped.
+	LockChatRetention AdvisoryLockKey = 0x5C10002E
+
+	// LockAgentDelegatedCredentialPurge guards the hourly purge of agent
+	// delegated credential rows that expired more than the retention
+	// period ago (.design/agent-delegation.md §18.1). A value in an unused
+	// gap of the range, so it does not collide with a key added next to
+	// the highest one.
+	LockAgentDelegatedCredentialPurge AdvisoryLockKey = 0x5C10001E
+
+	// LockHubSettingsGuardedBatch serializes guarded hub settings batches
+	// (HubSettingGuardedBatchWriter): a transaction-scoped
+	// pg_advisory_xact_lock taken before the batch reads and locks its
+	// rows, so a read guard on a section with no row (which FOR UPDATE
+	// cannot lock) still holds against a concurrent batch. A value in an
+	// unused gap of the range.
+	LockHubSettingsGuardedBatch AdvisoryLockKey = 0x5C10001F
+
+	// LockPendingSecretExpiry guards the periodic pending secret expiry
+	// sweep ("pending-secret-expiry"), so one replica per tick deletes
+	// expired pending secrets and releases their held values. A value in an
+	// unused gap of the range.
+	LockPendingSecretExpiry AdvisoryLockKey = 0x5C10001B
+
+	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
+	// secret write lock: a transaction-scoped
+	// pg_advisory_xact_lock(classid, objid) with objid
+	// StableProjectHash(owner scope ID), taken by
+	// CreateOrReplacePendingSecret so the per-agent and per-owner caps are
+	// checked and applied atomically. Like LockQuotaEnforcement it is in the
+	// per-object range; it is not taken through AdvisoryLocker.
+	LockPendingSecretOwnerWrite AdvisoryLockKey = 0x5C101004
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
@@ -185,19 +308,19 @@ type AdvisoryLocker interface {
 
 	// TryAdvisoryLockObject acquires a per-object advisory lock using
 	// Postgres's two-integer form: pg_try_advisory_lock(classid, objid).
-	// classid identifies the lock family (e.g. LockWorkspaceProvision) and
+	// classid identifies the lock family (e.g. LockQuotaEnforcement) and
 	// objid identifies the specific object within that family (e.g. a
-	// stable hash of the project ID). Two different objIDs under the same
+	// stable hash of the scope ID). Two different objIDs under the same
 	// classid are independent locks; the same (classid, objid) pair
 	// provides mutual exclusion across all replicas.
 	//
-	// This is the per-project provisioning guard (design §7, risk RN1):
-	// two agents for the same project on different nodes contend on the
-	// same (classid, hash(projectID)) lock; agents for different projects
-	// never contend.
+	// For example, quota enforcement uses it so that two checks for the
+	// same scope on different replicas contend on the same
+	// (classid, hash(scopeID)) lock; checks for different scopes never
+	// contend.
 	//
 	// On SQLite the lock is a no-op that always succeeds — the single-
-	// writer model already serializes provisioning.
+	// writer model already serializes the guarded work.
 	TryAdvisoryLockObject(ctx context.Context, classID AdvisoryLockKey, objID int32) (acquired bool, release func() error, err error)
 }
 

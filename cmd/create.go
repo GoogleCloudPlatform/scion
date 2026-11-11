@@ -17,17 +17,15 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -41,154 +39,189 @@ The agent will be created from a template.
 
 The agent-name is required as the first argument. All subsequent arguments
 form the task prompt, which will be written to prompt.md. If no task
-arguments are provided, an empty prompt.md is created for later editing.`,
+arguments are provided, an empty prompt.md is created for later editing.
+
+The agent is provisioned but not started, even when a task is given. Run
+'scion start <agent-name>' to start it.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
-		// Validate --harness-auth value
-		if harnessAuthFlag != "" {
-			switch harnessAuthFlag {
-			case "api-key", "oauth-token", "auth-file", "vertex-ai":
-				// valid
-			default:
-				return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
-			}
+		// A target-hub profile refuses the flags that need local state
+		// before anything else (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
 		}
 
-		// Check if Hub should be used, excluding the target agent from sync requirements.
-		// This allows creating an agent even if it already exists on Hub (recreate scenario)
-		// or if other agents are out of sync.
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
+			return asUsageError(err)
+		}
+
+		if err := validateTaskFileStdin(); err != nil {
+			return err
+		}
+		task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+		if err != nil {
+			return asUsageError(err)
+		}
+
+		// Validate --template-scope with the other flag checks, before any
+		// hub work (ResolveTemplateForHub keeps its own check as a guard).
+		if err := validateTemplateScope(templateScope); err != nil {
+			return asUsageError(err)
+		}
+
+		// Load inline config if --config was specified, with --model and
+		// --thinking-level on top, before any hub work so a bad flag value
+		// fails as a usage error first (as in scion start).
+		inlineCfg, err := loadCreateInlineConfig(cmd)
 		if err != nil {
 			return err
 		}
 
-		if hubCtx != nil {
-			return createAgentViaHub(hubCtx, agentName, task)
-		}
-
-		// Load inline config if --config was specified
-		var inlineCfg *api.ScionConfig
-		if inlineConfigPath != "" {
-			var inlineConfigDir string
-			var loadErr error
-			inlineCfg, inlineConfigDir, loadErr = loadInlineConfig(inlineConfigPath)
-			if loadErr != nil {
-				return loadErr
-			}
-			if loadErr := resolveInlineConfigContent(inlineCfg, inlineConfigDir); loadErr != nil {
-				return loadErr
-			}
-		}
-
-		// Local mode
-		rt := runtime.GetRuntime(projectPath, profile)
-		mgr := agent.NewManager(rt)
-
-		// Apply inline config overrides to CLI options
-		effectiveBranch := branch
-		effectiveTask := task
-		effectiveHarnessConfig := harnessConfigFlag
-		effectiveImage := agentImage
-
-		if inlineCfg != nil {
-			if effectiveBranch == "" && inlineCfg.Branch != "" {
-				effectiveBranch = inlineCfg.Branch
-			}
-			if effectiveTask == "" && inlineCfg.Task != "" {
-				effectiveTask = inlineCfg.Task
-			}
-			if effectiveHarnessConfig == "" && inlineCfg.HarnessConfig != "" {
-				effectiveHarnessConfig = inlineCfg.HarnessConfig
-			}
-			if effectiveImage == "" && inlineCfg.Image != "" {
-				effectiveImage = inlineCfg.Image
-			}
-		}
-
-		opts := api.StartOptions{
-			Name:          agentName,
-			Task:          effectiveTask,
-			Template:      templateName,
-			Profile:       profile,
-			HarnessConfig: effectiveHarnessConfig,
-			Image:         effectiveImage,
-			ProjectPath:   projectPath,
-			Branch:        effectiveBranch,
-			Workspace:     workspace,
-			InlineConfig:  inlineCfg,
-		}
-
-		// Check if agent already exists (directory on disk or running container)
-		projectDir, err := config.GetResolvedProjectDir(projectPath)
-		if err != nil {
-			return err
-		}
-		agentDir := filepath.Join(projectDir, "agents", agentName)
-		if _, err := os.Stat(agentDir); err == nil {
-			return fmt.Errorf("agent '%s' already exists. Use 'scion delete %s' first to recreate it", agentName, agentName)
-		}
-
-		ctx := context.Background()
-		// Attempt Hub connection for skill resolution in local mode.
-		// If Hub is not configured, this returns nil and provisioning
-		// proceeds without a resolver (S1 fail-closed for required skills).
-		hctx, hubErr := hubsync.EnsureHubReady(projectPath, hubsync.EnsureHubReadyOptions{
-			NoHub:       noHub,
-			AutoConfirm: true,
-			SkipSync:    true,
-		})
-		if hubErr == nil && hctx != nil && hctx.Client != nil {
-			hubResolver := agent.NewHubSkillResolver(hctx.Client.Skills())
-			resolver := agent.NewRoutingSkillResolver(hubResolver)
-			ghResolver := agent.NewGitHubSkillResolverWithCredentials(os.Getenv("GITHUB_TOKEN"), nil, nil)
-			resolver.Register("gh", ghResolver)
-
-			registrySvc := hctx.Client.SkillRegistries()
-			gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
-				reg, err := registrySvc.Get(ctx, name)
-				if err != nil {
-					return nil, err
-				}
-				if reg == nil {
-					return nil, fmt.Errorf("registry %q not found", name)
-				}
-				return &agent.RegistryLookupResult{
-					Name:     reg.Name,
-					Endpoint: reg.Endpoint,
-					Type:     reg.Type,
-					Status:   reg.Status,
-				}, nil
-			}
-			resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
-
-			ctx = agent.ContextWithSkillResolver(ctx, resolver)
-			if hctx.ProjectID != "" {
-				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)
-			}
-		}
-
-		_, err = mgr.Provision(ctx, opts)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 
-		if isJSONOutput() {
-			return outputJSON(ActionResult{
-				Status:  "success",
-				Command: "create",
-				Agent:   agentName,
-				Message: fmt.Sprintf("Agent '%s' created successfully.", agentName),
-			})
-		}
-		fmt.Printf("Agent '%s' created successfully.\n", agentName)
-		return nil
+		return createAgentViaHub(hubCtx, agentName, task, inlineCfg)
 	},
 }
 
-func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
+// scion create provisions an agent and never starts it; scion start launches
+// it. The helpers below make every create output say so and name the
+// follow-up command.
+
+// createStartCommand returns the command that launches an agent made by
+// scion create.
+func createStartCommand(agentName string) string {
+	return "scion start " + agentName
+}
+
+// createNotStartedHint is the line that tells the user the agent was
+// provisioned but not started, and how to start it.
+func createNotStartedHint(agentName string) string {
+	return fmt.Sprintf("Agent '%s' is provisioned but not started. Run '%s' to start it.", agentName, createStartCommand(agentName))
+}
+
+// createNotProvisionedHint is the line printed instead of
+// createNotStartedHint when the Hub kept the agent record but the runtime
+// broker could not provision it.
+func createNotProvisionedHint(agentName string) string {
+	return fmt.Sprintf("Agent '%s' was not fully provisioned (see the warning). Run '%s' to retry provisioning and start it.", agentName, createStartCommand(agentName))
+}
+
+// createHint returns the closing line of a scion create output.
+func createHint(agentName string, provisioned bool) string {
+	if provisioned {
+		return createNotStartedHint(agentName)
+	}
+	return createNotProvisionedHint(agentName)
+}
+
+// hubCreateProvisioned reports whether a Hub create provisioned the agent,
+// that is, whether none of the warnings says provisioning failed.
+func hubCreateProvisioned(warnings []string) bool {
+	for _, w := range warnings {
+		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// addCreateNotStartedDetails records in JSON output details that the agent
+// was not started, whether it was provisioned, and the command that starts
+// it.
+func addCreateNotStartedDetails(details map[string]interface{}, agentName string, provisioned bool) {
+	details["started"] = false
+	details["provisioned"] = provisioned
+	details["startCommand"] = createStartCommand(agentName)
+}
+
+// hubCreateResult is the JSON result of a scion create through a Hub.
+func hubCreateResult(agentName string, resp *hubclient.CreateAgentResponse) ActionResult {
+	provisioned := hubCreateProvisioned(resp.Warnings)
+	result := ActionResult{
+		Status:   "success",
+		Command:  "create",
+		Agent:    agentName,
+		Message:  fmt.Sprintf("Agent '%s' created via Hub. ", agentName) + createHint(agentName, provisioned),
+		Warnings: resp.Warnings,
+		Details:  map[string]interface{}{},
+	}
+	addCreateNotStartedDetails(result.Details, agentName, provisioned)
+	if resp.Agent != nil {
+		result.Details["slug"] = resp.Agent.Slug
+		phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+		result.Details["phase"] = phase
+		if activity != "" {
+			result.Details["activity"] = activity
+		}
+		if resp.Agent.RuntimeBrokerID != "" {
+			result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
+		}
+		if resp.Agent.RuntimeBrokerName != "" {
+			result.Details["runtimeBrokerName"] = resp.Agent.RuntimeBrokerName
+		}
+	}
+	return result
+}
+
+// writeHubCreateText prints the text result of a scion create through a
+// Hub: the agent summary, any warnings, then the closing hint. agentDir is
+// printed when not empty.
+func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAgentResponse, agentDir string) {
+	var b strings.Builder
+	if resp.Agent != nil {
+		brokerInfo := ""
+		if resp.Agent.RuntimeBrokerName != "" {
+			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerName)
+		} else if resp.Agent.RuntimeBrokerID != "" {
+			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerID)
+		}
+		fmt.Fprintf(&b, "Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
+		fmt.Fprintf(&b, "Agent Slug: %s\n", resp.Agent.Slug)
+		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
+		fmt.Fprintf(&b, "Phase: %s\n", provisionedPhaseLabel(phase, resp.Agent.ProvisionedOnly))
+		if agentDir != "" {
+			fmt.Fprintf(&b, "Agent directory: %s\n", agentDir)
+		}
+	} else {
+		fmt.Fprintf(&b, "Agent '%s' created via Hub.\n", agentName)
+	}
+	for _, warning := range resp.Warnings {
+		fmt.Fprintf(&b, "Warning: %s\n", warning)
+	}
+	fmt.Fprintf(&b, "%s\n", createHint(agentName, hubCreateProvisioned(resp.Warnings)))
+	_, _ = io.WriteString(w, b.String())
+}
+
+// loadCreateInlineConfig loads the --config file, if one was given, and
+// resolves its file:// content fields, then applies --model and
+// --thinking-level over it (applyModelFlags), so a flag beats the file's
+// value. It returns nil when neither --config nor a model flag is given.
+func loadCreateInlineConfig(cmd *cobra.Command) (*api.ScionConfig, error) {
+	var cfg *api.ScionConfig
+	if inlineConfigPath != "" {
+		var configDir string
+		var err error
+		cfg, configDir, err = loadInlineConfig(inlineConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := resolveInlineConfigContent(cfg, configDir); err != nil {
+			return nil, err
+		}
+	}
+	return applyModelFlags(cmd, cfg)
+}
+
+// createAgentViaHub provisions the agent through the Hub. inlineCfg is the
+// --config file's config (nil without --config); it is sent as the request
+// config, as startAgentViaHub does, so the Hub stores it with the agent.
+func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -218,17 +251,17 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 
 	parsedLabels, err := parseLabels(labelFlags)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --role flag if provided
 	if err := validateAgentRole(agentRoleFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --message-mode flag if provided
 	if err := validateMessageMode(messageModeFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Build create request — always provision-only (create does not start the agent)
@@ -239,8 +272,10 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,
 		RuntimeBrokerID: runtimeBrokerID,
+		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
+		Workspace:       workspace,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
 		AgentRole:       agentRoleFlag,
@@ -250,7 +285,14 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
-	if agentImage != "" {
+	// The inline config from --config is the base; CLI flags override
+	// specific fields (ptone/scion#4012).
+	if inlineCfg != nil {
+		req.Config = inlineCfg
+		if agentImage != "" {
+			req.Config.Image = agentImage
+		}
+	} else if agentImage != "" {
 		req.Config = &api.ScionConfig{
 			Image: agentImage,
 		}
@@ -266,6 +308,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 
 	resp, err := createAgentWithBrokerResolution(ctx, hubCtx, projectID, req)
 	if err != nil {
+		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to create agent via Hub: %w", err))
 	}
 
@@ -280,54 +323,16 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	printAutoResolvedBroker(ctx, hubCtx, runtimeBrokerID, req.RuntimeBrokerID, resp)
 
 	if isJSONOutput() {
-		result := ActionResult{
-			Status:   "success",
-			Command:  "create",
-			Agent:    agentName,
-			Message:  fmt.Sprintf("Agent '%s' created via Hub.", agentName),
-			Warnings: resp.Warnings,
-			Details:  map[string]interface{}{},
-		}
-		if resp.Agent != nil {
-			result.Details["slug"] = resp.Agent.Slug
-			phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-			result.Details["phase"] = phase
-			if activity != "" {
-				result.Details["activity"] = activity
-			}
-			if resp.Agent.RuntimeBrokerID != "" {
-				result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
-			}
-			if resp.Agent.RuntimeBrokerName != "" {
-				result.Details["runtimeBrokerName"] = resp.Agent.RuntimeBrokerName
-			}
-		}
-		return outputJSON(result)
+		return outputJSON(hubCreateResult(agentName, resp))
 	}
 
-	if resp.Agent != nil {
-		brokerInfo := ""
-		if resp.Agent.RuntimeBrokerName != "" {
-			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerName)
-		} else if resp.Agent.RuntimeBrokerID != "" {
-			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerID)
-		}
-		statusf("Agent '%s' created via Hub%s.\n", agentName, brokerInfo)
-		statusf("Agent Slug: %s\n", resp.Agent.Slug)
-		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-		statusf("Phase: %s\n", phase)
-
-		// For local broker, print the agent directory path so the user can inspect/tweak files
-		if hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
-			agentDir := filepath.Join(hubCtx.ProjectPath, "agents", agentName)
-			statusf("Agent directory: %s\n", agentDir)
-		}
-	} else {
-		statusf("Agent '%s' created via Hub.\n", agentName)
+	// For a local broker, print the agent directory path so the user can
+	// inspect or tweak its files.
+	agentDir := ""
+	if resp.Agent != nil && hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
+		agentDir = filepath.Join(hubCtx.ProjectPath, "agents", agentName)
 	}
-	for _, w := range resp.Warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
-	}
+	writeHubCreateText(os.Stderr, agentName, resp, agentDir)
 
 	return nil
 }
@@ -338,19 +343,24 @@ func init() {
 	createCmd.Flags().StringVarP(&agentImage, "image", "i", "", "Container image to use (overrides template)")
 	createCmd.Flags().StringVarP(&branch, "branch", "b", "", "Git branch to use for the agent workspace")
 	createCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path or project-relative subdirectory to mount as /workspace")
-	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
+	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 
+	// Model and thinking level (ptone/scion#378), as on scion start
+	createCmd.Flags().StringVar(&modelFlag, "model", "", "Model to use: alias (small, medium, large, extra-large/xl) or explicit model ID")
+	createCmd.Flags().StringVar(&thinkingLevelFlag, "thinking-level", "", thinkingLevelFlagUsage)
+
 	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+	createCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
@@ -361,8 +371,9 @@ func init() {
 
 	// Agent message mode flag
 	createCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
-		"Agent message mode: none, lineage, branch, project")
+		"Agent message mode: none, lineage, branch, project, hub\n"+
+			"Default: the template's mode, else the parent agent's, else 'project'.")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 }

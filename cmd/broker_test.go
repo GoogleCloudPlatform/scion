@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,7 +37,9 @@ func TestBrokerRestartCmdFlags(t *testing.T) {
 	// Verify restart command has the expected flags
 	portFlag := brokerRestartCmd.Flags().Lookup("port")
 	assert.NotNil(t, portFlag, "--port flag should be registered")
-	assert.Equal(t, "9800", portFlag.DefValue, "default port should be 9800")
+	// 0 means "not set": restart then keeps the running daemon's port
+	// (see resolveBrokerRestartOptions), else uses DefaultBrokerPort.
+	assert.Equal(t, "0", portFlag.DefValue, "unset --port should keep the daemon's port")
 
 	autoProvideFlag := brokerRestartCmd.Flags().Lookup("auto-provide")
 	assert.NotNil(t, autoProvideFlag, "--auto-provide flag should be registered")
@@ -56,4 +59,111 @@ func TestBrokerRestartCmdMetadata(t *testing.T) {
 
 func TestBrokerCmdLongDescriptionIncludesRestart(t *testing.T) {
 	assert.Contains(t, brokerCmd.Long, "restart")
+}
+
+// TestBuildBrokerForegroundArgsIncludesForeground is the regression guard for
+// a bug where `runtime-broker start --foreground` used to build the
+// underlying `server start` args without `--foreground`, so
+// serverStartCmd.RunE (runServerStartOrDaemon) daemonized instead of running
+// inline. Under a systemd Type=simple unit that meant the parent exited
+// immediately and the orphaned daemon child got reaped by cgroup cleanup.
+// --foreground must always be present, and first, regardless of the other
+// flags.
+func TestBuildBrokerForegroundArgsIncludesForeground(t *testing.T) {
+	got := buildBrokerForegroundArgs(DefaultBrokerPort, false, false)
+	assert.Equal(t, []string{"--foreground", "--hosted", "--enable-runtime-broker"}, got)
+	assert.Equal(t, "--foreground", got[0], "--foreground must be forwarded to the underlying server start invocation")
+}
+
+// TestBuildBrokerForegroundArgsForwardsAllFlags pins the full constructed
+// argv for every combination of the other runtime-broker start flags, so a
+// future change cannot silently drop --auto-provide, --debug, or the
+// non-default port the way --foreground was dropped.
+func TestBuildBrokerForegroundArgsForwardsAllFlags(t *testing.T) {
+	assert.Equal(t,
+		[]string{"--foreground", "--hosted", "--enable-runtime-broker", "--runtime-broker-port=9801", "--auto-provide", "--debug"},
+		buildBrokerForegroundArgs(9801, true, true),
+	)
+	assert.Equal(t,
+		[]string{"--foreground", "--hosted", "--enable-runtime-broker", "--auto-provide"},
+		buildBrokerForegroundArgs(DefaultBrokerPort, true, false),
+	)
+	assert.Equal(t,
+		[]string{"--foreground", "--hosted", "--enable-runtime-broker", "--debug"},
+		buildBrokerForegroundArgs(DefaultBrokerPort, false, true),
+	)
+}
+
+// TestBuildBrokerDaemonArgsForwardsAllFlags pins the argv used to launch (or
+// relaunch, on restart) the broker as a background daemon: the re-exec'd
+// child always runs with --foreground itself (daemon.Start is what
+// backgrounds it), and the other broker start/restart flags must survive.
+func TestBuildBrokerDaemonArgsForwardsAllFlags(t *testing.T) {
+	assert.Equal(t,
+		[]string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker"},
+		buildBrokerDaemonArgs(DefaultBrokerPort, false, false),
+	)
+	assert.Equal(t,
+		[]string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker", "--runtime-broker-port=9801", "--auto-provide", "--debug"},
+		buildBrokerDaemonArgs(9801, true, true),
+	)
+}
+
+// TestBrokerRegistrationCapabilities_IncludesEmptyPerAgentWorkspace pins
+// that the broker CLI reports emptyPerAgentWorkspace at join (design #2703
+// P2); the hub's capabilitiesFromStrings parses it.
+func TestBrokerRegistrationCapabilities_IncludesEmptyPerAgentWorkspace(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "emptyPerAgentWorkspace") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include emptyPerAgentWorkspace", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesReprovisionEmptyPerAgent pins
+// that the broker CLI reports reprovisionEmptyPerAgent at join
+// (miller79/scion#167). The join replaces the stored capabilities, so
+// without it a same-broker empty-per-agent reincarnate would get a spurious
+// 412 until the next heartbeat.
+func TestBrokerRegistrationCapabilities_IncludesReprovisionEmptyPerAgent(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "reprovisionEmptyPerAgent") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include reprovisionEmptyPerAgent", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesAgentMove pins that the broker
+// CLI reports agentMove at join (ptone/scion#2727); the hub refuses a move
+// unless both brokers report it.
+func TestBrokerRegistrationCapabilities_IncludesAgentMove(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "agentMove") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include agentMove", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesAgentMoveRecreate pins that
+// the broker CLI reports agentMoveRecreate at join, as its heartbeat does
+// (ptone/scion#5441); the hub refuses a forced move to a broker without it.
+func TestBrokerRegistrationCapabilities_IncludesAgentMoveRecreate(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "agentMoveRecreate") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include agentMoveRecreate", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesAsyncLaunch pins that the
+// broker CLI reports asyncLaunch at join, as its heartbeat does
+// (runtimebroker.StaticCapabilities), so the Hub knows it before the first
+// heartbeat (ptone/scion#2918).
+func TestBrokerRegistrationCapabilities_IncludesAsyncLaunch(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "asyncLaunch") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include asyncLaunch", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesAsyncStart pins that the
+// broker CLI reports asyncStart at join, as its heartbeat does
+// (runtimebroker.StaticCapabilities): the join replaces the stored
+// capabilities, so without it the Hub would read the broker as lacking
+// async start until the next heartbeat (ptone/scion#4669).
+func TestBrokerRegistrationCapabilities_IncludesAsyncStart(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "asyncStart") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include asyncStart", brokerRegistrationCapabilities())
+	}
 }

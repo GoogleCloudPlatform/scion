@@ -302,12 +302,12 @@ func (_q *ProjectQuery) WithAgents(opts ...func(*AgentQuery)) *ProjectQuery {
 // Example:
 //
 //	var v []struct {
-//		Name string `json:"name,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.Project.Query().
-//		GroupBy(project.FieldName).
+//		GroupBy(project.FieldFixtureRootID).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *ProjectQuery) GroupBy(field string, fields ...string) *ProjectGroupBy {
@@ -325,11 +325,11 @@ func (_q *ProjectQuery) GroupBy(field string, fields ...string) *ProjectGroupBy 
 // Example:
 //
 //	var v []struct {
-//		Name string `json:"name,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //	}
 //
 //	client.Project.Query().
-//		Select(project.FieldName).
+//		Select(project.FieldFixtureRootID).
 //		Scan(ctx, &v)
 func (_q *ProjectQuery) Select(fields ...string) *ProjectSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)

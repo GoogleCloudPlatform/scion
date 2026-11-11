@@ -1,0 +1,10 @@
+{"hook_event_name": "session.created", "session_id": "ses_f12e47017ffeENyRhXQiPOTPCy"}
+{"hook_event_name": "tool.execute.before", "tool_input": "{\"command\":\"ls -la\"}", "tool_name": "bash"}
+{"hook_event_name": "tool.execute.after", "success": true, "tool_name": "bash"}
+{"hook_event_name": "message.part.updated.step-finish", "input_tokens": 400, "model": "mockprov/mock-model", "output_tokens": 30, "reasoning_tokens": 5, "session_id": "ses_f12e47017ffeENyRhXQiPOTPCy"}
+{"hook_event_name": "tool.execute.before", "tool_input": "{\"filePath\":\"/workspace/project/README.md\"}", "tool_name": "read"}
+{"hook_event_name": "tool.execute.after", "success": true, "tool_name": "read"}
+{"cached_tokens": 384, "hook_event_name": "message.part.updated.step-finish", "input_tokens": 516, "model": "mockprov/mock-model", "output_tokens": 25, "session_id": "ses_f12e47017ffeENyRhXQiPOTPCy"}
+{"cached_tokens": 1152, "hook_event_name": "message.part.updated.step-finish", "input_tokens": 148, "model": "mockprov/mock-model", "output_tokens": 18, "session_id": "ses_f12e47017ffeENyRhXQiPOTPCy"}
+{"hook_event_name": "session.idle", "session_id": "ses_f12e47017ffeENyRhXQiPOTPCy"}
+{"hook_event_name": "session.created", "session_id": "ses_f12e465c5ffetIyJInJiFkk8xP"}

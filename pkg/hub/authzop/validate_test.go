@@ -37,6 +37,7 @@ func validSpec() OperationSpec {
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestOperation"}},
+		Bearer:           SessionOnly(ReasonInteractiveState),
 	}
 }
 
@@ -63,6 +64,7 @@ func validAuthoritySpec() OperationSpec {
 		},
 		DenialCodes: []DenialCode{DenialRoleAssignmentForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestGrant"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	}
 }
 
@@ -96,6 +98,7 @@ func validExternalSpec() OperationSpec {
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestDispatch"}},
+		Bearer:      SessionOnly(ReasonInteractiveState),
 	}
 }
 
@@ -367,11 +370,19 @@ func TestValidate_AllValidCredentialKinds(t *testing.T) {
 	kinds := []CredentialKind{
 		CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT,
 		CredentialBrokerToken, CredentialServiceAccount,
-		CredentialSystemInternal, CredentialIdentityToken,
+		CredentialSystemInternal, CredentialIdentityToken, CredentialDelegatedAgent,
+		CredentialWorkloadDelegation, CredentialFederatedUser,
 	}
 	for _, k := range kinds {
 		s := validSpec()
 		s.Credentials = []CredentialKind{k}
+		if k == CredentialScopedUAT {
+			s.Bearer = AdmitOn(BearerTargetProjectPath, BearerBoundaryProject)
+		}
+		if k == CredentialDelegatedAgent {
+			// Admitted only together with its principal kind.
+			s.Principals = append(s.Principals, PrincipalAgentDelegated)
+		}
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid credential %q caused error: %v", k, err)
 		}
@@ -843,6 +854,30 @@ func TestValidate_NonHTTPEntryPointWithoutMethod(t *testing.T) {
 	}
 }
 
+func TestValidate_EntryPointResponseSensitivity(t *testing.T) {
+	for _, r := range []ResponseSensitivity{"", ResponseCredential, ResponseCallerSpecific} {
+		s := validSpec()
+		s.EntryPoints[0].Response = r
+		if err := s.Validate(); err != nil {
+			t.Errorf("response %q: expected valid, got: %v", r, err)
+		}
+	}
+
+	s := validSpec()
+	s.EntryPoints[0].Response = "bogus"
+	err := s.Validate()
+	if err == nil || !strings.Contains(err.Error(), `unknown response sensitivity "bogus"`) {
+		t.Errorf("expected unknown response sensitivity error, got: %v", err)
+	}
+
+	s = validSpec()
+	s.EntryPoints = []EntryPoint{{Kind: EntryPointSchedulerJob, Pattern: "job", Response: ResponseCredential}}
+	err = s.Validate()
+	if err == nil || !strings.Contains(err.Error(), "response sensitivity is only valid on HTTP-like entry points, not scheduler_job") {
+		t.Errorf("expected non-HTTP response sensitivity error, got: %v", err)
+	}
+}
+
 // --- All-valid enum tests ---
 
 func TestValidate_AllValidEntryPointKinds(t *testing.T) {
@@ -863,6 +898,10 @@ func TestValidate_AllValidPrincipalKinds(t *testing.T) {
 	for k := range validPrincipalKinds {
 		s := validSpec()
 		s.Principals = []PrincipalKind{k}
+		if k == PrincipalAgentDelegated {
+			// Admitted only together with its credential kind.
+			s.Credentials = append(s.Credentials, CredentialDelegatedAgent)
+		}
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid principal kind %q caused error: %v", k, err)
 		}
@@ -1248,5 +1287,26 @@ func makeExternalPolicy() *ExternalEffectPolicy {
 		IdempotencyKey: "dispatch ID",
 		RetryPolicy:    "no retry",
 		AuthBeforeEmit: true,
+	}
+}
+
+// TestValidate_AgentDelegatedPairing: the agent delegated principal and
+// credential are admitted together or not at all.
+func TestValidate_AgentDelegatedPairing(t *testing.T) {
+	s := validSpec()
+	s.Principals = append(s.Principals, PrincipalAgentDelegated)
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "admitted together") {
+		t.Errorf("principal without credential: err = %v, want a pairing error", err)
+	}
+	s = validSpec()
+	s.Credentials = append(s.Credentials, CredentialDelegatedAgent)
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "admitted together") {
+		t.Errorf("credential without principal: err = %v, want a pairing error", err)
+	}
+	s = validSpec()
+	s.Principals = append(s.Principals, PrincipalAgentDelegated)
+	s.Credentials = append(s.Credentials, CredentialDelegatedAgent)
+	if err := s.Validate(); err != nil {
+		t.Errorf("paired kinds: unexpected error %v", err)
 	}
 }

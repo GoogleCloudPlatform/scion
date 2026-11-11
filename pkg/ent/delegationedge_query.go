@@ -265,12 +265,12 @@ func (_q *DelegationEdgeQuery) Clone() *DelegationEdgeQuery {
 // Example:
 //
 //	var v []struct {
-//		DelegatorType delegationedge.DelegatorType `json:"delegator_type,omitempty"`
+//		ProvenanceVersion int `json:"provenance_version,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.DelegationEdge.Query().
-//		GroupBy(delegationedge.FieldDelegatorType).
+//		GroupBy(delegationedge.FieldProvenanceVersion).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *DelegationEdgeQuery) GroupBy(field string, fields ...string) *DelegationEdgeGroupBy {
@@ -288,11 +288,11 @@ func (_q *DelegationEdgeQuery) GroupBy(field string, fields ...string) *Delegati
 // Example:
 //
 //	var v []struct {
-//		DelegatorType delegationedge.DelegatorType `json:"delegator_type,omitempty"`
+//		ProvenanceVersion int `json:"provenance_version,omitempty"`
 //	}
 //
 //	client.DelegationEdge.Query().
-//		Select(delegationedge.FieldDelegatorType).
+//		Select(delegationedge.FieldProvenanceVersion).
 //		Scan(ctx, &v)
 func (_q *DelegationEdgeQuery) Select(fields ...string) *DelegationEdgeSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)

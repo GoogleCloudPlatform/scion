@@ -24,9 +24,61 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import {
+  PROJECT_VISITORS_FLAG,
+  issuerTypeAllowsVisitorGrants,
+} from '../../shared/project-visitors.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  classifySettingsError,
+  fieldErrorMessages,
+  genericSaveErrorText,
+  sectionPathsFromSchema,
+} from '../../shared/settings-save-errors.js';
+import { diffPayload } from '../../shared/settings-diff.js';
+import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
+import { revisionsFromMetadata } from '../../shared/settings-dirty.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
+import {
+  envBadgeStyles,
+  readOnlyFieldStyles,
+  renderEnvBadge,
+  renderEnvBadgeUnder,
+  renderEnvLockBadge,
+  renderKeysEnvBadge,
+} from '../shared/env-badge-views.js';
+import {
+  type EnvKeyValue,
+  envValueFor,
+  formatEnvValue,
+  hasInEffect,
+} from './admin-server-config-env-values.js';
+
+/** koanf prefix of the federation settings the page edits. */
+const FED = 'server.federation';
+const ISSUERS_KEY = `${FED}.trusted_issuers`;
+
+/** The primary value of a locked field whose environment value the GET does not report. */
+export const ENV_VALUE_NOT_REPORTED = 'Environment value not reported';
+
+/** The global federation fields (API names under server.federation). */
+type FedLeaf = 'enabled' | 'algorithms' | 'refresh_interval' | 'debounce_interval';
+const FED_LEAVES: readonly FedLeaf[] = [
+  'enabled',
+  'algorithms',
+  'refresh_interval',
+  'debounce_interval',
+];
 
 // ── Type definitions matching the Go API response ──
 
@@ -38,9 +90,32 @@ interface TrustedIssuerConfig {
   allowed_root_users?: string[];
   default_scopes?: string[];
   issuer_type?: string;
+  /**
+   * Accepted by the hub for compatibility and ignored. The page no longer
+   * edits it; an existing value is kept as stored.
+   */
   default_role?: string;
   allowed_emails?: string[];
+  allowed_gcp_projects?: string[];
+  allowed_domains?: string[];
+  accept_user_tokens?: boolean;
+  /**
+   * Lets project owners and admins grant visitor access to users of this
+   * issuer (ptone/scion#4603). Only for issuer_type user or hub.
+   */
+  allow_visitor_grants?: boolean;
 }
+
+/**
+ * The issuer label of the visitor access toggle in the issuer dialog.
+ * Exported for tests.
+ */
+export const ALLOW_VISITOR_GRANTS_LABEL =
+  'Allow project owners to grant visitor access to users from this issuer';
+
+/** The hint under the visitor access toggle. */
+const ALLOW_VISITOR_GRANTS_HINT =
+  'Off by default. While off, project owners cannot add visitors from this issuer, and its existing visitors are refused until it is turned back on.';
 
 @customElement('scion-page-admin-federation')
 export class ScionPageAdminFederation extends LitElement {
@@ -60,6 +135,19 @@ export class ScionPageAdminFederation extends LitElement {
   // Trusted issuers list
   @state() private issuers: TrustedIssuerConfig[] = [];
 
+  // The federation values as loaded (after the defaults above were applied
+  // for keys GET left out). A save sends only the keys that differ from it,
+  // so a default is never written unless the user edits it, and a save
+  // leaves the keys it omits as stored (ptone/scion#3913).
+  private loadedFederation: Record<string, unknown> = {};
+
+  // Environment overrides from the same GET (ptone/scion#3837): the keys a
+  // SCION_SERVER_* variable sets on the node that served the page, and per
+  // key its value and whether the hub runs with it.
+  @state() private envOverrides: string[] = [];
+  @state() private envValues: Record<string, EnvKeyValue> = {};
+  @state() private settingsTier: 'db' | 'file' | undefined = undefined;
+
   // Add/Edit dialog state
   @state() private dialogOpen = false;
   @state() private editingIssuer: TrustedIssuerConfig | null = null;
@@ -72,10 +160,28 @@ export class ScionPageAdminFederation extends LitElement {
   // URL validation state
   @state() private issuerUrlError: string | null = null;
 
+  // Structured error from the last failed save (ptone/scion#3923)
+  @state() private saveError: SettingsSaveError | null = null;
+  /**
+   * The federation section's revision at load, sent as expected_revisions so
+   * a change another admin saved meanwhile answers 409 (ptone/scion#3922):
+   * the stored revision, 0 when no row is stored (create-only), null on a
+   * file-tier hub (no revisions, nothing sent).
+   */
+  private federationRevision: number | null = null;
+  // Section -> koanf paths from the schema endpoint, fetched on the first
+  // validation error so its path can be placed at its field (see
+  // sectionKoanfPaths()).
+  private sectionKoanfPathsPromise: Promise<Record<string, string[]> | undefined> | null = null;
+
   // Timer cleanup
   private successMessageTimer: ReturnType<typeof setTimeout> | null = null;
 
   static override styles = css`
+    ${settingsErrorStyles}
+    ${envBadgeStyles}
+    ${readOnlyFieldStyles}
+
     :host {
       display: block;
     }
@@ -201,6 +307,17 @@ export class ScionPageAdminFederation extends LitElement {
       background: var(--scion-surface, #ffffff);
     }
 
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      sl-input::part(base),
+      sl-select::part(combobox) {
+        font-size: max(16px, 0.875rem);
+      }
+    }
+
     sl-input::part(input) {
       color: var(--scion-text, #1e293b);
     }
@@ -320,6 +437,10 @@ export class ScionPageAdminFederation extends LitElement {
       white-space: nowrap;
     }
 
+    .issuer-url-cell .field-error {
+      white-space: normal;
+    }
+
     .form-field.mb-1 {
       margin-bottom: 1rem;
     }
@@ -354,6 +475,44 @@ export class ScionPageAdminFederation extends LitElement {
 
   // --- Data ---
 
+  /**
+   * The section -> koanf mapping, fetched at most once per page instance:
+   * the attempt is memoized as one promise, so overlapping saves share it.
+   * Failure policy: no retry. A failed or malformed fetch resolves to
+   * undefined for the rest of the page's life, and validation entries are
+   * then shown in the section summary only.
+   */
+  private sectionKoanfPaths(): Promise<Record<string, string[]> | undefined> {
+    this.sectionKoanfPathsPromise ??= (async () => {
+      try {
+        const res = await apiFetch('/api/v1/admin/server-config/schema');
+        return res.ok ? sectionPathsFromSchema(await res.json()) : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    return this.sectionKoanfPathsPromise;
+  }
+
+  /**
+   * Classifies a failed save. Only a validation error needs the section
+   * mapping, so other errors (500, 409, layer0) are shown without waiting
+   * for the schema fetch.
+   */
+  private async classifySaveError(res: Response): Promise<SettingsSaveError> {
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    const ctx = { defaultSection: 'federation' };
+    const err = classifySettingsError(res.status, body, ctx);
+    if (err.kind !== 'validation') return err;
+    const sectionKoanfPaths = await this.sectionKoanfPaths();
+    return classifySettingsError(res.status, body, { ...ctx, sectionKoanfPaths });
+  }
+
   private async loadData(showSpinner = true): Promise<void> {
     if (showSpinner) {
       this.loading = true;
@@ -373,14 +532,28 @@ export class ScionPageAdminFederation extends LitElement {
           debounce_interval?: string;
           trusted_issuers?: TrustedIssuerConfig[];
         };
+        settings_tier?: 'db' | 'file';
+        env_overrides?: string[];
+        env_values?: Record<string, EnvKeyValue>;
+        section_metadata?: Record<string, { source?: string; revision?: number }>;
       };
-      if (data.federation) {
-        this.enabled = data.federation.enabled ?? false;
-        this.algorithms = data.federation.algorithms ?? ['RS256'];
-        this.refreshInterval = data.federation.refresh_interval ?? '1h';
-        this.debounceInterval = data.federation.debounce_interval ?? '5s';
-        this.issuers = data.federation.trusted_issuers ?? [];
-      }
+      this.federationRevision =
+        data.settings_tier === 'db'
+          ? (revisionsFromMetadata(data.section_metadata).federation ?? 0)
+          : null;
+      // GET leaves the whole block out when federation is unconfigured;
+      // every field then shows its default (and is reset, so values from
+      // before a save that removed them do not linger).
+      const fed = data.federation ?? {};
+      this.enabled = fed.enabled ?? false;
+      this.algorithms = fed.algorithms ?? ['RS256'];
+      this.refreshInterval = fed.refresh_interval ?? '1h';
+      this.debounceInterval = fed.debounce_interval ?? '5s';
+      this.issuers = fed.trusted_issuers ?? [];
+      this.settingsTier = data.settings_tier;
+      this.envOverrides = data.env_overrides ?? [];
+      this.envValues = data.env_values ?? {};
+      this.loadedFederation = this.federationFormValues();
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
@@ -388,43 +561,127 @@ export class ScionPageAdminFederation extends LitElement {
     }
   }
 
+  /** The form's federation values, keyed by their API names. */
+  private federationFormValues(): Record<string, unknown> {
+    return {
+      enabled: this.enabled,
+      trusted_issuers: this.issuers,
+      algorithms: this.algorithms,
+      refresh_interval: this.refreshInterval,
+      debounce_interval: this.debounceInterval,
+    };
+  }
+
+  /**
+   * The federation keys to save: only those that differ from the loaded
+   * values. A cleared key is still sent explicitly (false, [] or ''), which
+   * clears it on the hub.
+   */
+  private buildFederationPayload(): Record<string, unknown> {
+    const payload = diffPayload(this.federationFormValues(), this.loadedFederation);
+    // A key whose environment value is in effect is read-only and never
+    // sent: the hub would store it, but would not run with it.
+    for (const leaf of FED_LEAVES) {
+      if (this.envLocked(leaf)) delete payload[leaf];
+    }
+    return payload;
+  }
+
+  /**
+   * Whether the environment value of a global federation field is the
+   * value the hub runs with on this node. Only then is the field read-only.
+   * The server reports it per key (in_effect). For an entry with no
+   * reported state, the tier decides: on a file-tier hub the environment
+   * wins over settings.yaml, while on a DB-backed hub federation is a
+   * Layer-1 section and the saved value wins.
+   */
+  private envLocked(leaf: FedLeaf): boolean {
+    const key = `${FED}.${leaf}`;
+    if (!this.envOverrides.includes(key)) return false;
+    const found = envValueFor(this.envValues, [key]);
+    if (found && hasInEffect(found.ev)) return found.ev.in_effect;
+    return this.settingsTier !== 'db';
+  }
+
+  /**
+   * A global federation field: its control, or, when the environment value
+   * is in effect, that value read-only (the stored value only as a
+   * secondary line, when one exists and differs). An editable field whose
+   * key the environment sets shows the badge and the environment value
+   * line, which says the saved value wins.
+   */
+  private renderFedField(
+    leaf: FedLeaf,
+    storedDisplay: string,
+    control: TemplateResult
+  ): TemplateResult {
+    const key = `${FED}.${leaf}`;
+    if (this.envLocked(leaf)) {
+      const found = envValueFor(this.envValues, [key]);
+      const ev = found?.ev;
+      // With no env_values entry the page has no environment value to show;
+      // the stored value is not it, so it is never shown as primary.
+      return html`${renderEnvLockBadge()}${renderEnvBadge()}<span
+          class="read-only-value env-value-primary"
+          >${ev ? formatEnvValue(ev) || '—' : ENV_VALUE_NOT_REPORTED}</span
+        >${ev?.saved_differs
+          ? html`<span class="hint env-value-saved"
+              >${this.settingsTier === 'db' ? 'Saved value' : 'settings.yaml value'}, not in effect
+              on this node: <code>${storedDisplay || '—'}</code></span
+            >`
+          : nothing}`;
+    }
+    return html`${renderKeysEnvBadge(this.envOverrides, this.envValues, [key])}${control}`;
+  }
+
   private async save(): Promise<void> {
-    this.saving = true;
     this.error = null;
+    this.saveError = null;
     this.successMessage = null;
+    const federation = this.buildFederationPayload();
+    if (Object.keys(federation).length === 0) {
+      this.showSuccess('No changes to save');
+      return;
+    }
+    this.saving = true;
     try {
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          federation: {
-            enabled: this.enabled,
-            trusted_issuers: this.issuers,
-            algorithms: this.algorithms,
-            refresh_interval: this.refreshInterval,
-            debounce_interval: this.debounceInterval,
-          },
-        }),
+        body: JSON.stringify(
+          this.federationRevision === null
+            ? { federation }
+            : { federation, expected_revisions: { federation: this.federationRevision } }
+        ),
       });
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to save federation config');
+        const err = await this.classifySaveError(res);
+        if (err.kind === 'generic') {
+          this.error = genericSaveErrorText(err, 'Failed to save federation config');
+        } else {
+          this.saveError = err;
+        }
         return;
       }
       // Reload server state so server-side normalization is reflected
       await this.loadData(false);
-      this.successMessage = 'Federation config saved successfully';
-      if (this.successMessageTimer !== null) {
-        clearTimeout(this.successMessageTimer);
-      }
-      this.successMessageTimer = setTimeout(() => {
-        this.successMessage = null;
-        this.successMessageTimer = null;
-      }, 3000);
+      this.showSuccess('Federation config saved successfully');
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
       this.saving = false;
     }
+  }
+
+  private showSuccess(message: string): void {
+    this.successMessage = message;
+    if (this.successMessageTimer !== null) {
+      clearTimeout(this.successMessageTimer);
+    }
+    this.successMessageTimer = setTimeout(() => {
+      this.successMessage = null;
+      this.successMessageTimer = null;
+    }, 3000);
   }
 
   // --- Issuer CRUD ---
@@ -449,8 +706,8 @@ export class ScionPageAdminFederation extends LitElement {
       allowed_root_users: issuer.allowed_root_users ? [...issuer.allowed_root_users] : [],
       default_scopes: issuer.default_scopes ? [...issuer.default_scopes] : [],
       issuer_type: issuer.issuer_type ?? 'hub',
-      default_role: issuer.default_role ?? '',
       allowed_emails: issuer.allowed_emails ? [...issuer.allowed_emails] : [],
+      allow_visitor_grants: issuer.allow_visitor_grants === true,
     };
     this.editingIndex = index;
     this.dialogOpen = true;
@@ -480,6 +737,27 @@ export class ScionPageAdminFederation extends LitElement {
       issuer_url: this.editingIssuer.issuer_url.trim(),
     };
 
+    // Fields the dialog does not edit are kept as stored on an existing
+    // issuer (default_role is accepted by the hub and ignored), as long as
+    // the hub still accepts them for the issuer type being saved: they are
+    // dropped when the type changes, and accept_user_tokens is kept only
+    // on a hub issuer ("" means hub). The dialog cannot show or clear them.
+    const stored = this.editingIndex >= 0 ? this.issuers[this.editingIndex] : undefined;
+    const newType = this.editingIssuer.issuer_type || 'hub';
+    const typeUnchanged = stored !== undefined && (stored.issuer_type || 'hub') === newType;
+    if (typeUnchanged && stored?.default_role) {
+      issuer.default_role = stored.default_role;
+    }
+    if (typeUnchanged && stored?.allowed_gcp_projects && stored.allowed_gcp_projects.length > 0) {
+      issuer.allowed_gcp_projects = [...stored.allowed_gcp_projects];
+    }
+    if (typeUnchanged && stored?.allowed_domains && stored.allowed_domains.length > 0) {
+      issuer.allowed_domains = [...stored.allowed_domains];
+    }
+    if (stored?.accept_user_tokens === true && newType === 'hub') {
+      issuer.accept_user_tokens = true;
+    }
+
     if (this.editingIssuer.issuer_type) {
       issuer.issuer_type = this.editingIssuer.issuer_type;
     }
@@ -498,11 +776,15 @@ export class ScionPageAdminFederation extends LitElement {
     if (this.editingIssuer.default_scopes && this.editingIssuer.default_scopes.length > 0) {
       issuer.default_scopes = this.editingIssuer.default_scopes;
     }
-    if (this.editingIssuer.default_role?.trim()) {
-      issuer.default_role = this.editingIssuer.default_role.trim();
-    }
     if (this.editingIssuer.allowed_emails && this.editingIssuer.allowed_emails.length > 0) {
       issuer.allowed_emails = this.editingIssuer.allowed_emails;
+    }
+    // The hub refuses allow_visitor_grants on a service_account issuer.
+    if (
+      this.editingIssuer.allow_visitor_grants === true &&
+      issuerTypeAllowsVisitorGrants(issuer.issuer_type)
+    ) {
+      issuer.allow_visitor_grants = true;
     }
 
     const updated = [...this.issuers];
@@ -580,9 +862,43 @@ export class ScionPageAdminFederation extends LitElement {
 
   // --- Render ---
 
+  /** Validation entries from the last failed save, or [] when there are none. */
+  private get fieldErrors(): SettingsFieldError[] {
+    return this.saveError?.kind === 'validation' ? this.saveError.fieldErrors : [];
+  }
+
+  private renderFedFieldErrors(leaf: string): TemplateResult | typeof nothing {
+    return renderFieldErrorMessages(fieldErrorMessages(this.fieldErrors, `${FED}.${leaf}`), leaf);
+  }
+
+  /** Errors for one trusted issuer row (keys below trusted_issuers.<index>). */
+  private issuerErrors(index: number): string[] {
+    return fieldErrorMessages(this.fieldErrors, `${ISSUERS_KEY}.${index}`);
+  }
+
+  private isIssuerError(e: SettingsFieldError): boolean {
+    return e.key !== null && (e.key === ISSUERS_KEY || e.key.startsWith(`${ISSUERS_KEY}.`));
+  }
+
+  private reloadAfterConflict(): void {
+    this.saveError = null;
+    this.error = null;
+    this.successMessage = null;
+    void this.loadData();
+  }
+
+  private renderSaveError(): TemplateResult | typeof nothing {
+    const err = this.saveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') return renderConflictNotice(err, () => this.reloadAfterConflict());
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return nothing;
+  }
+
   override render() {
     return html`
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
+      ${this.renderSaveError()}
       ${this.successMessage
         ? html`<div class="status-message success">${this.successMessage}</div>`
         : nothing}
@@ -637,36 +953,50 @@ export class ScionPageAdminFederation extends LitElement {
             Download JWKS
           </sl-button>
         </div>
+        ${renderSectionErrorSummary(
+          this.fieldErrors.filter((e) => !this.isIssuerError(e)),
+          'federation'
+        )}
 
         <div class="form-field mb-1">
-          <sl-switch
-            ?checked=${this.enabled}
-            @sl-change=${(e: Event) => {
-              this.enabled = (e.target as HTMLInputElement).checked;
-            }}
-          >
-            Enabled
-          </sl-switch>
+          ${this.renderFedField(
+            'enabled',
+            this.enabled ? 'Enabled' : 'Disabled',
+            html`<sl-switch
+              ?checked=${this.enabled}
+              @sl-change=${(e: Event) => {
+                this.enabled = (e.target as HTMLInputElement).checked;
+              }}
+            >
+              Enabled
+            </sl-switch>`
+          )}
           <span class="hint">Enable or disable federation authentication globally.</span>
+          ${this.renderFedFieldErrors('enabled')}
         </div>
 
         <div class="form-grid">
           <div class="form-field">
             <label>Algorithms</label>
-            <sl-select
-              multiple
-              .value=${this.algorithms.join(' ')}
-              @sl-change=${(e: Event) => {
-                const value = (e.target as HTMLSelectElement).value;
-                this.algorithms = Array.isArray(value)
-                  ? (value as string[])
-                  : value.split(' ').filter(Boolean);
-              }}
-            >
-              <sl-option value="RS256">RS256</sl-option>
-              <sl-option value="ES256">ES256</sl-option>
-            </sl-select>
+            ${this.renderFedField(
+              'algorithms',
+              this.algorithms.join(', '),
+              html`<sl-select
+                multiple
+                .value=${this.algorithms.join(' ')}
+                @sl-change=${(e: Event) => {
+                  const value = (e.target as HTMLSelectElement).value;
+                  this.algorithms = Array.isArray(value)
+                    ? (value as string[])
+                    : value.split(' ').filter(Boolean);
+                }}
+              >
+                <sl-option value="RS256">RS256</sl-option>
+                <sl-option value="ES256">ES256</sl-option>
+              </sl-select>`
+            )}
             <span class="hint">Allowed JWT signing algorithms.</span>
+            ${this.renderFedFieldErrors('algorithms')}
           </div>
         </div>
 
@@ -675,25 +1005,35 @@ export class ScionPageAdminFederation extends LitElement {
           <div class="cache-row">
             <div class="form-field">
               <label>Refresh Interval</label>
-              <sl-input
-                .value=${this.refreshInterval}
-                placeholder="1h"
-                @sl-change=${(e: Event) => {
-                  this.refreshInterval = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>
+              ${this.renderFedField(
+                'refresh_interval',
+                this.refreshInterval,
+                html`<sl-input
+                  .value=${this.refreshInterval}
+                  placeholder="1h"
+                  @sl-change=${(e: Event) => {
+                    this.refreshInterval = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
+              )}
               <span class="hint">How often to refresh JWKS keys (e.g. 1h, 30m).</span>
+              ${this.renderFedFieldErrors('refresh_interval')}
             </div>
             <div class="form-field">
               <label>Debounce Interval</label>
-              <sl-input
-                .value=${this.debounceInterval}
-                placeholder="5s"
-                @sl-change=${(e: Event) => {
-                  this.debounceInterval = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>
+              ${this.renderFedField(
+                'debounce_interval',
+                this.debounceInterval,
+                html`<sl-input
+                  .value=${this.debounceInterval}
+                  placeholder="5s"
+                  @sl-change=${(e: Event) => {
+                    this.debounceInterval = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
+              )}
               <span class="hint">Minimum delay between JWKS fetches (e.g. 5s).</span>
+              ${this.renderFedFieldErrors('debounce_interval')}
             </div>
           </div>
         </div>
@@ -713,7 +1053,11 @@ export class ScionPageAdminFederation extends LitElement {
             Add Issuer
           </sl-button>
         </div>
-
+        ${renderSectionErrorSummary(
+          this.fieldErrors.filter((e) => this.isIssuerError(e)),
+          'trusted_issuers'
+        )}
+        ${renderEnvBadgeUnder(this.envOverrides, this.envValues, ISSUERS_KEY)}
         ${this.issuers.length === 0
           ? html`
               <div class="empty-state">
@@ -741,6 +1085,10 @@ export class ScionPageAdminFederation extends LitElement {
                       <tr>
                         <td class="issuer-url-cell" title=${issuer.issuer_url}>
                           ${issuer.issuer_url}
+                          ${renderFieldErrorMessages(
+                            this.issuerErrors(index),
+                            `trusted_issuers.${index}`
+                          )}
                         </td>
                         <td>${issuer.issuer_type ?? 'hub'}</td>
                         <td>
@@ -887,7 +1235,9 @@ export class ScionPageAdminFederation extends LitElement {
                 ${issuerType === 'service_account' || issuerType === 'user'
                   ? this.renderEmailFields()
                   : nothing}
-                ${issuerType === 'user' ? this.renderUserFields() : nothing}
+                ${this.showVisitorGrantsField(issuerType)
+                  ? this.renderVisitorGrantsField()
+                  : nothing}
 
                 <div class="form-field">
                   <label>Default Scopes</label>
@@ -989,25 +1339,31 @@ export class ScionPageAdminFederation extends LitElement {
     `;
   }
 
-  private renderUserFields() {
+  /**
+   * The visitor access toggle applies to user and hub issuers, and is shown
+   * only while the federation.project_visitors experiment is on. While it
+   * is hidden, a stored value is kept unchanged.
+   */
+  private showVisitorGrantsField(issuerType: string): boolean {
+    return issuerTypeAllowsVisitorGrants(issuerType) && isFeatureEnabled(PROJECT_VISITORS_FLAG);
+  }
+
+  private renderVisitorGrantsField() {
     return html`
-      <div class="form-field" style="margin-top: 0.5rem;">
-        <label>Default Role</label>
-        <sl-select
-          .value=${this.editingIssuer?.default_role ?? ''}
-          placeholder="Select a default role"
+      <div class="form-field" data-visitor-grants-field>
+        <sl-switch
+          data-allow-visitor-grants
+          ?checked=${this.editingIssuer?.allow_visitor_grants === true}
           @sl-change=${(e: Event) => {
             this.editingIssuer = {
               ...this.editingIssuer!,
-              default_role: (e.target as HTMLSelectElement).value,
+              allow_visitor_grants: (e.target as HTMLInputElement).checked,
             };
           }}
         >
-          <sl-option value="admin">Admin</sl-option>
-          <sl-option value="member">Member</sl-option>
-          <sl-option value="viewer">Viewer</sl-option>
-        </sl-select>
-        <span class="hint">Default role assigned to users authenticating via this issuer.</span>
+          ${ALLOW_VISITOR_GRANTS_LABEL}
+        </sl-switch>
+        <span class="hint">${ALLOW_VISITOR_GRANTS_HINT}</span>
       </div>
     `;
   }

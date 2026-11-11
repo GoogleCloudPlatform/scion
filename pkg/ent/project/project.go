@@ -16,6 +16,10 @@ const (
 	Label = "project"
 	// FieldID holds the string denoting the id field in the database.
 	FieldID = "id"
+	// FieldFixtureRootID holds the string denoting the fixture_root_id field in the database.
+	FieldFixtureRootID = "fixture_root_id"
+	// FieldFixtureIssuerID holds the string denoting the fixture_issuer_id field in the database.
+	FieldFixtureIssuerID = "fixture_issuer_id"
 	// FieldName holds the string denoting the name field in the database.
 	FieldName = "name"
 	// FieldSlug holds the string denoting the slug field in the database.
@@ -66,6 +70,8 @@ const (
 // Columns holds all SQL columns for project fields.
 var Columns = []string{
 	FieldID,
+	FieldFixtureRootID,
+	FieldFixtureIssuerID,
 	FieldName,
 	FieldSlug,
 	FieldGitRemote,
@@ -145,6 +151,16 @@ type OrderOption func(*sql.Selector)
 // ByID orders the results by the id field.
 func ByID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldID, opts...).ToFunc()
+}
+
+// ByFixtureRootID orders the results by the fixture_root_id field.
+func ByFixtureRootID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureRootID, opts...).ToFunc()
+}
+
+// ByFixtureIssuerID orders the results by the fixture_issuer_id field.
+func ByFixtureIssuerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureIssuerID, opts...).ToFunc()
 }
 
 // ByName orders the results by the name field.

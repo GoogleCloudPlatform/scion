@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
 func writeTestFile(t *testing.T, path, content string) {
@@ -116,6 +118,98 @@ func TestRunHarnessProvision_RejectsManifestWithEscapingPaths(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "escapes allowed roots") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateManifestPaths_SeparatorBoundary(t *testing.T) {
+	home := "/home/agent"
+	bundleRoot := "/home/agent/.scion/harness"
+	extraRoot := "/run/scion/mem/outputs"
+
+	tests := []struct {
+		name    string
+		mutate  func(m *containerProvisionManifest)
+		extra   []string // extra roots; nil means {extraRoot}
+		wantErr bool
+	}{
+		{
+			name: "sibling home directory prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent_victim/confidential.json"
+			},
+			wantErr: true,
+		},
+		{
+			name: "sibling bundle directory prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.HarnessBundleDir = "/home/agent_victim/.scion/harness"
+			},
+			wantErr: true,
+		},
+		{
+			name: "sibling extraRoot prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.Outputs.Env = "/run/scion/mem/outputs_other/env.json"
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid nested paths",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent/auth.json"
+				m.Outputs.Env = "/run/scion/mem/outputs/env.json"
+				m.Outputs.ResolvedAuth = "/home/agent/.scion/harness/outputs/auth.json"
+			},
+			wantErr: false,
+		},
+		{
+			name: "exact home and extra roots",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = home
+				m.Outputs.Env = extraRoot
+			},
+			wantErr: false,
+		},
+		{
+			name: "dot-dot-prefixed name directly under root is inside",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent/..foo/auth.json"
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty extra root does not accept outside paths",
+			mutate: func(m *containerProvisionManifest) {
+				m.Outputs.Env = "/etc/outside/env.json"
+			},
+			extra:   []string{""},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &containerProvisionManifest{
+				HarnessBundleDir: bundleRoot,
+				Inputs:           map[string]string{},
+				Outputs: containerOutputs{
+					Env:          filepath.Join(bundleRoot, "outputs", "env.json"),
+					ResolvedAuth: filepath.Join(bundleRoot, "outputs", "resolved-auth.json"),
+				},
+			}
+			tt.mutate(m)
+			extra := tt.extra
+			if extra == nil {
+				extra = []string{extraRoot}
+			}
+			err := validateManifestPaths(m, bundleRoot, home, extra...)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateManifestPaths() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), "escapes allowed roots") {
+				t.Errorf("expected 'escapes allowed roots' in error, got: %v", err)
+			}
+		})
 	}
 }
 
@@ -358,5 +452,256 @@ func TestScrubSecrets_RedactsAuthCandidateValues(t *testing.T) {
 	}
 	if !strings.Contains(scrubbed, "[REDACTED]") {
 		t.Errorf("missing redaction marker: %q", scrubbed)
+	}
+}
+
+// TestRunHarnessProvision_HarnessOutputsDirEnv checks that with
+// SCION_HARNESS_OUTPUTS_DIR set the provisioner sees the variable and its
+// outputs are validated there, and the bundle's outputs/ is not used.
+func TestRunHarnessProvision_HarnessOutputsDirEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		wantErr string
+	}{{"valid", `{"K":"v"}`, ""}, {"invalid", "not-json", "invalid env output"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			memRoot := t.TempDir()
+			t.Cleanup(hooks.SetHarnessDirsRootForTest(memRoot))
+			outDir := filepath.Join(memRoot, "outputs")
+			t.Setenv("SCION_HARNESS_OUTPUTS_DIR", outDir)
+			t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+
+			bundle := filepath.Join(home, ".scion", "harness")
+			scriptPath := filepath.Join(bundle, "provision.sh")
+			writeTestFile(t, scriptPath, "#!/bin/sh\nmkdir -p \"$SCION_HARNESS_OUTPUTS_DIR\"\nprintf '"+tc.content+"' > \"$SCION_HARNESS_OUTPUTS_DIR/env.json\"\nexit 0\n")
+			if err := os.Chmod(scriptPath, 0755); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := writeManifest(t, bundle, baseManifest(t, home, scriptPath))
+
+			err := runHarnessProvision(context.Background(), manifestPath)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("runHarnessProvision: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if _, err := os.Stat(filepath.Join(outDir, "env.json")); err != nil {
+				t.Errorf("output not in SCION_HARNESS_OUTPUTS_DIR: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(bundle, "outputs")); err == nil {
+				t.Error("bundle outputs/ was used")
+			}
+		})
+	}
+}
+
+func TestRunHarnessProvision_RelativeHarnessDirRejected(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS_OUTPUTS_DIR", "outputs")
+	bundle := filepath.Join(home, ".scion", "harness")
+	scriptPath := filepath.Join(bundle, "noop.sh")
+	writeTestFile(t, scriptPath, "#!/bin/sh\nexit 0\n")
+	_ = os.Chmod(scriptPath, 0755)
+	err := runHarnessProvision(context.Background(), writeManifest(t, bundle, baseManifest(t, home, scriptPath)))
+	if err == nil || !strings.Contains(err.Error(), "SCION_HARNESS_OUTPUTS_DIR must be an absolute path") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestRunHarnessProvision_HarnessDirOutsideMemDirRejected checks that a
+// directory override outside the in-memory directory stops provisioning
+// before the provisioner runs.
+func TestRunHarnessProvision_HarnessDirOutsideMemDirRejected(t *testing.T) {
+	for _, tc := range []struct{ env, value string }{
+		{"SCION_HARNESS_OUTPUTS_DIR", "/"},
+		{"SCION_HARNESS_OUTPUTS_DIR", "/etc"},
+		{"SCION_HARNESS_SECRETS_DIR", "/run/scion/mem/../agent-secrets"},
+		{"SCION_HARNESS_SECRETS_DIR", "/run/scion/memx"},
+	} {
+		t.Run(tc.env+"="+tc.value, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_HARNESS_OUTPUTS_DIR", "")
+			t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+			t.Setenv(tc.env, tc.value)
+			bundle := filepath.Join(home, ".scion", "harness")
+			ran := filepath.Join(home, "ran")
+			scriptPath := filepath.Join(bundle, "touch.sh")
+			writeTestFile(t, scriptPath, "#!/bin/sh\ntouch '"+ran+"'\nexit 0\n")
+			_ = os.Chmod(scriptPath, 0755)
+			err := runHarnessProvision(context.Background(), writeManifest(t, bundle, baseManifest(t, home, scriptPath)))
+			if err == nil || !strings.Contains(err.Error(), tc.env+" must be a directory below /run/scion/mem") {
+				t.Fatalf("err = %v", err)
+			}
+			if _, err := os.Stat(ran); err == nil {
+				t.Error("provisioner ran")
+			}
+		})
+	}
+}
+
+// TestScrubSecrets_HarnessSecretsDir checks that staged secret values are
+// read from the bundle's secrets/ always, and also from
+// SCION_HARNESS_SECRETS_DIR when it is set.
+func TestScrubSecrets_HarnessSecretsDir(t *testing.T) {
+	home := t.TempDir()
+	bundle := filepath.Join(home, ".scion", "harness")
+	memRoot := t.TempDir()
+	t.Cleanup(hooks.SetHarnessDirsRootForTest(memRoot))
+	memDir := filepath.Join(memRoot, "harness-secrets")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "bundle-secret-value\n")
+	writeTestFile(t, filepath.Join(memDir, "A"), "memory-secret-value\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+	const line = "bundle-secret-value memory-secret-value"
+
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	if got := scrubSecrets(line, m); got != "[REDACTED] memory-secret-value" {
+		t.Errorf("unset: %q", got)
+	}
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", memDir)
+	if got := scrubSecrets(line, m); got != "[REDACTED] [REDACTED]" {
+		t.Errorf("set: %q", got)
+	}
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "/etc")
+	if got := scrubSecrets(line, m); got != "[REDACTED] memory-secret-value" {
+		t.Errorf("rejected override: %q", got)
+	}
+}
+
+// A multi-line staged file is masked as a whole and line by line, so a
+// single line of it in the output is masked too.
+func TestScrubSecrets_MultiLineStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"),
+		"placeholder-line-one-value\n  placeholder-line-two-value \r\n\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("found placeholder-line-two-value in config", m); got != "found [REDACTED] in config" {
+		t.Errorf("single line: %q", got)
+	}
+	whole := "placeholder-line-one-value\n  placeholder-line-two-value"
+	if got := scrubSecrets("dump: "+whole+" end", m); got != "dump: [REDACTED] end" {
+		t.Errorf("whole value: %q", got)
+	}
+}
+
+// A staged value shorter than minMaskLen cannot be masked in place, so the
+// output is omitted when it occurs there, and left alone when it does not.
+func TestScrubSecrets_ShortStagedValueOmitsOutput(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "SHORT"), "plv-1x\n")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "LONG"), "placeholder-value-1")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("auth failed for plv-1x", m); got != provisionerOutputOmitted {
+		t.Errorf("short value present: %q", got)
+	}
+	if got := scrubSecrets("auth failed: placeholder-value-1", m); got != "auth failed: [REDACTED]" {
+		t.Errorf("short value absent: %q", got)
+	}
+}
+
+// A short line of a multi-line staged file is handled like a short value.
+func TestScrubSecrets_ShortLineOfMultiLineFileOmitsOutput(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-user-value\nplv-2y\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("password plv-2y rejected", m); got != provisionerOutputOmitted {
+		t.Errorf("short line present: %q", got)
+	}
+}
+
+// Punctuation-only lines of a pretty-printed JSON staged file are skipped:
+// a brace in the output does not omit it, and the lines holding the secret
+// are still masked.
+func TestScrubSecrets_JSONStagedFileSkipsPunctuationLines(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "AUTH"),
+		"{\n  \"tokens\": {\n    \"access_token\": \"placeholder-token-value-1\"\n  },\n  \"items\": [\n    \"placeholder-item-value-2\"\n  ]\n}\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	in := `parsed {"mode": 1} and [] then saw "access_token": "placeholder-token-value-1" and "placeholder-item-value-2"`
+	want := `parsed {"mode": 1} and [] then saw [REDACTED] and [REDACTED]`
+	if got := scrubSecrets(in, m); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// When one staged value contains another, the longer one is masked whole
+// rather than leaving the rest of it behind.
+func TestScrubSecrets_LongerStagedValueMaskedFirst(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-value-1")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "B"), "placeholder-value-1-extended")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-value-1-extended here", m); got != "saw [REDACTED] here" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// Staged values are trimmed like lines; a whitespace-only value is ignored
+// rather than omitting any output that contains a space.
+func TestScrubSecrets_StagedValuesAreTrimmed(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "  placeholder-value-1 \n")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "B"), "   \n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-value-1.", m); got != "saw [REDACTED]." {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A staged file whose lines are separated by lone CRs is masked line by
+// line too.
+func TestScrubSecrets_CROnlyStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-line-one-value\rplaceholder-line-two-value\r")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-line-one-value and placeholder-line-two-value", m); got != "saw [REDACTED] and [REDACTED]" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A staged value that mixes CRLF, lone CR and LF, including the \r\r\n and
+// \n\r edges, is split into each of its lines, none lost or merged, and is
+// also masked whole.
+func TestScrubSecrets_MixedLineEndingsStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	lines := []string{
+		"placeholder-line-one-value",
+		"placeholder-line-two-value",
+		"placeholder-line-three-value",
+		"placeholder-line-four-value",
+		"placeholder-line-five-value",
+		"placeholder-line-six-value",
+	}
+	value := lines[0] + "\r\n" + lines[1] + "\r" + lines[2] + "\n" + lines[3] + "\r\r\n" +
+		lines[4] + "\n\r" + "  },\r\n" + lines[5] + "\n"
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), value)
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	in := "saw " + strings.Join(lines, " | ") + " | },"
+	want := "saw " + strings.TrimSuffix(strings.Repeat("[REDACTED] | ", len(lines)), " | ") + " | },"
+	if got := scrubSecrets(in, m); got != want {
+		t.Errorf("lines: got %q, want %q", got, want)
+	}
+	if got := scrubSecrets("dump: "+strings.TrimSpace(value)+" end", m); got != "dump: [REDACTED] end" {
+		t.Errorf("whole value: %q", got)
 	}
 }

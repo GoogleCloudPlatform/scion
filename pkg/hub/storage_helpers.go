@@ -16,16 +16,22 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -47,7 +53,13 @@ const fileUploadConcurrency = 8
 // Any failure to generate a signed URL for a listed file is treated as a hard
 // error — a partial URL set would cause the client to silently skip files,
 // producing an incomplete upload that passes verification only by accident.
+//
+// Every requested path must satisfy isCanonicalResourceFilePath; otherwise an
+// *invalidFilePathError is returned before any storage call.
 func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath string, files []FileUploadRequest) ([]UploadURLInfo, string, error) {
+	if err := validateUploadFilePaths(files); err != nil {
+		return nil, "", err
+	}
 	uploadURLs := make([]UploadURLInfo, 0, len(files))
 	for _, file := range files {
 		objectPath := basePath + "/" + file.Path
@@ -82,17 +94,114 @@ func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath stri
 	return uploadURLs, manifestURL, nil
 }
 
-// verifyAndFinalizeFiles verifies files exist in storage and computes content hash.
-// Returns the content hash string.
+// verifyAndFinalizeFiles verifies a skill version's files exist in storage
+// and returns their content hash (computeSkillContentHash). Manifest paths
+// are validated with validateManifestFilePaths before any storage call. A
+// missing file is a fileNotFoundError (400); a storage error while checking
+// is returned wrapped, so the caller answers 500 rather than "file not
+// found" (ptone/scion#5075).
 func verifyAndFinalizeFiles(ctx context.Context, stor storage.Storage, basePath string, files []store.TemplateFile) (string, error) {
+	if err := validateManifestFilePaths(files); err != nil {
+		return "", err
+	}
 	for _, file := range files {
 		objectPath := basePath + "/" + file.Path
 		exists, err := stor.Exists(ctx, objectPath)
-		if err != nil || !exists {
+		if err != nil {
+			return "", fmt.Errorf("check file %q in storage: %w", file.Path, err)
+		}
+		if !exists {
 			return "", &fileNotFoundError{path: file.Path}
 		}
 	}
-	return computeContentHash(files), nil
+	return computeSkillContentHash(files), nil
+}
+
+// isCanonicalResourceFilePath reports whether p is a relative,
+// slash-separated, already-clean file path inside a stored resource
+// (template, harness-config or skill version): not empty or ".", not
+// absolute, no ".." element, no "./", repeated or trailing slashes,
+// backslashes or NUL bytes. Only such paths map one-to-one onto a storage
+// object below the resource's storage path.
+//
+// Resource file paths are logical slash-separated paths, so the checks use the
+// path package and give the same result on every platform. The local storage
+// backend joins object paths with OS paths, so filepath.IsLocal on the
+// OS-form path is kept as an extra guard; on Windows it also rejects drive
+// letters and reserved names, which is stricter and safe.
+func isCanonicalResourceFilePath(p string) bool {
+	if p == "" || p == "." || path.IsAbs(p) || path.Clean(p) != p {
+		return false
+	}
+	if strings.ContainsAny(p, "\\\x00") {
+		return false
+	}
+	for _, elem := range strings.Split(p, "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return filepath.IsLocal(filepath.FromSlash(p))
+}
+
+// Field names reported by invalidFilePathError.
+const (
+	uploadFilePathField   = "files[].path"
+	manifestFilePathField = "manifest.files[].path"
+)
+
+// invalidFilePathError reports that a request listed a resource file path
+// that is not canonical or is repeated. Its message names only the request
+// field, never the submitted value.
+type invalidFilePathError struct {
+	field     string
+	duplicate bool
+}
+
+func (e *invalidFilePathError) Error() string {
+	if e.duplicate {
+		return e.field + " contains a duplicate path"
+	}
+	return e.field + " is not a canonical relative path"
+}
+
+// validateUploadFilePaths requires every requested upload path to be
+// canonical. It stops at the first invalid path.
+func validateUploadFilePaths(files []FileUploadRequest) error {
+	for _, f := range files {
+		if !isCanonicalResourceFilePath(f.Path) {
+			return &invalidFilePathError{field: uploadFilePathField}
+		}
+	}
+	return nil
+}
+
+// validateManifestFilePaths requires every manifest path to be canonical and
+// listed once. It stops at the first invalid path.
+func validateManifestFilePaths(files []store.TemplateFile) error {
+	seen := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		if !isCanonicalResourceFilePath(f.Path) {
+			return &invalidFilePathError{field: manifestFilePathField}
+		}
+		if _, dup := seen[f.Path]; dup {
+			return &invalidFilePathError{field: manifestFilePathField, duplicate: true}
+		}
+		seen[f.Path] = struct{}{}
+	}
+	return nil
+}
+
+// writeInvalidFilePathError writes a 400 validation_error response and
+// returns true if err is an *invalidFilePathError; otherwise it writes
+// nothing and returns false.
+func writeInvalidFilePathError(w http.ResponseWriter, err error) bool {
+	var pathErr *invalidFilePathError
+	if !errors.As(err, &pathErr) {
+		return false
+	}
+	ValidationError(w, pathErr.Error(), map[string]interface{}{"field": pathErr.field})
+	return true
 }
 
 // fileNotFoundError is returned when a file is not found during verification.
@@ -130,6 +239,9 @@ func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
 // with a subset of files and a content hash computed over that subset, which
 // later corrupts agent provisioning while masquerading as healthy. label
 // prefixes error messages ("template bootstrap" / "harness config bootstrap").
+// Each file is read through root (opened at the collected directory) with
+// transfer.OpenCollectedFile, so a file that is no longer a regular file of
+// the collected size and hash fails the upload.
 //
 // This is shared bootstrap mechanics for the resource-storage refactor (§7.3):
 // templates and harness-configs both route their import/sync upload loop through
@@ -140,7 +252,7 @@ func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
 // cancels the in-flight uploads as soon as one fails, preserving the fail-fast
 // contract above. Each worker writes its result into its own slot, so the
 // returned manifest preserves input order without locking.
-func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo, label string) ([]store.TemplateFile, map[string]struct{}, error) {
+func uploadResourceFiles(ctx context.Context, stor storage.Storage, root *os.Root, storagePath string, files []transfer.FileInfo, label string) ([]store.TemplateFile, map[string]struct{}, error) {
 	type uploadResult struct {
 		file       store.TemplateFile
 		objectPath string
@@ -163,9 +275,9 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 
 			objectPath := storagePath + "/" + fi.Path
 
-			f, err := os.Open(fi.FullPath)
+			f, err := transfer.OpenCollectedFile(root, fi)
 			if err != nil {
-				return fmt.Errorf("%s: failed to open file %s: %w", label, fi.Path, err)
+				return fmt.Errorf("%s: %w", label, err)
 			}
 
 			uploadOpts := storage.UploadOptions{}
@@ -201,29 +313,6 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 		written[r.objectPath] = struct{}{}
 	}
 	return uploaded, written, nil
-}
-
-// reconcileResourceStorage deletes objects under storagePath that are not in the
-// keep set, so files removed from a resource don't linger in storage after a
-// re-sync. List/delete failures are logged and skipped (best-effort), matching
-// the template reconcile behavior this consolidates. name is included in warn
-// messages to identify the resource.
-func reconcileResourceStorage(ctx context.Context, stor storage.Storage, storagePath, name string, keep map[string]struct{}, log *slog.Logger, label string) {
-	listResult, err := stor.List(ctx, storage.ListOptions{Prefix: storagePath + "/"})
-	if err != nil {
-		log.Warn(label+": failed to list storage for reconcile",
-			"resource", name, "prefix", storagePath, "error", err)
-		return
-	}
-	for _, obj := range listResult.Objects {
-		if _, keepObj := keep[obj.Name]; keepObj {
-			continue
-		}
-		if err := stor.Delete(ctx, obj.Name); err != nil {
-			log.Warn(label+": failed to delete stale object",
-				"resource", name, "object", obj.Name, "error", err)
-		}
-	}
 }
 
 // legacyFallbackPath returns the legacy un-namespaced storage path for fallback
@@ -285,6 +374,7 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath, l
 			URL:  signedURL.URL,
 			Size: file.Size,
 			Hash: file.Hash,
+			Mode: transfer.NormalizedModeString(file.Mode),
 		})
 	}
 
@@ -323,23 +413,39 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath, l
 //	<hubEndpoint>/api/v1/<resourceType>/<resourceID>/files/<filePath>
 //
 // with method PUT. The client's authenticated HTTP transport handles auth.
-// requestBaseURL derives the external base URL from the incoming HTTP request.
-// It trusts X-Forwarded-Proto and X-Forwarded-Host when present, which assumes
-// the hub is behind a trusted reverse proxy that overwrites those headers.
-// Otherwise it falls back to the request's TLS state and Host header.
-func requestBaseURL(r *http.Request) string {
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
+// requestBaseURL derives the external base URL from the incoming HTTP
+// request (requestBaseURLWith with the hub's server.trusted_proxies).
+func (s *Server) requestBaseURL(r *http.Request) string {
+	return requestBaseURLWith(r, s.transportTrustedNets)
+}
 
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		return proto + "://" + host
-	}
+// requestBaseURLWith derives the external base URL from r. X-Forwarded-Host
+// and X-Forwarded-Proto are honoured only when the immediate peer is in
+// trusted (server.trusted_proxies), and then only as a single value (a
+// host without a comma; a protocol of exactly http or https). With trusted
+// empty, or from any other peer, they are ignored: the URL comes from the
+// request's TLS state and Host header, so a client cannot steer the URL with
+// a forged header.
+func requestBaseURLWith(r *http.Request, trusted []*net.IPNet) string {
+	host := r.Host
+	scheme := "http"
 	if r.TLS != nil {
-		return "https://" + host
+		scheme = "https"
 	}
-	return "http://" + host
+	if peer := config.RemotePeerIP(r); peer != nil && len(trusted) > 0 && config.IPInNets(peer, trusted) {
+		if vals := r.Header.Values("X-Forwarded-Host"); len(vals) == 1 {
+			if h := strings.TrimSpace(vals[0]); h != "" && !strings.Contains(h, ",") {
+				host = h
+			}
+		}
+		if vals := r.Header.Values("X-Forwarded-Proto"); len(vals) == 1 {
+			switch p := strings.ToLower(strings.TrimSpace(vals[0])); p {
+			case "http", "https":
+				scheme = p
+			}
+		}
+	}
+	return scheme + "://" + host
 }
 
 func rewriteLocalUploadURLs(urls []UploadURLInfo, hubEndpoint, resourceType, resourceID string) []UploadURLInfo {
@@ -374,4 +480,20 @@ func rewriteLocalDownloadURLs(urls []DownloadURLInfo, hubEndpoint, resourceType,
 		}
 	}
 	return urls
+}
+
+// setDownloadContentLength sets Content-Length for a raw file download from
+// the size of the storage object being streamed, not from the database
+// record's size, which can be out of date relative to the stored object.
+//
+// Both storage backends normally report the object size. When the size is
+// unknown (nil object, or a non-positive size) the header is left off and
+// net/http frames the response itself: it computes the length for small
+// bodies (including "Content-Length: 0" for an empty one) or uses chunked
+// transfer encoding.
+func setDownloadContentLength(w http.ResponseWriter, obj *storage.Object) {
+	if obj == nil || obj.Size <= 0 {
+		return
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 }

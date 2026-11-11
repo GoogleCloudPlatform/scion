@@ -64,7 +64,8 @@ plugins:
         # Inbound mode: "poll" (default) or "webhook" (recommended).
         inbound_mode: webhook
 
-        # Webhook settings (required when inbound_mode is "webhook").
+        # Webhook settings. webhook_url and webhook_secret are required when
+        # inbound_mode is "webhook"; the plugin refuses to start without them.
         webhook_url: "https://hub.example.com/telegram/webhook"
         webhook_listen: ":9094"
         webhook_secret: "<generate with: openssl rand -hex 16>"
@@ -112,7 +113,7 @@ hub.example.com {
 openssl rand -hex 16
 ```
 
-Add the generated value to `settings.yaml` as `webhook_secret`.
+Add the generated value to `settings.yaml` as `webhook_secret`. The secret is required in webhook mode: if it is missing or empty, the plugin refuses to start with `webhook_secret is required when inbound_mode is "webhook"` and does not register the webhook with Telegram.
 
 After the hub starts, the plugin registers the webhook automatically. If you change the secret or the webhook URL, you may need to manually re-register:
 
@@ -192,6 +193,8 @@ The bot strips @-mentions from the message text before forwarding to the agent. 
 
 ### File Attachments
 
+Files sent in a linked group (photos, documents, audio and video) are delivered to each addressed agent. When attachment artifacts are enabled on the Hub (the default where the artifact service is ready), each agent receives the file in its inbox at `~/.scion/inbox/<message-id>/`. When attachment artifacts are off on the Hub, or the Hub is older, the file is placed in the project's shared scratchpad and its path is delivered. If the Hub accepts no attachments at all, the message text is still delivered and the sender is told in the chat. A message that carries only a file which can't be delivered is not sent at all, and the sender is told. If the Hub doesn't accept attachments from the sender for the addressed agents, the whole message is refused; with several recipients, none of them receives the text. A file over the size limit (the smaller of the Hub's current limit and Telegram's download limit for bots) is left out: the text is delivered and the sender gets a notice naming the limit. The former `downloads_path` setting is retired; if it is still configured, the plugin logs a warning at startup and ignores it.
+
 Agents can send files to users via the Scion CLI:
 
 ```bash
@@ -207,7 +210,6 @@ Use `/settings` in a linked group to toggle:
 | Setting | Description |
 |---------|-------------|
 | **Observer mode** (`a2a`) | Show agent-to-agent messages in the group. Format: `👀 🤖 agentA → 🤖 agentB 👀` |
-| **Commentary** (`commentary`) | Show assistant-reply messages (agent responses to other agents) |
 | **Notify in group** (`grp`) | Post agent state change notifications in the group chat (in addition to DMs) |
 
 ### Notification Subscriptions
@@ -284,7 +286,7 @@ These keys go in `plugins.broker.telegram.config` in `settings.yaml`:
 | `inbound_mode` | No | `poll` | `poll` (long-polling) or `webhook` |
 | `webhook_url` | Webhook mode | — | Public URL for Telegram to send updates to |
 | `webhook_listen` | No | `:9094` | Local address for the webhook HTTP server |
-| `webhook_secret` | No | — | Secret token for webhook request validation |
+| `webhook_secret` | Webhook mode | — | Secret token for webhook request validation. Required when `inbound_mode` is `webhook` |
 | `db_path` | No | `telegram_v2.db` | Path to SQLite database for persistent state |
 | `send_queue_size` | No | `100` | Max queued outbound messages per chat |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
@@ -340,7 +342,7 @@ Standalone mode runs the Telegram broker as an independent service with Postgres
 | `DATABASE_URL` | **Yes** | — | Postgres connection URL |
 | `TELEGRAM_BOT_TOKEN` | **Yes** | — | Telegram bot token |
 | `TELEGRAM_WEBHOOK_URL` | **Yes** | — | Public HTTPS URL for webhook delivery |
-| `TELEGRAM_WEBHOOK_SECRET` | No | — | Secret token for webhook validation |
+| `TELEGRAM_WEBHOOK_SECRET` | **Yes** | — | Secret token for webhook validation. The listener uses it to verify every inbound request |
 | `TELEGRAM_WEBHOOK_LISTEN` | No | `:9094` | Listen address for webhook HTTP server |
 | `TELEGRAM_HUB_URL` | No | — | Hub API URL for inbound message delivery |
 | `TELEGRAM_HMAC_KEY` | No | — | HMAC key for hub authentication |

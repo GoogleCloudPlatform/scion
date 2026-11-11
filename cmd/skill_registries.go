@@ -22,6 +22,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -39,7 +40,7 @@ var registriesListCmd = &cobra.Command{
 }
 
 func runRegistriesList(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -78,7 +79,7 @@ var registriesAddCmd = &cobra.Command{
 }
 
 func runRegistriesAdd(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -88,7 +89,7 @@ func runRegistriesAdd(cmd *cobra.Command, args []string) error {
 
 	endpoint, _ := cmd.Flags().GetString("endpoint")
 	if endpoint == "" {
-		return fmt.Errorf("--endpoint is required")
+		return newUsageError("--endpoint is required")
 	}
 
 	trust, _ := cmd.Flags().GetString("trust")
@@ -128,7 +129,7 @@ var registriesShowCmd = &cobra.Command{
 }
 
 func runRegistriesShow(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -157,8 +158,8 @@ func runRegistriesShow(cmd *cobra.Command, args []string) error {
 	if registry.Description != "" {
 		fmt.Printf("Description: %s\n", registry.Description)
 	}
-	fmt.Printf("Created:     %s\n", registry.Created.Format(time.RFC3339))
-	fmt.Printf("Updated:     %s\n", registry.Updated.Format(time.RFC3339))
+	fmt.Printf("Created:     %s\n", clitime.Format(registry.Created, clitime.Full))
+	fmt.Printf("Updated:     %s\n", clitime.Format(registry.Updated, clitime.Full))
 	return nil
 }
 
@@ -170,7 +171,7 @@ var registriesUpdateCmd = &cobra.Command{
 }
 
 func runRegistriesUpdate(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -226,7 +227,7 @@ var registriesRemoveCmd = &cobra.Command{
 }
 
 func runRegistriesRemove(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -249,12 +250,20 @@ func runRegistriesRemove(cmd *cobra.Command, args []string) error {
 var registriesPinCmd = &cobra.Command{
 	Use:   "pin <name-or-id> <skill-uri>",
 	Short: "Pin a skill hash for a registry",
-	Args:  cobra.ExactArgs(2),
-	RunE:  runRegistriesPin,
+	Long: `Pin the content hash a skill from a pinned-trust registry must have.
+
+The hash is either form of a skill's content hash: the "Content Hash"
+(file contents only) or, from a hub with the hub.skill_content_hash_v2
+experiment on, the "Content Hash v2" (file contents, paths and executable
+bits), both shown by 'scion skills resolve'. A v2 pin also rejects a skill
+whose files were renamed or had their executable bit changed. A hub with
+that experiment off matches the content hash only.`,
+	Args: cobra.ExactArgs(2),
+	RunE: runRegistriesPin,
 }
 
 func runRegistriesPin(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -264,7 +273,7 @@ func runRegistriesPin(cmd *cobra.Command, args []string) error {
 
 	hash, _ := cmd.Flags().GetString("hash")
 	if hash == "" {
-		return fmt.Errorf("--hash is required")
+		return newUsageError("--hash is required")
 	}
 
 	req := &hubclient.PinSkillHashRequest{
@@ -314,5 +323,5 @@ func init() {
 	registriesUpdateCmd.Flags().String("resolve-path", "", "Custom resolve endpoint path")
 
 	// Flags for pin command
-	registriesPinCmd.Flags().String("hash", "", "Content hash to pin (required, e.g., sha256:...)")
+	registriesPinCmd.Flags().String("hash", "", "Content hash or content hash v2 to pin (required, e.g., sha256:...)")
 }

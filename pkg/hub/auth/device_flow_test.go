@@ -53,6 +53,9 @@ func (m *mockAuthService) Logout(ctx context.Context) error {
 func (m *mockAuthService) Refresh(ctx context.Context, refreshToken string) (*hubclient.TokenResponse, error) {
 	return nil, fmt.Errorf("not implemented")
 }
+func (m *mockAuthService) FederationToken(ctx context.Context, req *hubclient.FederationTokenRequest) (*hubclient.FederationTokenResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
 func (m *mockAuthService) Me(ctx context.Context) (*hubclient.User, error) {
 	return nil, fmt.Errorf("not implemented")
 }

@@ -408,11 +408,14 @@ func (s *DMMigrationService) mergeConversation(
 	var restampFailed bool
 	cursor := ""
 	for {
+		// SkipTotalCount: nothing reads the page TotalCount, and the store
+		// would otherwise COUNT the conversation's messages on every page.
 		page, err := s.store.ListMessages(ctx, store.MessageFilter{
 			ConversationID: oldConvID,
 		}, store.ListOptions{
-			Limit:  defaultBatchSize,
-			Cursor: cursor,
+			Limit:          defaultBatchSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
 		})
 		if err != nil {
 			return fmt.Errorf("listing messages for %s: %w", oldConvID, err)

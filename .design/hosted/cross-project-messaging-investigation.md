@@ -1,5 +1,17 @@
 # Investigation: existing messaging and project boundaries
 
+> **Historical document.** This investigation was conducted at commit
+> `1b0a25a9774cdfa505c98debf29d7f1812acf6fc` (2026-09-17) and informed the
+> cross-project messaging design. The CPM cleanup (Phases 1–4, #1680) has
+> since been implemented on the `cpm-cleanup-integration` branch. Some
+> proposed paths described here — notably the separate `POST
+> /conversations/{id}/messages` send endpoint and the independent delivery
+> paths — were superseded by the shared `ExecuteAgentDM` operation and the
+> outbound `conversation_ref` transport. See the
+> [final design](cross-project-messaging.md) (Section 13) and the
+> [decision log](cross-project-messaging-decisions.md) (D-C1 through D-C7)
+> for the delivered architecture.
+
 ## Evidence and scope
 
 Inspected local source at `1b0a25a9774cdfa505c98debf29d7f1812acf6fc` on

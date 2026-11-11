@@ -1,0 +1,946 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+)
+
+// User tunnels over a conduit session (design §3.8 "Mechanics" and "Many
+// agents from one workstation", Phase 5.1).
+//
+// A CLI dials GET /api/v1/conduit as a user principal (the same Bearer
+// credential as attach) and asks for each tunnel with one RPC on that
+// session:
+//
+//	POST /v1/tunnels {"agent": "<agent id>", "kind": "tcp|pty|ssh", "params": {...}}
+//
+// The hub authorizes the request against the named agent, resolves the
+// agent's conduit session (local or on another relay), opens the target
+// stream with a grant, then opens a stream toward the user session (even
+// stream id) and copies framed data between the two. The response names
+// that stream: {"streamId": N, ...}. The user stream is opened before the
+// response is sent, so the CLI accepts relay-opened streams as they arrive
+// and matches them by id.
+//
+// One user session carries any number of tunnels to any mix of agents.
+// Tunnel state is keyed by (session id, stream id). Each tunnel is
+// authorized on its own, gets its own grant and its own authorization
+// deadline and re-check (§3.5), and closing it closes that tunnel only.
+// Only the session's close or loss ends every tunnel on it.
+
+// conduitTunnelsPath is the RPC path of a tunnel request.
+const conduitTunnelsPath = relay.TunnelsRPCPath
+
+// conduitTunnelStreamCap is the most tunnels (open or opening) one user
+// session may hold. It matches the dialer's default limit on the streams
+// its peer may open (conduit.DefaultMaxConcurrentStreams), so the hub never
+// opens a stream the CLI would refuse. A request beyond it gets an RPC 429.
+var conduitTunnelStreamCap atomic.Int64
+
+func init() { conduitTunnelStreamCap.Store(conduit.DefaultMaxConcurrentStreams) }
+
+// conduitTunnelRequest is the body of POST /v1/tunnels.
+type conduitTunnelRequest struct {
+	// Agent is the agent id.
+	Agent string `json:"agent"`
+	// Kind is tcp, pty or ssh.
+	Kind string `json:"kind"`
+	// Params are the kind's params, as strings: tcp {port} (host may be
+	// given and must be 127.0.0.1); pty {cols, rows} (default 80x24;
+	// session may be given and must be "scion"); ssh none.
+	Params map[string]string `json:"params,omitempty"`
+}
+
+// conduitTunnelResponse is the body of a successful POST /v1/tunnels.
+type conduitTunnelResponse struct {
+	// StreamID is the id of the stream the hub opened toward this
+	// session for the tunnel.
+	StreamID  uint32 `json:"streamId"`
+	SessionID string `json:"sessionId"`
+	AgentID   string `json:"agentId"`
+	ProjectID string `json:"projectId"`
+	Kind      string `json:"kind"`
+	// AuthzDeadline is the tunnel's authorization deadline (§3.5), when
+	// it has one.
+	AuthzDeadline *time.Time `json:"authzDeadline,omitempty"`
+}
+
+// conduitTunnelFailure is a refusal of POST /v1/tunnels. Each one maps to
+// exactly one status and error code, in conduitTunnelFailures.
+type conduitTunnelFailure int
+
+const (
+	tunnelInvalidRequest conduitTunnelFailure = iota
+	tunnelUnauthorized
+	tunnelForbidden
+	// tunnelPrincipalInactive: the user is no longer active (suspended or
+	// deleted) while its session is still open.
+	tunnelPrincipalInactive
+	tunnelAgentNotFound
+	tunnelAgentNotRunning
+	tunnelRateLimited
+	tunnelBrokerUnavailable
+	tunnelSessionUnavailable
+	// Transient hub faults (503 unavailable, with details.reason).
+	tunnelStreamAuthzUnavailable
+	tunnelRegistryUnavailable
+	tunnelGrantKeysUnavailable
+	tunnelConduitNotServing
+	// tunnelStreamRenewalUnavailable: target-side deadlines are enforced
+	// and this node cannot deliver renewals on the route (contracts,
+	// Renewal path unavailable).
+	tunnelStreamRenewalUnavailable
+	// tunnelAgentUpgradeRequired: target-side deadlines are enforced in
+	// external relay mode and the target session does not renew stream
+	// authorization (contracts, Target lacks stream renewal).
+	tunnelAgentUpgradeRequired
+	tunnelInternal
+	// Placement refusals (409): the grant was refused for a pinned agent
+	// whose saved placement is inconsistent (mintConduitGrant), one entry
+	// per requirePinnedPlacement code.
+	tunnelPlacementPinStale
+	tunnelPlacementBrokerMissing
+	tunnelPlacementTargetMismatch
+)
+
+// conduitTunnelFailures is the one mapping from a tunnel refusal to its
+// RPC status and error code (design §3.8 rule 7). 404 goes only with
+// agent_not_found.
+var conduitTunnelFailures = map[conduitTunnelFailure]struct {
+	status int
+	code   string
+	reason string // error.details.reason ("" = none)
+}{
+	tunnelInvalidRequest:           {http.StatusBadRequest, ErrCodeInvalidRequest, ""},
+	tunnelUnauthorized:             {http.StatusUnauthorized, ErrCodeUnauthorized, ""},
+	tunnelForbidden:                {http.StatusForbidden, ErrCodeForbidden, ""},
+	tunnelPrincipalInactive:        {http.StatusForbidden, ErrCodeForbidden, ""},
+	tunnelAgentNotFound:            {http.StatusNotFound, ErrCodeAgentNotFound, ""},
+	tunnelAgentNotRunning:          {http.StatusConflict, ErrCodeAgentNotRunning, ""},
+	tunnelRateLimited:              {http.StatusTooManyRequests, ErrCodeRateLimited, ""},
+	tunnelBrokerUnavailable:        {http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail, ""},
+	tunnelSessionUnavailable:       {http.StatusServiceUnavailable, ErrCodeAgentSessionUnavailable, ""},
+	tunnelStreamAuthzUnavailable:   {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonStreamAuthzDown},
+	tunnelRegistryUnavailable:      {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonRegistryUnavailable},
+	tunnelGrantKeysUnavailable:     {http.StatusServiceUnavailable, ErrCodeUnavailable, relay.ReasonGrantKeysUnavailable},
+	tunnelConduitNotServing:        {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonConduitNotServing},
+	tunnelStreamRenewalUnavailable: {http.StatusServiceUnavailable, ErrCodeUnavailable, conduitReasonStreamRenewalUnavailable},
+	tunnelAgentUpgradeRequired:     {http.StatusConflict, ErrCodeAgentUpgradeRequired, conduitReasonStreamRenewalUnsupported},
+	tunnelInternal:                 {http.StatusInternalServerError, ErrCodeInternalError, ""},
+	tunnelPlacementPinStale:        {http.StatusConflict, ErrCodeRuntimeTargetPinStale, ""},
+	tunnelPlacementBrokerMissing:   {http.StatusConflict, ErrCodeRuntimeBrokerMissing, ""},
+	tunnelPlacementTargetMismatch:  {http.StatusConflict, ErrCodeRuntimeTargetMismatch, ""},
+}
+
+// tunnelPlacementFailures maps a placement refusal's code to its tunnel
+// failure.
+var tunnelPlacementFailures = map[string]conduitTunnelFailure{
+	ErrCodeRuntimeTargetPinStale: tunnelPlacementPinStale,
+	ErrCodeRuntimeBrokerMissing:  tunnelPlacementBrokerMissing,
+	ErrCodeRuntimeTargetMismatch: tunnelPlacementTargetMismatch,
+}
+
+// conduitTunnelError is a refusal with its message for the client.
+type conduitTunnelError struct {
+	failure conduitTunnelFailure
+	message string
+	// cause is logged on the hub, never sent.
+	cause string
+}
+
+func (e *conduitTunnelError) Error() string {
+	if e.cause != "" {
+		return e.message + ": " + e.cause
+	}
+	return e.message
+}
+
+func tunnelRefusal(f conduitTunnelFailure, format string, args ...any) *conduitTunnelError {
+	return &conduitTunnelError{failure: f, message: fmt.Sprintf(format, args...)}
+}
+
+// conduitRPCJSON builds an RPC response with a JSON body.
+func conduitRPCJSON(status int, body any) *conduitv1.RpcResponse {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return &conduitv1.RpcResponse{Status: http.StatusInternalServerError}
+	}
+	return &conduitv1.RpcResponse{
+		Status:  int32(status),
+		Headers: map[string]string{"Content-Type": "application/json"},
+		Body:    data,
+	}
+}
+
+// conduitRPCError builds an RPC error response in the hub's error format.
+func conduitRPCError(status int, code, message string) *conduitv1.RpcResponse {
+	return conduitRPCJSON(status, ErrorResponse{Error: APIError{Code: code, Message: message}})
+}
+
+// withRPCHeader sets one header on resp and returns it.
+func withRPCHeader(resp *conduitv1.RpcResponse, key, value string) *conduitv1.RpcResponse {
+	if resp.Headers == nil {
+		resp.Headers = map[string]string{}
+	}
+	resp.Headers[key] = value
+	return resp
+}
+
+// conduitRPCErrorReason is conduitRPCError with error.details.reason.
+func conduitRPCErrorReason(status int, code, message, reason string) *conduitv1.RpcResponse {
+	if reason == "" {
+		return conduitRPCError(status, code, message)
+	}
+	return conduitRPCJSON(status, ErrorResponse{Error: APIError{Code: code, Message: message, Details: map[string]interface{}{"reason": reason}}})
+}
+
+// response renders the refusal through conduitTunnelFailures.
+func (e *conduitTunnelError) response() *conduitv1.RpcResponse {
+	m, ok := conduitTunnelFailures[e.failure]
+	if !ok {
+		m = conduitTunnelFailures[tunnelInternal]
+	}
+	return conduitRPCErrorReason(m.status, m.code, e.message, m.reason)
+}
+
+// conduitDrainingResponse is the answer to a tunnel request on a draining
+// session. It is the same bare 503 the session layer sends for any RPC that
+// reaches a draining session, so the client sees one answer however the
+// request raced the GoAway.
+func conduitDrainingResponse() *conduitv1.RpcResponse {
+	return &conduitv1.RpcResponse{
+		Status:  http.StatusServiceUnavailable,
+		Headers: map[string]string{conduit.RetryAfterHeader: "0"},
+		Body:    []byte(conduit.ErrDraining.Error()),
+	}
+}
+
+// conduitTunnelKey identifies a tunnel: its user session and the stream
+// the hub opened toward that session.
+type conduitTunnelKey struct {
+	SessionID string
+	StreamID  uint32
+}
+
+// conduitTunnelSession is the tunnel state of one user conduit session.
+// It is created when the session is admitted at the HTTP layer and serves
+// the session's RPCs.
+type conduitTunnelSession struct {
+	s        *Server
+	identity UserIdentity
+	// credExpiry is when the credential that admitted the session expires
+	// (zero: it has no expiry). New tunnels are refused after it; open
+	// tunnels run under their own deadlines (§3.8 rule 6).
+	credExpiry time.Time
+
+	mu sync.Mutex
+	// pending counts tunnel requests holding a slot that are not yet in
+	// tunnels.
+	pending int
+	tunnels map[conduitTunnelKey]*conduitTunnel
+}
+
+func newConduitTunnelSession(s *Server, identity UserIdentity, credExpiry time.Time) *conduitTunnelSession {
+	return &conduitTunnelSession{s: s, identity: identity, credExpiry: credExpiry, tunnels: map[conduitTunnelKey]*conduitTunnel{}}
+}
+
+// HandleRPC implements conduit.RPCHandler. Only POST /v1/tunnels is
+// served; any other path is a bare 404 (never agent_not_found).
+func (ts *conduitTunnelSession) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+	if req.GetPath() != conduitTunnelsPath {
+		return conduitRPCError(http.StatusNotFound, ErrCodeNotFound, "unknown method")
+	}
+	if req.GetMethod() != http.MethodPost {
+		return withRPCHeader(conduitRPCError(http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "method not allowed"), "Allow", http.MethodPost)
+	}
+	ls := conduit.LocalSessionFromContext(ctx)
+	if ls == nil {
+		return tunnelRefusal(tunnelInternal, "no conduit session").response()
+	}
+	resp, err := ts.open(ctx, ls, req.GetBody())
+	if err != nil {
+		var te *conduitTunnelError
+		if errors.As(err, &te) {
+			return te.response()
+		}
+		if errors.Is(err, conduit.ErrDraining) {
+			return conduitDrainingResponse()
+		}
+		slog.Warn("Conduit tunnel request failed", "user_id", ts.identity.ID(), "session_id", ls.Info().SessionID, "error", err)
+		return tunnelRefusal(tunnelInternal, "tunnel request failed").response()
+	}
+	return conduitRPCJSON(http.StatusOK, resp)
+}
+
+// now is the hub's conduit clock (the grant key set's, the clock grants
+// are minted on).
+func (ts *conduitTunnelSession) now() time.Time {
+	return ts.s.conduitGrantKeySet().now()
+}
+
+// reserve takes a tunnel slot on the session, or refuses with 429.
+func (ts *conduitTunnelSession) reserve() error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if int64(ts.pending+len(ts.tunnels)) >= conduitTunnelStreamCap.Load() {
+		return tunnelRefusal(tunnelRateLimited, "too many tunnels on this session")
+	}
+	ts.pending++
+	return nil
+}
+
+// commit moves a reserved slot to the open tunnel t (t == nil releases it).
+func (ts *conduitTunnelSession) commit(t *conduitTunnel) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.pending--
+	if t != nil {
+		ts.tunnels[t.key] = t
+	}
+}
+
+// remove forgets an ended tunnel.
+func (ts *conduitTunnelSession) remove(key conduitTunnelKey) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	delete(ts.tunnels, key)
+}
+
+// open serves one tunnel request. Checks run in the order the agent routes
+// use: the credential, the user's status, the request shape, the session's
+// cap, the agent's existence (404), authorization (403), and only then the
+// agent's state (409), the tcp target port (403), its broker (503) and its
+// session (503), so a caller who may not use the agent learns nothing
+// about it.
+func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSession, body []byte) (*conduitTunnelResponse, error) {
+	info := ls.Info()
+	log := slog.Default().With("subsystem", "hub.conduit", "user_id", ts.identity.ID(), "session_id", info.SessionID)
+	if !ts.credExpiry.IsZero() && !ts.now().Before(ts.credExpiry) {
+		log.Info("Conduit tunnel refused", "cause", "credential_expired")
+		return nil, tunnelRefusal(tunnelUnauthorized, "credential refused")
+	}
+	if info.Draining {
+		return nil, conduit.ErrDraining
+	}
+	// Per-request authorization covers user status, before the agent is
+	// read.
+	if err := ts.userActive(ctx); err != nil {
+		var te *conduitTunnelError
+		if errors.As(err, &te) {
+			log.Info("Conduit tunnel refused", "cause", te.cause)
+		}
+		return nil, err
+	}
+	req, kind, params, err := parseConduitTunnelRequest(body)
+	if err != nil {
+		return nil, err
+	}
+	if err := ts.reserve(); err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			ts.commit(nil)
+		}
+	}()
+
+	s := ts.s
+	agent, port, log, err := ts.checkTunnelTarget(ctx, log, req.Agent, kind, params)
+	if err != nil {
+		return nil, err
+	}
+	rt := s.conduit.Load()
+	if rt == nil || rt.router == nil {
+		return nil, tunnelRefusal(tunnelConduitNotServing, "conduit is not serving on this hub node")
+	}
+	if s.conduitAuthz.Load() == nil {
+		// User streams are opened only while their re-check runs; one
+		// always runs while the relay does.
+		return nil, errors.New("stream re-check is not running")
+	}
+
+	target, bridge, opened, err := ts.openTarget(ctx, rt.router, agent, kind, params)
+	if err != nil {
+		if te := (*conduitTunnelError)(nil); errors.As(err, &te) {
+			log.Info("Conduit tunnel refused", "cause", te.message, "error", err)
+		}
+		return nil, err
+	}
+	user, err := ls.OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduit.StreamKind(kind).Proto(), Params: params})
+	if err != nil {
+		_ = target.CloseWithCode(conduit.CloseCancelled, "cancelled")
+		return nil, err
+	}
+
+	t := &conduitTunnel{
+		key:    conduitTunnelKey{SessionID: info.SessionID, StreamID: user.ID()},
+		kind:   kind,
+		user:   user,
+		target: target,
+	}
+	tracked := &conduitUserStream{
+		Kind:      kind,
+		Identity:  ts.identity,
+		AgentID:   agent.ID,
+		ProjectID: agent.ProjectID,
+		Port:      port,
+		ViaTunnel: true,
+		SessionID: info.SessionID,
+		StreamID:  user.ID(),
+		Close:     t.closeBoth,
+		Renew:     opened.renew,
+		Bridge:    bridge,
+	}
+	applyConduitOpenGrant(tracked, opened.grant, opened.claims)
+	tracked.TargetSessionID, tracked.TargetStreamID = opened.target.SessionID, opened.target.StreamID
+	t.untrack = s.trackConduitUserStream(tracked)
+	t.tracked.Store(tracked)
+	resp := &conduitTunnelResponse{
+		StreamID:  user.ID(),
+		SessionID: info.SessionID,
+		AgentID:   agent.ID,
+		ProjectID: agent.ProjectID,
+		Kind:      kind,
+	}
+	if d := t.deadline(); !d.IsZero() {
+		resp.AuthzDeadline = &d
+	}
+	// Registered before the splice starts, so the splice's removal
+	// always finds it.
+	ts.commit(t)
+	committed = true
+	go t.run(ts)
+	log.Info("Conduit tunnel opened", append([]any{"stream_id", user.ID(), "target_session_id", opened.target.SessionID}, opened.route...)...)
+	return resp, nil
+}
+
+// checkTunnelTarget runs a tunnel request's checks on its target agent, in
+// the order design §3.8 rule 7 fixes for every tunnel path: the agent
+// exists (404), the user may open the kind on it (403, or 503 when that
+// cannot be evaluated), it is running (409 agent_not_running), a tcp
+// target port is one the agent exposes (403, checked after the agent's
+// state, so a stopped agent is reported 409 rather than refused the port),
+// and its runtime broker is connected (503). It returns the agent, the TCP
+// port the kind names (0 for other kinds) and log with the agent added.
+func (ts *conduitTunnelSession) checkTunnelTarget(ctx context.Context, log *slog.Logger, agentID, kind string, params map[string]string) (*store.Agent, int, *slog.Logger, error) {
+	s := ts.s
+	agent, err := s.store.GetAgent(ctx, agentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, 0, log, tunnelRefusal(tunnelAgentNotFound, "agent not found")
+	case err != nil:
+		return nil, 0, log, fmt.Errorf("agent lookup: %w", err)
+	case !agent.DeletedAt.IsZero():
+		return nil, 0, log, tunnelRefusal(tunnelAgentNotFound, "agent not found")
+	}
+	log = log.With("agent_id", agent.ID, "kind", kind)
+
+	port, err := s.authorizeConduitTunnel(ctx, ts.identity, agent, kind, params)
+	if te := (*conduitTunnelError)(nil); errors.As(err, &te) {
+		// The user stopped being active after userActive: the same
+		// refusal userActive gives.
+		log.Info("Conduit tunnel refused", "cause", te.cause)
+		return nil, 0, log, err
+	}
+	if errors.Is(err, errConduitUserStatusUnavailable) {
+		return nil, 0, log, err
+	}
+	if errors.Is(err, errConduitAuthzUnavailable) {
+		log.Warn("Conduit tunnel request: authorization could not be evaluated", "error", err)
+		return nil, 0, log, tunnelRefusal(tunnelStreamAuthzUnavailable, "authorization is temporarily unavailable")
+	}
+	if err != nil {
+		log.Info("Conduit tunnel refused", "cause", "forbidden", "error", err)
+		return nil, 0, log, tunnelRefusal(tunnelForbidden, "not permitted")
+	}
+	switch state.Phase(agent.Phase) {
+	case state.PhaseStopped, state.PhaseHalted, state.PhaseStopping, state.PhaseSuspended:
+		return nil, 0, log, tunnelRefusal(tunnelAgentNotRunning, "agent is not running")
+	}
+	// The tcp target port is checked after the agent's state: a stopped
+	// agent no longer exposes its ports, and a caller who may use the
+	// agent is told it is not running rather than refused the port.
+	if kind == grant.StreamKindTCP {
+		if err := s.authorizeConduitTCPTarget(agent, port); err != nil {
+			log.Info("Conduit tunnel refused", "cause", "forbidden", "error", err)
+			return nil, 0, log, tunnelRefusal(tunnelForbidden, "not permitted")
+		}
+	}
+	offline, err := s.conduitTunnelBrokerOffline(ctx, agent)
+	if err != nil {
+		return nil, 0, log, fmt.Errorf("broker lookup: %w", err)
+	}
+	if offline {
+		return nil, 0, log, tunnelRefusal(tunnelBrokerUnavailable, "runtime broker not connected")
+	}
+	return agent, port, log, nil
+}
+
+// userActive applies the user-status rule shared with the per-stream
+// re-check (conduitUserStatus) to the session's user, for every request,
+// before the target agent is read: a user that is no longer active is
+// refused with the same generic answer whatever the agent, and a lookup
+// that fails is an internal error and goes no further.
+func (ts *conduitTunnelSession) userActive(ctx context.Context) error {
+	verdict, reason := ts.s.conduitUserStatus(ctx, ts.identity, ts.identity.ID())
+	switch verdict {
+	case conduitAuthzAllowed:
+		return nil
+	case conduitAuthzDenied:
+		return principalInactiveRefusal(reason)
+	default:
+		return fmt.Errorf("user status: %s", reason)
+	}
+}
+
+// principalInactiveRefusal is the refusal of a user that is no longer
+// active: the same generic answer whatever the agent, with the cause
+// (reason) logged on the hub only.
+func principalInactiveRefusal(reason string) *conduitTunnelError {
+	return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: reason}
+}
+
+// parseConduitTunnelRequest validates the request shape and returns the
+// stream params the grant and both StreamOpens carry.
+func parseConduitTunnelRequest(body []byte) (*conduitTunnelRequest, string, map[string]string, error) {
+	var req conduitTunnelRequest
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		return nil, "", nil, tunnelRefusal(tunnelInvalidRequest, "invalid request body")
+	}
+	if req.Agent == "" {
+		return nil, "", nil, tunnelRefusal(tunnelInvalidRequest, "agent is required")
+	}
+	params := map[string]string{}
+	for k, v := range req.Params {
+		params[k] = v
+	}
+	switch req.Kind {
+	case grant.StreamKindTCP:
+		if h, ok := params[grant.ParamHost]; !ok {
+			params[grant.ParamHost] = "127.0.0.1"
+		} else if h != "127.0.0.1" {
+			return nil, "", nil, tunnelRefusal(tunnelInvalidRequest, "tcp host must be 127.0.0.1")
+		}
+		if _, err := conduitTCPTarget(params, false); err != nil {
+			return nil, "", nil, tunnelRefusal(tunnelInvalidRequest, "tcp params must be {port}")
+		}
+	case grant.StreamKindPTY:
+		if _, ok := params[grant.ParamCols]; !ok {
+			params[grant.ParamCols] = strconv.Itoa(ptyDefaultCols)
+		}
+		if _, ok := params[grant.ParamRows]; !ok {
+			params[grant.ParamRows] = strconv.Itoa(ptyDefaultRows)
+		}
+		if _, ok := params[grant.ParamSession]; !ok {
+			params[grant.ParamSession] = conduitPTYSession
+		}
+		if err := conduitPTYTarget(params); err != nil {
+			return nil, "", nil, tunnelRefusal(tunnelInvalidRequest, "pty params must be {cols, rows} within 1..%d", conduitPTYMaxDim)
+		}
+	case grant.StreamKindSSH:
+		if len(params) != 0 {
+			return nil, "", nil, tunnelRefusal(tunnelInvalidRequest, "ssh takes no params")
+		}
+		params = nil
+	default:
+		return nil, "", nil, tunnelRefusal(tunnelInvalidRequest, "unknown tunnel kind")
+	}
+	return &req, req.Kind, params, nil
+}
+
+// authorizeConduitTunnel decides a tunnel request (§3.5) with
+// authorizeConduitUserStream, the decision every re-check of the tunnel's
+// stream repeats: the user's status, ActionTunnel and the kind's action
+// (ActionPortAccess for tcp, ActionAttach for pty and ssh). The tcp
+// target port is left to the caller (DeferTCPTarget), which checks it
+// with authorizeConduitTCPTarget after the agent's state; re-checks
+// include it. It returns the tcp port (0 for other kinds).
+// mintConduitGrant repeats every check, the port included, when it mints;
+// deciding here first keeps a refused caller from learning the agent's
+// state or session.
+//
+// A deny by the user-status rule is the *conduitTunnelError userActive
+// returns; a user lookup that fails wraps errConduitUserStatusUnavailable
+// (an internal error, as in userActive).
+func (s *Server) authorizeConduitTunnel(ctx context.Context, identity UserIdentity, agent *store.Agent, kind string, params map[string]string) (int, error) {
+	port := 0
+	if kind == grant.StreamKindTCP {
+		var err error
+		if port, err = conduitTCPTarget(params, false); err != nil {
+			return 0, err
+		}
+	}
+	verdict, reason, err := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
+		Identity:       identity,
+		Agent:          agent,
+		Kind:           kind,
+		ViaTunnel:      true,
+		Port:           port,
+		DeferTCPTarget: true,
+	})
+	switch {
+	case verdict == conduitAuthzAllowed:
+		return port, nil
+	case errors.Is(err, errConduitPrincipalInactive):
+		return 0, principalInactiveRefusal(reason)
+	default:
+		return 0, err
+	}
+}
+
+// conduitTunnelBrokerOffline reports whether the agent's broker is offline:
+// its stored status is offline and it is not present (brokerPresence), so a
+// broker with a live registry session is not refused on a stale status, and
+// nothing that passed before is refused. A missing row is not treated as
+// offline (the session resolution decides then); a read that fails is
+// returned.
+func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Agent) (bool, error) {
+	if agent.RuntimeBrokerID == "" {
+		return false, nil
+	}
+	b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return false, nil
+	case err != nil:
+		return false, err
+	case b == nil:
+		return false, nil
+	}
+	return b.Status == store.BrokerStatusOffline && !s.brokerPresence(ctx, b).Connected, nil
+}
+
+// openTarget resolves the agent's session that serves kind, mints a grant
+// for exactly that session and opens the target stream with the same
+// params, as the agent PTY path does. It also returns what it learned
+// about the target stream (conduitTunnelOpened).
+func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Router, agent *store.Agent, kind string, params map[string]string) (conduit.Stream, relay.Bridge, *conduitTunnelOpened, error) {
+	var (
+		st     conduit.Stream
+		bridge relay.Bridge
+		opened = &conduitTunnelOpened{}
+	)
+	req := router.Request{
+		Op:    router.OpStream,
+		Kind:  registry.PrincipalAgent,
+		ID:    agent.ID,
+		Want:  registry.Want{ProjectID: agent.ProjectID, Capability: kind},
+		Agent: agentIncarnationFacts(agent),
+	}
+	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+		renews, canRenew := conduitTargetRenews(res), ts.s.conduitRouteCanRenew(res)
+		if ts.s.conduitTargetUpgradeRequired(ctx, ts.identity, renews, conduitRouteTunnel, agent.ID) {
+			return errConduitAgentUpgradeRequired
+		}
+		if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteTunnel, agent.ID) {
+			return errConduitStreamRenewalUnavailable
+		}
+		tok, claims, err := ts.s.mintConduitGrant(ctx, conduitGrantRequest{
+			Identity: ts.identity,
+			Agent:    agent,
+			Stream:   grant.StreamHeader{Kind: kind, Params: params},
+			Target: grant.Target{
+				Kind:                grant.TargetKindAgent,
+				ID:                  agent.ID,
+				EndpointIncarnation: res.Want.Incarnation,
+				SessionID:           res.Record.SessionID,
+				ConnectionEpoch:     res.Record.ConnectionEpoch,
+			},
+			Via:          grant.ViaTunnel,
+			TargetRenews: renews,
+			CanRenew:     canRenew,
+		})
+		if err != nil {
+			if conduitTunnelMintErrPassesThrough(err) {
+				return err
+			}
+			// Authorization passed; the signing key set failed.
+			return fmt.Errorf("%w: %w", errConduitTunnelGrantKeys, err)
+		}
+		st, bridge, err = ts.s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
+			Kind:   conduit.StreamKind(kind).Proto(),
+			Params: params,
+			Grant:  tok,
+		})
+		if err != nil {
+			return err
+		}
+		opened.grant, opened.claims = tok, claims
+		opened.target = conduitLeafTarget(res, st, bridge)
+		opened.renew = conduitStreamRenewal(res, st, claims != nil && !claims.AuthzUntil.IsZero())
+		opened.route = conduitRouteLogAttrs(res)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, nil, conduitTunnelOpenError(err)
+	}
+	return st, bridge, opened, nil
+}
+
+// conduitTunnelOpened is what openTarget learned about the target stream:
+// its open grant and claims, its ids on the target's own session, and its
+// renewal sender (conduitStreamRenewal).
+type conduitTunnelOpened struct {
+	grant  []byte
+	claims *grant.Claims
+	target relay.TargetStream
+	renew  func(grant []byte) error
+	// route holds the routing log fields (conduitRouteLogAttrs).
+	route []any
+}
+
+// conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant
+// error keeps its own refusal: an authorization, request or experiment
+// refusal, a target without stream renewal (409), a placement refusal
+// (409), or a placement check that could not
+// read the store (registry unavailable). Any other mint error is the
+// signing key set failing.
+func conduitTunnelMintErrPassesThrough(err error) bool {
+	var placement *PlacementConflictError
+	return errors.Is(err, errConduitForbidden) || errors.Is(err, errConduitInvalid) || errors.Is(err, errConduitDisabled) ||
+		errors.As(err, &placement) || errors.Is(err, router.ErrRegistryUnavailable) ||
+		errors.Is(err, errConduitStreamRenewalUnavailable) || errors.Is(err, errConduitAgentUpgradeRequired) ||
+		errors.Is(err, errConduitGrantInternal)
+}
+
+// errConduitTunnelGrantKeys marks a grant that could not be signed.
+var errConduitTunnelGrantKeys = errors.New("grant keys unavailable")
+
+// conduitTunnelTargetCloses is the one mapping from the close code a target
+// refuses a tunnel's stream with to the tunnel's refusal (design §3.8 rule
+// 7), for tunnels on hub-held sessions (conduitTunnelOpenError) and on
+// relay-held sessions (relayTunnelTargetRefusals) alike.
+var conduitTunnelTargetCloses = map[uint32]struct {
+	failure conduitTunnelFailure
+	message string
+}{
+	relay.CloseTargetNotFound: {tunnelAgentNotFound, "agent not found"},
+	conduit.CloseForbidden:    {tunnelForbidden, "not permitted"},
+}
+
+// conduitTunnelTargetRefusal returns the refusal for a target close code
+// (nil when the code has none).
+func conduitTunnelTargetRefusal(code uint32) *conduitTunnelError {
+	m, ok := conduitTunnelTargetCloses[code]
+	if !ok {
+		return nil
+	}
+	return tunnelRefusal(m.failure, "%s", m.message)
+}
+
+// conduitTunnelOpenError maps a failed target open to its refusal.
+func conduitTunnelOpenError(err error) error {
+	var ce *conduit.CloseError
+	var placement *PlacementConflictError
+	if errors.As(err, &placement) {
+		if f, ok := tunnelPlacementFailures[placement.Refusal.Code]; ok {
+			return tunnelRefusal(f, "%s", placement.Refusal.Message)
+		}
+	}
+	switch {
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// External relay mode resolved to something other than a relay-held
+		// session: an internal invariant broke (contracts §2, tunnel RPC
+		// internal error), never a disconnected agent session.
+		return tunnelRefusal(tunnelInternal, "tunnel request failed")
+	case errors.Is(err, errConduitAuthzUnavailable):
+		return tunnelRefusal(tunnelStreamAuthzUnavailable, "authorization is temporarily unavailable")
+	case errors.Is(err, errConduitForbidden):
+		return tunnelRefusal(tunnelForbidden, "not permitted")
+	case errors.Is(err, errConduitInvalid):
+		return tunnelRefusal(tunnelInvalidRequest, "invalid tunnel params")
+	case errors.Is(err, errConduitDisabled):
+		return tunnelRefusal(tunnelConduitNotServing, "conduit is not serving on this hub node")
+	case errors.Is(err, router.ErrRegistryUnavailable):
+		return tunnelRefusal(tunnelRegistryUnavailable, "conduit routing is temporarily unavailable")
+	case errors.Is(err, errConduitStreamRenewalUnavailable):
+		return tunnelRefusal(tunnelStreamRenewalUnavailable, "%s", conduitStreamRenewalUnavailableMessage)
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		return tunnelRefusal(tunnelAgentUpgradeRequired, "%s", conduitAgentUpgradeRequiredMessage)
+	case errors.Is(err, errConduitGrantInternal):
+		return tunnelRefusal(tunnelInternal, "internal error")
+	case errors.Is(err, errConduitTunnelGrantKeys):
+		return tunnelRefusal(tunnelGrantKeysUnavailable, "stream grants are temporarily unavailable")
+	case errors.As(err, &ce) && conduitTunnelTargetRefusal(ce.Code) != nil:
+		return conduitTunnelTargetRefusal(ce.Code)
+	case errors.Is(err, context.Canceled):
+		return err
+	default:
+		// No session serves the kind, the registry or the owner relay is
+		// unreachable, conduit was turned off, or the target refused for
+		// another reason.
+		slog.Debug("Conduit tunnel target unavailable", "error", err)
+		return tunnelRefusal(tunnelSessionUnavailable, "agent session unavailable")
+	}
+}
+
+// decideConduitUser is decideConduit for an authenticated user (hub.conduit
+// on): the session may only ask the hub for tunnels by RPC. The
+// credential's expiry is captured here and bounds new tunnels on the
+// session.
+func (s *Server) decideConduitUser(w http.ResponseWriter, r *http.Request, user UserIdentity, forRelay bool) (conduitAdmission, bool) {
+	rt := s.conduit.Load()
+	if rt == nil && !forRelay {
+		s.writeConduitRelayNotRunning(w)
+		return conduitAdmission{}, false
+	}
+	expiry, err := s.conduitCredentialExpiry(r)
+	if errors.Is(err, errConduitCredentialNotAdmitted) {
+		slog.Info("Conduit user session refused", "user_id", user.ID(), "error", err)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "This credential cannot open conduit sessions", nil)
+		return conduitAdmission{}, false
+	}
+	if err != nil {
+		slog.Warn("Conduit: reading the admitting credential's expiry failed", "user_id", user.ID(), "error", err)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Unable to read the credential's expiry", nil)
+		return conduitAdmission{}, false
+	}
+	if !isWebSocketUpgrade(r) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
+		return conduitAdmission{}, false
+	}
+	p := relay.Principal{
+		Kind: registry.PrincipalUser,
+		ID:   user.ID(),
+	}
+	return conduitAdmission{rt: rt, principal: p, user: user, credentialExpiry: expiry}, true
+}
+
+// serveConduitUser serves an admitted user session. Its RPCs go to the
+// session's tunnel state.
+func (s *Server) serveConduitUser(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
+	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
+	if err != nil {
+		return
+	}
+	ts := newConduitTunnelSession(s, a.user, a.credentialExpiry)
+	p := a.principal
+	p.RPCHandler = ts
+	ctx := context.WithoutCancel(r.Context())
+	if err := a.rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
+		slog.Debug("Conduit user session ended", "user_id", a.user.ID(), "error", err)
+	}
+}
+
+// errConduitCredentialNotAdmitted refuses a user session whose credential
+// kind may not open one.
+var errConduitCredentialNotAdmitted = errors.New("credential kind cannot open a conduit user session")
+
+// conduitCredentialExpiry returns when the request's credential expires
+// (zero: no expiry). The credential was validated by the auth middleware;
+// this only reads its expiry: a hub user JWT's exp, a user access token's
+// stored expiry, the exp of an external bearer token, or for an auth-proxy
+// credential the admission time plus proxy_session_max_age. The dev token
+// has no expiry. A credential kind with no defined expiry rule is refused
+// (errConduitCredentialNotAdmitted).
+func (s *Server) conduitCredentialExpiry(r *http.Request) (time.Time, error) {
+	authType, _ := r.Context().Value(logging.AuthTypeKey{}).(string)
+	switch authType {
+	case AuthTypeJWT:
+		if s.userTokenService == nil {
+			return time.Time{}, errors.New("no user token service")
+		}
+		return s.userTokenService.GetTokenExpiry(extractBearerToken(r))
+	case AuthTypeUAT:
+		scoped, ok := GetIdentityFromContext(r.Context()).(*ScopedUserIdentity)
+		if !ok || scoped.CredentialID() == "" {
+			return time.Time{}, errors.New("access token identity has no credential id")
+		}
+		tok, err := s.store.GetUserAccessToken(r.Context(), scoped.CredentialID())
+		if err != nil {
+			return time.Time{}, err
+		}
+		if tok.ExpiresAt == nil {
+			return time.Time{}, nil
+		}
+		return *tok.ExpiresAt, nil
+	case AuthTypeExternalBearer:
+		return jwtExpiryUnverified(extractBearerToken(r))
+	case AuthTypeDevToken:
+		// The development token carries no expiry.
+		return time.Time{}, nil
+	case AuthTypeProxy:
+		// Trusted-proxy authentication presents no credential with an
+		// expiry: new tunnels are bounded from admission instead.
+		return s.conduitGrantKeySet().now().Add(s.conduitProxySessionMaxAge()), nil
+	default:
+		// A credential kind with no defined expiry rule is refused at
+		// admission.
+		return time.Time{}, fmt.Errorf("%w: auth type %q", errConduitCredentialNotAdmitted, authType)
+	}
+}
+
+// conduitProxySessionMaxAge is server.hub.conduit.proxy_session_max_age
+// (0 = the default, 1h).
+func (s *Server) conduitProxySessionMaxAge() time.Duration {
+	if d := s.config.ConduitProxySessionMaxAge; d > 0 {
+		return d
+	}
+	return config.ConduitDefaultProxySessionMaxAge
+}
+
+// jwtExpiryUnverified reads the exp claim of an already validated JWT.
+func jwtExpiryUnverified(token string) (time.Time, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, errors.New("bearer token is not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("decoding token payload: %w", err)
+	}
+	var claims struct {
+		Exp *json.Number `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, fmt.Errorf("decoding token claims: %w", err)
+	}
+	if claims.Exp == nil {
+		return time.Time{}, nil
+	}
+	f, err := claims.Exp.Float64()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid exp claim: %w", err)
+	}
+	return time.Unix(int64(f), 0), nil
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
+  // Type-checks every client unit test and fixture, which the root project
+  // excludes (ptone/scion#5335). Globs, so a new test file is checked from
+  // its first commit. The terminal tests have their own project
+  // (tsconfig.terminal-tests.json).
+  "include": ["*.test.ts", "__fixtures__/*.ts"],
+  "exclude": ["terminal-*.test.ts"]
+}

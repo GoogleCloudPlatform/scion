@@ -17,18 +17,14 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,28 +46,6 @@ type def171ConvInfo struct {
 	Kind    string `json:"kind"`
 	Surface string `json:"surface"`
 	Name    string `json:"name,omitempty"`
-}
-
-// extractEnvelopeJSON pulls the raw JSON from between BEGIN/END SCION MESSAGE
-// delimiters in a rendered DeliveryText string.
-func extractEnvelopeJSON(t *testing.T, deliveryText string) string {
-	t.Helper()
-	const begin = "---BEGIN SCION MESSAGE---"
-	const end = "---END SCION MESSAGE---"
-
-	startIdx := strings.Index(deliveryText, begin)
-	if startIdx < 0 {
-		t.Fatalf("BEGIN delimiter not found in DeliveryText:\n%s", deliveryText)
-	}
-	startIdx += len(begin) + 1 // skip delimiter + newline
-
-	endIdx := strings.LastIndex(deliveryText, end)
-	if endIdx < 0 || endIdx <= startIdx {
-		t.Fatalf("END delimiter not found in DeliveryText:\n%s", deliveryText)
-	}
-	endIdx-- // trim newline before end delimiter
-
-	return deliveryText[startIdx:endIdx]
 }
 
 // parseDEF171Envelope extracts and decodes the JSON envelope from a rendered
@@ -114,7 +88,6 @@ func def171Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 		Slug:            "agent-a",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentA))
@@ -125,7 +98,6 @@ func def171Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 		Slug:            "agent-b",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		Visibility:      store.VisibilityPrivate,
 		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
@@ -147,31 +119,6 @@ func def171Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	srv.SetDispatcher(dispatcher)
 
 	return srv, s, project, agentA, agentB, convID, dispatcher
-}
-
-// sendAgentDM sends an agent-to-agent DM through the real HTTP handler.
-func sendAgentDM(t *testing.T, srv *Server, sender *store.Agent, convID, projectID, msgText string) *httptest.ResponseRecorder {
-	t.Helper()
-
-	reqBody, err := json.Marshal(OutboundMessageRequest{
-		ConversationRef: "conv:" + convID,
-		Msg:             msgText,
-		Type:            "instruction",
-	})
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/projects/"+projectID+"/agents/"+sender.ID+"/outbound-message",
-		bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: sender.ID},
-		ProjectID: projectID,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, sender.ID)
-	return rr
 }
 
 // ---------------------------------------------------------------------------
@@ -343,36 +290,52 @@ func TestDEF171_AgentDM_PersistAndDispatch_Integrity(t *testing.T) {
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp["message_id"], "response must include message_id")
-	assert.Equal(t, "sent", resp["status"], "response status must be 'sent'")
+	assert.Equal(t, "dispatched", resp["status"], "response status must be 'dispatched' (#1689)")
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: Dispatch failure is non-fatal — the message is still persisted
-// and the handler returns 200.
+// Test 5: Dispatch definite failure returns non-2xx and persists failed
+// state (#1689). Replaces the pre-#1689 nonfatal-failure test.
 // ---------------------------------------------------------------------------
 
-func TestDEF171_AgentDM_DispatchFailure_NonFatal(t *testing.T) {
+func TestDEF171_AgentDM_DispatchFailure_Returns502AndFailed(t *testing.T) {
 	srv, s, project, agentA, _, convID, dispatcher := def171Setup(t)
 	enableReadSwitch(t, srv)
 
-	// Make the dispatcher return an error.
+	// Make the dispatcher return a definite (non-context) error.
 	dispatcher.returnErr = assert.AnError
 
 	rr := sendAgentDM(t, srv, agentA, convID, project.ID, "DEF-171 dispatch-fail test")
-	require.Equal(t, http.StatusOK, rr.Code,
-		"dispatch failure is non-fatal; handler must still return 200; body: %s",
+	require.Equal(t, http.StatusBadGateway, rr.Code,
+		"dispatch definite failure must return 502; body: %s",
 		rr.Body.String())
 
-	// Message must still be persisted.
+	// Error response must include the message ID for correlation.
+	var errResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	errObj, ok := errResp["error"].(map[string]interface{})
+	require.True(t, ok, "response must contain an error object")
+	details, ok := errObj["details"].(map[string]interface{})
+	require.True(t, ok, "error must contain details")
+	assert.NotEmpty(t, details["message_id"],
+		"error details must include message_id for correlation")
+
+	// Message must still be persisted with dispatch_state="failed".
 	ctx := context.Background()
 	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agentA.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
-	var found bool
-	for _, m := range msgs.Items {
-		if m.Msg == "DEF-171 dispatch-fail test" {
-			found = true
+	var found *store.Message
+	for i := range msgs.Items {
+		if msgs.Items[i].Msg == "DEF-171 dispatch-fail test" {
+			found = &msgs.Items[i]
 			break
 		}
 	}
-	assert.True(t, found, "message must be persisted even when dispatch fails")
+	require.NotNil(t, found, "message must be persisted even when dispatch fails")
+	assert.Equal(t, store.MessageDispatchFailed, found.DispatchState,
+		"message dispatch_state must be 'failed' after definite dispatch failure")
+	require.NotNil(t, found.DispatchFailureReason,
+		"DispatchFailureReason must be set")
+	assert.NotEmpty(t, *found.DispatchFailureReason,
+		"DispatchFailureReason must be non-empty")
 }

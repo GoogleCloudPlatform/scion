@@ -32,7 +32,7 @@ import (
 	"context"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // EventBus abstracts message routing and delivery.
@@ -44,6 +44,9 @@ type EventBus interface {
 	// Subscribe registers a handler for messages matching a topic pattern.
 	// Patterns use NATS-style wildcards: * matches a single token, > matches the remainder.
 	// Returns a Subscription that can be used to unsubscribe.
+	// Buses that invoke handlers locally reject a nil handler with
+	// ErrNilHandler; external spokes of a FanOutEventBus are subscribed with a
+	// nil handler (pattern-only, for remote filtering) and must accept it.
 	Subscribe(pattern string, handler EventHandler) (Subscription, error)
 
 	// Close shuts down the event bus and releases resources.
@@ -62,12 +65,12 @@ type Subscription interface {
 
 // TopicAgentMessages returns the topic for direct messages to an agent.
 func TopicAgentMessages(projectID, agentSlug string) string {
-	return projectcompat.AgentTopic(projectID, agentSlug)
+	return projectkeys.AgentTopic(projectID, agentSlug)
 }
 
 // TopicProjectBroadcast returns the topic for project-wide broadcast messages.
 func TopicProjectBroadcast(projectID string) string {
-	return projectcompat.BroadcastTopic(projectID)
+	return projectkeys.BroadcastTopic(projectID)
 }
 
 // TopicGlobalBroadcast returns the topic for global broadcast messages.
@@ -78,16 +81,16 @@ func TopicGlobalBroadcast() string {
 // TopicAllAgentMessages returns a wildcard pattern matching all agent message
 // topics in a project.
 func TopicAllAgentMessages(projectID string) string {
-	return projectcompat.AllAgentTopic(projectID)
+	return projectkeys.AllAgentTopic(projectID)
 }
 
 // TopicUserMessages returns the topic for messages directed at a specific user in a project.
 func TopicUserMessages(projectID, userID string) string {
-	return projectcompat.UserTopic(projectID, userID)
+	return projectkeys.UserTopic(projectID, userID)
 }
 
 // TopicAllUserMessages returns a wildcard pattern matching all user message
 // topics in a project.
 func TopicAllUserMessages(projectID string) string {
-	return projectcompat.AllUserTopic(projectID)
+	return projectkeys.AllUserTopic(projectID)
 }

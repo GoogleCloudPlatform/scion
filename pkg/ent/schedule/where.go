@@ -55,6 +55,81 @@ func IDLTE(id uuid.UUID) predicate.Schedule {
 	return predicate.Schedule(sql.FieldLTE(FieldID, id))
 }
 
+// InitiatorPrincipalKind applies equality check predicate on the "initiator_principal_kind" field. It's identical to InitiatorPrincipalKindEQ.
+func InitiatorPrincipalKind(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalID applies equality check predicate on the "initiator_principal_id" field. It's identical to InitiatorPrincipalIDEQ.
+func InitiatorPrincipalID(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorCredentialKind applies equality check predicate on the "initiator_credential_kind" field. It's identical to InitiatorCredentialKindEQ.
+func InitiatorCredentialKind(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialID applies equality check predicate on the "initiator_credential_id" field. It's identical to InitiatorCredentialIDEQ.
+func InitiatorCredentialID(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialSnapshot applies equality check predicate on the "initiator_credential_snapshot" field. It's identical to InitiatorCredentialSnapshotEQ.
+func InitiatorCredentialSnapshot(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorCredentialSnapshot, v))
+}
+
+// AttributionVersion applies equality check predicate on the "attribution_version" field. It's identical to AttributionVersionEQ.
+func AttributionVersion(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAttributionVersion, v))
+}
+
+// AuthorizationRevision applies equality check predicate on the "authorization_revision" field. It's identical to AuthorizationRevisionEQ.
+func AuthorizationRevision(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorizationRevision, v))
+}
+
+// AuthorityCeilingKind applies equality check predicate on the "authority_ceiling_kind" field. It's identical to AuthorityCeilingKindEQ.
+func AuthorityCeilingKind(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingVersion applies equality check predicate on the "authority_ceiling_version" field. It's identical to AuthorityCeilingVersionEQ.
+func AuthorityCeilingVersion(v int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingPermissionIds applies equality check predicate on the "authority_ceiling_permission_ids" field. It's identical to AuthorityCeilingPermissionIdsEQ.
+func AuthorityCeilingPermissionIds(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingBoundaryKind applies equality check predicate on the "authority_ceiling_boundary_kind" field. It's identical to AuthorityCeilingBoundaryKindEQ.
+func AuthorityCeilingBoundaryKind(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryProjectID applies equality check predicate on the "authority_ceiling_boundary_project_id" field. It's identical to AuthorityCeilingBoundaryProjectIDEQ.
+func AuthorityCeilingBoundaryProjectID(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingSourceExpiresAt applies equality check predicate on the "authority_ceiling_source_expires_at" field. It's identical to AuthorityCeilingSourceExpiresAtEQ.
+func AuthorityCeilingSourceExpiresAt(v time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// FixtureRootID applies equality check predicate on the "fixture_root_id" field. It's identical to FixtureRootIDEQ.
+func FixtureRootID(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldFixtureRootID, v))
+}
+
+// FixtureIssuerID applies equality check predicate on the "fixture_issuer_id" field. It's identical to FixtureIssuerIDEQ.
+func FixtureIssuerID(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldFixtureIssuerID, v))
+}
+
 // ProjectID applies equality check predicate on the "project_id" field. It's identical to ProjectIDEQ.
 func ProjectID(v uuid.UUID) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldProjectID, v))
@@ -70,6 +145,11 @@ func CronExpr(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldCronExpr, v))
 }
 
+// TimeZone applies equality check predicate on the "time_zone" field. It's identical to TimeZoneEQ.
+func TimeZone(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldTimeZone, v))
+}
+
 // EventType applies equality check predicate on the "event_type" field. It's identical to EventTypeEQ.
 func EventType(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldEventType, v))
@@ -83,6 +163,11 @@ func Payload(v string) predicate.Schedule {
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldStatus, v))
+}
+
+// StatusReason applies equality check predicate on the "status_reason" field. It's identical to StatusReasonEQ.
+func StatusReason(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldStatusReason, v))
 }
 
 // NextRunAt applies equality check predicate on the "next_run_at" field. It's identical to NextRunAtEQ.
@@ -128,6 +213,941 @@ func Created(v time.Time) predicate.Schedule {
 // Updated applies equality check predicate on the "updated" field. It's identical to UpdatedEQ.
 func Updated(v time.Time) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldUpdated, v))
+}
+
+// InitiatorPrincipalKindEQ applies the EQ predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindNEQ applies the NEQ predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindIn applies the In predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldInitiatorPrincipalKind, vs...))
+}
+
+// InitiatorPrincipalKindNotIn applies the NotIn predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldInitiatorPrincipalKind, vs...))
+}
+
+// InitiatorPrincipalKindGT applies the GT predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindGTE applies the GTE predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindLT applies the LT predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindLTE applies the LTE predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindContains applies the Contains predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindHasPrefix applies the HasPrefix predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindHasSuffix applies the HasSuffix predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindIsNil applies the IsNil predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldInitiatorPrincipalKind))
+}
+
+// InitiatorPrincipalKindNotNil applies the NotNil predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldInitiatorPrincipalKind))
+}
+
+// InitiatorPrincipalKindEqualFold applies the EqualFold predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindContainsFold applies the ContainsFold predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalIDEQ applies the EQ predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDNEQ applies the NEQ predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDIn applies the In predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldInitiatorPrincipalID, vs...))
+}
+
+// InitiatorPrincipalIDNotIn applies the NotIn predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldInitiatorPrincipalID, vs...))
+}
+
+// InitiatorPrincipalIDGT applies the GT predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDGTE applies the GTE predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDLT applies the LT predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDLTE applies the LTE predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDContains applies the Contains predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDHasPrefix applies the HasPrefix predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDHasSuffix applies the HasSuffix predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDIsNil applies the IsNil predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldInitiatorPrincipalID))
+}
+
+// InitiatorPrincipalIDNotNil applies the NotNil predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldInitiatorPrincipalID))
+}
+
+// InitiatorPrincipalIDEqualFold applies the EqualFold predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDContainsFold applies the ContainsFold predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorCredentialKindEQ applies the EQ predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindNEQ applies the NEQ predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindIn applies the In predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldInitiatorCredentialKind, vs...))
+}
+
+// InitiatorCredentialKindNotIn applies the NotIn predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldInitiatorCredentialKind, vs...))
+}
+
+// InitiatorCredentialKindGT applies the GT predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindGTE applies the GTE predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindLT applies the LT predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindLTE applies the LTE predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindContains applies the Contains predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindHasPrefix applies the HasPrefix predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindHasSuffix applies the HasSuffix predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindIsNil applies the IsNil predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldInitiatorCredentialKind))
+}
+
+// InitiatorCredentialKindNotNil applies the NotNil predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldInitiatorCredentialKind))
+}
+
+// InitiatorCredentialKindEqualFold applies the EqualFold predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindContainsFold applies the ContainsFold predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialIDEQ applies the EQ predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDNEQ applies the NEQ predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDIn applies the In predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldInitiatorCredentialID, vs...))
+}
+
+// InitiatorCredentialIDNotIn applies the NotIn predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldInitiatorCredentialID, vs...))
+}
+
+// InitiatorCredentialIDGT applies the GT predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDGTE applies the GTE predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDLT applies the LT predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDLTE applies the LTE predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDContains applies the Contains predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDHasPrefix applies the HasPrefix predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDHasSuffix applies the HasSuffix predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDIsNil applies the IsNil predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldInitiatorCredentialID))
+}
+
+// InitiatorCredentialIDNotNil applies the NotNil predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldInitiatorCredentialID))
+}
+
+// InitiatorCredentialIDEqualFold applies the EqualFold predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDContainsFold applies the ContainsFold predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialSnapshotEQ applies the EQ predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotNEQ applies the NEQ predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotIn applies the In predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldInitiatorCredentialSnapshot, vs...))
+}
+
+// InitiatorCredentialSnapshotNotIn applies the NotIn predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldInitiatorCredentialSnapshot, vs...))
+}
+
+// InitiatorCredentialSnapshotGT applies the GT predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotGTE applies the GTE predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotLT applies the LT predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotLTE applies the LTE predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotContains applies the Contains predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotHasPrefix applies the HasPrefix predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotHasSuffix applies the HasSuffix predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotIsNil applies the IsNil predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldInitiatorCredentialSnapshot))
+}
+
+// InitiatorCredentialSnapshotNotNil applies the NotNil predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldInitiatorCredentialSnapshot))
+}
+
+// InitiatorCredentialSnapshotEqualFold applies the EqualFold predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldInitiatorCredentialSnapshot, v))
+}
+
+// InitiatorCredentialSnapshotContainsFold applies the ContainsFold predicate on the "initiator_credential_snapshot" field.
+func InitiatorCredentialSnapshotContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldInitiatorCredentialSnapshot, v))
+}
+
+// AttributionVersionEQ applies the EQ predicate on the "attribution_version" field.
+func AttributionVersionEQ(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAttributionVersion, v))
+}
+
+// AttributionVersionNEQ applies the NEQ predicate on the "attribution_version" field.
+func AttributionVersionNEQ(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAttributionVersion, v))
+}
+
+// AttributionVersionIn applies the In predicate on the "attribution_version" field.
+func AttributionVersionIn(vs ...int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAttributionVersion, vs...))
+}
+
+// AttributionVersionNotIn applies the NotIn predicate on the "attribution_version" field.
+func AttributionVersionNotIn(vs ...int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAttributionVersion, vs...))
+}
+
+// AttributionVersionGT applies the GT predicate on the "attribution_version" field.
+func AttributionVersionGT(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAttributionVersion, v))
+}
+
+// AttributionVersionGTE applies the GTE predicate on the "attribution_version" field.
+func AttributionVersionGTE(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAttributionVersion, v))
+}
+
+// AttributionVersionLT applies the LT predicate on the "attribution_version" field.
+func AttributionVersionLT(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAttributionVersion, v))
+}
+
+// AttributionVersionLTE applies the LTE predicate on the "attribution_version" field.
+func AttributionVersionLTE(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAttributionVersion, v))
+}
+
+// AttributionVersionIsNil applies the IsNil predicate on the "attribution_version" field.
+func AttributionVersionIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldAttributionVersion))
+}
+
+// AttributionVersionNotNil applies the NotNil predicate on the "attribution_version" field.
+func AttributionVersionNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldAttributionVersion))
+}
+
+// AuthorizationRevisionEQ applies the EQ predicate on the "authorization_revision" field.
+func AuthorizationRevisionEQ(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorizationRevision, v))
+}
+
+// AuthorizationRevisionNEQ applies the NEQ predicate on the "authorization_revision" field.
+func AuthorizationRevisionNEQ(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAuthorizationRevision, v))
+}
+
+// AuthorizationRevisionIn applies the In predicate on the "authorization_revision" field.
+func AuthorizationRevisionIn(vs ...int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAuthorizationRevision, vs...))
+}
+
+// AuthorizationRevisionNotIn applies the NotIn predicate on the "authorization_revision" field.
+func AuthorizationRevisionNotIn(vs ...int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAuthorizationRevision, vs...))
+}
+
+// AuthorizationRevisionGT applies the GT predicate on the "authorization_revision" field.
+func AuthorizationRevisionGT(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAuthorizationRevision, v))
+}
+
+// AuthorizationRevisionGTE applies the GTE predicate on the "authorization_revision" field.
+func AuthorizationRevisionGTE(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAuthorizationRevision, v))
+}
+
+// AuthorizationRevisionLT applies the LT predicate on the "authorization_revision" field.
+func AuthorizationRevisionLT(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAuthorizationRevision, v))
+}
+
+// AuthorizationRevisionLTE applies the LTE predicate on the "authorization_revision" field.
+func AuthorizationRevisionLTE(v int) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAuthorizationRevision, v))
+}
+
+// AuthorizationRevisionIsNil applies the IsNil predicate on the "authorization_revision" field.
+func AuthorizationRevisionIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldAuthorizationRevision))
+}
+
+// AuthorizationRevisionNotNil applies the NotNil predicate on the "authorization_revision" field.
+func AuthorizationRevisionNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldAuthorizationRevision))
+}
+
+// AuthorityCeilingKindEQ applies the EQ predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindNEQ applies the NEQ predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindIn applies the In predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAuthorityCeilingKind, vs...))
+}
+
+// AuthorityCeilingKindNotIn applies the NotIn predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAuthorityCeilingKind, vs...))
+}
+
+// AuthorityCeilingKindGT applies the GT predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindGTE applies the GTE predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindLT applies the LT predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindLTE applies the LTE predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindContains applies the Contains predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindHasPrefix applies the HasPrefix predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindHasSuffix applies the HasSuffix predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindEqualFold applies the EqualFold predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingKindContainsFold applies the ContainsFold predicate on the "authority_ceiling_kind" field.
+func AuthorityCeilingKindContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldAuthorityCeilingKind, v))
+}
+
+// AuthorityCeilingVersionEQ applies the EQ predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionEQ(v int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionNEQ applies the NEQ predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionNEQ(v int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionIn applies the In predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionIn(vs ...int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAuthorityCeilingVersion, vs...))
+}
+
+// AuthorityCeilingVersionNotIn applies the NotIn predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionNotIn(vs ...int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAuthorityCeilingVersion, vs...))
+}
+
+// AuthorityCeilingVersionGT applies the GT predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionGT(v int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionGTE applies the GTE predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionGTE(v int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionLT applies the LT predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionLT(v int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingVersionLTE applies the LTE predicate on the "authority_ceiling_version" field.
+func AuthorityCeilingVersionLTE(v int32) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAuthorityCeilingVersion, v))
+}
+
+// AuthorityCeilingPermissionIdsEQ applies the EQ predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsNEQ applies the NEQ predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsIn applies the In predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAuthorityCeilingPermissionIds, vs...))
+}
+
+// AuthorityCeilingPermissionIdsNotIn applies the NotIn predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAuthorityCeilingPermissionIds, vs...))
+}
+
+// AuthorityCeilingPermissionIdsGT applies the GT predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsGTE applies the GTE predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsLT applies the LT predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsLTE applies the LTE predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsContains applies the Contains predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsHasPrefix applies the HasPrefix predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsHasSuffix applies the HasSuffix predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsIsNil applies the IsNil predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldAuthorityCeilingPermissionIds))
+}
+
+// AuthorityCeilingPermissionIdsNotNil applies the NotNil predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldAuthorityCeilingPermissionIds))
+}
+
+// AuthorityCeilingPermissionIdsEqualFold applies the EqualFold predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingPermissionIdsContainsFold applies the ContainsFold predicate on the "authority_ceiling_permission_ids" field.
+func AuthorityCeilingPermissionIdsContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldAuthorityCeilingPermissionIds, v))
+}
+
+// AuthorityCeilingBoundaryKindEQ applies the EQ predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindNEQ applies the NEQ predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindIn applies the In predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAuthorityCeilingBoundaryKind, vs...))
+}
+
+// AuthorityCeilingBoundaryKindNotIn applies the NotIn predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAuthorityCeilingBoundaryKind, vs...))
+}
+
+// AuthorityCeilingBoundaryKindGT applies the GT predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindGTE applies the GTE predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindLT applies the LT predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindLTE applies the LTE predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindContains applies the Contains predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindHasPrefix applies the HasPrefix predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindHasSuffix applies the HasSuffix predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindEqualFold applies the EqualFold predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryKindContainsFold applies the ContainsFold predicate on the "authority_ceiling_boundary_kind" field.
+func AuthorityCeilingBoundaryKindContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldAuthorityCeilingBoundaryKind, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDEQ applies the EQ predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDNEQ applies the NEQ predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDIn applies the In predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAuthorityCeilingBoundaryProjectID, vs...))
+}
+
+// AuthorityCeilingBoundaryProjectIDNotIn applies the NotIn predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAuthorityCeilingBoundaryProjectID, vs...))
+}
+
+// AuthorityCeilingBoundaryProjectIDGT applies the GT predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDGTE applies the GTE predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDLT applies the LT predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDLTE applies the LTE predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDContains applies the Contains predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDHasPrefix applies the HasPrefix predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDHasSuffix applies the HasSuffix predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDEqualFold applies the EqualFold predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingBoundaryProjectIDContainsFold applies the ContainsFold predicate on the "authority_ceiling_boundary_project_id" field.
+func AuthorityCeilingBoundaryProjectIDContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldAuthorityCeilingBoundaryProjectID, v))
+}
+
+// AuthorityCeilingSourceExpiresAtEQ applies the EQ predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtEQ(v time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtNEQ applies the NEQ predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtNEQ(v time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtIn applies the In predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtIn(vs ...time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldAuthorityCeilingSourceExpiresAt, vs...))
+}
+
+// AuthorityCeilingSourceExpiresAtNotIn applies the NotIn predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtNotIn(vs ...time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldAuthorityCeilingSourceExpiresAt, vs...))
+}
+
+// AuthorityCeilingSourceExpiresAtGT applies the GT predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtGT(v time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtGTE applies the GTE predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtGTE(v time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtLT applies the LT predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtLT(v time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtLTE applies the LTE predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtLTE(v time.Time) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldAuthorityCeilingSourceExpiresAt, v))
+}
+
+// AuthorityCeilingSourceExpiresAtIsNil applies the IsNil predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldAuthorityCeilingSourceExpiresAt))
+}
+
+// AuthorityCeilingSourceExpiresAtNotNil applies the NotNil predicate on the "authority_ceiling_source_expires_at" field.
+func AuthorityCeilingSourceExpiresAtNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldAuthorityCeilingSourceExpiresAt))
+}
+
+// FixtureRootIDEQ applies the EQ predicate on the "fixture_root_id" field.
+func FixtureRootIDEQ(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDNEQ applies the NEQ predicate on the "fixture_root_id" field.
+func FixtureRootIDNEQ(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDIn applies the In predicate on the "fixture_root_id" field.
+func FixtureRootIDIn(vs ...uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldFixtureRootID, vs...))
+}
+
+// FixtureRootIDNotIn applies the NotIn predicate on the "fixture_root_id" field.
+func FixtureRootIDNotIn(vs ...uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldFixtureRootID, vs...))
+}
+
+// FixtureRootIDGT applies the GT predicate on the "fixture_root_id" field.
+func FixtureRootIDGT(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDGTE applies the GTE predicate on the "fixture_root_id" field.
+func FixtureRootIDGTE(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDLT applies the LT predicate on the "fixture_root_id" field.
+func FixtureRootIDLT(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDLTE applies the LTE predicate on the "fixture_root_id" field.
+func FixtureRootIDLTE(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDIsNil applies the IsNil predicate on the "fixture_root_id" field.
+func FixtureRootIDIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldFixtureRootID))
+}
+
+// FixtureRootIDNotNil applies the NotNil predicate on the "fixture_root_id" field.
+func FixtureRootIDNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldFixtureRootID))
+}
+
+// FixtureIssuerIDEQ applies the EQ predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDEQ(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDNEQ applies the NEQ predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNEQ(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDIn applies the In predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDIn(vs ...uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldFixtureIssuerID, vs...))
+}
+
+// FixtureIssuerIDNotIn applies the NotIn predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNotIn(vs ...uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldFixtureIssuerID, vs...))
+}
+
+// FixtureIssuerIDGT applies the GT predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDGT(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDGTE applies the GTE predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDGTE(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDLT applies the LT predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDLT(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDLTE applies the LTE predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDLTE(v uuid.UUID) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDIsNil applies the IsNil predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldFixtureIssuerID))
+}
+
+// FixtureIssuerIDNotNil applies the NotNil predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldFixtureIssuerID))
 }
 
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.
@@ -298,6 +1318,71 @@ func CronExprEqualFold(v string) predicate.Schedule {
 // CronExprContainsFold applies the ContainsFold predicate on the "cron_expr" field.
 func CronExprContainsFold(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldContainsFold(FieldCronExpr, v))
+}
+
+// TimeZoneEQ applies the EQ predicate on the "time_zone" field.
+func TimeZoneEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldTimeZone, v))
+}
+
+// TimeZoneNEQ applies the NEQ predicate on the "time_zone" field.
+func TimeZoneNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldTimeZone, v))
+}
+
+// TimeZoneIn applies the In predicate on the "time_zone" field.
+func TimeZoneIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldTimeZone, vs...))
+}
+
+// TimeZoneNotIn applies the NotIn predicate on the "time_zone" field.
+func TimeZoneNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldTimeZone, vs...))
+}
+
+// TimeZoneGT applies the GT predicate on the "time_zone" field.
+func TimeZoneGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldTimeZone, v))
+}
+
+// TimeZoneGTE applies the GTE predicate on the "time_zone" field.
+func TimeZoneGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldTimeZone, v))
+}
+
+// TimeZoneLT applies the LT predicate on the "time_zone" field.
+func TimeZoneLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldTimeZone, v))
+}
+
+// TimeZoneLTE applies the LTE predicate on the "time_zone" field.
+func TimeZoneLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldTimeZone, v))
+}
+
+// TimeZoneContains applies the Contains predicate on the "time_zone" field.
+func TimeZoneContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldTimeZone, v))
+}
+
+// TimeZoneHasPrefix applies the HasPrefix predicate on the "time_zone" field.
+func TimeZoneHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldTimeZone, v))
+}
+
+// TimeZoneHasSuffix applies the HasSuffix predicate on the "time_zone" field.
+func TimeZoneHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldTimeZone, v))
+}
+
+// TimeZoneEqualFold applies the EqualFold predicate on the "time_zone" field.
+func TimeZoneEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldTimeZone, v))
+}
+
+// TimeZoneContainsFold applies the ContainsFold predicate on the "time_zone" field.
+func TimeZoneContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldTimeZone, v))
 }
 
 // EventTypeEQ applies the EQ predicate on the "event_type" field.
@@ -493,6 +1578,81 @@ func StatusEqualFold(v string) predicate.Schedule {
 // StatusContainsFold applies the ContainsFold predicate on the "status" field.
 func StatusContainsFold(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldContainsFold(FieldStatus, v))
+}
+
+// StatusReasonEQ applies the EQ predicate on the "status_reason" field.
+func StatusReasonEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldStatusReason, v))
+}
+
+// StatusReasonNEQ applies the NEQ predicate on the "status_reason" field.
+func StatusReasonNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldStatusReason, v))
+}
+
+// StatusReasonIn applies the In predicate on the "status_reason" field.
+func StatusReasonIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldStatusReason, vs...))
+}
+
+// StatusReasonNotIn applies the NotIn predicate on the "status_reason" field.
+func StatusReasonNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldStatusReason, vs...))
+}
+
+// StatusReasonGT applies the GT predicate on the "status_reason" field.
+func StatusReasonGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldStatusReason, v))
+}
+
+// StatusReasonGTE applies the GTE predicate on the "status_reason" field.
+func StatusReasonGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldStatusReason, v))
+}
+
+// StatusReasonLT applies the LT predicate on the "status_reason" field.
+func StatusReasonLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldStatusReason, v))
+}
+
+// StatusReasonLTE applies the LTE predicate on the "status_reason" field.
+func StatusReasonLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldStatusReason, v))
+}
+
+// StatusReasonContains applies the Contains predicate on the "status_reason" field.
+func StatusReasonContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldStatusReason, v))
+}
+
+// StatusReasonHasPrefix applies the HasPrefix predicate on the "status_reason" field.
+func StatusReasonHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldStatusReason, v))
+}
+
+// StatusReasonHasSuffix applies the HasSuffix predicate on the "status_reason" field.
+func StatusReasonHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldStatusReason, v))
+}
+
+// StatusReasonIsNil applies the IsNil predicate on the "status_reason" field.
+func StatusReasonIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldStatusReason))
+}
+
+// StatusReasonNotNil applies the NotNil predicate on the "status_reason" field.
+func StatusReasonNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldStatusReason))
+}
+
+// StatusReasonEqualFold applies the EqualFold predicate on the "status_reason" field.
+func StatusReasonEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldStatusReason, v))
+}
+
+// StatusReasonContainsFold applies the ContainsFold predicate on the "status_reason" field.
+func StatusReasonContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldStatusReason, v))
 }
 
 // NextRunAtEQ applies the EQ predicate on the "next_run_at" field.

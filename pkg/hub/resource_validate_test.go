@@ -25,6 +25,38 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// moveTemplateToLegacyLayout rewrites a bootstrapped template's row into the
+// legacy path layout (Layout "", one object per file at <StoragePath>/<path>),
+// as rows written before ptone/scion#4221 are, and uploads files at those
+// legacy paths. Only legacy rows have a manifest.json and per-object hash
+// checks in ValidateStorage.
+func moveTemplateToLegacyLayout(t *testing.T, srv *Server, s store.Store, tmpl *store.Template, files map[string]string) *store.Template {
+	t.Helper()
+	ctx := context.Background()
+	expected := store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash, Layout: tmpl.Layout}
+	legacy := *tmpl
+	legacy.Layout = ""
+	legacy.StoragePath = storage.TemplateStoragePath(srv.HubID(), tmpl.Scope, tmpl.ScopeID, tmpl.Slug)
+	legacy.StorageURI = storage.StorageURIForPath(tmpl.StorageBucket, legacy.StoragePath)
+	if err := s.UpdateTemplateContent(ctx, &legacy, expected); err != nil {
+		t.Fatalf("move template to legacy layout: %v", err)
+	}
+	for p, c := range files {
+		if _, err := srv.GetStorage().Upload(ctx, legacy.StoragePath+"/"+p, bytes.NewReader([]byte(c)),
+			storage.UploadOptions{Metadata: map[string]string{"sha256": commitHash(c)}}); err != nil {
+			t.Fatalf("upload legacy object %s: %v", p, err)
+		}
+	}
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Layout != "" || got.StoragePath != legacy.StoragePath {
+		t.Fatalf("row not in legacy layout: layout=%q path=%q", got.Layout, got.StoragePath)
+	}
+	return got
+}
+
 func TestValidateStorage_HealthyTemplate(t *testing.T) {
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
@@ -48,10 +80,17 @@ func TestValidateStorage_HealthyTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The bootstrap path doesn't write manifest.json; add it manually so the
-	// "fully healthy" test exercises the zero-issues path.
-	manifestPath := tmpl.StoragePath + "/manifest.json"
-	stor.Upload(ctx, manifestPath, nil, storage.UploadOptions{}) //nolint:errcheck
+	// A bootstrapped template is a blob-layout row (ptone/scion#4221): its
+	// files are blobs and no manifest.json is expected, so a fully healthy
+	// row has zero issues as bootstrapped.
+	if tmpl.Layout != store.TemplateLayoutBlobs {
+		t.Fatalf("expected blob layout, got %q", tmpl.Layout)
+	}
+	for _, c := range []string{"harness: claude\n", "# bashrc"} {
+		if ok, _ := stor.Exists(ctx, blobObjectPath(tmpl, c)); !ok {
+			t.Fatalf("expected blob for %q", c)
+		}
+	}
 
 	rec := templateToRecord(tmpl)
 	report, err := rs.ValidateStorage(ctx, rec)
@@ -90,8 +129,8 @@ func TestValidateStorage_MissingObject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Delete one storage object to simulate storage desync
-	objectPath := tmpl.StoragePath + "/home/.bashrc"
+	// Delete one file's blob to simulate storage desync
+	objectPath := blobObjectPath(tmpl, "# bashrc")
 	if err := stor.Delete(ctx, objectPath); err != nil {
 		t.Fatalf("failed to delete object: %v", err)
 	}
@@ -135,6 +174,10 @@ func TestValidateStorage_MissingManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Only legacy-layout rows expect a manifest.json.
+	tmpl = moveTemplateToLegacyLayout(t, srv, s, tmpl, map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+	})
 
 	// Delete the manifest from storage
 	manifestPath := tmpl.StoragePath + "/manifest.json"
@@ -221,6 +264,12 @@ func TestValidateStorage_ContentHashMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Only legacy-layout rows re-check object hashes: a blob's name is its
+	// content hash.
+	tmpl = moveTemplateToLegacyLayout(t, srv, s, tmpl, map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+		"home/.bashrc":     "# original content",
+	})
 
 	// Overwrite one file with different content while keeping the DB manifest
 	// unchanged, simulating GCS/DB divergence.
@@ -274,6 +323,11 @@ func TestRepairStorage_FixesHashMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A hash mismatch can only be detected on a legacy-layout row.
+	tmpl = moveTemplateToLegacyLayout(t, srv, s, tmpl, map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+		"home/.bashrc":     "# correct content",
+	})
 
 	// Corrupt one file in storage
 	objectPath := tmpl.StoragePath + "/home/.bashrc"
@@ -308,6 +362,26 @@ func TestRepairStorage_FixesHashMismatch(t *testing.T) {
 	}
 	if result.Repaired != 1 {
 		t.Errorf("expected Repaired=1, got %d", result.Repaired)
+	}
+
+	// The repair commit migrates the row to the blob layout, with the
+	// correct content stored as a blob.
+	repaired, err := s.GetTemplateBySlug(ctx, "repair-hash", "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.Layout != store.TemplateLayoutBlobs {
+		t.Errorf("expected repaired row in blob layout, got %q", repaired.Layout)
+	}
+	if ok, _ := stor.Exists(ctx, blobObjectPath(repaired, "# correct content")); !ok {
+		t.Error("expected the correct content's blob after repair")
+	}
+	report2, err := rs.ValidateStorage(ctx, templateToRecord(repaired))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report2.Issues) != 0 {
+		t.Errorf("expected no issues after repair, got %v", report2.Issues)
 	}
 }
 
@@ -373,8 +447,8 @@ func TestRepairStorage_FixesMissingObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Delete one storage object to simulate desync
-	objectPath := tmpl.StoragePath + "/home/.bashrc"
+	// Delete one file's blob to simulate desync
+	objectPath := blobObjectPath(tmpl, "# bashrc content")
 	if err := stor.Delete(ctx, objectPath); err != nil {
 		t.Fatalf("failed to delete object: %v", err)
 	}

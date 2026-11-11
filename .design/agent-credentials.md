@@ -35,7 +35,7 @@ Populates an `AuthConfig` struct from the process environment and well-known cre
 | `CODEX_API_KEY` | CodexAPIKey | — |
 | `GOOGLE_APPLICATION_CREDENTIALS` | GoogleAppCredentials | — |
 | `GOOGLE_CLOUD_PROJECT` | GoogleCloudProject | `GCP_PROJECT` → `ANTHROPIC_VERTEX_PROJECT_ID` |
-| `GOOGLE_CLOUD_REGION` | GoogleCloudRegion | `CLOUD_ML_REGION` → `GOOGLE_CLOUD_LOCATION` |
+| `GOOGLE_CLOUD_LOCATION` | GoogleCloudRegion | `GOOGLE_CLOUD_REGION` → `CLOUD_ML_REGION` (warns when LOCATION and REGION differ; ptone/scion#4719) |
 
 **File paths probed** (if not already set via env var):
 

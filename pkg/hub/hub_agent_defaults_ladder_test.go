@@ -22,7 +22,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -44,48 +43,6 @@ import (
 //
 // The other four agent_defaults fields are deliberately absent from both: they
 // must land BELOW the template, which nothing stamped hub-side can do.
-
-// setHubAgentDefaults sets the hub operational agent_defaults on a test server,
-// simulating what ApplySnapshot does in Postgres mode. Writes under s.mu, the
-// same lock hubAgentDefaults() reads under.
-func setHubAgentDefaults(srv *Server, d opsettings.AgentDefaultsSettings) {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	srv.config.AgentDefaults = d
-}
-
-// recordsContaining returns captured log records whose message contains sub.
-func (h *levelCapturingHandler) recordsContaining(sub string) []slog.Record {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var out []slog.Record
-	for _, r := range h.records {
-		if strings.Contains(r.Message, sub) {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// hubDefaultTemplateWarnings returns the records emitted by
-// warnHubDefaultTemplateUnusable.
-func (h *levelCapturingHandler) hubDefaultTemplateWarnings() []slog.Record {
-	return h.recordsContaining("hub operational default_template is unusable")
-}
-
-// recordAttr reads a single attribute off a captured record.
-func recordAttr(r slog.Record, key string) (slog.Value, bool) {
-	var found slog.Value
-	var ok bool
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == key {
-			found, ok = a.Value, true
-			return false
-		}
-		return true
-	})
-	return found, ok
-}
 
 // ---------------------------------------------------------------------------
 // applyHubAgentDefaults — the unit-level rank contract
@@ -123,7 +80,7 @@ func TestApplyHubAgentDefaults_HarnessConfig(t *testing.T) {
 			wantApplied: false,
 		},
 		{
-			// getHarnessConfigFromTemplate's value, stamped by the template rung
+			// templateHarnessConfigName's value, stamped by the template rung
 			// on both paths before applyProjectDefaults runs.
 			name:        "LosesToTemplate",
 			incumbent:   "template-hc",
@@ -350,7 +307,7 @@ func TestApplyHubAgentDefaults_HarnessAuthDoesNotAffectHCProvenance(t *testing.T
 // the hub default must warn and continue with no template.
 func TestCreateAgent_HubDefaultTemplate_MissingTemplate_DoesNotFailCreate(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupLadderServer(t, disp)
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "deleted-template"})
 
@@ -385,7 +342,7 @@ func TestCreateAgent_HubDefaultTemplate_MissingTemplate_DoesNotFailCreate(t *tes
 // or neither counts.
 func TestCreateAgent_RequestedTemplate_Missing_Still404s(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, _, project := setupLadderServer(t, disp)
 	logs := captureHarnessLogs(srv)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -539,7 +496,7 @@ func TestCreateAgent_HubDefaultTemplate_Pending_DoesNotFailCreate(t *testing.T) 
 // set on the hub-default branch only.
 func TestCreateAgent_ProjectAnnotationTemplate_Missing_Still404s(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupLadderServer(t, disp)
 	setProjectAnnotations(t, s, project, map[string]string{
 		projectSettingDefaultTemplate: "annotation-ghost",
 	})
@@ -706,7 +663,7 @@ func TestCreateAgent_ImplicitDefaultTemplate_HC_FlowsFromTemplate(t *testing.T) 
 // create succeeds with no template (graceful degradation, not an error).
 func TestCreateAgent_ImplicitDefaultTemplate_MissingDoesNotFail(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, _, project := setupLadderServer(t, disp)
 
 	// No template named "default" exists, no hub defaults.
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -755,7 +712,7 @@ func TestCreateAgent_ExplicitTemplate_StillWorks(t *testing.T) {
 // for user-requested templates).
 func TestCreateAgent_ExplicitTemplate_Missing_Still404s(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, _, project := setupLadderServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "missing-explicit-agent",
@@ -982,7 +939,7 @@ func TestCreateAgent_HubDefaultHarnessConfig_ProvenanceNotInferredFromTheSetting
 // a simulation of it.
 func TestCreateAgent_FileMode_NoHubDefaultRungFires(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupLadderServer(t, disp)
 
 	require.Equal(t, opsettings.AgentDefaultsSettings{}, srv.hubAgentDefaults(),
 		"file-mode precondition: no hub agent defaults are cached")
@@ -1021,13 +978,13 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_MissingTemplate_DoesNotFai
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "deleted-template"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-ghost-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-ghost","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-hub-ghost")
@@ -1053,13 +1010,13 @@ func TestDispatchAgentEventHandler_PayloadTemplate_Missing_KeepsName(t *testing.
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "deleted-template"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-payload-ghost-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-payload-ghost","template":"payload-tmpl","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-payload-ghost")
@@ -1101,13 +1058,13 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_StoreError_KeepsName(t *te
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-store-error",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-store-error","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-hub-store-error")
@@ -1130,13 +1087,13 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_Applies(t *testing.T) {
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-tmpl-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-tmpl","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-hub-tmpl")
@@ -1144,8 +1101,8 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_Applies(t *testing.T) {
 	assert.Equal(t, "hub-tmpl", created.Template,
 		"both payload.Template and agent.Template must be set by the rung")
 	require.NotNil(t, created.AppliedConfig)
-	assert.Equal(t, "claude", created.AppliedConfig.HarnessConfig,
-		"the resolved template's harness value still wins over any hub default")
+	assert.Equal(t, "claude-declared", created.AppliedConfig.HarnessConfig,
+		"the resolved template's declared harness config still wins over any hub default")
 }
 
 // TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotation
@@ -1158,13 +1115,13 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 		srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-		err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+		err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 			ID:        "dispatch-rank-payload",
 			ProjectID: "project-1",
 			EventType: "dispatch_agent",
 			Payload:   `{"agentName":"sched-rank-payload","template":"payload-tmpl"}`,
 			CreatedBy: creatorID,
-		})
+		}, creatorID))
 		require.NoError(t, err)
 
 		created := findMockAgent(ms, "sched-rank-payload")
@@ -1183,13 +1140,13 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 		srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-		err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+		err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 			ID:        "dispatch-rank-annotation",
 			ProjectID: "project-1",
 			EventType: "dispatch_agent",
 			Payload:   `{"agentName":"sched-rank-annotation"}`,
 			CreatedBy: creatorID,
-		})
+		}, creatorID))
 		require.NoError(t, err)
 
 		created := findMockAgent(ms, "sched-rank-annotation")
@@ -1238,13 +1195,13 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_Applies(t *testing.T)
 	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-wide-hc"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-hc-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-hc","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-hub-hc")
@@ -1283,13 +1240,13 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToProjectAnnotat
 	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc-x"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-hc-annotation",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-annotation-beats-hub"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-annotation-beats-hub")
@@ -1311,20 +1268,20 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToTemplate(t *te
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-wide-hc"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-hc-2",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-hub-hc-tmpl","template":"payload-tmpl"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-hub-hc-tmpl")
 	require.NotNil(t, created)
 	require.NotNil(t, created.AppliedConfig)
-	assert.Equal(t, "claude", created.AppliedConfig.HarnessConfig,
-		"the template's harness value is in the slot before applyHubAgentDefaults runs")
+	assert.Equal(t, "claude-declared", created.AppliedConfig.HarnessConfig,
+		"the template's declared harness config is in the slot before applyHubAgentDefaults runs")
 }
 
 // TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires is criterion 12
@@ -1338,13 +1295,13 @@ func TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires(t *testing.T) 
 	require.Equal(t, opsettings.AgentDefaultsSettings{}, srv.hubAgentDefaults(),
 		"file-mode precondition: no hub agent defaults are cached")
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-file-mode-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-file-mode","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-file-mode")
@@ -1354,14 +1311,17 @@ func TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires(t *testing.T) 
 	assert.Empty(t, created.AppliedConfig.HarnessConfig)
 }
 
-// findMockAgent returns the agent with the given slug from the mock store.
-func findMockAgent(ms *mockScheduledEventStore, slug string) *store.Agent {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	for _, a := range ms.agents {
-		if a.Slug == slug {
-			return a
-		}
-	}
-	return nil
+// setupLadderServer is setupCreateAgentServer with the fixture broker as
+// the co-located (embedded) broker and no project path on its provider row.
+// The hub then resolves the template itself: for a broker with a project
+// path it assumes a missing template comes from the broker's own checkout
+// and does not answer 404. The co-located broker also reaches the
+// hub-managed workspace, so the create is not refused for workspace
+// storage (ptone/scion#5813).
+func setupLadderServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project) {
+	t.Helper()
+	srv, s, project := setupCreateAgentServer(t, disp)
+	clearCreateAgentProviderPath(t, s, project)
+	srv.SetEmbeddedBrokerID(project.DefaultRuntimeBrokerID)
+	return srv, s, project
 }

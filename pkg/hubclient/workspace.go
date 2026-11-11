@@ -16,6 +16,8 @@ package hubclient
 
 import (
 	"context"
+	"net/url"
+	"os"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -82,6 +84,10 @@ type SyncToFinalizeResponse struct {
 	FilesApplied int `json:"filesApplied"`
 	// BytesTransferred is the total bytes transferred.
 	BytesTransferred int64 `json:"bytesTransferred"`
+	// Warnings lists non-fatal issues, e.g. uploaded files ignored because
+	// the project gives each agent an empty workspace directory
+	// (api.WarningEmptyPerAgentWorkspaceFilesIgnored).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // WorkspaceStatusResponse is the response from getting workspace status.
@@ -122,11 +128,11 @@ func (s *workspaceService) SyncFrom(ctx context.Context, agentID string, opts *S
 		}
 	}
 
-	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-from", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace/sync-from", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SyncFromResponse](resp)
+	return apiclient.DecodeRequired[SyncFromResponse](resp)
 }
 
 // SyncTo initiates upload of workspace to an agent.
@@ -137,11 +143,11 @@ func (s *workspaceService) SyncTo(ctx context.Context, agentID string, files []t
 		Files: files,
 	}
 
-	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace/sync-to", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SyncToResponse](resp)
+	return apiclient.DecodeRequired[SyncToResponse](resp)
 }
 
 // FinalizeSyncTo completes the sync-to operation after files are uploaded.
@@ -152,20 +158,21 @@ func (s *workspaceService) FinalizeSyncTo(ctx context.Context, agentID string, m
 		Manifest: manifest,
 	}
 
-	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace/sync-to/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: callers treat a missing finalize body as empty.
 	return apiclient.DecodeResponse[SyncToFinalizeResponse](resp)
 }
 
 // GetStatus returns the current workspace sync status for an agent.
 func (s *workspaceService) GetStatus(ctx context.Context, agentID string) (*WorkspaceStatusResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/agents/"+agentID+"/workspace", nil)
+	resp, err := s.c.get(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace", nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[WorkspaceStatusResponse](resp)
+	return apiclient.DecodeRequired[WorkspaceStatusResponse](resp)
 }
 
 // getTransferClient returns the transfer client, creating one if necessary.
@@ -176,11 +183,13 @@ func (s *workspaceService) getTransferClient() *transfer.Client {
 	return s.transferClient
 }
 
-// UploadFiles uploads files to their respective signed URLs.
+// UploadFiles uploads collected files to their respective signed URLs,
+// reading each through root, which must be opened at the collected
+// directory (see transfer.Client.UploadFiles).
 // This is a convenience method that uses the transfer client.
-func (s *workspaceService) UploadFiles(ctx context.Context, files []transfer.FileInfo, urls []transfer.UploadURLInfo, progress transfer.ProgressCallback) error {
+func (s *workspaceService) UploadFiles(ctx context.Context, root *os.Root, files []transfer.FileInfo, urls []transfer.UploadURLInfo, progress transfer.ProgressCallback) error {
 	client := s.getTransferClient()
-	return client.UploadFiles(ctx, files, urls, progress)
+	return client.UploadFiles(ctx, root, files, urls, progress)
 }
 
 // DownloadFiles downloads files from signed URLs to a destination directory.

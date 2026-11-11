@@ -19,12 +19,6 @@ import (
 	"context"
 )
 
-// BrokerIdentity represents an authenticated Runtime Broker.
-type BrokerIdentity interface {
-	Identity
-	BrokerID() string
-}
-
 // brokerIdentityImpl implements BrokerIdentity.
 //
 // INTENTIONAL DESIGN: brokerIdentityImpl must not implement UserIdentity
@@ -63,14 +57,26 @@ func NewBrokerIdentity(brokerID string) BrokerIdentity {
 // brokerIdentityContextKey is the context key for BrokerIdentity.
 type brokerIdentityContextKey struct{}
 
-// GetBrokerIdentityFromContext returns the BrokerIdentity from the context, if present.
+// GetBrokerIdentityFromContext returns the BrokerIdentity from the context, if
+// present. The type assertions below report ok=true for a stored value whose
+// concrete type implements BrokerIdentity even when that concrete pointer is
+// nil (a typed nil), because a type assertion checks the dynamic type, not
+// nilness. BrokerIdentity embeds Identity, so isNilIdentity applies directly:
+// each branch treats that case the same as nothing being stored, so callers
+// comparing the result with == nil see a real nil interface instead of a
+// non-nil interface wrapping a nil pointer.
 func GetBrokerIdentityFromContext(ctx context.Context) BrokerIdentity {
-	if identity, ok := ctx.Value(brokerIdentityContextKey{}).(BrokerIdentity); ok {
+	if identity, ok := ctx.Value(brokerIdentityContextKey{}).(BrokerIdentity); ok && !isNilIdentity(identity) {
 		return identity
 	}
-	// Also check the generic identity key
-	if identity, ok := ctx.Value(identityContextKey{}).(BrokerIdentity); ok {
-		return identity
+	// Also check the generic identity key. contextIdentityValue asserts
+	// Identity first; BrokerIdentity embeds Identity, so every stored value
+	// implementing BrokerIdentity also passes that assertion, and the result
+	// is the same as asserting BrokerIdentity on the raw context value.
+	if stored, ok := contextIdentityValue(ctx); ok {
+		if identity, ok := stored.(BrokerIdentity); ok && !isNilIdentity(identity) {
+			return identity
+		}
 	}
 	return nil
 }

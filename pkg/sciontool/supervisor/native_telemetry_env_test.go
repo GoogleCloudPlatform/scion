@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/internal/nativetelemetrytest"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
@@ -28,6 +29,7 @@ func TestNativeTelemetryPolicyRejectsBeforeChildLaunch(t *testing.T) {
 		{"marker", "enabled", hooks.NativeTelemetryPolicyKey, "disabled", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			nativetelemetrytest.ClearEnv(t)
 			if tc.inheritedKey != "" {
 				t.Setenv(tc.inheritedKey, tc.inheritedValue)
 			}
@@ -63,6 +65,7 @@ func TestNativeTelemetryPolicyEffectiveChildEnv(t *testing.T) {
 		{"disabled", "disabled", "0", "http://127.0.0.1:4317"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			nativetelemetrytest.ClearEnv(t)
 			t.Setenv("UNRELATED_CLI", "cli")
 			out := filepath.Join(t.TempDir(), "env")
 			cfg := DefaultConfig()
@@ -92,6 +95,7 @@ func TestNativeTelemetryPolicyEffectiveChildEnv(t *testing.T) {
 }
 
 func TestNativeTelemetryNoPolicyKeepsLegacyPrecedence(t *testing.T) {
+	nativetelemetrytest.ClearEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://cli.invalid")
 	out := filepath.Join(t.TempDir(), "endpoint")
 	cfg := DefaultConfig()

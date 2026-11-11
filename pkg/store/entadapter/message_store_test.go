@@ -79,6 +79,29 @@ func TestMessageInvalidInput(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
+// An attachment-only chat message has no text, so the store accepts an
+// empty body and reads it back unchanged (ptone/scion#6146). The send
+// handlers decide whether a body is required.
+func TestCreateMessage_EmptyBodyRoundTrips(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	msg := newTestMessage(uuid.NewString(), "agent-1")
+	msg.Msg = ""
+	msg.Type = "chat"
+
+	require.NoError(t, s.CreateMessage(ctx, msg))
+
+	got, err := s.GetMessage(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Msg)
+	assert.Equal(t, "chat", got.Type)
+
+	// The identifiers stay required.
+	noProject := newTestMessage("", "agent-1")
+	noProject.Msg = ""
+	assert.ErrorIs(t, s.CreateMessage(ctx, noProject), store.ErrInvalidInput)
+}
+
 func TestMarkMessageRead(t *testing.T) {
 	s := newTestMessageStore(t)
 	ctx := context.Background()
@@ -168,38 +191,6 @@ func TestListMessagesExcludeTypeAndSkipCount(t *testing.T) {
 	assert.Equal(t, "chat", next.Items[0].Type)
 	assert.Equal(t, 2, next.TotalCount)
 	assert.Empty(t, next.NextCursor)
-}
-
-func TestPurgeOldMessages(t *testing.T) {
-	s := newTestMessageStore(t)
-	ctx := context.Background()
-	projectID := uuid.NewString()
-
-	oldRead := newTestMessage(projectID, "agent-1")
-	oldRead.Read = true
-	oldRead.CreatedAt = time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldRead))
-
-	oldUnread := newTestMessage(projectID, "agent-1")
-	oldUnread.CreatedAt = time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldUnread))
-
-	recent := newTestMessage(projectID, "agent-1")
-	require.NoError(t, s.CreateMessage(ctx, recent))
-
-	// readCutoff 24h ago purges oldRead; unreadCutoff 96h ago keeps oldUnread.
-	readCutoff := time.Now().Add(-24 * time.Hour)
-	unreadCutoff := time.Now().Add(-96 * time.Hour)
-	n, err := s.PurgeOldMessages(ctx, readCutoff, unreadCutoff)
-	require.NoError(t, err)
-	assert.Equal(t, 1, n)
-
-	_, err = s.GetMessage(ctx, oldRead.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound)
-	_, err = s.GetMessage(ctx, oldUnread.ID)
-	require.NoError(t, err)
-	_, err = s.GetMessage(ctx, recent.ID)
-	require.NoError(t, err)
 }
 
 // fakePublisher records PublishUserMessage calls to verify the LISTEN/NOTIFY
@@ -335,4 +326,127 @@ func TestCountUnbackfilledMessages_InvalidProjectIDReturnsError(t *testing.T) {
 	count, err := s.CountUnbackfilledMessages(ctx, "not-a-uuid")
 	assert.Error(t, err)
 	assert.Equal(t, 0, count)
+}
+
+// TestMessageProjectProvenanceRoundTrip pins ptone/scion#2282: the
+// server-derived SenderProjectID / RecipientProjectID stamps must survive a
+// CreateMessage -> read round-trip on every read path, and an absent stamp
+// (human sender, legacy row) must read back as nil.
+func TestMessageProjectProvenanceRoundTrip(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderProj := uuid.NewString()
+	recipientProj := projectID
+
+	stamped := newTestMessage(projectID, "agent-1")
+	stamped.Sender = "agent:peer"
+	stamped.SenderProjectID = &senderProj
+	stamped.RecipientProjectID = &recipientProj
+	require.NoError(t, s.CreateMessage(ctx, stamped))
+
+	unstamped := newTestMessage(projectID, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, unstamped))
+
+	emptyStr := ""
+	emptyStamp := newTestMessage(projectID, "agent-1")
+	emptyStamp.SenderProjectID = &emptyStr
+	require.NoError(t, s.CreateMessage(ctx, emptyStamp))
+
+	assertStamped := func(t *testing.T, got *store.Message) {
+		t.Helper()
+		require.NotNil(t, got.SenderProjectID, "SenderProjectID must be persisted")
+		require.NotNil(t, got.RecipientProjectID, "RecipientProjectID must be persisted")
+		assert.Equal(t, senderProj, *got.SenderProjectID)
+		assert.Equal(t, recipientProj, *got.RecipientProjectID)
+	}
+
+	t.Run("GetMessage", func(t *testing.T) {
+		got, err := s.GetMessage(ctx, stamped.ID)
+		require.NoError(t, err)
+		assertStamped(t, got)
+
+		got, err = s.GetMessage(ctx, unstamped.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got.SenderProjectID)
+		assert.Nil(t, got.RecipientProjectID)
+
+		got, err = s.GetMessage(ctx, emptyStamp.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got.SenderProjectID, "an empty stamp persists as NULL")
+	})
+
+	t.Run("GetMessagesByIDs", func(t *testing.T) {
+		got, err := s.GetMessagesByIDs(ctx, []string{stamped.ID, unstamped.ID})
+		require.NoError(t, err)
+		require.Contains(t, got, stamped.ID)
+		assertStamped(t, got[stamped.ID])
+		assert.Nil(t, got[unstamped.ID].SenderProjectID)
+	})
+
+	t.Run("ListMessages", func(t *testing.T) {
+		res, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		var found bool
+		for i := range res.Items {
+			if res.Items[i].ID == stamped.ID {
+				found = true
+				assertStamped(t, &res.Items[i])
+			}
+		}
+		assert.True(t, found)
+	})
+}
+
+func TestMessageProjectProvenanceRejectsMalformedID(t *testing.T) {
+	s := newTestMessageStore(t)
+	bad := "not-a-uuid"
+	msg := newTestMessage(uuid.NewString(), "agent-1")
+	msg.RecipientProjectID = &bad
+	assert.ErrorIs(t, s.CreateMessage(context.Background(), msg), store.ErrInvalidInput)
+}
+
+// TestMessageDelegationAttribution_RoundTrip: the authorizing user and the
+// grant of a message sent with an agent delegated credential
+// (.design/agent-delegation.md §14.5) are stored and read back; a message
+// without them reads back empty. Runs on both backends (enttest).
+func TestMessageDelegationAttribution_RoundTrip(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	delegated := newTestMessage(projectID, "agent-b")
+	delegated.Sender, delegated.SenderID = "agent:agent-a", "agent-a"
+	delegated.AuthorizingUserID = uuid.NewString()
+	delegated.DelegationGrantID = uuid.NewString()
+	require.NoError(t, s.CreateMessage(ctx, delegated))
+	plain := newTestMessage(projectID, "agent-b")
+	require.NoError(t, s.CreateMessage(ctx, plain))
+
+	got, err := s.GetMessage(ctx, delegated.ID)
+	require.NoError(t, err)
+	assert.Equal(t, delegated.AuthorizingUserID, got.AuthorizingUserID)
+	assert.Equal(t, delegated.DelegationGrantID, got.DelegationGrantID)
+	assert.Equal(t, "agent:agent-a", got.Sender, "the sender stays the agent")
+
+	got, err = s.GetMessage(ctx, plain.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.AuthorizingUserID)
+	assert.Empty(t, got.DelegationGrantID)
+
+	list, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: "agent-b"}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 2)
+	attributed := 0
+	for _, m := range list.Items {
+		if m.ID == delegated.ID {
+			attributed++
+			assert.Equal(t, delegated.AuthorizingUserID, m.AuthorizingUserID)
+			assert.Equal(t, delegated.DelegationGrantID, m.DelegationGrantID)
+		} else {
+			assert.Empty(t, m.AuthorizingUserID)
+			assert.Empty(t, m.DelegationGrantID)
+		}
+	}
+	assert.Equal(t, 1, attributed)
 }

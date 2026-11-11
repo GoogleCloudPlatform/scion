@@ -120,7 +120,7 @@ func TestGCPSkillResolver_HappyPath(t *testing.T) {
 		t.Errorf("Files[0].Hash = %q, want %q", rs.Files[0].Hash, skillHash)
 	}
 
-	expectedBundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	expectedBundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: skillHash},
 	})
 	if rs.Hash != expectedBundleHash {

@@ -33,54 +33,6 @@ import (
 // Test setup helpers
 // ---------------------------------------------------------------------------
 
-// setupScopedAdminTest creates a test server with a hub-admin user and a regular
-// member user. The hub-admin has Role=member but holds a system-scoped hub-admin
-// role binding, giving them permissions defined in hubAdminPermissionIDs().
-func setupScopedAdminTest(t *testing.T) (*Server, store.Store, *store.User, *store.User) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create a hub-admin user (NOT super-admin — role is "member")
-	hubAdmin := &store.User{
-		ID:          tid("user-hub-admin-test"),
-		Email:       "hubadmin@test.com",
-		DisplayName: "Hub Admin",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, hubAdmin))
-	ensureHubMembership(ctx, s, hubAdmin.ID)
-
-	// Create system-scoped hub-admin role binding
-	hubAdminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubAdminRoleDef.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      hubAdmin.ID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "system",
-	})
-	require.NoError(t, err)
-
-	// Create a regular member user for comparison
-	member := &store.User{
-		ID:          tid("user-member-test"),
-		Email:       "member@test.com",
-		DisplayName: "Member",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, member))
-	ensureHubMembership(ctx, s, member.ID)
-
-	return srv, s, hubAdmin, member
-}
-
 // ==========================================================================
 // Group 1: Hub-admin Access Tests (scopeable endpoints)
 //
@@ -349,7 +301,7 @@ func setupProjectScopedAdminTest(t *testing.T) (*Server, store.Store, *store.Use
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectX))
-	srv.createProjectMembersGroup(ctx, projectX)
+	srv.seedProjectCreatorMembership(ctx, projectX)
 
 	// Create project Y (unbound project)
 	projectY := &store.Project{
@@ -362,7 +314,7 @@ func setupProjectScopedAdminTest(t *testing.T) (*Server, store.Store, *store.Use
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectY))
-	srv.createProjectMembersGroup(ctx, projectY)
+	srv.seedProjectCreatorMembership(ctx, projectY)
 
 	// Create project-admin role binding for projectAdmin in project X only
 	projectAdminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
@@ -525,12 +477,12 @@ func TestScopedAdmin_HubAdminCanCreateCustomRoleWithHeldPermissions(t *testing.T
 	srv, _, hubAdmin, _ := setupScopedAdminTest(t)
 
 	// Hub-admin should be able to create a custom role that contains
-	// only permissions they hold (user.read, user.list are in hub-admin).
+	// only permissions they hold (user.read, group.read are in hub-admin).
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, "/api/v1/admin/roles", createRoleDefinitionRequest{
 		Name:        "custom-reader",
 		Description: "Custom read-only role",
 		ScopeType:   store.RoleScopeSystem,
-		Permissions: []string{"user.read", "user.list"},
+		Permissions: []string{"user.read", "group.read"},
 	})
 	assert.Equal(t, http.StatusCreated, rec.Code,
 		"hub-admin should be able to create custom role with held permissions; got body: %s", rec.Body.String())
@@ -567,7 +519,7 @@ func TestScopedAdmin_HubAdminCanCreateProjectScopedBinding(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Look up project-admin role definition
 	projectAdminDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
@@ -608,7 +560,7 @@ func TestScopedAdmin_CombinedHubAndProjectRoles(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Hub-admin should still access hub-level endpoints
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/admin/roles", nil)
@@ -869,10 +821,10 @@ func TestScopedAdmin_ProjectOwnerCanCreateProjectBinding_ViaAdminAPI(t *testing.
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	// createProjectMembersGroup also creates a project-owner role binding
+	// seedProjectCreatorMembership also creates a project-owner role binding
 	// for the project creator, so the owner is recognized by the membership
 	// service governance check.
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a member user to assign a project role to.
 	member := &store.User{
@@ -965,7 +917,7 @@ func TestScopedAdmin_HubMemberDeniedProjectBinding_ViaAdminAPI(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a random hub-member who has no project role.
 	bystander := &store.User{

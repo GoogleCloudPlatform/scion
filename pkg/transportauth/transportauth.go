@@ -52,6 +52,13 @@ const (
 	// unreachable.
 	EnvMetadataMode = "SCION_METADATA_MODE"
 
+	// metadataModePassthrough mirrors store.GCPMetadataModePassthrough. It is
+	// duplicated as a literal (rather than importing pkg/store) to keep this
+	// package free of the store/ent dependency graph — the same tradeoff
+	// pkg/agent/run.go's hasMetadataInterception already makes for the same
+	// env var.
+	metadataModePassthrough = "passthrough"
+
 	RefreshMargin = 5 * time.Minute
 	DefaultTTL    = 1 * time.Hour
 	FetchTimeout  = 2 * time.Second
@@ -78,6 +85,20 @@ const (
 	HeaderServerlessAuthorization
 )
 
+// HeaderName returns the HTTP header that carries the transport token in
+// this mode. For HeaderAuthorization the header is only set when the
+// request has no Authorization header already.
+func (m HeaderMode) HeaderName() string {
+	switch m {
+	case HeaderProxyAuthorization:
+		return "Proxy-Authorization"
+	case HeaderServerlessAuthorization:
+		return "X-Serverless-Authorization"
+	default:
+		return "Authorization"
+	}
+}
+
 // TokenSource yields transport-layer Google OIDC ID tokens. Thread-safe.
 type TokenSource interface {
 	// Token returns a valid OIDC token, refreshing if necessary.
@@ -91,6 +112,22 @@ type TokenSource interface {
 
 // IsOnGCEFunc detects whether we're running on GCP. Override in tests.
 var IsOnGCEFunc = func() bool { return metadata.OnGCE() }
+
+// IsMetadataRedirected reports whether the given SCION_METADATA_MODE value
+// means 169.254.169.254 has been redirected to the scion metadata sidecar,
+// making the real GCE metadata server (and therefore ambient-SA OIDC via
+// MetadataSource) unreachable.
+//
+// Only "assign" and "block" redirect (pkg/runtimebroker/start_context.go);
+// "passthrough" deliberately does not — the agent is meant to reach the real
+// metadata server directly, so ambient-SA OIDC must still work under it. Any
+// other non-empty value (including future modes this package doesn't yet
+// know about, or corruption) is treated as redirected — fail closed, matching
+// the allow-list philosophy start_context.go already applies to this same
+// env var.
+func IsMetadataRedirected(mode string) bool {
+	return mode != "" && mode != metadataModePassthrough
+}
 
 // ParseTokenExpiry extracts the expiry time from a JWT token without
 // validating the signature. This is safe for scheduling purposes since
@@ -133,6 +170,13 @@ func ModeFromString(mode string) HeaderMode {
 	}
 }
 
+// IsProxyMode reports whether mode (a SCION_TRANSPORT_MODE value) names a
+// platform proxy in front of the hub that requires a transport credential:
+// "iap" or "cloudrun_invoker".
+func IsProxyMode(mode string) bool {
+	return mode == "iap" || mode == "cloudrun_invoker"
+}
+
 // ModeFromEnv reads SCION_TRANSPORT_MODE and returns the corresponding
 // HeaderMode. Returns HeaderAuthorization when unset or unrecognised.
 func ModeFromEnv() HeaderMode {
@@ -144,26 +188,48 @@ func ModeFromEnv() HeaderMode {
 // exactly as before this change.
 //
 // Resolution order:
-//  1. SCION_TRANSPORT_TOKEN set → InjectedSource
-//  2. On GCE && SCION_METADATA_MODE unset && audience configured
-//     (SCION_TRANSPORT_AUDIENCE or SCION_HUB_OIDC_AUDIENCE) → MetadataSource
-//  3. Otherwise → nil (no transport auth)
+//  1. SCION_TRANSPORT_TOKEN_FILE or SCION_TRANSPORT_TOKEN set (inside an
+//     agent) → FileSource. It reads the refreshed transport token file and
+//     uses the injected env value only as a bootstrap fallback; whichever
+//     expires last wins.
+//  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
+//     && audience configured (SCION_TRANSPORT_AUDIENCE or
+//     SCION_HUB_OIDC_AUDIENCE) → MetadataSource
+//  3. SCION_TRANSPORT_MODE names a proxy mode and the default transport
+//     token file exists → FileSource for that file. This covers an agent
+//     that started without a transport token and received one later, from
+//     a token refresh or reset-auth.
+//  4. Otherwise → nil (no transport auth)
 func FromEnv() (TokenSource, error) {
-	if tok := os.Getenv(EnvTransportToken); tok != "" {
-		source := NewInjectedSource()
-		expiry, err := ParseTokenExpiry(tok)
-		if err != nil {
-			expiry = time.Now().Add(DefaultTTL)
-		}
-		source.SetToken(tok, expiry)
-		return source, nil
-	}
+	return FromEnvWithReader(nil)
+}
 
-	if !IsOnGCEFunc() {
-		return nil, nil
+// FromEnvWithReader is FromEnv with the reader used by both file-backed
+// steps (the injected transport token file and the proxy-mode default
+// file). A nil read uses ReadTransportTokenFile, as FromEnv does. Callers
+// that may run with elevated privileges should pass a stricter reader,
+// such as sciontool's guarded one.
+func FromEnvWithReader(read FileReadFunc) (TokenSource, error) {
+	if src := fileSourceFromEnv(read); src != nil {
+		return src, nil
 	}
-	if mode := os.Getenv(EnvMetadataMode); mode != "" {
-		return nil, nil
+	if src := metadataSourceFromEnv(); src != nil {
+		return src, nil
+	}
+	if src := lateFileSourceFromEnv(read); src != nil {
+		return src, nil
+	}
+	return nil, nil
+}
+
+// metadataSourceFromEnv returns a MetadataSource when running on GCE with
+// the real metadata server reachable and a transport audience configured.
+func metadataSourceFromEnv() *MetadataSource {
+	if !IsOnGCEFunc() {
+		return nil
+	}
+	if mode := os.Getenv(EnvMetadataMode); IsMetadataRedirected(mode) {
+		return nil
 	}
 
 	audience := os.Getenv(EnvTransportAudience)
@@ -171,10 +237,9 @@ func FromEnv() (TokenSource, error) {
 		audience = os.Getenv(EnvHubOIDCAudience)
 	}
 	if audience == "" {
-		return nil, nil
+		return nil
 	}
-
-	return NewMetadataSource(audience), nil
+	return NewMetadataSource(audience)
 }
 
 // TransportSettings holds transport auth settings read from settings.yaml.
@@ -188,8 +253,11 @@ type TransportSettings struct {
 // available (keeping the sciontool binary lean).
 //
 // Resolution order:
-//  1. SCION_TRANSPORT_TOKEN set → InjectedSource (env always wins)
-//  2. On GCE && SCION_METADATA_MODE unset && audience available → MetadataSource
+//  1. Injected transport token (file or env) → FileSource (always wins);
+//     in a proxy mode, otherwise after the metadata step of FromEnv, the
+//     default transport token file once it exists → FileSource
+//  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
+//     && audience available → MetadataSource
 //  3. Settings audience + adcNew → ADCSource
 //  4. Otherwise → nil
 func FromSettings(settings *TransportSettings, adcNew ADCSourceConstructor) (TokenSource, HeaderMode, error) {
@@ -215,7 +283,7 @@ func FromSettings(settings *TransportSettings, adcNew ADCSourceConstructor) (Tok
 
 	// Try metadata server first when on GCE.
 	if IsOnGCEFunc() {
-		if metaMode := os.Getenv(EnvMetadataMode); metaMode == "" {
+		if metaMode := os.Getenv(EnvMetadataMode); !IsMetadataRedirected(metaMode) {
 			return NewMetadataSource(settings.Audience), mode, nil
 		}
 	}
@@ -289,4 +357,23 @@ func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	applyToken(req.Header, tok, t.mode)
 	return t.base.RoundTrip(req)
+}
+
+// hubOnlyRoundTripper has the method set of apiclient.HubOnlyRoundTripper
+// (apiclient's tests import this package, so it cannot import apiclient). The
+// assertion below keeps the RoundTripper that Wrap returns recognisable to
+// apiclient.Transport.AuthenticatedHTTPClient.
+type hubOnlyRoundTripper interface {
+	http.RoundTripper
+	HubOnlyBase() http.RoundTripper
+}
+
+var _ hubOnlyRoundTripper = (*roundTripper)(nil)
+
+// HubOnlyBase returns the transport below this layer. The transport token is
+// meant only for the hub, so a client that also sends requests to other
+// hosts (apiclient.Transport.AuthenticatedHTTPClient, for signed transfer
+// URLs) sends those requests through HubOnlyBase instead.
+func (t *roundTripper) HubOnlyBase() http.RoundTripper {
+	return t.base
 }

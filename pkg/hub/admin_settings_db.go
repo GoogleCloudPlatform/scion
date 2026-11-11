@@ -20,16 +20,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/knadh/koanf/v2"
@@ -50,13 +60,18 @@ type SectionMetadata struct {
 }
 
 // ServerConfigDBResponse extends the file-mode response with metadata for the
-// postgres-mode GET endpoint. It embeds the original ServerConfigResponse and
-// adds section_metadata and env_overrides.
+// DB-backed GET endpoint (any driver). It embeds the original
+// ServerConfigResponse and adds section_metadata and env_overrides.
 type ServerConfigDBResponse struct {
 	ServerConfigResponse
 
 	// SectionMetadata maps section name to its provenance metadata.
 	SectionMeta map[string]SectionMetadata `json:"section_metadata,omitempty"`
+
+	// Layer0Editable is true on workstation hubs, where the PUT writes
+	// Layer-0, unclassified and file-only keys to settings.yaml; false on
+	// hosted hubs, where they are rejected (ptone/scion#1091 option C).
+	Layer0Editable bool `json:"layer0_editable"`
 
 	// SupersededKeys maps section name to bootstrap-material keys whose
 	// merged value differs from the DB value (managed sections only).
@@ -65,13 +80,39 @@ type ServerConfigDBResponse struct {
 	// DeprecatedEnvKeys lists SCION_SERVER_* env vars that target Layer-1
 	// keys and should be migrated to SCION_SEED_* equivalents.
 	DeprecatedEnvKeys []DeprecatedEnvKeyInfo `json:"deprecated_env_keys,omitempty"`
+
+	// PublicURLStatus reports the hub endpoint in effect, where it came
+	// from, and the operator setting that pins it, if any (ptone/scion#3905).
+	// Read-only.
+	PublicURLStatus *PublicURLStatus `json:"public_url_status,omitempty"`
+
+	// ContentURLStatus reports whether server.hub.content_url is in effect,
+	// and if not, why it is ignored (ptone/scion#7107). Read-only: a PUT
+	// body that sends it back has it dropped.
+	ContentURLStatus *ContentURLStatus `json:"content_url_status,omitempty"`
+
+	// ObservabilityExport reports whether the hub's own metrics and trace
+	// exporters run, why, and the export project with its source (env,
+	// file or metadata), as decided at startup. Read-only: the export
+	// project is not a settings key (ptone/scion#4914).
+	ObservabilityExport *hubexport.Status `json:"observability_export,omitempty"`
+
+	// ImageRegistryProvenance reports where the image_registry in effect
+	// comes from: the hub-scope source and value, every Runtime Broker that
+	// reports a node env, and each profile's value (ptone/scion#3916).
+	// Read-only.
+	ImageRegistryProvenance *ImageRegistryProvenance `json:"image_registry_provenance,omitempty"`
+
+	// PlacementPreflight is the read-only Kubernetes placement pre-upgrade
+	// report (counts only). Set by the GET handler only.
+	PlacementPreflight *PlacementPreflightView `json:"placement_preflight,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
 // bootstrap merge differs from the admin-set DB value in a managed section.
 type SupersededKey struct {
 	Key    string `json:"key"`
-	Source string `json:"source"` // "seed_env", "yaml", or "server_env"
+	Source string `json:"source"` // "seed_env", "yaml", "server_env", or "default"
 }
 
 // DeprecatedEnvKeyInfo represents a SCION_SERVER_* env var that targets a
@@ -85,7 +126,7 @@ type DeprecatedEnvKeyInfo struct {
 // ServerConfigUpdateDBRequest extends the update request with optional CAS
 // support via expected_revisions. The body shape is additive — the web UI
 // sends ServerConfigUpdateRequest today, and expected_revisions is optional
-// (omitted = last-writer-wins, preserving current UI behavior).
+// (omitted = last-writer-wins, except the access section; see handlePutServerConfigDB).
 //
 // We chose an in-body map over If-Match headers because:
 //   - A single PUT can touch multiple sections, each with its own revision.
@@ -95,22 +136,56 @@ type ServerConfigUpdateDBRequest struct {
 	ServerConfigUpdateRequest
 
 	// ExpectedRevisions maps section name → expected revision for CAS.
-	// Omitted sections use last-writer-wins semantics.
+	// A section merged on its current row (mergeSectionOnCurrent) that has
+	// no entry uses the revision the merge read as an implicit CAS; the
+	// map sections (runtimes, profiles, harness_configs) use
+	// last-writer-wins. runtimes and profiles are written together in one
+	// transaction that also compares the revision of the one the body
+	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
-// handleGetServerConfigDB handles GET /api/v1/admin/server-config in postgres mode.
+// handleGetServerConfigDB handles GET /api/v1/admin/server-config
+// whenever OperationalSettings is wired (any DB driver).
 //
 // Layer-1 sections come from OperationalSettings.Snapshot(); Layer-0 comes from
 // the local GlobalConfig (settings.yaml). Section metadata shows provenance.
 func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
+	resp, err := s.buildServerConfigDBResponse(r.Context(), ops)
+	if err != nil {
+		var ue *serverConfigReadError
+		if errors.As(err, &ue) {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, ue.userMsg, nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
+		return
+	}
+	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
+	resp.PlacementPreflight = s.placementPreflight(r.Context(), ops)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// serverConfigReadError carries the client-facing message for a failure to
+// build the server-config GET view; the cause is logged where it happens.
+type serverConfigReadError struct {
+	userMsg string
+	err     error
+}
+
+func (e *serverConfigReadError) Error() string { return e.userMsg + ": " + e.err.Error() }
+func (e *serverConfigReadError) Unwrap() error { return e.err }
+
+// buildServerConfigDBResponse builds the GET /api/v1/admin/server-config body
+// (sensitive fields masked). The PUT handler also uses it as the reference
+// view for echo detection.
+func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *OperationalSettings) (*ServerConfigDBResponse, error) {
 	// Build the base response from the file (same as file mode) for Layer-0.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		// N3: log the full error server-side for observability.
 		slog.Error("GET server-config: failed to resolve settings directory", "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
@@ -118,8 +193,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if err != nil && !os.IsNotExist(err) {
 		// N3: log the full error server-side for observability.
 		slog.Error("GET server-config: failed to read settings file", "path", settingsPath, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to read settings file", err}
 	}
 
 	var vs config.VersionedSettings
@@ -127,10 +201,13 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if err := yamlv3.Unmarshal(data, &vs); err != nil {
 			// N3: log the full error server-side for observability.
 			slog.Error("GET server-config: failed to parse settings file", "path", settingsPath, "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
-			return
+			return nil, &serverConfigReadError{"Failed to parse settings file", err}
 		}
 	}
+
+	// The settings.yaml values, for env_values' saved_differs (taken before
+	// the response below shares and changes vs.Server; never returned).
+	fileStored := fileStoredValues(&vs)
 
 	// Start with file-based response for Layer-0 fields.
 	resp := ServerConfigDBResponse{
@@ -153,29 +230,70 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	resp.SettingsTier = "db"
+	resp.Layer0Editable = s.layer0Editable()
 
 	// Overlay Layer-1 fields from the operational settings snapshot.
 	snap := ops.Snapshot()
 	applySnapshotToResponse(&resp.ServerConfigResponse, snap)
+	// hub_name: the effective value (DB, else bootstrap), so a client that
+	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
+	resp.Server.Hub.HubName = effectiveHubName(ops)
+	// Keys that return to the startup value when unset: the value this hub
+	// runs with, so GET and the running hub agree (ptone/scion#3904).
+	s.applyRunningValuesForUnsetKeys(&resp.ServerConfigResponse, snap)
+	// GCP permission-check settings: the values this hub applies, which
+	// differ from the stored or file value when that value cannot be used.
+	iam := s.currentGCPIAMSettings()
+	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
+	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
+	// The keys GET never returns: the hub class, test identities, the
+	// relay-peer secret, the proxy driver settings (WS2) and the server
+	// keyring file path (ptone/scion#1530).
+	hideNeverShownServerKeys(resp.Server)
 
 	// Build section metadata from the cache.
-	resp.SectionMeta = s.buildSectionMetadata(r.Context(), ops)
+	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
 
 	// Env overrides.
-	overrides := ops.EnvOverriddenKeys()
+	// Never-API-writable keys are not listed: GET does not reveal which of
+	// them are set.
+	overrides := withoutNeverAPIWritableKeys(ops.EnvOverriddenKeys())
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
+	// How the hub endpoint was resolved at startup (ptone/scion#3905).
+	resp.PublicURLStatus = s.publicURLStatus()
+	// Whether the content host is in effect (ptone/scion#7107).
+	resp.ContentURLStatus = s.contentURLStatus()
+	// The hub observability exporters as started (ptone/scion#4914).
+	resp.ObservabilityExport = s.ObservabilityExportStatus()
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
+	// Where image_registry comes from (ptone/scion#3916).
+	resp.ImageRegistryProvenance = s.imageRegistryProvenance(ctx, ops)
 
 	// Deprecated env keys (SCION_SERVER_* targeting Layer-1 keys).
 	resp.DeprecatedEnvKeys = s.computeDeprecatedEnvKeys(ops)
 
+	// Built-in profiles and runtimes the co-located broker's overlay retains
+	// (ptone/scion#5113): the overlay-level set, read-only.
+	if overlay, _, _ := s.profileRefs.target(); overlay != nil {
+		resp.RetainedBuiltinProfiles, resp.RetainedBuiltinRuntimes = overlay.RetainedState()
+	}
+
+	// The environment values of the overridden keys and whether each is in
+	// effect, compared with the unmasked view built above.
+	if ops.envKoanf != nil {
+		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, resp.EnvOverrides, &resp.ServerConfigResponse, dbStoredValues(fileStored, ops))
+	}
+	// The running values of the keys start-up sets, compared with the
+	// unmasked view (ptone/scion#3722).
+	resp.RunningValues = startupRunningValues(ops.envKoanf, s.config.StartupServerSettings, &resp.ServerConfigResponse)
+
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
 
-	writeJSON(w, http.StatusOK, resp)
+	return &resp, nil
 }
 
 // applySnapshotToResponse writes Layer-1 snapshot values into the
@@ -189,7 +307,9 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Agent defaults
 	resp.DefaultTemplate = snap.DefaultTemplate
 	resp.DefaultHarnessConfig = snap.DefaultHarnessConfig
-	resp.ImageRegistry = snap.ImageRegistry
+	// image_registry is not the snapshot value (a seeded row holds another
+	// replica's bootstrap under HA): applyRunningValuesForUnsetKeys sets it
+	// from shownImageRegistry.
 	resp.DefaultMaxTurns = snap.DefaultMaxTurns
 	resp.DefaultMaxModelCalls = snap.DefaultMaxModelCalls
 	resp.DefaultMaxDuration = snap.DefaultMaxDuration
@@ -197,6 +317,9 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultModel = snap.DefaultModel
 	resp.DefaultThinkingLevel = snap.DefaultThinkingLevel
 	resp.DefaultRuntimeBroker = snap.DefaultRuntimeBroker
+	resp.DefaultTimezone = snap.DefaultTimezone
+	resp.DefaultGCPIdentityMode = snap.DefaultGCPIdentityMode
+	resp.DefaultGCPIdentityServiceAccountID = snap.DefaultGCPIdentityServiceAccountID
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
 	resp.Telemetry = snap.TelemetryConfig
@@ -215,6 +338,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Access fields
 	resp.Server.Hub.AdminEmails = snap.AdminEmails
 	resp.Server.Auth.UserAccessMode = snap.UserAccessMode
+	resp.Server.Auth.DefaultUserRole = snap.DefaultUserRole
 	resp.Server.Auth.AuthorizedDomains = snap.AuthorizedDomains
 
 	// Lifecycle — always set booleans from the snapshot, regardless of
@@ -223,11 +347,30 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.Hub.AutoSuspendStalled = &b
 	resp.Server.Hub.StalledThreshold = snap.StalledThreshold
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
-	b2 := snap.SoftDeleteRetainFiles
+	resp.Server.Hub.StartClaimLeaseTTL = snap.StartClaimLeaseTTL
+	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
+	resp.Server.Hub.StartUnconfirmedHold = snap.StartUnconfirmedHold
+	resp.Server.Hub.StartCreateUnconfirmedHold = snap.StartCreateUnconfirmedHold
+	b2 := snap.SoftDeleteRetainFiles != nil && *snap.SoftDeleteRetainFiles
 	resp.Server.Hub.SoftDeleteRetainFiles = &b2
 
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
+	resp.Server.Hub.ContentURL = snap.ContentURL
+	allowSameSite := snap.ContentURLAllowSameSite
+	resp.Server.Hub.ContentURLAllowSameSite = &allowSameSite
+	resp.Server.Hub.MonitoringDashboardURL = snap.MonitoringDashboardURL
+
+	// Hub observability export switches: the saved (or bootstrap) value;
+	// nil when unset. They apply at the next start, so the exporters in
+	// effect are reported separately (ObservabilityExport).
+	resp.Server.Hub.Observability = nil
+	if snap.HubMetricsEnabled != nil || snap.HubTracingEnabled != nil {
+		resp.Server.Hub.Observability = &config.V1ServerHubObservabilityConfig{
+			MetricsEnabled: snap.HubMetricsEnabled,
+			TracingEnabled: snap.HubTracingEnabled,
+		}
+	}
 
 	// GitHub App
 	if resp.Server.GitHubApp == nil {
@@ -250,11 +393,34 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
-	// Federation — populate from snapshot's FederationConfig.
+	// Quotas
+	if snap.EnforceBrokerQuotas != nil {
+		resp.Quotas = &config.QuotaSettings{
+			EnforceBrokerQuotas: snap.EnforceBrokerQuotas,
+		}
+	}
+
+	// Agent secrets
+	if snap.AgentSecretsUserScopeOnly != nil {
+		resp.AgentSecrets = &config.AgentSecretsSettings{
+			UserScopeOnly: snap.AgentSecretsUserScopeOnly,
+		}
+	}
+
+	// Federation — populate from snapshot's FederationConfig, which is set
+	// whenever the stored (or bootstrap) federation settings have enabled or
+	// trusted_issuers. It is reported in full, also when it is disabled and
+	// has no trusted issuers, so a stored section with only algorithms or
+	// intervals is shown (ptone/scion#5694).
 	if snap.FederationConfig != nil {
-		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
-		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
-		resp.Federation = v1Server.Federation
+		fc := *snap.FederationConfig
+		resp.Federation = config.ConvertFederationToV1(&fc)
+	}
+	// server.federation reports the same value, the one in effect, never
+	// the settings.yaml seed (ptone/scion#4326). resp.Server is set above;
+	// the check keeps this line safe if that changes.
+	if resp.Server != nil {
+		resp.Server.Federation = resp.Federation
 	}
 
 	// Runtimes / Profiles / HarnessConfigs — snapshot values override file
@@ -330,18 +496,33 @@ func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName
 
 // computeSupersededKeys returns, for each managed section, the bootstrap-material
 // keys whose merged value differs from the DB value. This tells the admin which
-// deployment-config values their explicit DB writes are overriding.
+// deployment-config values their explicit DB writes are overriding. When the
+// unseeded bootstrap is set (SetUnseededBootstrap, as startup does), the
+// endpoints public_url is compared with its value from that merge instead,
+// since startup never applies a seed value for the hub endpoint
+// (ptone/scion#4865), and a key is attributed to the seed layer only when
+// that layer gave it its value: a key the unseeded merge gives the same
+// value comes from a layer above the seed, which wins over it
+// (ptone/scion#4904). When the above-seed bootstrap is set too
+// (SetAboveSeedBootstrap, as startup does), such a key that no layer above
+// the seed sets is attributed to the seed layer when it has the key, else to
+// the coded defaults ("default", ptone/scion#4983).
 func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]SupersededKey {
 	ops.mu.RLock()
 	cacheSnap := make(map[string]sectionState, len(ops.cache))
 	for name, ss := range ops.cache {
 		cacheSnap[name] = ss
 	}
+	unseededPublicURL, hasUnseededPublicURL := ops.unseededPublicURL, ops.hasUnseededPublicURL
+	unseededK := ops.unseededKoanf
+	aboveSeedK := ops.aboveSeedKoanf
 	ops.mu.RUnlock()
 
 	if ops.bootstrapKoanf == nil {
 		return nil
 	}
+
+	publicURLPinned := s.HubEndpoints().Pin != ""
 
 	// Load individual layers for source attribution.
 	seedEnvK := config.LoadSeedEnvKoanf()
@@ -366,18 +547,78 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		if err := json.Unmarshal(bootstrapDoc, &bootstrapMap); err != nil {
 			continue
 		}
+		unseededMap := unseededSectionMap(unseededK, sec.Name)
+		aboveSeedMap := unseededSectionMap(aboveSeedK, sec.Name)
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); opsettings.IsEnvPinnedLayer1Key(koanfPath) &&
+				koanfPath != config.PublicURLKey && ops.envOverrides[koanfPath] {
+				// A SCION_SERVER_* variable pins this key on this node, so
+				// the database value does not supersede it; the field's
+				// environment badge says so (authorized_domains,
+				// ptone/scion#6000; public_url is handled below).
+				continue
+			}
+			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
+				// An operator setting pins the endpoint on this node, so
+				// the database value does not supersede it; the field's
+				// pinned badge says so (ptone/scion#3905).
+				continue
+			}
+			if sec.Name == "endpoints" && key == "public_url" && hasUnseededPublicURL {
+				// Startup's endpoint resolution ignores a seed value, so
+				// compare with the value from the layers it reads
+				// (ptone/scion#4826, ptone/scion#4865). Without such a
+				// value, the saved one supersedes nothing.
+				if unseededPublicURL == "" {
+					continue
+				}
+				bootstrapVal = unseededPublicURL
+			}
+			keySeedEnvK := seedEnvK
+			unsetAboveSeed := false
+			if unseededVal, ok := unseededMap[key]; ok && reflect.DeepEqual(unseededVal, bootstrapVal) {
+				_, above := aboveSeedMap[key]
+				if aboveSeedK == nil || above {
+					// A layer above the seed (settings.yaml, the --config
+					// location or SCION_SERVER_*) gives the key this value
+					// and wins over a seed value, so the key is not
+					// attributed to the seed layer (ptone/scion#4904).
+					keySeedEnvK = nil
+				} else {
+					// No layer above the seed sets the key, so its value
+					// comes from the seed layer, when it has the key (a
+					// seed value equal to the default), else from the coded
+					// defaults (ptone/scion#4983).
+					unsetAboveSeed = true
+				}
+			}
 			dbVal, exists := dbMap[key]
+			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
+				// The DB row does not override this key; the bootstrap
+				// value stays in effect.
+				continue
+			}
+			if sec.Name == "profiles" && exists {
+				// A managed profile without image_registry or image_tag
+				// inherits the file value, so the profile is compared
+				// without it unless the row holds one (ptone/scion#3916,
+				// ptone/scion#6625).
+				bootstrapVal = withoutInheritedProfileKeys(bootstrapVal, dbVal)
+			}
 			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
 				koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key)
 				if koanfPath == "" {
 					koanfPath = key
 				}
+				source := detectKeySource(keySeedEnvK, serverEnvK, sec.Name, key)
+				if unsetAboveSeed && source == "yaml" {
+					source = "default"
+				}
 				superseded = append(superseded, SupersededKey{
 					Key:    koanfPath,
-					Source: detectKeySource(seedEnvK, serverEnvK, sec.Name, key),
+					Source: source,
 				})
 			}
 		}
@@ -393,9 +634,412 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 	return result
 }
 
+// withoutInheritedProfileKeys returns the bootstrap profile bootstrapVal
+// without image_registry, and without image_tag, when the stored profile
+// dbVal has none: the stored profile then inherits the file value rather
+// than superseding it.
+func withoutInheritedProfileKeys(bootstrapVal, dbVal interface{}) interface{} {
+	boot, ok := bootstrapVal.(map[string]interface{})
+	if !ok {
+		return bootstrapVal
+	}
+	db, _ := dbVal.(map[string]interface{})
+	drop := map[string]bool{}
+	for _, key := range []string{endpointsImageRegistryKey, profilesImageTagKey} {
+		if v, has := db[key]; has && v != "" {
+			continue
+		}
+		if _, has := boot[key]; has {
+			drop[key] = true
+		}
+	}
+	if len(drop) == 0 {
+		return bootstrapVal
+	}
+	out := make(map[string]interface{}, len(boot))
+	for k, v := range boot {
+		if !drop[k] {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// unseededSectionMap returns a section's keys from the bootstrap merge
+// without the SCION_SEED_* layer, or nil when that merge is not set or does
+// not have the section.
+func unseededSectionMap(unseededK *koanf.Koanf, sectionName string) map[string]interface{} {
+	if unseededK == nil {
+		return nil
+	}
+	doc, err := opsettings.ExtractSectionFromKoanf(unseededK, sectionName)
+	if err != nil || doc == nil {
+		return nil
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(doc, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// bootstrapAppliesWhenAbsent reports whether a section key keeps its
+// bootstrap value when a managed DB row omits it. That is the case for
+// endpoints hub_name and public_url: a managed endpoints row carries them
+// only after an admin sets them, and Snapshot falls back to the bootstrap
+// value (for public_url, so does the hub's endpoint resolution at startup,
+// ptone/scion#3905). It is also the case for access authorized_domains: a
+// row without a list (a cleared list is stored that way) runs with the
+// startup list (authorizedDomainsForSnapshot, ptone/scion#6000).
+func bootstrapAppliesWhenAbsent(section, key string) bool {
+	if section == "access" && key == "authorized_domains" {
+		return true
+	}
+	return section == "endpoints" && (key == "hub_name" || key == "public_url" || key == endpointsImageRegistryKey)
+}
+
+// applyRunningValuesForUnsetKeys sets, in a GET response, the running value
+// of each key that ApplySnapshot returns to the startup value when the
+// snapshot leaves it unset: soft_delete_retention and
+// soft_delete_retain_files. A stored value is shown as stored. Without
+// this, GET would show the key empty (or false) while the hub runs with the
+// startup value, and a client echoing the body back would change the
+// running value. It also sets image_registry and the profiles'
+// image_registry to the values a save compares with (shownImageRegistry).
+func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap Layer1Snapshot) {
+	s.mu.RLock()
+	retention := s.config.SoftDeleteRetention
+	retainFiles := s.config.SoftDeleteRetainFiles
+	s.mu.RUnlock()
+
+	if snap.SoftDeleteRetention == "" && retention > 0 {
+		resp.Server.Hub.SoftDeleteRetention = retention.String()
+	}
+	if snap.SoftDeleteRetainFiles == nil {
+		resp.Server.Hub.SoftDeleteRetainFiles = &retainFiles
+	}
+	// authorized_domains: with no saved list the hub runs with the startup
+	// list (authorizedDomainsForSnapshot, ptone/scion#6000), so GET shows
+	// it rather than an empty list that reads as "every domain".
+	if len(snap.AuthorizedDomains) == 0 && resp.Server.Auth != nil {
+		if running := s.AuthorizedDomains(); len(running) > 0 {
+			resp.Server.Auth.AuthorizedDomains = running
+		}
+	}
+	// image_registry: the managed value, else this replica's file tier,
+	// never a node env; profiles show managed image_registry and image_tag
+	// values only. A save compares with exactly these values
+	// (ptone/scion#3916, ptone/scion#6625).
+	if ops := s.GetOperationalSettings(); ops != nil {
+		resp.ImageRegistry = shownImageRegistry(ops)
+		_, managed := ops.managedImageRegistries()
+		resp.Profiles = showManagedProfileImageSettings(resp.Profiles, managed, ops.managedProfileImageTags())
+	}
+}
+
+// Koanf paths of the keys applyRunningValuesForUnsetKeys fills in GET.
+const (
+	softDeleteRetentionKey   = "server.hub.soft_delete_retention"
+	softDeleteRetainFilesKey = "server.hub.soft_delete_retain_files"
+)
+
+// echoedRunningValueKeys returns the keys of soft_delete_retention,
+// soft_delete_retain_files, content_url_allow_same_site and
+// authorized_domains that the request sends back
+// as the running value GET showed for them while no value is stored
+// (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
+// writing it would pin this replica's startup value (which may come from
+// its own environment) into the shared row, and report a key the admin did
+// not touch. A retention is compared as a duration, since GET formats it
+// ("72h0m0s"). As with hub_name, the startup value itself therefore cannot
+// be pinned while the key is unset.
+//
+// Whether a value is stored is read from the section row, as the merge
+// that builds the written document reads it (storedKeyUnset).
+//
+// The comparison uses this replica's running value. A value GET showed on
+// another replica with a different startup or environment value is not
+// recognised as an echo, and is stored (ptone/scion#4498).
+func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest) map[string]bool {
+	s.mu.RLock()
+	retention := s.config.SoftDeleteRetention
+	retainFiles := s.config.SoftDeleteRetainFiles
+	s.mu.RUnlock()
+
+	echoed := map[string]bool{}
+	// authorized_domains: GET shows the running list while none is saved
+	// (ptone/scion#6000); sending it back is an echo.
+	if req.Server != nil && req.Server.Auth != nil && len(req.Server.Auth.AuthorizedDomains) > 0 {
+		if running := s.AuthorizedDomains(); len(running) > 0 && sameDomainSet(req.Server.Auth.AuthorizedDomains, running) &&
+			storedKeyUnset(ctx, ops, authorizedDomainsKey) {
+			echoed[authorizedDomainsKey] = true
+		}
+	}
+	if req.Server != nil && req.Server.Hub != nil {
+		hub := req.Server.Hub
+		if retention > 0 && hub.SoftDeleteRetention != "" {
+			if d, err := time.ParseDuration(hub.SoftDeleteRetention); err == nil && d == retention &&
+				storedKeyUnset(ctx, ops, softDeleteRetentionKey) {
+				echoed[softDeleteRetentionKey] = true
+			}
+		}
+		if hub.SoftDeleteRetainFiles != nil && *hub.SoftDeleteRetainFiles == retainFiles &&
+			storedKeyUnset(ctx, ops, softDeleteRetainFilesKey) {
+			echoed[softDeleteRetainFilesKey] = true
+		}
+		// content_url_allow_same_site: GET always shows the value in effect
+		// (false, or a bootstrap true); sending it back must not pin the
+		// override into the shared row (ptone/scion#7107).
+		if hub.ContentURLAllowSameSite != nil && *hub.ContentURLAllowSameSite == ops.Snapshot().ContentURLAllowSameSite &&
+			storedKeyUnset(ctx, ops, config.ContentURLAllowSameSiteKey) {
+			echoed[config.ContentURLAllowSameSiteKey] = true
+		}
+	}
+	return echoed
+}
+
+// storedKeyUnset reports whether the Layer-1 key koanfPath has no value:
+// its section row lacks the key, or there is no row and the bootstrap
+// value lacks it. A read error counts as set, so nothing is dropped.
+func storedKeyUnset(ctx context.Context, ops *OperationalSettings, koanfPath string) bool {
+	section := opsettings.OwningSection(koanfPath)
+	key := opsettings.SectionKeyFromKoanfPath(koanfPath)
+	var doc json.RawMessage
+	row, err := ops.store.GetHubSetting(ctx, section)
+	switch {
+	case err == nil:
+		doc = row.Value
+	case errors.Is(err, store.ErrNotFound):
+		d, ok := ops.rawSection(section)
+		if !ok {
+			return true
+		}
+		doc = d
+	default:
+		return false
+	}
+	var m map[string]json.RawMessage
+	if len(doc) > 0 && json.Unmarshal(doc, &m) != nil {
+		return false
+	}
+	v, ok := m[key]
+	return !ok || string(v) == "null"
+}
+
+// dropKoanfKeys returns keys without those in drop.
+func dropKoanfKeys(keys []string, drop map[string]bool) []string {
+	if len(drop) == 0 {
+		return keys
+	}
+	out := keys[:0:0]
+	for _, k := range keys {
+		if !drop[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// effectiveHubName returns the configured hub_name: the DB value or, when
+// the endpoints row has none, the bootstrap value. "" means unset (each
+// replica then runs under its own startup default, which is deliberately
+// not returned: GET serves this value and clients echo it to any replica).
+// GET server-config returns this value.
+func effectiveHubName(ops *OperationalSettings) string {
+	return ops.Snapshot().HubName
+}
+
+// bootstrapHubName returns the bootstrap server.hub.hub_name, the value
+// Snapshot uses when the endpoints row leaves hub_name unset ("" when
+// there is none).
+func (o *OperationalSettings) bootstrapHubName() string {
+	if o == nil || o.bootstrapKoanf == nil {
+		return ""
+	}
+	return o.bootstrapKoanf.String("server.hub.hub_name")
+}
+
+// hubNameInEffectDoc returns the endpoints document doc with hub_name set
+// to the configured hub_name in effect: the document's own non-empty
+// hub_name, else bootstrap, the value Snapshot falls back to. hub_name is
+// removed when both are "". It is used only to compare the value in effect
+// before and after a save (ptone/scion#4699); nothing is written from it.
+// doc is returned as it is when it cannot be decoded.
+func hubNameInEffectDoc(doc json.RawMessage, bootstrap string) json.RawMessage {
+	m := map[string]json.RawMessage{}
+	if len(doc) > 0 {
+		if err := json.Unmarshal(doc, &m); err != nil {
+			return doc
+		}
+	}
+	if m == nil {
+		m = map[string]json.RawMessage{}
+	}
+	value := ""
+	if raw, ok := m["hub_name"]; ok {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return doc
+		}
+	}
+	if value == "" {
+		value = bootstrap
+	}
+	if value == "" {
+		delete(m, "hub_name")
+	} else {
+		v, err := json.Marshal(value)
+		if err != nil {
+			return doc
+		}
+		m["hub_name"] = v
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return doc
+	}
+	return out
+}
+
+// dropEchoedHubName removes server.hub.hub_name from keys when the request
+// sends the effective value back unchanged, and reports whether hub_name is
+// still a change to write. An echo is not written and not validated, so a
+// GET body echoed back never fails because of a bootstrap hub_name that
+// does not match the schema pattern.
+func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective string) ([]string, bool) {
+	idx := -1
+	for i, k := range keys {
+		if k == "server.hub.hub_name" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return keys, false
+	}
+	sent := ""
+	if req.Server != nil && req.Server.Hub != nil {
+		sent = req.Server.Hub.HubName
+	}
+	if sent != effective {
+		return keys, true
+	}
+	if req.Server != nil && req.Server.Hub != nil {
+		req.Server.Hub.HubName = ""
+	}
+	return append(keys[:idx:idx], keys[idx+1:]...), false
+}
+
+// overlayEndpointsRequest applies the endpoints fields the request sets
+// onto d, which buildSingleSectionDoc then encodes as the request doc:
+//   - public_url, content_url, monitoring_dashboard_url and
+//     image_registry: their request values.
+//   - hub_name: set when hubNameChanged (see dropEchoedHubName, which drops
+//     an echo of the configured value).
+//
+// A sent "" or null is left out of the encoded doc, so the merge on the
+// current row (mergeSectionOnCurrent) clears that key; a cleared hub_name
+// lets the bootstrap name, or with none each replica's startup default,
+// apply. Omitted fields keep whatever d already holds.
+func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigUpdateRequest, fp *fieldPresence, hubNameChanged bool) {
+	hubFP := fp.nestedPresence("server").nestedPresence("hub")
+	if req.Server != nil && req.Server.Hub != nil {
+		if req.Server.Hub.PublicURL != "" {
+			d.PublicURL = req.Server.Hub.PublicURL
+		} else if hubFP.has("public_url") {
+			d.PublicURL = "" // explicitly cleared
+		}
+		if req.Server.Hub.MonitoringDashboardURL != "" {
+			d.MonitoringDashboardURL = req.Server.Hub.MonitoringDashboardURL
+		} else if hubFP.has("monitoring_dashboard_url") {
+			d.MonitoringDashboardURL = "" // explicitly cleared
+		}
+		if req.Server.Hub.ContentURL != "" {
+			d.ContentURL = req.Server.Hub.ContentURL
+		} else if hubFP.has("content_url") {
+			d.ContentURL = "" // explicitly cleared
+		}
+		if req.Server.Hub.ContentURLAllowSameSite != nil {
+			v := *req.Server.Hub.ContentURLAllowSameSite
+			d.ContentURLAllowSameSite = &v
+		} else if hubFP.has("content_url_allow_same_site") {
+			d.ContentURLAllowSameSite = nil // explicitly cleared
+		}
+		if hubNameChanged {
+			d.HubName = req.Server.Hub.HubName
+		}
+	}
+	if req.ImageRegistry != nil {
+		d.ImageRegistry = *req.ImageRegistry
+	}
+}
+
+// accessNoRowBase is the access base when no access row exists: the
+// effective access values of the snapshot (bootstrap or file).
+func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
+	snap := ops.Snapshot()
+	return structToRawMap(opsettings.AccessSettings{
+		AdminEmails:       snap.AdminEmails,
+		UserAccessMode:    snap.UserAccessMode,
+		DefaultUserRole:   snap.DefaultUserRole,
+		AuthorizedDomains: snap.AuthorizedDomains,
+	})
+}
+
+// endpointsNoRowBase is the endpoints base when no endpoints row exists:
+// the effective monitoring_dashboard_url, content_url and
+// content_url_allow_same_site. hub_name is left
+// out: the
+// bootstrap value applies without being written
+// (bootstrapAppliesWhenAbsent). public_url and image_registry are left out
+// too: each is stored only when an admin sets it, so a bootstrap value
+// never becomes a saved value that would override a later settings.yaml
+// change (ptone/scion#3905, ptone/scion#3916).
+func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
+	snap := ops.Snapshot()
+	base := opsettings.EndpointsSettings{
+		MonitoringDashboardURL: snap.MonitoringDashboardURL,
+		ContentURL:             snap.ContentURL,
+	}
+	// The same-site override goes with the content host it governs, so a
+	// first save keeps a bootstrap content_url that relies on it in effect.
+	if snap.ContentURLAllowSameSite {
+		allowSameSite := true
+		base.ContentURLAllowSameSite = &allowSameSite
+	}
+	return structToRawMap(base)
+}
+
+// endpointsSeededBase drops hub_name and public_url from a non-managed
+// endpoints base. A seeded row holds the bootstrap hub_name, which applies
+// without being written (Snapshot falls back to it) and may not match the
+// schema pattern, so it is not carried into the managed row. Its public_url
+// is bootstrap material as well; carrying it would turn it into a saved
+// value that overrides a later settings.yaml change (ptone/scion#3905).
+// Its image_registry is this or another replica's file tier, which is
+// stored only when an admin changes it (ptone/scion#3916).
+func endpointsSeededBase(base map[string]json.RawMessage) {
+	delete(base, "hub_name")
+	delete(base, "public_url")
+	delete(base, endpointsImageRegistryKey)
+}
+
+// bodyMergeOptions returns the base rules of a section in
+// bodyMergedSections.
+func bodyMergeOptions(section string) sectionMergeOptions {
+	switch section {
+	case "access":
+		return sectionMergeOptions{noRowBase: accessNoRowBase}
+	case "endpoints":
+		return sectionMergeOptions{noRowBase: endpointsNoRowBase, seededBase: endpointsSeededBase}
+	}
+	return sectionMergeOptions{}
+}
+
 // detectKeySource determines which bootstrap layer provides a given section key.
-// It checks the individual layers in reverse precedence order (server_env first,
-// then seed_env, then yaml) and returns the first match.
+// It checks server_env first, then seed_env, then falls back to yaml.
+// settings.yaml wins over the seed layer, so a caller that can tell a layer
+// above the seed gives the key its value passes a nil seedEnvK
+// (computeSupersededKeys, ptone/scion#4904).
 func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string) string {
 	sec := opsettings.SectionByName(sectionName)
 	if sec == nil {
@@ -405,7 +1049,14 @@ func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string)
 	// Map the section-level key (e.g. "admin_emails") to koanf paths and check
 	// which layer provides the value.
 	for _, kp := range sec.KoanfPaths {
-		if opsettings.SectionKeyFromKoanfPath(kp) != key {
+		sectionKey := opsettings.SectionKeyFromKoanfPath(kp)
+		if sectionKey == "" {
+			// Sections without a JSON field mapping (agent_defaults) use
+			// the koanf path as the key, as computeSupersededKeys does
+			// (ptone/scion#4983).
+			sectionKey = kp
+		}
+		if sectionKey != key {
 			continue
 		}
 		if serverEnvK != nil && serverEnvK.Exists(kp) {
@@ -441,7 +1092,8 @@ func (s *Server) computeDeprecatedEnvKeys(ops *OperationalSettings) []Deprecated
 	return result
 }
 
-// handlePutServerConfigDB handles PUT /api/v1/admin/server-config in postgres mode.
+// handlePutServerConfigDB handles PUT /api/v1/admin/server-config
+// whenever OperationalSettings is wired (any DB driver).
 //
 // It partitions incoming fields via the opsettings registry:
 //   - Layer-1 fields → per-section docs → validate → OperationalSettings.Update
@@ -453,15 +1105,104 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// then decode into the typed struct. This lets us distinguish
 	// OMITTED fields (keep current value) from EXPLICITLY-SENT empty
 	// values ("", [], null) which CLEAR the field in the section doc.
-	// File-mode behavior is untouched — this is postgres-path only.
 	rawBody, err := readRawBody(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
+	// Gate-protected keys (server.hub.class always; federation while the
+	// test admin tier is on) are refused in DB and workstation mode alike,
+	// before the Layer-0 / workstation file split below.
+	// An empty relay-peer secret is ignored; any other value is refused. A
+	// body that held nothing else is not an empty request: it still
+	// answers as an update that changes nothing.
+	sentBody := rawBody
+	rawBody = dropEmptySecretSettings(rawBody)
+	// The read-only image_registry provenance of a GET body sent back is
+	// ignored, so the echo of a changed report is not refused
+	// (ptone/scion#3916).
+	rawBody = dropImageRegistryProvenance(rawBody)
+	// Likewise the read-only placement pre-upgrade report of a GET body.
+	rawBody = dropTopLevelMember(rawBody, placementPreflightKey)
+	// And the read-only content URL status, which a save in between (on
+	// any replica) changes.
+	rawBody = dropTopLevelMember(rawBody, contentURLStatusKey)
+	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
+		return
+	}
+	// Test identities with admin roles write no settings (test-admin
+	// policy), in DB and workstation mode alike.
+	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
+		return
+	}
+	// telemetry.cloud.cloud_logging is read only at startup, before the
+	// settings database is opened: a changed value is refused, an unchanged
+	// echo of GET is dropped (ptone/scion#5664), in DB and workstation mode
+	// alike.
+	cl, err := s.checkCloudLoggingDBWrite(r.Context(), ops, rawBody)
+	if err != nil {
+		slog.Error("PUT server-config: failed to build GET view for the cloud_logging check", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+		return
+	}
+	if cl.refused {
+		writeCloudLoggingDBWriteRefused(w)
+		return
+	}
+	rawBody = cl.body
+	if rejectRepeatedPlacementSections(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	if isEmptySettingsBody(sentBody) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "No settings provided", nil)
+		return
+	}
+	// The typed decode above silently drops a removed profiles.<name>.timezone
+	// key, so check the raw body before anything is written.
+	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// Likewise the retired server.hub.async_agent_launch (ptone/scion#4991).
+	if rejectRetiredAsyncAgentLaunch(w, rawBody) {
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
+		return
+	}
+	// GCP permission-check keys: a sent key must carry a recognised value.
+	if !validateGCPIAMRequest(w, rawBody) {
+		return
+	}
+	// The monitoring dashboard link must be an absolute http(s) URL.
+	if !validateMonitoringDashboardURLRequest(w, &req.ServerConfigUpdateRequest) {
+		return
+	}
+	// A public URL saved in the database must pass the stricter rule the
+	// hub applies to it at startup (ptone/scion#3905).
+	if !validatePublicURLRequest(w, &req.ServerConfigUpdateRequest, ops.Snapshot().PublicURL) {
+		return
+	}
+	// The content host must be an origin, and not on the hub's own host name
+	// or the agent endpoint's (ptone/scion#7107 phase A). A workstation
+	// writes a sent agent_endpoint to settings.yaml, so a save that sends one
+	// is checked against it, as file mode does.
+	dbRequestAgentEndpoint := requestAgentEndpoint(&req.ServerConfigUpdateRequest)
+	if !validateContentURLRequest(w, &req.ServerConfigUpdateRequest, s.HubEndpoints().Public, contentURLAllowSameSiteAfter(&req.ServerConfigUpdateRequest, s.contentURLAllowSameSiteLiveValue()), s.config.AgentEndpoint, dbRequestAgentEndpoint) {
+		return
+	}
+	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
+		return
+	}
+	if rejectNullFederation(w, rawBody) {
 		return
 	}
 
@@ -481,18 +1222,75 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// clearing) by walking the raw request body.
 	koanfKeys := extractKoanfKeysFromRequest(&req.ServerConfigUpdateRequest)
 	koanfKeys = appendPresenceAwareKeys(koanfKeys, rawBody)
+	// A client that echoes the GET body sends hub_name back unchanged; that
+	// must neither write nor be validated (ptone/scion#2073).
+	koanfKeys, hubNameChanged := dropEchoedHubName(koanfKeys, &req.ServerConfigUpdateRequest, effectiveHubName(ops))
+	// Likewise an echo of a running value that GET shows for an unset key
+	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
+	// written nor reported (ptone/scion#3904).
+	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
+	// An echo of the public URL GET shows is not stored either, so a
+	// bootstrap value never becomes a saved value (ptone/scion#3905).
+	if echoedPublicURL(ops, &req.ServerConfigUpdateRequest) {
+		echoedRunning[config.PublicURLKey] = true
+	}
+	koanfKeys = dropKoanfKeys(koanfKeys, echoedRunning)
 
 	// Classify keys.
 	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
 
+	// Option C (ptone/scion#1091): a workstation hub writes Layer-0 and
+	// unclassified keys to settings.yaml instead of rejecting them; see
+	// admin_settings_workstation.go for the split and its failure semantics.
+	//
+	// The file-routed leaves come from raw-body presence, not from the
+	// non-zero typed values koanfKeys is built from, so an explicit false,
+	// "" or [] clears a value instead of being dropped.
+	workstation := s.layer0Editable()
+	var fileLeaves []bodyLeaf
+	if workstation {
+		fileLeaves = workstationFileLeaves(rawBody)
+		layer0Keys, unclassifiedKeys = nil, nil
+	}
+	fileKeys := leafKeys(fileLeaves)
+
+	// Hosted: the Layer-0 check also works on body presence, so an explicit
+	// zero (dev_mode:false over a stored true) is rejected instead of being
+	// dropped by the non-zero koanf-key extraction, and an unchanged echo of
+	// the GET view, zero-valued blocks included, is ignored.
+	// Unclassified leaves (schema_version, active_profile, workspace_path)
+	// follow the same echo rule, so a GET -> PUT round trip is a 200.
+	if !workstation {
+		l0, u, err := s.hostedBootstrapChanges(r.Context(), ops, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for Layer-0 check", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		layer0Keys, unclassifiedKeys = l0, u
+	}
+
+	// Workstation: server.broker.broker_id / broker_token are written by the
+	// hub itself (broker registration); the PUT may only echo them.
+	if workstation {
+		owned, err := s.hubOwnedBrokerChanges(r.Context(), ops, fileLeaves)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for broker identity check", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if len(owned) > 0 {
+			writeSettingsCodedKeysError(w, "hub_owned_keys_rejected",
+				"The broker ID and token are written by the hub itself and cannot be changed through the server config API.", owned)
+			return
+		}
+	}
+
 	// Reject if any Layer-0 keys are present — 422 before any write.
 	if len(layer0Keys) > 0 {
 		sort.Strings(layer0Keys)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-			"error":   "layer0_rejected",
-			"message": "Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.",
-			"keys":    layer0Keys,
-		})
+		writeSettingsCodedKeysError(w, "layer0_rejected",
+			"Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.", layer0Keys)
 		return
 	}
 
@@ -508,13 +1306,62 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"keys", unclassifiedKeys,
 			"user", updatedBy,
 		)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-			"error":   "unclassified_keys_rejected",
-			"message": "These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.",
-			"keys":    unclassifiedKeys,
-		})
+		writeSettingsCodedKeysError(w, "unclassified_keys_rejected",
+			"These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.", unclassifiedKeys)
 		return
 	}
+
+	// Keys that never became a koanf key (unknown to the request type, or
+	// mapped nowhere) would otherwise be dropped while the PUT reports
+	// "saved". Reject them unless they echo the GET view.
+	if _, done := s.rejectUnpersistedKeys(r.Context(), w, ops, rawBody, workstation); done {
+		return
+	}
+
+	// GET masks secrets and clients send the GET body back on save: restore
+	// every still-masked field from the stored config (the same view GET
+	// masked) before any section document is built. This runs after the 422
+	// checks so a Layer-0 request is still rejected as such.
+	//
+	// github_app private_key and webhook_secret are not persisted in DB mode
+	// (the github_app section has no secret fields), so for them this check
+	// only validates the request; their handling is tracked in
+	// ptone/scion#2938.
+	// An unchanged masked Layer-0 secret is dropped first (see
+	// maskedLayer0Echoes), so a lone placeholder echo is not rejected for
+	// siblings the body leaves out.
+	if req.Server != nil {
+		echoes, err := s.maskedLayer0Echoes(r.Context(), ops, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for masked echoes", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		root := reflect.ValueOf(&req).Elem()
+		for _, l := range echoes {
+			if fv, ok := fieldByIndexPath(root, l.index); ok && fv.Kind() == reflect.String && fv.CanSet() {
+				fv.SetString("")
+			}
+		}
+		fileLeaves = dropLeaves(fileLeaves, echoes)
+		fileKeys = leafKeys(fileLeaves)
+	}
+	if req.Server != nil {
+		stored, err := storedServerConfigDB(ops)
+		if err != nil {
+			slog.Error("PUT server-config: failed to load stored config for masked values", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if err := restoreMaskedServerSecrets(req.Server, stored); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
+	// Top-level presence of the body; nil (omitted semantics) on a parse
+	// error, which the typed decode above has already ruled out.
+	topFP, _ := parseFieldPresence(rawBody)
 
 	// Build per-section documents from the request.
 	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec, rawBody)
@@ -525,38 +1372,310 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Duration-valued keys (opsettings Section.Durations and
+	// NestedDurations) must parse as a Go duration; "" or null clears.
+	// Checked on the documents built from the body, before any merge, so
+	// only the values sent are checked.
+	if bad := validateDurationSettings(sectionDocs); len(bad) > 0 {
+		entries := make([]settingsFieldError, 0, len(bad))
+		for _, fe := range bad {
+			entries = append(entries, settingsFieldError{Field: fe.field, Message: fe.msg})
+		}
+		writeSettingsValidation(w, bad[0].msg, entries, nil)
+		return
+	}
+
+	// Sections merged on the current row by mergeSectionOnCurrent: only the
+	// keys the body sends change, and the row revision read is the CAS base
+	// (ptone/scion#3718, ptone/scion#3720).
+	mergedBaseRevs := map[string]int64{}
+	// noopRevs holds the base revision of each section whose filtered
+	// document equals the filtered base from the same read: such a save
+	// writes nothing (image_registry persistence, ptone/scion#3916).
+	noopRevs := map[string]int64{}
+	for _, sec := range bodyMergedSections {
+		doc, ok := sectionDocs[sec]
+		if !ok {
+			continue
+		}
+		fp := sectionBodyPresence(sec, rawBody)
+		if sec == "endpoints" && !hubNameChanged {
+			// An echo of the effective hub_name is not a change
+			// (dropEchoedHubName), so it is not applied.
+			delete(fp.raw, "hub_name")
+		}
+		// An echoed running value of an unset key keeps the key unset.
+		for kp := range echoedRunning {
+			if opsettings.OwningSection(kp) == sec {
+				delete(fp.raw, opsettings.SectionKeyFromKoanfPath(kp))
+			}
+		}
+		opts := bodyMergeOptions(sec)
+		var filteredBase json.RawMessage
+		if sec == "endpoints" {
+			opts = endpointsMergeOptions(ops, &filteredBase)
+		}
+		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, sec, doc, fp, opts)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build section document", "section", sec, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs[sec] = merged
+		mergedBaseRevs[sec] = rev
+		// The no-op compares with the filtered base, which leaves out a
+		// seeded row's hub_name, public_url and image_registry. A request
+		// that sends public_url or a changed hub_name must still write: a
+		// seeded row keeps its own values in effect, so skipping the write
+		// would lose an explicit clear or set of those keys. image_registry
+		// resolves from the file tier, never from the seeded row, so only
+		// it may be filtered into a no-op (ptone/scion#3916).
+		if sec == "endpoints" && sameAsFilteredBase(merged, filteredBase) && !fp.has("public_url") && !fp.has("hub_name") {
+			noopRevs[sec] = rev
+		}
+	}
+
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). The check reads the merged access document, so a
+	// value kept from the row counts. It always checks the lists as saved:
+	// they apply on every replica that does not pin the domain list, and
+	// on this node once its pin is removed. When this node pins the list
+	// through SCION_SERVER_*, a save that sends admin_emails is also
+	// checked against the pinned list, which applies here. Either refuses.
+	if doc, ok := sectionDocs["access"]; ok {
+		fp := sectionBodyPresence("access", rawBody)
+		domainsSent := fp.has("authorized_domains") && !echoedRunning[authorizedDomainsKey]
+		adminsSent := fp.has("admin_emails")
+		pinned := slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey)
+		if adminsSent || domainsSent {
+			var merged opsettings.AccessSettings
+			if err := json.Unmarshal(doc, &merged); err != nil {
+				slog.Error("PUT server-config: failed to decode access document", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			domains, admins := s.accessListsAfterDBSave(merged, false)
+			if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+				return
+			}
+			if pinned && adminsSent {
+				domains, admins = s.accessListsAfterDBSave(merged, true)
+				if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+					return
+				}
+			}
+		}
+	}
+
+	// profiles replaces the section wholesale: a profile the body leaves
+	// out is deleted with its values, and a profile's omitted or ""
+	// image_registry or image_tag stores none. GET shows managed profile
+	// image_registry and image_tag values only, so an echo carries no file
+	// copies. A save equal to the filtered base from one row read (that
+	// row's revision is the CAS base) writes nothing (ptone/scion#3916,
+	// ptone/scion#6625).
+	if doc, ok := sectionDocs["profiles"]; ok {
+		var row *store.HubSetting
+		rev := int64(0)
+		got, err := ops.store.GetHubSetting(r.Context(), "profiles")
+		switch {
+		case err == nil:
+			row, rev = got, got.Revision
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			slog.Error("PUT server-config: failed to read profiles section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		base, err := profilesFilteredBase(ops, row)
+		if err != nil {
+			slog.Error("PUT server-config: failed to decode profiles section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		// image_tag is refused while its experiment is off: a save that
+		// sets or changes a profile's image_tag gets 412
+		// experiment_disabled (ptone/scion#6625). An echo of a stored
+		// value, or a clear, passes, so the rest of the page still saves.
+		if !s.experimentEnabled(experiments.ImageTagSetting) && profilesSaveSetsImageTag(doc, base) {
+			writeImageTagExperimentDisabled(w)
+			return
+		}
+		mergedBaseRevs["profiles"] = rev
+		if sameAsFilteredBase(doc, base) {
+			noopRevs["profiles"] = rev
+		}
+	}
+
+	// runtimes: the body's map decides which entries exist, and each sent
+	// entry is merged key by key on the stored one, so a stored key the
+	// body leaves out, including one V1RuntimeConfig does not model, is
+	// kept (ptone/scion#6580; mergeRuntimeEntries). The row revision read
+	// is the CAS base.
+	var runtimeMergeWarnings []string
+	var runtimesBefore map[string]config.V1RuntimeConfig
+	if _, ok := sectionDocs["runtimes"]; ok {
+		var rowValue []byte
+		rev := int64(0)
+		got, err := ops.store.GetHubSetting(r.Context(), "runtimes")
+		switch {
+		case err == nil:
+			rowValue, rev = got.Value, got.Revision
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			slog.Error("PUT server-config: failed to read runtimes section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		// The stored runtimes for the placement save checks: the row, or
+		// the effective runtimes when there is no row or it does not
+		// decode (a bootstrap-origin hub), so a stored value never counts
+		// as one this save sets.
+		if len(bytes.TrimSpace(rowValue)) == 0 || json.Unmarshal(rowValue, &runtimesBefore) != nil {
+			runtimesBefore = ops.Snapshot().Runtimes
+		}
+		merged, warnings, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build runtimes document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["runtimes"] = merged
+		mergedBaseRevs["runtimes"] = rev
+		runtimeMergeWarnings = warnings
+	}
+
+	// The start-claim keys are checked on the merged lifecycle document,
+	// so a value carried from the row counts as well. They follow the same
+	// contract as the other lifecycle keys: omitted keeps, "" or null
+	// clears (an absent key applies the startup value). The earlier rule
+	// that an empty value keeps them stood in for "omitted keeps" before
+	// lifecycle saves were presence-aware.
+	if doc, ok := sectionDocs["lifecycle"]; ok {
+		var lc opsettings.LifecycleSettings
+		if err := json.Unmarshal(doc, &lc); err == nil {
+			if err := validateStartClaimSettingStrings(s.config.StartClaim, lc); err != nil {
+				writeSettingsFieldError(w, startClaimErrorField(err), err.Error())
+				return
+			}
+		}
+	}
+
+	if doc, ok := sectionDocs["github_app"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "github_app", doc, githubAppPresence(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build github_app document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["github_app"] = merged
+		mergedBaseRevs["github_app"] = rev
+	}
+	// telemetry is deep-merged: a nested key the body omits (cloud.headers,
+	// filter, resource, ...) keeps its stored value (ptone/scion#3717).
+	// telemetry.cloud.headers values are masked in GET too: a masked echo
+	// keeps the stored header. The check and the values restored use the
+	// row this merge read, whose revision is the write's CAS base.
+	if doc, ok := sectionDocs["telemetry"]; ok {
+		var cur json.RawMessage
+		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, "telemetry", doc, telemetryPresence(rawBody), sectionMergeOptions{baseOut: &cur})
+		if err != nil {
+			slog.Error("PUT server-config: failed to build telemetry document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		// This check runs before the section validation below, so a body
+		// that sends an invalid telemetry.cloud member next to a masked
+		// header gets this 400 rather than the validation 400; either way
+		// nothing is written.
+		if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
+			var restored int
+			merged, restored, err = restoreMaskedTelemetryHeadersInDoc(merged, cur)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+				return
+			}
+			// A restored value is approved against the row this merge
+			// read, so the write must be a CAS on that row's revision. A
+			// client revision that differs (-1 included) cannot carry it.
+			if pinned, ok := req.ExpectedRevisions["telemetry"]; ok && restored > 0 && pinned != rev {
+				writeSettingsRevisionConflict(w,
+					"telemetry.cloud.headers holds masked values, which are kept only on the current revision of the telemetry section; reload and save again.",
+					[]map[string]interface{}{settingsConflictEntry("telemetry", pinned, rev)},
+					map[string]interface{}{"applied": map[string]int64{}})
+				return
+			}
+		}
+		sectionDocs["telemetry"] = merged
+		mergedBaseRevs["telemetry"] = rev
+	}
+	// agent_defaults: only the keys the body sends change, so env-pinned
+	// fields the page leaves out, and the read-only role keys, are kept
+	// (ptone/scion#3719). This runs before the gcp_iam check, which reads
+	// the default GCP identity mode from the merged doc.
+	if doc, ok := sectionDocs["agent_defaults"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "agent_defaults", doc, agentDefaultsPresence(topFP))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build agent_defaults document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["agent_defaults"] = merged
+		mergedBaseRevs["agent_defaults"] = rev
+	}
+
+	// GCP permission-check section: carry an omitted key forward from the
+	// current row, skip the write when the applied values would not
+	// change, and refuse a change the transition rules do not allow.
+	gcpIAMBaseRev := int64(-1)
+	var gcpIAMCur, gcpIAMNext gcpIAMSettings
+	if _, ok := sectionDocs[gcpIAMSection]; ok {
+		doc, rev, err := buildGCPIAMDoc(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build gcp_iam document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		gcpIAMCur = s.currentGCPIAMSettings()
+		gcpIAMNext = s.gcpIAMEffectiveFor(&doc)
+		if gcpIAMNext == gcpIAMCur {
+			delete(sectionDocs, gcpIAMSection)
+		} else {
+			if !s.requireGCPIAMHubAdmin(w, r.Context()) {
+				return
+			}
+			pendingAssign := false
+			if adDoc, ok := sectionDocs["agent_defaults"]; ok {
+				var ad opsettings.AgentDefaultsSettings
+				if json.Unmarshal(adDoc, &ad) == nil && ad.DefaultGCPIdentityMode == store.GCPMetadataModeAssign {
+					pendingAssign = true
+				}
+			}
+			if err := s.checkGCPIAMTransition(r.Context(), gcpIAMCur, gcpIAMNext, pendingAssign); err != nil {
+				writeGCPIAMTransitionError(w, err)
+				return
+			}
+			b, err := json.Marshal(doc)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			sectionDocs[gcpIAMSection] = b
+			gcpIAMBaseRev = rev
+		}
+	}
+
 	// Validate federation semantics (beyond JSON schema).
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings
 		if err := json.Unmarshal(doc, &fedSettings); err == nil {
-			// Validate duration strings before conversion (which silently
-			// falls back to zero for invalid values). Invalid durations like
-			// "1hour" would fail at time.ParseDuration during ApplySnapshot.
-			if fedSettings.RefreshInterval != "" {
-				if _, err := time.ParseDuration(fedSettings.RefreshInterval); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err), nil)
-					return
-				}
-			}
-			if fedSettings.DebounceInterval != "" {
-				if _, err := time.ParseDuration(fedSettings.DebounceInterval); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err), nil)
-					return
-				}
-			}
-
-			fedCfg := convertFederationSettingsToConfig(fedSettings)
-			if errs := fedCfg.Validate(); len(errs) > 0 {
-				var errMsgs []string
-				for _, e := range errs {
-					errMsgs = append(errMsgs, e.Error())
-				}
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-					"federation config validation failed", map[string]interface{}{
-						"errors": errMsgs,
-					})
+			// Every failure is reported in one response (ptone/scion#4450).
+			if entries := federationSaveErrors(fedSettings); len(entries) > 0 {
+				// The message is the first entry's "<field>: <message>", so
+				// it names the key like the other settings errors
+				// (ptone/scion#4451).
+				writeSettingsValidation(w, "", entries, nil)
 				return
 			}
 		} else {
@@ -567,27 +1686,216 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Validate shared_dir_size on runtime and profile entries (beyond JSON
+	// schema — Kubernetes quantity check), naming the offending key so a bad
+	// value is rejected here instead of failing every agent start later.
+	var saveWarnings []string
+	// runtimes and profiles are written below in one transaction that
+	// compares the revision of an omitted section the save checks used.
+	var placement placementPair
+	{
+		var runtimes opsettings.RuntimesSettings
+		var profiles opsettings.ProfilesSettings
+		if doc, ok := sectionDocs["runtimes"]; ok {
+			_ = json.Unmarshal(doc, &runtimes)
+		}
+		if doc, ok := sectionDocs["profiles"]; ok {
+			_ = json.Unmarshal(doc, &profiles)
+		}
+		sentProfiles := profiles
+		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
+			writeSettingsValidationErrors(w, errs)
+			return
+		}
+		// The per-runtime and per-profile storage overrides are removed
+		// (server.project_storage decides storage; volumes: replaces
+		// node-local overrides).
+		if errs := config.RemovedStorageOverrideErrors(runtimes, profiles, nil); len(errs) > 0 {
+			writeSettingsValidationErrors(w, errs)
+			return
+		}
+		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
+		// with the same warning as config validate. A section missing from
+		// this request is checked against its current value.
+		_, hasRuntimes := sectionDocs["runtimes"]
+		_, hasProfiles := sectionDocs["profiles"]
+		if hasRuntimes || hasProfiles {
+			// The guard revision of an omitted section is read before the
+			// snapshot the checks use, so a write that lands after it fails
+			// the guarded write below (409) rather than passing a check
+			// made on an older value.
+			placement = placementPairForSave(ops, sectionDocs)
+			snap := ops.Snapshot()
+			if placementSnapshotHook != nil {
+				placementSnapshotHook()
+			}
+			if !hasRuntimes {
+				runtimes = snap.Runtimes
+			}
+			if !hasProfiles {
+				profiles = snap.Profiles
+			}
+			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
+			// Kubernetes placement and identity fields (ptone/scion#6580):
+			// a problem this save causes is refused; one already stored
+			// that the save does not touch is a warning.
+			profilesBefore := snap.Profiles
+			if !hasRuntimes {
+				runtimesBefore = snap.Runtimes
+			}
+			pErrs, pWarnings := config.RuntimeSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			// The rules across runtime entries and profiles, in the same
+			// form (PlacementPairSaveChecks).
+			xErrs, xWarnings := config.PlacementPairSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			pErrs, pWarnings = append(pErrs, xErrs...), append(pWarnings, xWarnings...)
+			if len(pErrs) > 0 {
+				writeSettingsValidationErrors(w, pErrs)
+				return
+			}
+			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
+			saveWarnings = append(saveWarnings, config.PlacementIgnoredWarnings(runtimes, profiles)...)
+			saveWarnings = append(saveWarnings, config.PlacementSettingsWarnings(runtimes, profiles)...)
+		}
+		// Resource quantities (ptone/scion#6581): the profiles the body
+		// sends, and default_resources when the body sends it.
+		var defaultResources *api.ResourceSpec
+		if doc, ok := sectionDocs["agent_defaults"]; ok {
+			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
+			var agentDefaults opsettings.AgentDefaultsSettings
+			if adSent["default_resources"] && json.Unmarshal(doc, &agentDefaults) == nil {
+				defaultResources = agentDefaults.DefaultResources
+			}
+		}
+		qErrs, qWarnings := config.ValidateResourceQuantities(defaultResources, sentProfiles)
+		if len(qErrs) > 0 {
+			writeSettingsValidationErrors(w, qErrs)
+			return
+		}
+		saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
+		saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
+	}
+	// Validate hub-level default_timezone (IANA name check; rejects "Local",
+	// same rule as the file-mode handler and as the per-user display
+	// preference — design §3 A (d)) and the default GCP identity. The doc
+	// is merged on the current row, so each check runs only when the body
+	// sends one of its keys: a stored value the body leaves out is not
+	// re-checked on an unrelated save (ptone/scion#2720).
+	if doc, ok := sectionDocs["agent_defaults"]; ok {
+		var agentDefaults opsettings.AgentDefaultsSettings
+		if err := json.Unmarshal(doc, &agentDefaults); err == nil {
+			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
+			if adSent["default_timezone"] {
+				if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
+					writeSettingsFieldError(w, "default_timezone",
+						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err))
+					return
+				}
+			}
+			if adSent["default_gcp_identity_mode"] || adSent["default_gcp_identity_service_account_id"] {
+				if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
+					return
+				}
+			}
+		}
+	}
+
 	// Validate ALL sections before writing ANY (atomic: all-or-nothing).
 	// Collect errors from every section so the client sees all invalid
 	// sections in one response, not just the first one (N6).
+	// The telemetry.cloud.tls unit rule applies only when the save touches
+	// tls; a stored invalid tls is otherwise kept and logged
+	// (telemetryTLSSaveErrors).
 	allValidationErrors := make(map[string][]config.ValidationError)
+	tlsTouched := telemetryTLSTouched(rawBody)
 	for secName, doc := range sectionDocs {
-		if errs := opsettings.Validate(secName, doc); len(errs) > 0 {
+		errs := opsettings.Validate(secName, doc)
+		if secName == "telemetry" {
+			errs = append(errs, telemetryTLSSaveErrors(doc, tlsTouched, slog.Default())...)
+		}
+		if len(errs) > 0 {
 			allValidationErrors[secName] = errs
 		}
 	}
 	if len(allValidationErrors) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":  "validation_failed",
-			"errors": allValidationErrors,
-		})
+		writeSettingsValidation(w, "", sortedSectionValidationEntries(allValidationErrors), nil)
 		return
+	}
+
+	// Workstation: validate and prepare the settings.yaml part before any DB
+	// write, so a bad file-routed value or a file that cannot be edited
+	// writes nothing. The settings-file lock is held from here to the
+	// commit below (see admin_settings_workstation.go for the lock order).
+	var fileTxn *settingsFileTxn
+	if len(fileLeaves) > 0 {
+		if err := validateServerConfigFileKeys(&req.ServerConfigUpdateRequest, fileKeys, ops); err != nil {
+			var fieldErr *serverConfigFileFieldError
+			if errors.As(err, &fieldErr) {
+				writeSettingsFieldError(w, fieldErr.field, fieldErr.Error())
+				return
+			}
+			var valErr *serverConfigFileValidationError
+			if errors.As(err, &valErr) {
+				writeSettingsValidation(w, valErr.Error(), valErr.entries, nil)
+				return
+			}
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+		fileTxn, err = prepareSettingsFileTxn(s.config.ConfigPath, func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {
+			return workstationFileEdits(&req, fileLeaves, gc, typed)
+		})
+		if err != nil {
+			slog.Error("PUT server-config: failed to prepare settings.yaml edit", "error", err)
+			if errors.Is(err, errLegacyServerYAML) {
+				writeError(w, http.StatusConflict, "legacy_server_yaml",
+					"The server configuration is still read from the deprecated server.yaml. Move its contents under a top-level `server:` key in settings.yaml (see the Server Configuration reference, docs/reference/server-config), remove server.yaml, then save again.", nil)
+				return
+			}
+			if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
+				writeSettingsFieldError(w, "settings",
+					"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+		defer fileTxn.abort() // no-op after commit
+		// A sent value the staged file does not carry (so it would not take
+		// effect) is rejected rather than reported as saved.
+		bad, err := unreflectedFileLeaves(&req, fileLeaves, fileTxn.staged.Result())
+		if err != nil {
+			fileTxn.abort()
+			slog.Error("PUT server-config: failed to check staged settings", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+		if len(bad) > 0 {
+			fileTxn.abort()
+			writeSettingsCodedKeysError(w, "unsaved_keys_rejected",
+				"These settings would not take effect as sent; nothing was saved.", bad)
+			return
+		}
 	}
 
 	// Write sections in sorted order for deterministic partial-apply and CAS
 	// behavior: if a conflict occurs partway, exactly the alphabetically-first
 	// sections are applied, giving clients predictable retry semantics.
+	// Each section's effective document before the write, for the
+	// key-level save report (reportSavedKeys).
+	beforeDocs := make(map[string]json.RawMessage, len(sectionDocs))
+	for secName := range sectionDocs {
+		if doc, ok := ops.rawSection(secName); ok {
+			beforeDocs[secName] = doc
+		}
+	}
+	// The saved public URL before the write, for the report below.
+	publicURLSavedBefore := storedManagedPublicURL(ops)
+
 	applied := make(map[string]int64)
+	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
+	// Sections written but not in this hub's self-apply (the post-write
+	// re-read failed or kept losing; ptone/scion#5691).
+	notInEffect := map[string]bool{}
 	var conflicted []map[string]interface{}
 
 	sortedSections := make([]string, 0, len(sectionDocs))
@@ -596,60 +1904,446 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	sort.Strings(sortedSections)
 
+	// runtimes and profiles are saved first, together, in one guarded
+	// transaction: either both are written or neither is, and a conflict
+	// leaves every section of the save unwritten. The runtimes write's
+	// expected revision is the row the merge read (ptone/scion#6580).
+	if placement.active {
+		var writes []guardedSectionWrite
+		reads := placement.reads
+		for _, secName := range placementSections {
+			doc, sent := sectionDocs[secName]
+			if !sent {
+				continue
+			}
+			expectedRev := int64(-1)
+			if rev, ok := req.ExpectedRevisions[secName]; ok {
+				expectedRev = rev
+			} else if rev, ok := mergedBaseRevs[secName]; ok {
+				expectedRev = rev
+			}
+			if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			writes = append(writes, guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev})
+		}
+		if len(writes) > 0 {
+			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")
+			switch {
+			case errors.Is(err, store.ErrRevisionConflict):
+				written := map[string]bool{}
+				for _, wr := range writes {
+					written[wr.section] = true
+					conflicted = append(conflicted, map[string]interface{}{
+						"section":           wr.section,
+						"expected_revision": wr.expectedRevision,
+						"current_revision":  s.getCurrentRevision(ops, wr.section),
+					})
+				}
+				// The sections checked but not written, whose revision
+				// changed, are listed too.
+				conflicted = append(conflicted, placementReadConflicts(r.Context(), ops, reads, written)...)
+			case errors.Is(err, errGuardedBatchUnsupported):
+				slog.Error("PUT server-config: the settings store cannot save runtimes and profiles together", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to save runtimes and profiles: the settings store cannot save them in one transaction", nil)
+				return
+			case err != nil:
+				slog.Error("Failed to update runtimes and profiles", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to update runtimes and profiles", nil)
+				return
+			default:
+				for sec, rev := range revs {
+					applied[sec] = rev
+					if notApplied[sec] {
+						notInEffect[sec] = true
+					}
+				}
+			}
+		}
+	}
+
 	for _, secName := range sortedSections {
+		if len(conflicted) > 0 {
+			// A conflict on the runtimes and profiles save writes nothing
+			// else.
+			break
+		}
+		if placement.active && (secName == "runtimes" || secName == "profiles") {
+			continue
+		}
 		doc := sectionDocs[secName]
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {
 			expectedRev = rev
+		} else if secName == gcpIAMSection && gcpIAMBaseRev >= 0 {
+			expectedRev = gcpIAMBaseRev
+		} else if rev, ok := mergedBaseRevs[secName]; ok {
+			expectedRev = rev
 		}
 
-		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		// A save equal to the filtered base it was built from writes
+		// nothing, whatever the row's origin; a stale expected revision is
+		// not such a save and goes to the write's revision check.
+		if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+			applied[secName] = rev
+			unchanged = append(unchanged, secName)
+			continue
+		}
+
+		// A write that would leave a managed row as it is is skipped, so a
+		// save leaves the rows of the sections it does not change
+		// byte-identical (ptone/scion#3899).
+		if secName != gcpIAMSection {
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				// The revision is reported for the client's next CAS; the
+				// section is listed as unchanged, not as written.
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				continue
+			}
+		}
+
+		// A GCP permission-check change is recorded before it is written;
+		// if the record cannot be written, the change is not made.
+		if secName == gcpIAMSection {
+			if err := s.auditGCPIAMChange(r.Context(), gcpIAMSurfaceSave, gcpIAMCur, gcpIAMNext); err != nil {
+				slog.Error("PUT server-config: failed to record GCP permission-check change", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+				return
+			}
+			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
+		}
+
+		// A change to the stored public URL is recorded before it is
+		// written, like a GCP permission-check change; if the record cannot
+		// be written, the change is not made (ptone/scion#3905).
+		// A failure records every change already recorded as not applied
+		// (endpointURLAudits).
+		endpointAudits := &endpointURLAudits{s: s, ctx: r.Context(), surface: gcpIAMSurfaceSave}
+		if secName == "endpoints" {
+			publicURLBefore, publicURLAfter := storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
+			if publicURLBefore != publicURLAfter {
+				if err := endpointAudits.record(config.PublicURLKey, publicURLBefore, publicURLAfter); err != nil {
+					slog.Error("PUT server-config: failed to record public URL change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
+		}
+
+		// So is a change to the content host in effect (ptone/scion#7107
+		// phase A).
+		if secName == "endpoints" {
+			contentURLBefore, contentURLAfter := ops.Snapshot().ContentURL, contentURLInEffectWith(ops, doc)
+			if contentURLBefore != contentURLAfter {
+				if err := endpointAudits.record(config.ContentURLKey, contentURLForAudit(contentURLBefore), contentURLForAudit(contentURLAfter)); err != nil {
+					slog.Error("PUT server-config: failed to record content URL change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
+		}
+
+		// And a change to the same-site override in effect (phase B item 1).
+		if secName == "endpoints" {
+			allowSameSiteBefore := strconv.FormatBool(ops.Snapshot().ContentURLAllowSameSite)
+			allowSameSiteAfter := strconv.FormatBool(contentURLAllowSameSiteInEffectWith(ops, doc))
+			if allowSameSiteBefore != allowSameSiteAfter {
+				if err := endpointAudits.record(config.ContentURLAllowSameSiteKey, allowSameSiteBefore, allowSameSiteAfter); err != nil {
+					slog.Error("PUT server-config: failed to record content URL same-site override change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
+		}
+
+		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if err != nil {
+			endpointAudits.notApplied(err)
+		}
+		if secName == gcpIAMSection {
+			// The approval covers only this write's own self-apply.
+			s.clearGCPIAMApproval()
+			if err != nil {
+				s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				// Report the conflict with current revision.
 				currentRev := s.getCurrentRevision(ops, secName)
-				conflicted = append(conflicted, map[string]interface{}{
-					"section":           secName,
-					"expected_revision": expectedRev,
-					"current_revision":  currentRev,
-				})
+				conflicted = append(conflicted, settingsConflictEntry(secName, expectedRev, currentRev))
 				// Stop writing further sections on CAS conflict.
 				break
 			}
 			slog.Error("Failed to update section", "section", secName, "error", err)
+			fileTxn.abort()
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				fmt.Sprintf("Failed to update section %q", secName), nil)
 			return
 		}
 		applied[secName] = newRev
+		if !inEffect {
+			notInEffect[secName] = true
+		}
+	}
+
+	sort.Strings(unchanged)
+	written := make(map[string]int64, len(applied))
+	for sec, rev := range applied {
+		written[sec] = rev
+	}
+	for _, sec := range unchanged {
+		delete(written, sec)
+	}
+
+	// Key-level report: every changed Layer-1 key is either applied to the
+	// running hub or pending a restart (opsettings Section.RestartRequired).
+	// On a conflict it covers the sections written before the conflict.
+	writtenDocs := make(map[string]json.RawMessage, len(written))
+	for sec := range written {
+		writtenDocs[sec] = sectionDocs[sec]
+	}
+	// Without a saved public URL the operator endpoint is in effect, so the
+	// report compares that value, not the absence of a saved one; a seeded
+	// row's public_url is not a saved value (ptone/scion#3905,
+	// ptone/scion#4826). Written endpoints docs are managed rows.
+	operatorEndpoint := s.HubEndpoints().Operator
+	if doc, ok := writtenDocs["endpoints"]; ok {
+		before := beforeDocs["endpoints"]
+		beforeDocs["endpoints"] = publicURLInEffectDoc(before, publicURLSavedBefore, operatorEndpoint)
+		writtenDocs["endpoints"] = publicURLInEffectDoc(doc, publicURLFromSectionDoc(doc), operatorEndpoint)
+		// hub_name keeps its bootstrap value when a document leaves it
+		// unset, so compare the hub_name in effect: an echoed hub_name that
+		// is not written, or a seeded row's bootstrap hub_name, is not a
+		// change (ptone/scion#4699).
+		bootstrapName := ops.bootstrapHubName()
+		beforeDocs["endpoints"] = hubNameInEffectDoc(beforeDocs["endpoints"], bootstrapName)
+		writtenDocs["endpoints"] = hubNameInEffectDoc(writtenDocs["endpoints"], bootstrapName)
+	}
+	// The keys the write's self-apply skipped are reported as skipped, not
+	// applied (ptone/scion#4466). So are the keys of a section the
+	// self-apply did not include (ptone/scion#5691).
+	inEffectDocs := make(map[string]json.RawMessage, len(writtenDocs))
+	notInEffectDocs := make(map[string]json.RawMessage)
+	for sec, doc := range writtenDocs {
+		if notInEffect[sec] {
+			notInEffectDocs[sec] = doc
+		} else {
+			inEffectDocs[sec] = doc
+		}
+	}
+	keyReport := reportSavedKeys(beforeDocs, inEffectDocs).withSkipped(s.layer1ApplySkips())
+	if len(notInEffectDocs) > 0 {
+		keyReport = keyReport.withNotYetApplied(reportSavedKeys(beforeDocs, notInEffectDocs))
 	}
 
 	if len(conflicted) > 0 {
-		writeJSON(w, http.StatusConflict, map[string]interface{}{
-			"error":      "revision_conflict",
-			"message":    "One or more sections have been modified since the expected revision.",
-			"applied":    applied,
-			"conflicted": conflicted,
-		})
+		fileTxn.abort()
+		// applied lists only the sections this request wrote; the current
+		// revisions of the sections it left unchanged are in
+		// unchanged_revisions (ptone/scion#4453).
+		unchangedRevs := make(map[string]int64, len(unchanged))
+		for _, sec := range unchanged {
+			unchangedRevs[sec] = applied[sec]
+		}
+		writeSettingsRevisionConflict(w, "One or more sections have been modified since the expected revision.",
+			conflicted, map[string]interface{}{
+				"applied":             written,
+				"unchanged_revisions": unchangedRevs,
+				"applied_keys":        keyReport.Applied,
+				"pending_restart":     keyReport.PendingRestart,
+				"skipped":             keyReport.Skipped,
+			})
 		return
 	}
-
-	slog.Info("Server config updated via admin API (postgres mode)",
+	slog.Info("Server config updated via admin API (DB-backed)",
 		"user", updatedBy,
-		"sections", mapKeys(applied),
+		"sections", mapKeys(written),
+		"unchanged", unchanged,
 	)
 
-	appliedKeys := mapKeys(applied)
+	appliedKeys := mapKeys(written)
+	requiresRestart := []string{}
+	fileApplied := []string{}
+
+	var fileChanged []string
+	if fileTxn != nil {
+		changed, err := fileTxn.commit()
+		if err != nil {
+			slog.Error("PUT server-config: failed to write settings.yaml after DB sections were written",
+				"error", err, "applied", appliedKeys)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Database settings were saved but settings.yaml could not be written",
+				map[string]interface{}{"applied": applied})
+			return
+		}
+		fileChanged = changed
+		if len(fileChanged) > 0 {
+			slog.Info("Server config written to settings.yaml via admin API (workstation)",
+				"user", updatedBy, "keys", fileChanged)
+		}
+		live, restart := s.applyServerConfigFileSideEffects(fileChanged)
+		appliedKeys = append(appliedKeys, live...)
+		fileApplied = live
+		requiresRestart = restart
+	}
 
 	resp := map[string]interface{}{
 		"status": "saved",
 		"reload": map[string]interface{}{
 			"applied":          appliedKeys,
-			"requires_restart": []string{},
+			"requires_restart": requiresRestart,
+			// applied_keys and pending_restart list the changed Layer-1
+			// keys (koanf paths) by whether they took effect on save.
+			// file_applied lists the settings.yaml changes applied live
+			// on a workstation hub (also included in applied). skipped
+			// lists the changed keys saved but not in use, each with a
+			// reason (ptone/scion#4466).
+			"applied_keys":    keyReport.Applied,
+			"pending_restart": keyReport.PendingRestart,
+			"skipped":         keyReport.Skipped,
+			"file_applied":    fileApplied,
 		},
+	}
+	if len(unchanged) > 0 {
+		resp["unchanged"] = unchanged
+	}
+	if len(fileChanged) > 0 {
+		resp["file_keys"] = fileChanged
+	}
+	if len(saveWarnings) > 0 {
+		resp["warnings"] = saveWarnings
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// validateHubDefaultGCPIdentity rejects a hub-level default GCP identity that
+// agent creation would later refuse to apply, mirroring
+// validateDefaultGCPIdentity's project-level checks (existence, verification)
+// and adding the checks that only make sense one tier up:
+//
+//   - The mode must be one of the known values. The JSON schema enum already
+//     enforces this in DB mode; file mode has no schema pass, so it is
+//     repeated here for both.
+//   - The service account must be hub-scoped. A hub default applies to every
+//     project, and a project-scoped account is unreachable from all projects
+//     but its own, so every agent create elsewhere would fail with 400.
+//   - Hub-scoped assignment requires gcpIamCheckMode=enforce (D4, see
+//     authorizeSAAssignment). Outside enforce mode every agent create would
+//     fail with 403, so the admin is told now rather than every creator later.
+//
+// Used by both the DB-mode and file-mode PUT handlers.
+func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, d opsettings.AgentDefaultsSettings) bool {
+	p := s.hubDefaultGCPIdentityProblem(ctx, d)
+	if p == nil {
+		return true
+	}
+	switch {
+	case p.err != nil:
+		writeErrorFromErr(w, p.err, "")
+	case p.notVerified:
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified, p.msg, map[string]interface{}{
+			"field":  p.field,
+			"errors": []settingsFieldError{{Field: p.field, Message: p.msg}},
+		})
+	default:
+		writeSettingsFieldError(w, p.field, p.msg)
+	}
+	return false
+}
+
+// gcpIdentityProblem is why a hub default GCP identity pair is refused:
+// a validation failure on field (msg; notVerified for an unverified
+// account, which has its own error code), or err, a store error.
+type gcpIdentityProblem struct {
+	field       string
+	msg         string
+	notVerified bool
+	err         error
+}
+
+// hubDefaultGCPIdentityProblem checks a hub default GCP identity pair and
+// returns why it is refused, or nil. It writes nothing:
+// validateHubDefaultGCPIdentity turns the result into the response, and the
+// settings.yaml-mode PUT also uses it to warn about a stored pair that is
+// valid only because the environment pins one of its keys.
+func (s *Server) hubDefaultGCPIdentityProblem(ctx context.Context, d opsettings.AgentDefaultsSettings) *gcpIdentityProblem {
+	const saField = "default_gcp_identity_service_account_id"
+	switch d.DefaultGCPIdentityMode {
+	case "", store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough, store.GCPMetadataModeAssign:
+	default:
+		return &gcpIdentityProblem{field: "default_gcp_identity_mode",
+			msg: fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode)}
+	}
+
+	if d.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && d.DefaultGCPIdentityServiceAccountID == "" {
+		return &gcpIdentityProblem{field: saField,
+			msg: "default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode"}
+	}
+
+	if d.DefaultGCPIdentityServiceAccountID == "" {
+		// Empty means clear. Clearing must always be permitted.
+		return nil
+	}
+
+	sa, err := s.store.GetGCPServiceAccount(ctx, d.DefaultGCPIdentityServiceAccountID)
+	if err == nil && sa == nil {
+		err = store.ErrNotFound // defensive: treat a nil result as not found
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return &gcpIdentityProblem{field: saField, msg: "default GCP service account not found"}
+		}
+		return &gcpIdentityProblem{err: err}
+	}
+
+	if !gcpServiceAccountVerified(sa) {
+		return &gcpIdentityProblem{field: saField, notVerified: true,
+			msg: "GCP service account is not verified; verify it before setting it as the hub default. " +
+				identityVerifyRemedy(sa.Scope)}
+	}
+
+	if sa.Scope != store.ScopeHub {
+		return &gcpIdentityProblem{field: saField,
+			msg: "hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project"}
+	}
+
+	if saReferencePreconditions(sa) != nil {
+		return &gcpIdentityProblem{field: saField, msg: saAssignTranslationRecordMsg}
+	}
+
+	s.mu.RLock()
+	mode := s.saAssignCheckMode
+	s.mu.RUnlock()
+	if mode != SAAssignCheckEnforce {
+		return &gcpIdentityProblem{field: saField,
+			msg: "hub-scoped service account assignment requires gcpIamCheckMode=enforce; " +
+				"agent creation would be denied for every user until it is enabled"}
+	}
+
+	return nil
 }
 
 // getCurrentRevision reads the current revision for a section from the cache.
@@ -736,9 +2430,26 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	if req.DefaultRuntimeBroker != nil {
 		keys = append(keys, "default_runtime_broker")
 	}
+	if req.DefaultTimezone != nil {
+		keys = append(keys, "default_timezone")
+	}
+	if req.DefaultGCPIdentityMode != nil {
+		keys = append(keys, "default_gcp_identity_mode")
+	}
+	if req.DefaultGCPIdentityServiceAccountID != nil {
+		keys = append(keys, "default_gcp_identity_service_account_id")
+	}
 
 	if req.AutoExposePorts != nil {
 		keys = append(keys, "auto_expose_ports.enabled")
+	}
+
+	if req.Quotas != nil {
+		keys = append(keys, "quotas.enforce_broker_quotas")
+	}
+
+	if req.AgentSecrets != nil {
+		keys = append(keys, "agent_secrets.user_scope_only")
 	}
 
 	if req.Telemetry != nil {
@@ -782,6 +2493,26 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.PublicURL != "" {
 				keys = append(keys, "server.hub.public_url")
 			}
+			if hub.HubName != "" {
+				keys = append(keys, "server.hub.hub_name")
+			}
+			if hub.MonitoringDashboardURL != "" {
+				keys = append(keys, config.MonitoringDashboardURLKey)
+			}
+			if hub.ContentURL != "" {
+				keys = append(keys, config.ContentURLKey)
+			}
+			if hub.ContentURLAllowSameSite != nil {
+				keys = append(keys, config.ContentURLAllowSameSiteKey)
+			}
+			if o := hub.Observability; o != nil {
+				if o.MetricsEnabled != nil {
+					keys = append(keys, config.HubMetricsEnabledKey)
+				}
+				if o.TracingEnabled != nil {
+					keys = append(keys, config.HubTracingEnabledKey)
+				}
+			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
 			}
@@ -793,6 +2524,24 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.SoftDeleteRetention != "" {
 				keys = append(keys, "server.hub.soft_delete_retention")
+			}
+			if hub.StartClaimLeaseTTL != "" {
+				keys = append(keys, "server.hub.start_claim_lease_ttl")
+			}
+			if hub.GCPIAMCheckMode != "" {
+				keys = append(keys, gcpIAMCheckModeKey)
+			}
+			if hub.GCPIAMDenyUnknownPolicy != "" {
+				keys = append(keys, gcpIAMDenyUnknownKey)
+			}
+			if hub.StartMaxDuration != "" {
+				keys = append(keys, "server.hub.start_max_duration")
+			}
+			if hub.StartUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_unconfirmed_hold")
+			}
+			if hub.StartCreateUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_create_unconfirmed_hold")
 			}
 			if hub.SoftDeleteRetainFiles != nil {
 				keys = append(keys, "server.hub.soft_delete_retain_files")
@@ -806,14 +2555,41 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.HubID != "" {
 				keys = append(keys, "server.hub.hub_id")
 			}
+			if hub.HubClass != "" {
+				keys = append(keys, config.HubClassKey)
+			}
+			if hub.GCPProjectID != "" {
+				keys = append(keys, config.HubGCPProjectIDKey)
+			}
+			if hub.TestIdentities != nil {
+				keys = append(keys, config.TestIdentitiesKey)
+			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
+			}
+			if hub.PerfTrace != nil {
+				keys = append(keys, "server.hub.perf_trace")
+			}
+			if hub.CSPReportRawSamples != nil {
+				keys = append(keys, "server.hub.csp_report_raw_samples")
+			}
+			if hub.MembershipSweepReportOnly != nil {
+				keys = append(keys, "server.hub.membership_sweep_report_only")
+			}
+			if hub.LaunchTimeout != "" {
+				keys = append(keys, "server.hub.launch_timeout")
+			}
+			if hub.LaunchKeepaliveSeconds != nil {
+				keys = append(keys, "server.hub.launch_keepalive_seconds")
 			}
 		}
 		if srv.Auth != nil {
 			auth := srv.Auth
 			if auth.UserAccessMode != "" {
 				keys = append(keys, "server.auth.user_access_mode")
+			}
+			if auth.DefaultUserRole != "" {
+				keys = append(keys, "server.auth.default_user_role")
 			}
 			if len(auth.AuthorizedDomains) > 0 {
 				keys = append(keys, "server.auth.authorized_domains")
@@ -870,8 +2646,17 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		if srv.Secrets != nil && !isZeroStruct(srv.Secrets) {
 			keys = append(keys, "server.secrets")
 		}
+		if srv.ProjectStorage != nil && !isZeroStruct(srv.ProjectStorage) {
+			keys = append(keys, "server.project_storage")
+		}
 		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")
+		}
+		if srv.SharedDirStorage != nil && !isZeroStruct(srv.SharedDirStorage) {
+			keys = append(keys, "server.shared_dir_storage")
+		}
+		if srv.HomeStorage != nil && !isZeroStruct(srv.HomeStorage) {
+			keys = append(keys, "server.home_storage")
 		}
 		if srv.MessageBroker != nil && !isZeroStruct(srv.MessageBroker) {
 			keys = append(keys, "server.message_broker")
@@ -916,9 +2701,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 // extractKoanfKeysFromRequest can't detect these because Go's zero values
 // make them invisible.
 //
-// Only the clearable Layer-1 fields are checked here:
-// admin_emails, user_access_mode, notification_channels, public_url,
-// runtimes, profiles, harness_configs.
+// The fields checked here are the keys of the sections in
+// bodyMergedSections, the agent_defaults keys the PUT writes, and the map
+// sections runtimes, profiles and harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -933,29 +2718,34 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 		keySet[k] = true
 	}
 
-	serverFP := fp.nestedPresence("server")
-	hubFP := serverFP.nestedPresence("hub")
-	authFP := serverFP.nestedPresence("auth")
+	// Keys of the sections merged on their current row
+	// (bodyMergedSections): any sent key, including an explicit null or an
+	// empty value, adds its koanf key, so a lone explicit clear builds the
+	// section doc and clears the key instead of being kept by the merge
+	// (ptone/scion#3464, ptone/scion#3720). An echoed hub_name added here
+	// is dropped again by dropEchoedHubName.
+	for _, sec := range bodyMergedSections {
+		sent := sectionBodyPresence(sec, rawBody).sentKeys()
+		for _, key := range sectionJSONKeys(sec) {
+			if _, ok := sent[key]; !ok {
+				continue
+			}
+			if p := sectionKeyKoanfPath(sec, key); p != "" && !keySet[p] {
+				keySet[p] = true
+				keys = append(keys, p)
+			}
+		}
+	}
 
-	// admin_emails: present in hub but empty → add the key.
-	if !keySet["server.hub.admin_emails"] && hubFP.has("admin_emails") {
-		keys = append(keys, "server.hub.admin_emails")
-	}
-	// user_access_mode: present in auth but empty → add the key.
-	if !keySet["server.auth.user_access_mode"] && authFP.has("user_access_mode") {
-		keys = append(keys, "server.auth.user_access_mode")
-	}
-	// authorized_domains: present in auth but empty → add the key.
-	if !keySet["server.auth.authorized_domains"] && authFP.has("authorized_domains") {
-		keys = append(keys, "server.auth.authorized_domains")
-	}
-	// notification_channels: present in server but empty → add the key.
-	if !keySet["server.notification_channels"] && serverFP.has("notification_channels") {
-		keys = append(keys, "server.notification_channels")
-	}
-	// public_url: present in hub but empty → add the key.
-	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
-		keys = append(keys, "server.hub.public_url")
+	// agent_defaults keys: any sent agent_defaults key (including an
+	// explicit null) → add the key, so a lone explicit clear builds the
+	// agent_defaults doc and clears the key instead of being kept by the
+	// merge (ptone/scion#3719). Keys already present are deduplicated.
+	for k := range agentDefaultsPresence(fp).sentKeys() {
+		if key, ok := modelledSectionKey("agent_defaults", k); ok && !keySet[key] {
+			keySet[key] = true
+			keys = append(keys, key)
+		}
 	}
 
 	// Map-of-objects sections: present as null or {} → add the key to clear.
@@ -998,52 +2788,116 @@ func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map
 	return docs, nil
 }
 
-// buildSingleSectionDoc extracts the fields for a single section from the
-// update request and marshals them into a section document.
+// overlayAccessRequest applies the access fields present in the request onto
+// d, presence-aware (N6):
+//   - non-empty value in the request → set
+//   - explicitly sent empty ("", [], null) → cleared
+//   - omitted → d keeps whatever it already holds
 //
-// N6/N7 presence-aware clearing (postgres-path only):
-//
-// The fp (fieldPresence) parameter carries the raw JSON structure so we can
-// distinguish OMITTED fields from EXPLICITLY-SENT empty values:
-//   - OMITTED → field not in raw JSON → do NOT include in section doc
-//     (the current DB value is preserved on Refresh)
-//   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
-//     zero value in the section doc, which CLEARS it in the DB
-//
-// This applies to: admin_emails, user_access_mode, notification_channels,
-// public_url. File-mode behavior is untouched.
-func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
-	var doc interface{}
-
-	// N6/N7: Derive nested presence maps for the server, hub, and auth sub-objects.
+// buildSingleSectionDoc calls it with an empty d, so the request doc holds
+// only the sent values; the DB-backed PUT merges that doc on the current
+// row (mergeSectionOnCurrent), where a cleared key is removed and an
+// omitted one is kept (design §5.A item 3a).
+func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateRequest, fp *fieldPresence) {
 	serverFP := fp.nestedPresence("server")
 	hubFP := serverFP.nestedPresence("hub")
 	authFP := serverFP.nestedPresence("auth")
 
+	if req.Server != nil && req.Server.Hub != nil {
+		if len(req.Server.Hub.AdminEmails) > 0 {
+			d.AdminEmails = req.Server.Hub.AdminEmails
+		} else if hubFP.has("admin_emails") {
+			// Explicitly sent as [] or null → clear to empty slice.
+			d.AdminEmails = []string{}
+		}
+	}
+	if req.Server != nil && req.Server.Auth != nil {
+		if req.Server.Auth.UserAccessMode != "" {
+			d.UserAccessMode = req.Server.Auth.UserAccessMode
+		} else if authFP.has("user_access_mode") {
+			d.UserAccessMode = "" // explicitly cleared
+		}
+		// Explicit "" clears default_user_role; the server then falls back
+		// to "member" (Server.DefaultUserRole).
+		if req.Server.Auth.DefaultUserRole != "" {
+			d.DefaultUserRole = req.Server.Auth.DefaultUserRole
+		} else if authFP.has("default_user_role") {
+			d.DefaultUserRole = "" // explicitly cleared
+		}
+		if len(req.Server.Auth.AuthorizedDomains) > 0 {
+			d.AuthorizedDomains = req.Server.Auth.AuthorizedDomains
+		} else if authFP.has("authorized_domains") {
+			d.AuthorizedDomains = []string{}
+		}
+	}
+}
+
+// buildSingleSectionDoc extracts the fields for a single section from the
+// update request and marshals them into a section document. The document
+// holds the request's values only; how it is written is decided by the
+// DB-backed PUT (handlePutServerConfigDB).
+//
+// Contract for a DB-backed save (ptone/scion#3718, ptone/scion#3720): a
+// save changes only the keys the request body sends.
+//   - OMITTED key → keeps its stored value.
+//   - Sent key → replaces the stored value, or clears it when the field's
+//     encoding in this doc leaves the sent value out: an explicit null, and
+//     for omitempty fields their zero value. A *bool field (for example
+//     github_app webhooks_enabled, quotas enforce_broker_quotas) carries an
+//     explicit false as a value, so false is stored, not cleared. A
+//     cleared key is removed from the stored row; because a section with a
+//     stored row owns all of its keys, the key is then unset (bootstrap
+//     values from settings.yaml or env are not re-applied).
+//   - The write is a CAS against the row revision the merge read, so a
+//     concurrent write to the section yields a 409, not a lost update.
+//
+// Every section with keys except the map sections and gcp_iam meets it
+// through the shared helper mergeSectionOnCurrent, which also keeps or
+// drops (with a warning) stored keys the request does not send; see its
+// doc comment:
+//   - access, endpoints, lifecycle, notifications, federation,
+//     auto_expose_ports, quotas and agent_secrets take the presence of
+//     their keys from the body paths of their koanf keys
+//     (bodyMergedSections, sectionBodyPresence). access and endpoints
+//     start from the effective snapshot values when they have no row, and
+//     endpoints writes hub_name only when it changes (dropEchoedHubName).
+//   - github_app, telemetry and agent_defaults have presence functions of
+//     their own. telemetry is deep-merged: its nested objects are merged
+//     key by key, while maps and arrays are replaced whole
+//     (deepMergeSections; ptone/scion#3717). agent_defaults applies only
+//     the keys the PUT writes (agentDefaultsRequestKeys), so the read-only
+//     role keys are never cleared (ptone/scion#3719).
+//   - gcp_iam is built on the current row by buildGCPIAMDoc, with its own
+//     transition rules.
+//
+// The map sections (runtimes, profiles, harness_configs) replace the whole
+// row by design: the Server Config editor always sends the full map, so a
+// sent map is the new value and an explicit null or {} clears it. An
+// omitted map section is not written.
+//
+// The file-mode handler (hub without OperationalSettings) does not use
+// this.
+func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
+	var doc interface{}
+
+	// N6/N7: Derive the nested presence map for the server sub-object.
+	// (Access and endpoints presence is handled in overlayAccessRequest and
+	// overlayEndpointsRequest.)
+	serverFP := fp.nestedPresence("server")
+
 	switch secName {
 	case "access":
 		d := &opsettings.AccessSettings{}
+		overlayAccessRequest(d, req, fp)
+		doc = d
+
+	case gcpIAMSection:
+		// handlePutServerConfigDB rebuilds this doc on the current row
+		// (buildGCPIAMDoc).
+		d := &opsettings.GCPIAMSettings{}
 		if req.Server != nil && req.Server.Hub != nil {
-			// N6: presence-aware — explicit empty [] clears admin_emails.
-			if len(req.Server.Hub.AdminEmails) > 0 {
-				d.AdminEmails = req.Server.Hub.AdminEmails
-			} else if hubFP.has("admin_emails") {
-				// Explicitly sent as [] or null → clear to empty slice.
-				d.AdminEmails = []string{}
-			}
-		}
-		if req.Server != nil && req.Server.Auth != nil {
-			// N6: presence-aware — explicit empty "" clears user_access_mode.
-			if req.Server.Auth.UserAccessMode != "" {
-				d.UserAccessMode = req.Server.Auth.UserAccessMode
-			} else if authFP.has("user_access_mode") {
-				d.UserAccessMode = "" // explicitly cleared
-			}
-			if len(req.Server.Auth.AuthorizedDomains) > 0 {
-				d.AuthorizedDomains = req.Server.Auth.AuthorizedDomains
-			} else if authFP.has("authorized_domains") {
-				d.AuthorizedDomains = []string{}
-			}
+			d.CheckMode = req.Server.Hub.GCPIAMCheckMode
+			d.DenyUnknownPolicy = req.Server.Hub.GCPIAMDenyUnknownPolicy
 		}
 		doc = d
 
@@ -1058,6 +2912,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 				d.SoftDeleteRetention = req.Server.Hub.SoftDeleteRetention
 			}
 			d.SoftDeleteRetainFiles = req.Server.Hub.SoftDeleteRetainFiles
+			d.StartClaimLeaseTTL = req.Server.Hub.StartClaimLeaseTTL
+			d.StartMaxDuration = req.Server.Hub.StartMaxDuration
+			d.StartUnconfirmedHold = req.Server.Hub.StartUnconfirmedHold
+			d.StartCreateUnconfirmedHold = req.Server.Hub.StartCreateUnconfirmedHold
 		}
 		doc = d
 
@@ -1091,31 +2949,31 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		if req.DefaultModel != nil {
 			d.DefaultModel = *req.DefaultModel
 		}
+		// An explicit null (a nil pointer) clears the level. 0 is not a
+		// clear: the PUT handlers reject it (rejectInvalidThinkingLevel).
 		if req.DefaultThinkingLevel != nil {
-			if *req.DefaultThinkingLevel > 0 {
-				d.DefaultThinkingLevel = req.DefaultThinkingLevel
-			} else {
-				d.DefaultThinkingLevel = nil
-			}
+			d.DefaultThinkingLevel = req.DefaultThinkingLevel
 		}
 		if req.DefaultRuntimeBroker != nil {
 			d.DefaultRuntimeBroker = *req.DefaultRuntimeBroker
 		}
+		if req.DefaultTimezone != nil {
+			d.DefaultTimezone = *req.DefaultTimezone
+		}
+		if req.DefaultGCPIdentityMode != nil {
+			d.DefaultGCPIdentityMode = *req.DefaultGCPIdentityMode
+		}
+		if req.DefaultGCPIdentityServiceAccountID != nil {
+			d.DefaultGCPIdentityServiceAccountID = *req.DefaultGCPIdentityServiceAccountID
+		}
 		doc = d
 
 	case "endpoints":
+		// handlePutServerConfigDB drops an echoed hub_name from the request
+		// (dropEchoedHubName) before this runs, so any hub_name the request
+		// still carries counts as a change.
 		d := &opsettings.EndpointsSettings{}
-		if req.Server != nil && req.Server.Hub != nil {
-			// N6: presence-aware — explicit empty "" clears public_url.
-			if req.Server.Hub.PublicURL != "" {
-				d.PublicURL = req.Server.Hub.PublicURL
-			} else if hubFP.has("public_url") {
-				d.PublicURL = "" // explicitly cleared
-			}
-		}
-		if req.ImageRegistry != nil {
-			d.ImageRegistry = *req.ImageRegistry
-		}
+		overlayEndpointsRequest(d, req, fp, true)
 		doc = d
 
 	case "github_app":
@@ -1125,9 +2983,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.AppID = ga.AppID
 			d.APIBaseURL = ga.APIBaseURL
 			// #391: webhooks_enabled is a plain bool in the request; use
-			// fieldPresence to distinguish explicit false from omitted.
-			githubFP := serverFP.nestedPresence("github_app")
-			if ga.WebhooksEnabled || githubFP.has("webhooks_enabled") {
+			// the raw body to tell an explicit false (stored as false)
+			// from an omitted key or an explicit null (left out, so the
+			// merge keeps or clears it). The member is resolved with the
+			// decode's case-insensitive rule, as mergeSectionOnCurrent
+			// resolves it.
+			v, sent := githubAppPresenceFromTop(fp).sentFold("webhooks_enabled")
+			if ga.WebhooksEnabled || (sent && !isJSONNull(v)) {
 				d.WebhooksEnabled = &ga.WebhooksEnabled
 			}
 			d.InstallationURL = ga.InstallationURL
@@ -1138,6 +3000,31 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 	case "auto_expose_ports":
 		if req.AutoExposePorts != nil {
 			doc = req.AutoExposePorts
+		} else {
+			return nil, nil
+		}
+
+	case "quotas":
+		if req.Quotas != nil {
+			doc = req.Quotas
+		} else {
+			return nil, nil
+		}
+
+	case hubObservabilitySection:
+		// handlePutServerConfigDB merges this doc on the current row
+		// (bodyMergedSections): an omitted switch keeps its value, null
+		// clears it.
+		d := &opsettings.HubObservabilitySettings{}
+		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Observability != nil {
+			d.MetricsEnabled = req.Server.Hub.Observability.MetricsEnabled
+			d.TracingEnabled = req.Server.Hub.Observability.TracingEnabled
+		}
+		doc = d
+
+	case "agent_secrets":
+		if req.AgentSecrets != nil {
+			doc = req.AgentSecrets
 		} else {
 			return nil, nil
 		}
@@ -1244,17 +3131,56 @@ func mapKeys(m map[string]int64) []string {
 	return keys
 }
 
-// handleGetMaintenanceDB handles GET /api/v1/admin/maintenance in postgres mode.
-// Reads maintenance state from the operational settings snapshot.
+// handleGetMaintenanceDB handles GET /api/v1/admin/maintenance
+// whenever OperationalSettings is wired (any DB driver).
+// Reports the maintenance row when one exists, else the live state.
 func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalSettings) {
-	snap := ops.Snapshot()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"enabled": snap.AdminMode,
-		"message": maintenanceMessageOrDefault(snap.MaintenanceMessage),
-	})
+	enabled, message := s.maintenanceReported(ops)
+	resp := map[string]interface{}{
+		"enabled": enabled,
+		"message": maintenanceMessageOrDefault(message),
+	}
+	// break_glass: a workstation hub started in admin mode stays in
+	// maintenance whatever the DB row says.
+	if s.maintenanceBreakGlass() {
+		resp["break_glass"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
-// handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance in postgres mode.
+// maintenanceBaseline returns the maintenance state the DB-backed handlers
+// report and build a partial PUT on. With a maintenance row that is the row
+// (ApplyMaintenanceFromSnapshot has made it the live state too). With no row
+// (the section is never seeded) the live MaintenanceState is authoritative:
+// it was set at startup from SCION_SERVER_ADMIN_MODE or settings.yaml, and
+// the empty snapshot would wrongly report, and a message-only PUT would
+// wrongly write, admin_mode=false.
+//
+// The PUT baseline is the row even during a workstation break-glass, so a
+// message-only PUT does not copy the forced admin_mode=true into the row
+// (which would keep the hub in maintenance after a restart without the
+// break-glass). With no row, a message-only PUT does persist the live
+// admin_mode (documented in admin-settings.md).
+func (s *Server) maintenanceBaseline(ops *OperationalSettings) (enabled bool, message string) {
+	snap := ops.Snapshot()
+	if s.maintenance != nil && !snap.HasMaintenanceRow {
+		return s.maintenance.State()
+	}
+	return snap.AdminMode, snap.MaintenanceMessage
+}
+
+// maintenanceReported is the state GET reports: the live state during a
+// workstation break-glass (the hub is in maintenance whatever the row says),
+// else the PUT baseline.
+func (s *Server) maintenanceReported(ops *OperationalSettings) (enabled bool, message string) {
+	if s.maintenance != nil && s.maintenanceBreakGlass() {
+		return s.maintenance.State()
+	}
+	return s.maintenanceBaseline(ops)
+}
+
+// handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance
+// whenever OperationalSettings is wired (any DB driver).
 // Writes the maintenance section via OperationalSettings.Update (durable +
 // propagated), then applies locally via ApplyMaintenanceFromSnapshot.
 func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
@@ -1279,12 +3205,13 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 		updatedBy = caller.Email()
 	}
 
-	// Build the maintenance section doc. Start from the current snapshot values
-	// to preserve fields not being updated (partial update semantics).
-	snap := ops.Snapshot()
+	// Build the maintenance section doc. Start from the current state (the
+	// row, else the live state) to preserve fields not being updated
+	// (partial update semantics).
+	baseEnabled, baseMessage := s.maintenanceBaseline(ops)
 	ms := opsettings.MaintenanceSettings{
-		AdminMode:          snap.AdminMode,
-		MaintenanceMessage: snap.MaintenanceMessage,
+		AdminMode:          baseEnabled,
+		MaintenanceMessage: baseMessage,
 	}
 	if body.Enabled != nil {
 		ms.AdminMode = *body.Enabled
@@ -1320,11 +3247,16 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// The Update call already self-applies via ApplySnapshot + ApplyMaintenanceFromSnapshot,
-	// but read the final state from the server's MaintenanceState to reflect env overrides.
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	// but read the final state from the server's MaintenanceState to reflect
+	// a workstation break-glass.
+	resp := map[string]interface{}{
 		"enabled": s.maintenance.IsEnabled(),
 		"message": s.maintenance.Message(),
-	})
+	}
+	if s.maintenanceBreakGlass() {
+		resp["break_glass"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAdminServerConfigSchema handles GET /api/v1/admin/server-config/schema.
@@ -1332,7 +3264,7 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 // intended for UI form generation and CLI validation. Static metadata — no DB access.
 func (s *Server) handleAdminServerConfigSchema(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1361,6 +3293,120 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// repeatedJSONMember reports the first object member name that rawBody
+// repeats within one object, at any depth. Names compare under the same
+// case folding encoding/json uses to match struct fields, so "server" and
+// "Server" in one object are a repeat; the comparison applies to every
+// object, including the keys of map-valued objects such as profiles, so
+// "Foo" and "foo" there are a repeat too. A body that is not exactly one
+// JSON value (empty, malformed, or followed by anything other than
+// whitespace) returns an error: it is never reported as having no repeat.
+func repeatedJSONMember(rawBody []byte) (string, bool, error) {
+	type frame struct {
+		object    bool
+		expectKey bool
+		names     map[string]bool
+	}
+	var stack []*frame
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].expectKey = true
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", false, fmt.Errorf("request body is not one JSON value: %w", err)
+		}
+		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
+			top := stack[n-1]
+			if d, ok := tok.(json.Delim); ok && d == '}' {
+				stack = stack[:n-1]
+				valueDone()
+			} else if key, ok := tok.(string); ok {
+				folded := foldJSONMemberName(key)
+				if top.names[folded] {
+					return key, true, nil
+				}
+				top.names[folded] = true
+				top.expectKey = false
+			}
+		} else {
+			switch tok {
+			case json.Delim('{'):
+				stack = append(stack, &frame{object: true, expectKey: true, names: map[string]bool{}})
+			case json.Delim('['):
+				stack = append(stack, &frame{})
+			case json.Delim(']'):
+				// A closing bracket must close an open array.
+				// json.Decoder already refuses an unmatched closer;
+				// the guard keeps the stack pop from underflowing.
+				if len(stack) == 0 {
+					return "", false, errors.New("request body is not one JSON value: unmatched ']'")
+				}
+				stack = stack[:len(stack)-1]
+				valueDone()
+			default:
+				valueDone()
+			}
+		}
+		if len(stack) == 0 {
+			// The first top-level value is complete; only whitespace may
+			// follow it.
+			if _, err := dec.Token(); err != io.EOF {
+				return "", false, errors.New("request body has data after the first JSON value")
+			}
+			return "", false, nil
+		}
+	}
+}
+
+// foldJSONMemberName folds a member name the way encoding/json does when it
+// matches a name to a struct field: ASCII letters to upper case, and every
+// other rune to the smallest rune of its simple fold set.
+func foldJSONMemberName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r < utf8.RuneSelf {
+			if 'a' <= r && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			b.WriteRune(r)
+			continue
+		}
+		for {
+			r2 := unicode.SimpleFold(r)
+			if r2 <= r {
+				r = r2
+				break
+			}
+			r = r2
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// rejectRepeatedJSONMembers answers 400 and returns true when a hub
+// configuration write body is not exactly one JSON value, or repeats an
+// object member name at any depth. The key classification and the typed
+// write decode must read the same members, so a body they could read
+// differently is refused for every credential before either runs.
+func rejectRepeatedJSONMembers(w http.ResponseWriter, rawBody []byte) bool {
+	name, repeated, err := repeatedJSONMember(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body: "+err.Error(), nil)
+		return true
+	}
+	if !repeated {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+		"request body repeats the member name "+strconv.Quote(name)+" in one object", nil)
+	return true
+}
+
 // fieldPresence extracts which JSON fields are explicitly present (including
 // when set to "", [], null) in the raw request body by walking nested
 // map[string]json.RawMessage paths. This powers N6/N7: presence-aware
@@ -1371,7 +3417,7 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 //   - EXPLICITLY-SENT empty ("", [], null) → in the returned set → CLEAR the field
 //   - EXPLICITLY-SENT non-empty → in the returned set → normal update
 //
-// File-mode behavior is untouched — this is postgres-path only.
+// Used by the DB-backed handlers only; the file-mode handler does not use it.
 type fieldPresence struct {
 	raw map[string]json.RawMessage
 }
@@ -1416,4 +3462,216 @@ func maintenanceMessageOrDefault(msg string) string {
 		return defaultMaintenanceMessage
 	}
 	return msg
+}
+
+// Settings keys a user access token may write.
+//
+// The server-config and project-defaults writes admit a user access token
+// that carries the operation's selector, but only for keys classified as
+// configuration below. A key is refused for every credential other than an
+// interactive session or a dev credential (a user access token, or an
+// unknown or missing credential kind) when writing it confers authority
+// (who is an administrator, who may sign in, which external issuers are
+// trusted), decides the origin users and agents reach the hub on, or
+// selects the code, images, runtimes or credentials agents run with. A
+// refused key is refused whenever it is present in the body, including a
+// value equal to the stored one or an explicit clear. A key the tables do
+// not classify is refused too, so a new settings key reaches tokens only
+// after it is classified here.
+
+// settingsTokenClass classifies a settings section or key for writes by a
+// user access token.
+type settingsTokenClass int
+
+const (
+	// settingsTokenRefused refuses every user access token.
+	settingsTokenRefused settingsTokenClass = iota + 1
+	// settingsTokenConfiguration admits a token that holds the operation's
+	// selector and live authority.
+	settingsTokenConfiguration
+	// settingsTokenPerKey classifies each key of the section through
+	// serverConfigTokenKeys.
+	settingsTokenPerKey
+)
+
+// serverConfigTokenSections classifies every Layer-1 operational settings
+// section for token writes through PUT /api/v1/admin/server-config and for
+// token resets through DELETE /api/v1/admin/server-config/sections/{name}.
+// A section that contains a refused key cannot be reset by a token.
+var serverConfigTokenSections = map[string]settingsTokenClass{
+	"access":            settingsTokenRefused,       // administrators, sign-in mode, default user role, sign-in domains
+	"federation":        settingsTokenRefused,       // trusted external issuers
+	"github_app":        settingsTokenRefused,       // the hub's GitHub App credential
+	"agent_secrets":     settingsTokenRefused,       // which secret scopes agents may write
+	"auto_expose_ports": settingsTokenRefused,       // whether agent ports are reachable
+	"runtimes":          settingsTokenRefused,       // where and how agents run
+	"profiles":          settingsTokenRefused,       // runtime, image and environment agents run with
+	"harness_configs":   settingsTokenRefused,       // harness code and images agents run with
+	"maintenance":       settingsTokenRefused,       // admin mode, a session-only host operation
+	"messaging":         settingsTokenRefused,       // written through PUT /api/v1/admin/messaging
+	"experiments":       settingsTokenRefused,       // written through /api/v1/admin/experiments
+	"profiling":         settingsTokenRefused,       // written through PUT /api/v1/admin/profiling
+	"agent_defaults":    settingsTokenPerKey,        // see serverConfigTokenKeys
+	"endpoints":         settingsTokenPerKey,        // see serverConfigTokenKeys
+	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing
+	"telemetry":         settingsTokenConfiguration, // telemetry export
+	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
+	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
+	"gcp_iam":           settingsTokenRefused,       // service account permission check
+	"notifications":     settingsTokenConfiguration, // notification channels
+	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
+	"artifacts":         settingsTokenConfiguration, // artifact limits
+
+	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
+	"chat_retention":          settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
+}
+
+// serverConfigTokenKeys classifies each key of a settingsTokenPerKey
+// section, by koanf path.
+var serverConfigTokenKeys = map[string]settingsTokenClass{
+	// agent_defaults
+	"default_max_agent_role":                  settingsTokenRefused, // authority granted to agents
+	"default_agent_role":                      settingsTokenRefused, // authority granted to agents
+	"default_gcp_identity_mode":               settingsTokenRefused, // cloud identity agents run with
+	"default_gcp_identity_service_account_id": settingsTokenRefused, // cloud identity agents run with
+	"default_template":                        settingsTokenRefused, // code agents run with
+	"default_harness_config":                  settingsTokenRefused, // harness code and image agents run with
+	"default_runtime_broker":                  settingsTokenRefused, // broker and credentials agents run with
+	"default_max_turns":                       settingsTokenConfiguration,
+	"default_max_model_calls":                 settingsTokenConfiguration,
+	"default_max_duration":                    settingsTokenConfiguration,
+	"default_resources":                       settingsTokenConfiguration,
+	"default_model":                           settingsTokenConfiguration,
+	"default_thinking_level":                  settingsTokenConfiguration,
+	"default_timezone":                        settingsTokenConfiguration,
+	// endpoints
+	"server.hub.public_url": settingsTokenRefused, // the origin users and agents reach the hub on
+	config.ContentURLKey:    settingsTokenRefused, // the origin users open shared artifacts on
+	// whether that origin may share the hub's registrable domain
+	config.ContentURLAllowSameSiteKey: settingsTokenRefused,
+	"image_registry":                  settingsTokenRefused, // the registry agent images come from
+	"server.hub.hub_name":             settingsTokenConfiguration,
+	// the link operators follow from the Health page
+	"server.hub.monitoring_dashboard_url": settingsTokenRefused,
+}
+
+// projectDefaultsTokenKeys classifies each key of the project_defaults
+// section, by JSON field name, for token writes through
+// PUT /api/v1/admin/project-defaults.
+var projectDefaultsTokenKeys = map[string]settingsTokenClass{
+	"default_scratchpad": settingsTokenConfiguration,
+}
+
+// serverConfigKeyTokenClass returns the token class of a Layer-1 koanf key.
+// A key outside every Layer-1 section, or not classified, is refused. That
+// covers the file-only keys (dbFileOnlyRequestPaths), among them
+// server.hub.agent_endpoint, which decides the origin agents reach the hub
+// on.
+func serverConfigKeyTokenClass(koanfKey string) settingsTokenClass {
+	section := opsettings.OwningSection(koanfKey)
+	switch serverConfigTokenSections[section] {
+	case settingsTokenConfiguration:
+		return settingsTokenConfiguration
+	case settingsTokenPerKey:
+		if serverConfigTokenKeys[koanfKey] == settingsTokenConfiguration {
+			return settingsTokenConfiguration
+		}
+	}
+	return settingsTokenRefused
+}
+
+// serverConfigSectionTokenResettable reports whether a token may reset the
+// named section: only a configuration section, never one that contains a
+// refused key.
+func serverConfigSectionTokenResettable(section string) bool {
+	return serverConfigTokenSections[section] == settingsTokenConfiguration
+}
+
+// serverConfigBodyKoanfKey maps a server-config request body path to its
+// koanf key. The request carries federation at the top level; its koanf
+// keys live under server.federation.
+func serverConfigBodyKoanfKey(path []string) string {
+	key := strings.Join(path, ".")
+	if len(path) > 0 && path[0] == "federation" {
+		key = "server." + key
+	}
+	return key
+}
+
+// unparsedBodyKey is the refused key a classifier reports for a body it
+// cannot parse as one JSON object: an unparsed body is refused, never read
+// as carrying no refused key.
+const unparsedBodyKey = "<body>"
+
+// tokenRefusedServerConfigKeys returns, sorted, the body keys of a
+// server-config write that a user access token may not write. Every
+// present leaf counts, null and empty values included. expected_revisions
+// carries compare-and-set revisions, not settings, and is not classified.
+func tokenRefusedServerConfigKeys(rawBody []byte) []string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &top); err != nil {
+		return []string{unparsedBodyKey}
+	}
+	refused := map[string]bool{}
+	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
+		if len(l.path) > 0 && l.path[0] == "expected_revisions" {
+			continue
+		}
+		if serverConfigKeyTokenClass(serverConfigBodyKoanfKey(l.path)) != settingsTokenConfiguration {
+			refused[strings.Join(l.path, ".")] = true
+		}
+	}
+	return sortedSettingsKeys(refused)
+}
+
+// tokenRefusedProjectDefaultsKeys returns, sorted, the body keys of a
+// project-defaults write that a user access token may not write: every
+// top-level key that is not a configuration key of projectDefaultsTokenKeys.
+// JSON field names match case-insensitively, as the decoder matches them.
+func tokenRefusedProjectDefaultsKeys(rawBody []byte) []string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &top); err != nil {
+		return []string{unparsedBodyKey}
+	}
+	refused := map[string]bool{}
+	for key := range top {
+		allowed := false
+		for name, class := range projectDefaultsTokenKeys {
+			if strings.EqualFold(key, name) && class == settingsTokenConfiguration {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			refused[key] = true
+		}
+	}
+	return sortedSettingsKeys(refused)
+}
+
+func sortedSettingsKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// writeTokenRefusedSettingsKeys refuses a hub configuration write that
+// carries refused keys (settings keys, or a lifecycle hook's execution
+// identity) from any credential other than an interactive session or a
+// dev credential (sessionCredentialAllowed): 403 with the session-only
+// details (reason GOV_PENDING) and details.keys listing the refused keys.
+// An unknown or missing credential kind is refused too. It writes nothing
+// and returns false for a session or dev credential, or when keys is empty.
+func writeTokenRefusedSettingsKeys(w http.ResponseWriter, ctx context.Context, keys []string) bool {
+	if sessionCredentialAllowed(ctx) || len(keys) == 0 {
+		return false
+	}
+	details := sessionOnlyDenialDetails(authzop.ReasonGovernancePending)
+	details["keys"] = keys
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"these keys require an interactive session", details)
+	return true
 }

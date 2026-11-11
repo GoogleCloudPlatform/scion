@@ -94,7 +94,7 @@ func main() {
 	fmt.Println("  DATABASE_URL                Postgres connection URL (required)")
 	fmt.Println("  TELEGRAM_BOT_TOKEN          Telegram bot token (required)")
 	fmt.Println("  TELEGRAM_WEBHOOK_URL        Public webhook URL (required)")
-	fmt.Println("  TELEGRAM_WEBHOOK_SECRET     Secret token for webhook validation")
+	fmt.Println("  TELEGRAM_WEBHOOK_SECRET     Secret token for webhook validation (required)")
 	fmt.Println("  TELEGRAM_WEBHOOK_LISTEN     Listen address for webhook (default :9094)")
 	fmt.Println("  TELEGRAM_HUB_URL            Hub API URL")
 	fmt.Println("  TELEGRAM_HMAC_KEY           HMAC key for hub auth")
@@ -177,16 +177,10 @@ func serveStandalone() {
 		Integration: "telegram",
 		DatabaseURL: databaseURL,
 		ConfigFile:  os.Getenv("CONFIG_FILE"),
-		EnvPrefix:   "TELEGRAM",
-		EnvKeys: []string{
-			"bot_token", "webhook_url", "webhook_secret", "webhook_listen",
-			"hub_url", "hmac_key", "broker_id",
-			"api_base_url", "agent_cache_ttl", "send_queue_size",
-			"send_min_delay",
-			"transport_mode", "transport_audience",
-		},
-		UpdateHook: os.Getenv("UPDATE_HOOK"),
-		Log:        log,
+		EnvPrefix:   standaloneEnvPrefix,
+		EnvKeys:     standaloneEnvKeys,
+		UpdateHook:  os.Getenv("UPDATE_HOOK"),
+		Log:         log,
 	})
 
 	rctx, err := rt.Start(ctx)
@@ -233,16 +227,6 @@ func serveStandalone() {
 		return broker.Configure(newCfg)
 	})
 
-	// Resolve webhook URL and secret for RegisterWebhook.
-	webhookURL := cfg["webhook_url"]
-	if webhookURL == "" {
-		webhookURL = os.Getenv("TELEGRAM_WEBHOOK_URL")
-	}
-	webhookSecret := cfg["webhook_secret"]
-	if webhookSecret == "" {
-		webhookSecret = os.Getenv("TELEGRAM_WEBHOOK_SECRET")
-	}
-
 	// F1+F5: Use the shared lock loop. Only the lock holder calls setWebhook;
 	// all instances serve webhook HTTP traffic.
 	lockStore, ok := telegramStore.(lockloop.AdvisoryLocker)
@@ -253,7 +237,10 @@ func serveStandalone() {
 
 	lockLoop := lockloop.New(lockStore, int64(store.LockTelegramWebhook), log)
 	lockLoop.OnAcquired = func() error {
-		if err := broker.RegisterWebhook(webhookURL, webhookSecret); err != nil {
+		// RegisterWebhook registers the webhook URL and credential of the
+		// broker's current configuration, and a reconfigure while this
+		// instance holds the registration registers the new ones.
+		if err := broker.RegisterWebhook(); err != nil {
 			return err
 		}
 		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
@@ -305,6 +292,19 @@ func serveStandalone() {
 	lockLoop.ReleaseHandle()
 
 	log.Info("Standalone Telegram bot stopped")
+}
+
+// standaloneEnvPrefix and standaloneEnvKeys select the environment variables
+// the integration runtime merges into the standalone config: each key is read
+// from standaloneEnvPrefix + "_" + UPPER(key), e.g. TELEGRAM_WEBHOOK_SECRET.
+const standaloneEnvPrefix = "TELEGRAM"
+
+var standaloneEnvKeys = []string{
+	"bot_token", "webhook_url", "webhook_secret", "webhook_listen",
+	"hub_url", "hmac_key", "broker_id",
+	"api_base_url", "agent_cache_ttl", "send_queue_size",
+	"send_min_delay",
+	"transport_mode", "transport_audience",
 }
 
 var errPollRejected = errors.New("HA/standalone Telegram requires webhook mode; inbound_mode=poll is not supported")

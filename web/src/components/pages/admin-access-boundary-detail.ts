@@ -33,7 +33,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
 import type {
   AccessBoundaryDetail,
@@ -45,6 +44,7 @@ import { canAccessBoundary } from '../../shared/access-boundaries.js';
 
 // Import sub-components
 import '../shared/access-boundary-status.js';
+import '../shared/detail-header.js';
 import '../shared/access-boundary-impact-summary.js';
 import '../shared/affected-principals-table.js';
 import '../shared/access-boundary-audit-timeline.js';
@@ -53,6 +53,9 @@ import '../shared/access-boundary-preview.js';
 import type { PageRequestDetail } from '../shared/affected-principals-table.js';
 import type { AuditPageRequestDetail } from '../shared/access-boundary-audit-timeline.js';
 import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting' | 'permission_denied';
 
@@ -60,6 +63,9 @@ const STALENESS_THRESHOLD_MS = 5 * 60 * 1000;
 
 @customElement('scion-page-admin-access-boundary-detail')
 export class ScionPageAdminAccessBoundaryDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private boundaryId = '';
   @state() private phase: PagePhase = 'loading';
   @state() private boundary: AccessBoundaryDetail | null = null;
@@ -77,6 +83,10 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   @state() private auditNextToken: PageToken | undefined;
   @state() private auditTotalCount = 0;
   @state() private loadingAudit = false;
+  @state() private auditError = '';
+  private auditResourceId = '';
+  private auditRequestGeneration = 0;
+  private consumedAuditTokens = new Set<PageToken>();
 
   // Delete flow
   @state() private showDeletePreview = false;
@@ -97,74 +107,16 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     }
 
     /* Header */
-    .page-header {
-      margin-bottom: 1.5rem;
-    }
-
-    .header-top {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-bottom: 0.25rem;
-    }
-
-    .back-link {
-      font-size: 0.875rem;
-      color: var(--sl-color-primary-600, #2563eb);
-      text-decoration: none;
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      cursor: pointer;
-    }
-
-    .back-link:hover {
-      text-decoration: underline;
-    }
-
-    .header-main {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .header-info {
-      flex: 1;
-      min-width: 200px;
-    }
-
-    .boundary-name {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.375rem;
-      overflow-wrap: anywhere;
-    }
-
-    .header-badges {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.5rem;
-    }
-
+    /* Long scope or subject labels (ids) break instead of spilling past the
+       shared header's title column. */
     .header-meta {
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
+      overflow-wrap: anywhere;
     }
 
     .header-meta span + span::before {
       content: ' · ';
-    }
-
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      flex-shrink: 0;
     }
 
     /* Sections */
@@ -498,19 +450,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
         padding: 0.5rem 0.75rem 2rem;
       }
 
-      .boundary-name {
-        font-size: 1.25rem;
-      }
-
-      .header-main {
-        flex-direction: column;
-      }
-
-      .header-actions {
-        width: 100%;
-        justify-content: flex-start;
-      }
-
       .definition-grid {
         grid-template-columns: 1fr;
         gap: 0.25rem 0;
@@ -601,6 +540,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private async loadBoundary(): Promise<void> {
     this.phase = 'loading';
     this.errorMessage = '';
+    this.resetAuditState(this.boundaryId);
 
     try {
       const boundary = await accessBoundariesApi.get(this.boundaryId);
@@ -652,23 +592,66 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   }
 
   private async loadAuditEvents(pageToken?: PageToken): Promise<void> {
+    const resourceId = this.boundaryId;
+    if (!resourceId) return;
+    if (this.auditResourceId !== resourceId || !pageToken) {
+      this.resetAuditState(resourceId);
+    }
+    if (pageToken && this.consumedAuditTokens.has(pageToken)) {
+      this.auditNextToken = undefined;
+      return;
+    }
+    if (pageToken) this.consumedAuditTokens.add(pageToken);
+
+    const generation = ++this.auditRequestGeneration;
     this.loadingAudit = true;
+    this.auditError = '';
     try {
       const auditParams: { pageToken?: PageToken; pageSize?: number } = { pageSize: 20 };
       if (pageToken) auditParams.pageToken = pageToken;
-      const page = await accessBoundariesApi.listAudit(this.boundaryId, auditParams);
+      const page = await accessBoundariesApi.listAudit(resourceId, auditParams);
+      if (generation !== this.auditRequestGeneration || resourceId !== this.boundaryId) return;
+      const safeItems = page.items.filter((item) => item.constraintId === resourceId);
       if (pageToken) {
-        this.auditEvents = [...this.auditEvents, ...page.items];
+        const known = new Set(this.auditEvents.map((item) => item.id));
+        this.auditEvents = [
+          ...this.auditEvents,
+          ...safeItems.filter((item) => !known.has(item.id)),
+        ];
       } else {
-        this.auditEvents = page.items;
+        this.auditEvents = safeItems;
       }
-      this.auditNextToken = page.nextPageToken;
+      this.auditNextToken =
+        page.nextPageToken &&
+        page.nextPageToken !== pageToken &&
+        !this.consumedAuditTokens.has(page.nextPageToken)
+          ? page.nextPageToken
+          : undefined;
       this.auditTotalCount = page.totalCount;
     } catch (err) {
-      console.error('Failed to load audit events:', err);
+      if (generation !== this.auditRequestGeneration || resourceId !== this.boundaryId) return;
+      if (err instanceof accessBoundariesApi.StaleResponseError) return;
+      this.auditEvents = [];
+      this.auditNextToken = undefined;
+      this.auditTotalCount = 0;
+      this.auditError =
+        err instanceof accessBoundariesApi.AccessBoundaryAPIError && err.httpStatus === 404
+          ? 'Audit history is unavailable.'
+          : 'Unable to load audit history. Try again.';
     } finally {
-      this.loadingAudit = false;
+      if (generation === this.auditRequestGeneration) this.loadingAudit = false;
     }
+  }
+
+  private resetAuditState(resourceId: string): void {
+    this.auditRequestGeneration++;
+    this.auditResourceId = resourceId;
+    this.auditEvents = [];
+    this.auditNextToken = undefined;
+    this.auditTotalCount = 0;
+    this.auditError = '';
+    this.loadingAudit = false;
+    this.consumedAuditTokens.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -693,35 +676,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private formatDatetime(iso: string | null): string {
     if (!iso) return '—';
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleString(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
-    } catch {
-      return iso;
-    }
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(iso) || iso;
   }
 
   private subjectDescription(): string {
@@ -939,72 +894,52 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private renderPageHeader(b: AccessBoundaryDetail) {
     return html`
-      <div class="page-header">
-        <div class="header-top">
-          <a
-            class="back-link"
-            href="/admin/access-boundaries"
-            @click=${(e: Event) => {
-              e.preventDefault();
-              navigateTo('/admin/access-boundaries');
-            }}
-          >
-            <sl-icon name="arrow-left"></sl-icon>
-            Access Constraints
-          </a>
+      <scion-detail-header heading=${b.name}>
+        <scion-back-link slot="back" href="/admin/access-boundaries"
+          >Access Constraints</scion-back-link
+        >
+        <sl-icon slot="icon" name="shield-check"></sl-icon>
+        <scion-access-boundary-status
+          status=${b.status}
+          .risk=${b.risk}
+        ></scion-access-boundary-status>
+        <div slot="meta" class="header-meta">
+          <span>${this.scopeDescription()}</span>
+          <span>${this.subjectDescription()}</span>
+          ${b.updatedAt ? html`<span>Updated ${formatRelative(b.updatedAt)}</span>` : nothing}
+          ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
         </div>
-
-        <div class="header-main">
-          <div class="header-info">
-            <h1 class="boundary-name">${b.name}</h1>
-            <div class="header-badges">
-              <scion-access-boundary-status
-                status=${b.status}
-                .risk=${b.risk}
-              ></scion-access-boundary-status>
-            </div>
-            <div class="header-meta">
-              <span>${this.scopeDescription()}</span>
-              <span>${this.subjectDescription()}</span>
-              ${b.updatedAt
-                ? html`<span>Updated ${this.formatRelativeTime(b.updatedAt)}</span>`
-                : nothing}
-              ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
-            </div>
-          </div>
-
-          ${!this.isRecoveryDisabled
-            ? html`
-                <div class="header-actions">
-                  ${this.canEdit
-                    ? html`
-                        <sl-button
-                          variant="default"
-                          size="small"
-                          @click=${() => this.handleEditClick()}
-                        >
-                          <sl-icon slot="prefix" name="pencil"></sl-icon>
-                          Edit
-                        </sl-button>
-                      `
-                    : nothing}
-                  ${this.canDelete
-                    ? html`
-                        <sl-button
-                          variant="text"
-                          size="small"
-                          style="color: var(--sl-color-danger-600)"
-                          @click=${() => this.handleDeleteClick()}
-                        >
-                          Delete
-                        </sl-button>
-                      `
-                    : nothing}
-                </div>
-              `
-            : nothing}
-        </div>
-      </div>
+        ${this.canEdit || this.canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${this.canEdit
+                  ? html`
+                      <sl-button
+                        variant="default"
+                        size="small"
+                        @click=${() => this.handleEditClick()}
+                      >
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>
+                    `
+                  : nothing}
+                ${this.canDelete
+                  ? html`
+                      <sl-button
+                        variant="text"
+                        size="small"
+                        style="color: var(--sl-color-danger-600)"
+                        @click=${() => this.handleDeleteClick()}
+                      >
+                        Delete
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
   }
 
@@ -1282,6 +1217,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             .nextPageToken=${this.auditNextToken}
             .totalCount=${this.auditTotalCount}
             .loading=${this.loadingAudit}
+            .errorMessage=${this.auditError}
             @audit-page-request=${(e: CustomEvent<AuditPageRequestDetail>) =>
               this.handleAuditPageRequest(e)}
           ></scion-access-boundary-audit-timeline>

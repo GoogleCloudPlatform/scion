@@ -55,6 +55,111 @@ func IDLTE(id uuid.UUID) predicate.DelegationEdge {
 	return predicate.DelegationEdge(sql.FieldLTE(FieldID, id))
 }
 
+// ProvenanceVersion applies equality check predicate on the "provenance_version" field. It's identical to ProvenanceVersionEQ.
+func ProvenanceVersion(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldProvenanceVersion, v))
+}
+
+// SourcePrincipalKind applies equality check predicate on the "source_principal_kind" field. It's identical to SourcePrincipalKindEQ.
+func SourcePrincipalKind(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalID applies equality check predicate on the "source_principal_id" field. It's identical to SourcePrincipalIDEQ.
+func SourcePrincipalID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourcePrincipalID, v))
+}
+
+// SourceCredentialKind applies equality check predicate on the "source_credential_kind" field. It's identical to SourceCredentialKindEQ.
+func SourceCredentialKind(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialID applies equality check predicate on the "source_credential_id" field. It's identical to SourceCredentialIDEQ.
+func SourceCredentialID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceCredentialID, v))
+}
+
+// SourceEventID applies equality check predicate on the "source_event_id" field. It's identical to SourceEventIDEQ.
+func SourceEventID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceEventID, v))
+}
+
+// SourceScheduleID applies equality check predicate on the "source_schedule_id" field. It's identical to SourceScheduleIDEQ.
+func SourceScheduleID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceScheduleID, v))
+}
+
+// SourceAuthorizationRevision applies equality check predicate on the "source_authorization_revision" field. It's identical to SourceAuthorizationRevisionEQ.
+func SourceAuthorizationRevision(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceAuthorizationRevision, v))
+}
+
+// InitiatorPrincipalKind applies equality check predicate on the "initiator_principal_kind" field. It's identical to InitiatorPrincipalKindEQ.
+func InitiatorPrincipalKind(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalID applies equality check predicate on the "initiator_principal_id" field. It's identical to InitiatorPrincipalIDEQ.
+func InitiatorPrincipalID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorCredentialKind applies equality check predicate on the "initiator_credential_kind" field. It's identical to InitiatorCredentialKindEQ.
+func InitiatorCredentialKind(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialID applies equality check predicate on the "initiator_credential_id" field. It's identical to InitiatorCredentialIDEQ.
+func InitiatorCredentialID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorCredentialID, v))
+}
+
+// CeilingKind applies equality check predicate on the "ceiling_kind" field. It's identical to CeilingKindEQ.
+func CeilingKind(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingKind, v))
+}
+
+// CeilingVersion applies equality check predicate on the "ceiling_version" field. It's identical to CeilingVersionEQ.
+func CeilingVersion(v int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingVersion, v))
+}
+
+// CeilingPermissionIds applies equality check predicate on the "ceiling_permission_ids" field. It's identical to CeilingPermissionIdsEQ.
+func CeilingPermissionIds(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingPermissionIds, v))
+}
+
+// CeilingBoundaryKind applies equality check predicate on the "ceiling_boundary_kind" field. It's identical to CeilingBoundaryKindEQ.
+func CeilingBoundaryKind(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryProjectID applies equality check predicate on the "ceiling_boundary_project_id" field. It's identical to CeilingBoundaryProjectIDEQ.
+func CeilingBoundaryProjectID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingSourceExpiresAt applies equality check predicate on the "ceiling_source_expires_at" field. It's identical to CeilingSourceExpiresAtEQ.
+func CeilingSourceExpiresAt(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingSourceExpiresAt, v))
+}
+
+// DeactivationCause applies equality check predicate on the "deactivation_cause" field. It's identical to DeactivationCauseEQ.
+func DeactivationCause(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldDeactivationCause, v))
+}
+
+// DeactivatedAt applies equality check predicate on the "deactivated_at" field. It's identical to DeactivatedAtEQ.
+func DeactivatedAt(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldDeactivatedAt, v))
+}
+
+// DeactivationOpID applies equality check predicate on the "deactivation_op_id" field. It's identical to DeactivationOpIDEQ.
+func DeactivationOpID(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldDeactivationOpID, v))
+}
+
 // DelegatorID applies equality check predicate on the "delegator_id" field. It's identical to DelegatorIDEQ.
 func DelegatorID(v string) predicate.DelegationEdge {
 	return predicate.DelegationEdge(sql.FieldEQ(FieldDelegatorID, v))
@@ -93,6 +198,1286 @@ func Created(v time.Time) predicate.DelegationEdge {
 // Updated applies equality check predicate on the "updated" field. It's identical to UpdatedEQ.
 func Updated(v time.Time) predicate.DelegationEdge {
 	return predicate.DelegationEdge(sql.FieldEQ(FieldUpdated, v))
+}
+
+// ProvenanceVersionEQ applies the EQ predicate on the "provenance_version" field.
+func ProvenanceVersionEQ(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldProvenanceVersion, v))
+}
+
+// ProvenanceVersionNEQ applies the NEQ predicate on the "provenance_version" field.
+func ProvenanceVersionNEQ(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldProvenanceVersion, v))
+}
+
+// ProvenanceVersionIn applies the In predicate on the "provenance_version" field.
+func ProvenanceVersionIn(vs ...int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldProvenanceVersion, vs...))
+}
+
+// ProvenanceVersionNotIn applies the NotIn predicate on the "provenance_version" field.
+func ProvenanceVersionNotIn(vs ...int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldProvenanceVersion, vs...))
+}
+
+// ProvenanceVersionGT applies the GT predicate on the "provenance_version" field.
+func ProvenanceVersionGT(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldProvenanceVersion, v))
+}
+
+// ProvenanceVersionGTE applies the GTE predicate on the "provenance_version" field.
+func ProvenanceVersionGTE(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldProvenanceVersion, v))
+}
+
+// ProvenanceVersionLT applies the LT predicate on the "provenance_version" field.
+func ProvenanceVersionLT(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldProvenanceVersion, v))
+}
+
+// ProvenanceVersionLTE applies the LTE predicate on the "provenance_version" field.
+func ProvenanceVersionLTE(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldProvenanceVersion, v))
+}
+
+// SourcePrincipalKindEQ applies the EQ predicate on the "source_principal_kind" field.
+func SourcePrincipalKindEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindNEQ applies the NEQ predicate on the "source_principal_kind" field.
+func SourcePrincipalKindNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindIn applies the In predicate on the "source_principal_kind" field.
+func SourcePrincipalKindIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldSourcePrincipalKind, vs...))
+}
+
+// SourcePrincipalKindNotIn applies the NotIn predicate on the "source_principal_kind" field.
+func SourcePrincipalKindNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldSourcePrincipalKind, vs...))
+}
+
+// SourcePrincipalKindGT applies the GT predicate on the "source_principal_kind" field.
+func SourcePrincipalKindGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindGTE applies the GTE predicate on the "source_principal_kind" field.
+func SourcePrincipalKindGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindLT applies the LT predicate on the "source_principal_kind" field.
+func SourcePrincipalKindLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindLTE applies the LTE predicate on the "source_principal_kind" field.
+func SourcePrincipalKindLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindContains applies the Contains predicate on the "source_principal_kind" field.
+func SourcePrincipalKindContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindHasPrefix applies the HasPrefix predicate on the "source_principal_kind" field.
+func SourcePrincipalKindHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindHasSuffix applies the HasSuffix predicate on the "source_principal_kind" field.
+func SourcePrincipalKindHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindEqualFold applies the EqualFold predicate on the "source_principal_kind" field.
+func SourcePrincipalKindEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalKindContainsFold applies the ContainsFold predicate on the "source_principal_kind" field.
+func SourcePrincipalKindContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldSourcePrincipalKind, v))
+}
+
+// SourcePrincipalIDEQ applies the EQ predicate on the "source_principal_id" field.
+func SourcePrincipalIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDNEQ applies the NEQ predicate on the "source_principal_id" field.
+func SourcePrincipalIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDIn applies the In predicate on the "source_principal_id" field.
+func SourcePrincipalIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldSourcePrincipalID, vs...))
+}
+
+// SourcePrincipalIDNotIn applies the NotIn predicate on the "source_principal_id" field.
+func SourcePrincipalIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldSourcePrincipalID, vs...))
+}
+
+// SourcePrincipalIDGT applies the GT predicate on the "source_principal_id" field.
+func SourcePrincipalIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDGTE applies the GTE predicate on the "source_principal_id" field.
+func SourcePrincipalIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDLT applies the LT predicate on the "source_principal_id" field.
+func SourcePrincipalIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDLTE applies the LTE predicate on the "source_principal_id" field.
+func SourcePrincipalIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDContains applies the Contains predicate on the "source_principal_id" field.
+func SourcePrincipalIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDHasPrefix applies the HasPrefix predicate on the "source_principal_id" field.
+func SourcePrincipalIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDHasSuffix applies the HasSuffix predicate on the "source_principal_id" field.
+func SourcePrincipalIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDEqualFold applies the EqualFold predicate on the "source_principal_id" field.
+func SourcePrincipalIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldSourcePrincipalID, v))
+}
+
+// SourcePrincipalIDContainsFold applies the ContainsFold predicate on the "source_principal_id" field.
+func SourcePrincipalIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldSourcePrincipalID, v))
+}
+
+// SourceCredentialKindEQ applies the EQ predicate on the "source_credential_kind" field.
+func SourceCredentialKindEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindNEQ applies the NEQ predicate on the "source_credential_kind" field.
+func SourceCredentialKindNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindIn applies the In predicate on the "source_credential_kind" field.
+func SourceCredentialKindIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldSourceCredentialKind, vs...))
+}
+
+// SourceCredentialKindNotIn applies the NotIn predicate on the "source_credential_kind" field.
+func SourceCredentialKindNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldSourceCredentialKind, vs...))
+}
+
+// SourceCredentialKindGT applies the GT predicate on the "source_credential_kind" field.
+func SourceCredentialKindGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindGTE applies the GTE predicate on the "source_credential_kind" field.
+func SourceCredentialKindGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindLT applies the LT predicate on the "source_credential_kind" field.
+func SourceCredentialKindLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindLTE applies the LTE predicate on the "source_credential_kind" field.
+func SourceCredentialKindLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindContains applies the Contains predicate on the "source_credential_kind" field.
+func SourceCredentialKindContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindHasPrefix applies the HasPrefix predicate on the "source_credential_kind" field.
+func SourceCredentialKindHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindHasSuffix applies the HasSuffix predicate on the "source_credential_kind" field.
+func SourceCredentialKindHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindEqualFold applies the EqualFold predicate on the "source_credential_kind" field.
+func SourceCredentialKindEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialKindContainsFold applies the ContainsFold predicate on the "source_credential_kind" field.
+func SourceCredentialKindContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldSourceCredentialKind, v))
+}
+
+// SourceCredentialIDEQ applies the EQ predicate on the "source_credential_id" field.
+func SourceCredentialIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDNEQ applies the NEQ predicate on the "source_credential_id" field.
+func SourceCredentialIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDIn applies the In predicate on the "source_credential_id" field.
+func SourceCredentialIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldSourceCredentialID, vs...))
+}
+
+// SourceCredentialIDNotIn applies the NotIn predicate on the "source_credential_id" field.
+func SourceCredentialIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldSourceCredentialID, vs...))
+}
+
+// SourceCredentialIDGT applies the GT predicate on the "source_credential_id" field.
+func SourceCredentialIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDGTE applies the GTE predicate on the "source_credential_id" field.
+func SourceCredentialIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDLT applies the LT predicate on the "source_credential_id" field.
+func SourceCredentialIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDLTE applies the LTE predicate on the "source_credential_id" field.
+func SourceCredentialIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDContains applies the Contains predicate on the "source_credential_id" field.
+func SourceCredentialIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDHasPrefix applies the HasPrefix predicate on the "source_credential_id" field.
+func SourceCredentialIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDHasSuffix applies the HasSuffix predicate on the "source_credential_id" field.
+func SourceCredentialIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDEqualFold applies the EqualFold predicate on the "source_credential_id" field.
+func SourceCredentialIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldSourceCredentialID, v))
+}
+
+// SourceCredentialIDContainsFold applies the ContainsFold predicate on the "source_credential_id" field.
+func SourceCredentialIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldSourceCredentialID, v))
+}
+
+// SourceEventIDEQ applies the EQ predicate on the "source_event_id" field.
+func SourceEventIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceEventID, v))
+}
+
+// SourceEventIDNEQ applies the NEQ predicate on the "source_event_id" field.
+func SourceEventIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldSourceEventID, v))
+}
+
+// SourceEventIDIn applies the In predicate on the "source_event_id" field.
+func SourceEventIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldSourceEventID, vs...))
+}
+
+// SourceEventIDNotIn applies the NotIn predicate on the "source_event_id" field.
+func SourceEventIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldSourceEventID, vs...))
+}
+
+// SourceEventIDGT applies the GT predicate on the "source_event_id" field.
+func SourceEventIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldSourceEventID, v))
+}
+
+// SourceEventIDGTE applies the GTE predicate on the "source_event_id" field.
+func SourceEventIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldSourceEventID, v))
+}
+
+// SourceEventIDLT applies the LT predicate on the "source_event_id" field.
+func SourceEventIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldSourceEventID, v))
+}
+
+// SourceEventIDLTE applies the LTE predicate on the "source_event_id" field.
+func SourceEventIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldSourceEventID, v))
+}
+
+// SourceEventIDContains applies the Contains predicate on the "source_event_id" field.
+func SourceEventIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldSourceEventID, v))
+}
+
+// SourceEventIDHasPrefix applies the HasPrefix predicate on the "source_event_id" field.
+func SourceEventIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldSourceEventID, v))
+}
+
+// SourceEventIDHasSuffix applies the HasSuffix predicate on the "source_event_id" field.
+func SourceEventIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldSourceEventID, v))
+}
+
+// SourceEventIDEqualFold applies the EqualFold predicate on the "source_event_id" field.
+func SourceEventIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldSourceEventID, v))
+}
+
+// SourceEventIDContainsFold applies the ContainsFold predicate on the "source_event_id" field.
+func SourceEventIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldSourceEventID, v))
+}
+
+// SourceScheduleIDEQ applies the EQ predicate on the "source_schedule_id" field.
+func SourceScheduleIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDNEQ applies the NEQ predicate on the "source_schedule_id" field.
+func SourceScheduleIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDIn applies the In predicate on the "source_schedule_id" field.
+func SourceScheduleIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldSourceScheduleID, vs...))
+}
+
+// SourceScheduleIDNotIn applies the NotIn predicate on the "source_schedule_id" field.
+func SourceScheduleIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldSourceScheduleID, vs...))
+}
+
+// SourceScheduleIDGT applies the GT predicate on the "source_schedule_id" field.
+func SourceScheduleIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDGTE applies the GTE predicate on the "source_schedule_id" field.
+func SourceScheduleIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDLT applies the LT predicate on the "source_schedule_id" field.
+func SourceScheduleIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDLTE applies the LTE predicate on the "source_schedule_id" field.
+func SourceScheduleIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDContains applies the Contains predicate on the "source_schedule_id" field.
+func SourceScheduleIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDHasPrefix applies the HasPrefix predicate on the "source_schedule_id" field.
+func SourceScheduleIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDHasSuffix applies the HasSuffix predicate on the "source_schedule_id" field.
+func SourceScheduleIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDIsNil applies the IsNil predicate on the "source_schedule_id" field.
+func SourceScheduleIDIsNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIsNull(FieldSourceScheduleID))
+}
+
+// SourceScheduleIDNotNil applies the NotNil predicate on the "source_schedule_id" field.
+func SourceScheduleIDNotNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotNull(FieldSourceScheduleID))
+}
+
+// SourceScheduleIDEqualFold applies the EqualFold predicate on the "source_schedule_id" field.
+func SourceScheduleIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldSourceScheduleID, v))
+}
+
+// SourceScheduleIDContainsFold applies the ContainsFold predicate on the "source_schedule_id" field.
+func SourceScheduleIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldSourceScheduleID, v))
+}
+
+// SourceAuthorizationRevisionEQ applies the EQ predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionEQ(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldSourceAuthorizationRevision, v))
+}
+
+// SourceAuthorizationRevisionNEQ applies the NEQ predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionNEQ(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldSourceAuthorizationRevision, v))
+}
+
+// SourceAuthorizationRevisionIn applies the In predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionIn(vs ...int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldSourceAuthorizationRevision, vs...))
+}
+
+// SourceAuthorizationRevisionNotIn applies the NotIn predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionNotIn(vs ...int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldSourceAuthorizationRevision, vs...))
+}
+
+// SourceAuthorizationRevisionGT applies the GT predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionGT(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldSourceAuthorizationRevision, v))
+}
+
+// SourceAuthorizationRevisionGTE applies the GTE predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionGTE(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldSourceAuthorizationRevision, v))
+}
+
+// SourceAuthorizationRevisionLT applies the LT predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionLT(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldSourceAuthorizationRevision, v))
+}
+
+// SourceAuthorizationRevisionLTE applies the LTE predicate on the "source_authorization_revision" field.
+func SourceAuthorizationRevisionLTE(v int) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldSourceAuthorizationRevision, v))
+}
+
+// InitiatorPrincipalKindEQ applies the EQ predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindNEQ applies the NEQ predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindIn applies the In predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldInitiatorPrincipalKind, vs...))
+}
+
+// InitiatorPrincipalKindNotIn applies the NotIn predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldInitiatorPrincipalKind, vs...))
+}
+
+// InitiatorPrincipalKindGT applies the GT predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindGTE applies the GTE predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindLT applies the LT predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindLTE applies the LTE predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindContains applies the Contains predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindHasPrefix applies the HasPrefix predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindHasSuffix applies the HasSuffix predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindEqualFold applies the EqualFold predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindContainsFold applies the ContainsFold predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalIDEQ applies the EQ predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDNEQ applies the NEQ predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDIn applies the In predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldInitiatorPrincipalID, vs...))
+}
+
+// InitiatorPrincipalIDNotIn applies the NotIn predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldInitiatorPrincipalID, vs...))
+}
+
+// InitiatorPrincipalIDGT applies the GT predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDGTE applies the GTE predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDLT applies the LT predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDLTE applies the LTE predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDContains applies the Contains predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDHasPrefix applies the HasPrefix predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDHasSuffix applies the HasSuffix predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDEqualFold applies the EqualFold predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDContainsFold applies the ContainsFold predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorCredentialKindEQ applies the EQ predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindNEQ applies the NEQ predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindIn applies the In predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldInitiatorCredentialKind, vs...))
+}
+
+// InitiatorCredentialKindNotIn applies the NotIn predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldInitiatorCredentialKind, vs...))
+}
+
+// InitiatorCredentialKindGT applies the GT predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindGTE applies the GTE predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindLT applies the LT predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindLTE applies the LTE predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindContains applies the Contains predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindHasPrefix applies the HasPrefix predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindHasSuffix applies the HasSuffix predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindEqualFold applies the EqualFold predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindContainsFold applies the ContainsFold predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialIDEQ applies the EQ predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDNEQ applies the NEQ predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDIn applies the In predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldInitiatorCredentialID, vs...))
+}
+
+// InitiatorCredentialIDNotIn applies the NotIn predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldInitiatorCredentialID, vs...))
+}
+
+// InitiatorCredentialIDGT applies the GT predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDGTE applies the GTE predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDLT applies the LT predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDLTE applies the LTE predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDContains applies the Contains predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDHasPrefix applies the HasPrefix predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDHasSuffix applies the HasSuffix predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDEqualFold applies the EqualFold predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDContainsFold applies the ContainsFold predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldInitiatorCredentialID, v))
+}
+
+// CeilingKindEQ applies the EQ predicate on the "ceiling_kind" field.
+func CeilingKindEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingKind, v))
+}
+
+// CeilingKindNEQ applies the NEQ predicate on the "ceiling_kind" field.
+func CeilingKindNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldCeilingKind, v))
+}
+
+// CeilingKindIn applies the In predicate on the "ceiling_kind" field.
+func CeilingKindIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldCeilingKind, vs...))
+}
+
+// CeilingKindNotIn applies the NotIn predicate on the "ceiling_kind" field.
+func CeilingKindNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldCeilingKind, vs...))
+}
+
+// CeilingKindGT applies the GT predicate on the "ceiling_kind" field.
+func CeilingKindGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldCeilingKind, v))
+}
+
+// CeilingKindGTE applies the GTE predicate on the "ceiling_kind" field.
+func CeilingKindGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldCeilingKind, v))
+}
+
+// CeilingKindLT applies the LT predicate on the "ceiling_kind" field.
+func CeilingKindLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldCeilingKind, v))
+}
+
+// CeilingKindLTE applies the LTE predicate on the "ceiling_kind" field.
+func CeilingKindLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldCeilingKind, v))
+}
+
+// CeilingKindContains applies the Contains predicate on the "ceiling_kind" field.
+func CeilingKindContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldCeilingKind, v))
+}
+
+// CeilingKindHasPrefix applies the HasPrefix predicate on the "ceiling_kind" field.
+func CeilingKindHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldCeilingKind, v))
+}
+
+// CeilingKindHasSuffix applies the HasSuffix predicate on the "ceiling_kind" field.
+func CeilingKindHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldCeilingKind, v))
+}
+
+// CeilingKindEqualFold applies the EqualFold predicate on the "ceiling_kind" field.
+func CeilingKindEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldCeilingKind, v))
+}
+
+// CeilingKindContainsFold applies the ContainsFold predicate on the "ceiling_kind" field.
+func CeilingKindContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldCeilingKind, v))
+}
+
+// CeilingVersionEQ applies the EQ predicate on the "ceiling_version" field.
+func CeilingVersionEQ(v int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingVersion, v))
+}
+
+// CeilingVersionNEQ applies the NEQ predicate on the "ceiling_version" field.
+func CeilingVersionNEQ(v int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldCeilingVersion, v))
+}
+
+// CeilingVersionIn applies the In predicate on the "ceiling_version" field.
+func CeilingVersionIn(vs ...int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldCeilingVersion, vs...))
+}
+
+// CeilingVersionNotIn applies the NotIn predicate on the "ceiling_version" field.
+func CeilingVersionNotIn(vs ...int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldCeilingVersion, vs...))
+}
+
+// CeilingVersionGT applies the GT predicate on the "ceiling_version" field.
+func CeilingVersionGT(v int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldCeilingVersion, v))
+}
+
+// CeilingVersionGTE applies the GTE predicate on the "ceiling_version" field.
+func CeilingVersionGTE(v int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldCeilingVersion, v))
+}
+
+// CeilingVersionLT applies the LT predicate on the "ceiling_version" field.
+func CeilingVersionLT(v int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldCeilingVersion, v))
+}
+
+// CeilingVersionLTE applies the LTE predicate on the "ceiling_version" field.
+func CeilingVersionLTE(v int32) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldCeilingVersion, v))
+}
+
+// CeilingPermissionIdsEQ applies the EQ predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsNEQ applies the NEQ predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsIn applies the In predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldCeilingPermissionIds, vs...))
+}
+
+// CeilingPermissionIdsNotIn applies the NotIn predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldCeilingPermissionIds, vs...))
+}
+
+// CeilingPermissionIdsGT applies the GT predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsGTE applies the GTE predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsLT applies the LT predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsLTE applies the LTE predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsContains applies the Contains predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsHasPrefix applies the HasPrefix predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsHasSuffix applies the HasSuffix predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsIsNil applies the IsNil predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsIsNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIsNull(FieldCeilingPermissionIds))
+}
+
+// CeilingPermissionIdsNotNil applies the NotNil predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsNotNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotNull(FieldCeilingPermissionIds))
+}
+
+// CeilingPermissionIdsEqualFold applies the EqualFold predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsContainsFold applies the ContainsFold predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldCeilingPermissionIds, v))
+}
+
+// CeilingBoundaryKindEQ applies the EQ predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindNEQ applies the NEQ predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindIn applies the In predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldCeilingBoundaryKind, vs...))
+}
+
+// CeilingBoundaryKindNotIn applies the NotIn predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldCeilingBoundaryKind, vs...))
+}
+
+// CeilingBoundaryKindGT applies the GT predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindGTE applies the GTE predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindLT applies the LT predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindLTE applies the LTE predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindContains applies the Contains predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindHasPrefix applies the HasPrefix predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindHasSuffix applies the HasSuffix predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindEqualFold applies the EqualFold predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryKindContainsFold applies the ContainsFold predicate on the "ceiling_boundary_kind" field.
+func CeilingBoundaryKindContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldCeilingBoundaryKind, v))
+}
+
+// CeilingBoundaryProjectIDEQ applies the EQ predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDNEQ applies the NEQ predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDIn applies the In predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldCeilingBoundaryProjectID, vs...))
+}
+
+// CeilingBoundaryProjectIDNotIn applies the NotIn predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldCeilingBoundaryProjectID, vs...))
+}
+
+// CeilingBoundaryProjectIDGT applies the GT predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDGTE applies the GTE predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDLT applies the LT predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDLTE applies the LTE predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDContains applies the Contains predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDHasPrefix applies the HasPrefix predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDHasSuffix applies the HasSuffix predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDEqualFold applies the EqualFold predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingBoundaryProjectIDContainsFold applies the ContainsFold predicate on the "ceiling_boundary_project_id" field.
+func CeilingBoundaryProjectIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldCeilingBoundaryProjectID, v))
+}
+
+// CeilingSourceExpiresAtEQ applies the EQ predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtEQ(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldCeilingSourceExpiresAt, v))
+}
+
+// CeilingSourceExpiresAtNEQ applies the NEQ predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtNEQ(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldCeilingSourceExpiresAt, v))
+}
+
+// CeilingSourceExpiresAtIn applies the In predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtIn(vs ...time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldCeilingSourceExpiresAt, vs...))
+}
+
+// CeilingSourceExpiresAtNotIn applies the NotIn predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtNotIn(vs ...time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldCeilingSourceExpiresAt, vs...))
+}
+
+// CeilingSourceExpiresAtGT applies the GT predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtGT(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldCeilingSourceExpiresAt, v))
+}
+
+// CeilingSourceExpiresAtGTE applies the GTE predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtGTE(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldCeilingSourceExpiresAt, v))
+}
+
+// CeilingSourceExpiresAtLT applies the LT predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtLT(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldCeilingSourceExpiresAt, v))
+}
+
+// CeilingSourceExpiresAtLTE applies the LTE predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtLTE(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldCeilingSourceExpiresAt, v))
+}
+
+// CeilingSourceExpiresAtIsNil applies the IsNil predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtIsNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIsNull(FieldCeilingSourceExpiresAt))
+}
+
+// CeilingSourceExpiresAtNotNil applies the NotNil predicate on the "ceiling_source_expires_at" field.
+func CeilingSourceExpiresAtNotNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotNull(FieldCeilingSourceExpiresAt))
+}
+
+// DeactivationCauseEQ applies the EQ predicate on the "deactivation_cause" field.
+func DeactivationCauseEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseNEQ applies the NEQ predicate on the "deactivation_cause" field.
+func DeactivationCauseNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseIn applies the In predicate on the "deactivation_cause" field.
+func DeactivationCauseIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldDeactivationCause, vs...))
+}
+
+// DeactivationCauseNotIn applies the NotIn predicate on the "deactivation_cause" field.
+func DeactivationCauseNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldDeactivationCause, vs...))
+}
+
+// DeactivationCauseGT applies the GT predicate on the "deactivation_cause" field.
+func DeactivationCauseGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseGTE applies the GTE predicate on the "deactivation_cause" field.
+func DeactivationCauseGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseLT applies the LT predicate on the "deactivation_cause" field.
+func DeactivationCauseLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseLTE applies the LTE predicate on the "deactivation_cause" field.
+func DeactivationCauseLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseContains applies the Contains predicate on the "deactivation_cause" field.
+func DeactivationCauseContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseHasPrefix applies the HasPrefix predicate on the "deactivation_cause" field.
+func DeactivationCauseHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseHasSuffix applies the HasSuffix predicate on the "deactivation_cause" field.
+func DeactivationCauseHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseEqualFold applies the EqualFold predicate on the "deactivation_cause" field.
+func DeactivationCauseEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldDeactivationCause, v))
+}
+
+// DeactivationCauseContainsFold applies the ContainsFold predicate on the "deactivation_cause" field.
+func DeactivationCauseContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldDeactivationCause, v))
+}
+
+// DeactivatedAtEQ applies the EQ predicate on the "deactivated_at" field.
+func DeactivatedAtEQ(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldDeactivatedAt, v))
+}
+
+// DeactivatedAtNEQ applies the NEQ predicate on the "deactivated_at" field.
+func DeactivatedAtNEQ(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldDeactivatedAt, v))
+}
+
+// DeactivatedAtIn applies the In predicate on the "deactivated_at" field.
+func DeactivatedAtIn(vs ...time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldDeactivatedAt, vs...))
+}
+
+// DeactivatedAtNotIn applies the NotIn predicate on the "deactivated_at" field.
+func DeactivatedAtNotIn(vs ...time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldDeactivatedAt, vs...))
+}
+
+// DeactivatedAtGT applies the GT predicate on the "deactivated_at" field.
+func DeactivatedAtGT(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldDeactivatedAt, v))
+}
+
+// DeactivatedAtGTE applies the GTE predicate on the "deactivated_at" field.
+func DeactivatedAtGTE(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldDeactivatedAt, v))
+}
+
+// DeactivatedAtLT applies the LT predicate on the "deactivated_at" field.
+func DeactivatedAtLT(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldDeactivatedAt, v))
+}
+
+// DeactivatedAtLTE applies the LTE predicate on the "deactivated_at" field.
+func DeactivatedAtLTE(v time.Time) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldDeactivatedAt, v))
+}
+
+// DeactivatedAtIsNil applies the IsNil predicate on the "deactivated_at" field.
+func DeactivatedAtIsNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIsNull(FieldDeactivatedAt))
+}
+
+// DeactivatedAtNotNil applies the NotNil predicate on the "deactivated_at" field.
+func DeactivatedAtNotNil() predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotNull(FieldDeactivatedAt))
+}
+
+// DeactivationOpIDEQ applies the EQ predicate on the "deactivation_op_id" field.
+func DeactivationOpIDEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEQ(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDNEQ applies the NEQ predicate on the "deactivation_op_id" field.
+func DeactivationOpIDNEQ(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNEQ(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDIn applies the In predicate on the "deactivation_op_id" field.
+func DeactivationOpIDIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldIn(FieldDeactivationOpID, vs...))
+}
+
+// DeactivationOpIDNotIn applies the NotIn predicate on the "deactivation_op_id" field.
+func DeactivationOpIDNotIn(vs ...string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldNotIn(FieldDeactivationOpID, vs...))
+}
+
+// DeactivationOpIDGT applies the GT predicate on the "deactivation_op_id" field.
+func DeactivationOpIDGT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGT(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDGTE applies the GTE predicate on the "deactivation_op_id" field.
+func DeactivationOpIDGTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldGTE(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDLT applies the LT predicate on the "deactivation_op_id" field.
+func DeactivationOpIDLT(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLT(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDLTE applies the LTE predicate on the "deactivation_op_id" field.
+func DeactivationOpIDLTE(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldLTE(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDContains applies the Contains predicate on the "deactivation_op_id" field.
+func DeactivationOpIDContains(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContains(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDHasPrefix applies the HasPrefix predicate on the "deactivation_op_id" field.
+func DeactivationOpIDHasPrefix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasPrefix(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDHasSuffix applies the HasSuffix predicate on the "deactivation_op_id" field.
+func DeactivationOpIDHasSuffix(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldHasSuffix(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDEqualFold applies the EqualFold predicate on the "deactivation_op_id" field.
+func DeactivationOpIDEqualFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldEqualFold(FieldDeactivationOpID, v))
+}
+
+// DeactivationOpIDContainsFold applies the ContainsFold predicate on the "deactivation_op_id" field.
+func DeactivationOpIDContainsFold(v string) predicate.DelegationEdge {
+	return predicate.DelegationEdge(sql.FieldContainsFold(FieldDeactivationOpID, v))
 }
 
 // DelegatorTypeEQ applies the EQ predicate on the "delegator_type" field.

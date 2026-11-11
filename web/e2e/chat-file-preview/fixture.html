@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Chat file preview extraction fixture</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+      }
+      #thread-outlet {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+      scion-chat-thread {
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="thread-outlet"></div>
+    <script type="module" src="./fixture.ts"></script>
+  </body>
+</html>

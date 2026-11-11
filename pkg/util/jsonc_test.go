@@ -15,6 +15,7 @@
 package util
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,12 +90,12 @@ func TestStripComments(t *testing.T) {
 		{
 			name:     "block comment",
 			input:    `{"foo": /* comment */ "bar"}`,
-			expected: `{"foo":  "bar"}`,
+			expected: `{"foo":   "bar"}`,
 		},
 		{
 			name:     "multiline block comment",
 			input:    "{\n/* multi\nline */\n\"foo\": 1}",
-			expected: "{\n\n\"foo\": 1}",
+			expected: "{\n \n\"foo\": 1}",
 		},
 		{
 			name:     "comment-like in string preserved",
@@ -221,6 +222,42 @@ func TestUnmarshalJSONC_InvalidJSON(t *testing.T) {
 	var cfg TestConfig
 	if err := UnmarshalJSONC(jsonc, &cfg); err == nil {
 		t.Error("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestUnmarshalJSONC_RejectsCommentInsideToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"integer", `{"value": 1/* comment */2}`},
+		{"fraction", `{"value": 1/* comment */.5}`},
+		{"exponent", `{"value": 1e/* comment */2}`},
+		{"boolean", `{"value": tr/* comment */ue}`},
+		{"null", `{"value": n/* comment */ull}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got map[string]any
+			if err := UnmarshalJSONC([]byte(tt.input), &got); err == nil {
+				t.Fatalf("expected an error for a comment inside a token, decoded %#v", got)
+			}
+		})
+	}
+}
+
+func TestUnmarshalJSONC_LineCommentEndings(t *testing.T) {
+	for _, ending := range []string{"\n", "\r\n", "\r"} {
+		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {
+			input := "{// comment" + ending + `"foo": "baz", "bar": 123}`
+			var got TestConfig
+			if err := UnmarshalJSONC([]byte(input), &got); err != nil {
+				t.Fatalf("UnmarshalJSONC failed: %v", err)
+			}
+			if got.Foo != "baz" || got.Bar != 123 {
+				t.Fatalf("unexpected decoded config: %#v", got)
+			}
+		})
 	}
 }
 

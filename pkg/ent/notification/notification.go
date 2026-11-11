@@ -32,6 +32,22 @@ const (
 	FieldDispatched = "dispatched"
 	// FieldAcknowledged holds the string denoting the acknowledged field in the database.
 	FieldAcknowledged = "acknowledged"
+	// FieldDispatchAttempts holds the string denoting the dispatch_attempts field in the database.
+	FieldDispatchAttempts = "dispatch_attempts"
+	// FieldDispatchOutcome holds the string denoting the dispatch_outcome field in the database.
+	FieldDispatchOutcome = "dispatch_outcome"
+	// FieldDispatchReason holds the string denoting the dispatch_reason field in the database.
+	FieldDispatchReason = "dispatch_reason"
+	// FieldNextAttemptAt holds the string denoting the next_attempt_at field in the database.
+	FieldNextAttemptAt = "next_attempt_at"
+	// FieldKind holds the string denoting the kind field in the database.
+	FieldKind = "kind"
+	// FieldResourceType holds the string denoting the resource_type field in the database.
+	FieldResourceType = "resource_type"
+	// FieldResourceID holds the string denoting the resource_id field in the database.
+	FieldResourceID = "resource_id"
+	// FieldExcerpt holds the string denoting the excerpt field in the database.
+	FieldExcerpt = "excerpt"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the notification in the database.
@@ -50,6 +66,14 @@ var Columns = []string{
 	FieldMessage,
 	FieldDispatched,
 	FieldAcknowledged,
+	FieldDispatchAttempts,
+	FieldDispatchOutcome,
+	FieldDispatchReason,
+	FieldNextAttemptAt,
+	FieldKind,
+	FieldResourceType,
+	FieldResourceID,
+	FieldExcerpt,
 	FieldCreated,
 }
 
@@ -76,6 +100,22 @@ var (
 	DefaultDispatched bool
 	// DefaultAcknowledged holds the default value on creation for the "acknowledged" field.
 	DefaultAcknowledged bool
+	// DefaultDispatchAttempts holds the default value on creation for the "dispatch_attempts" field.
+	DefaultDispatchAttempts int
+	// DispatchAttemptsValidator is a validator for the "dispatch_attempts" field. It is called by the builders before save.
+	DispatchAttemptsValidator func(int) error
+	// DefaultDispatchOutcome holds the default value on creation for the "dispatch_outcome" field.
+	DefaultDispatchOutcome string
+	// DefaultDispatchReason holds the default value on creation for the "dispatch_reason" field.
+	DefaultDispatchReason string
+	// DefaultKind holds the default value on creation for the "kind" field.
+	DefaultKind string
+	// DefaultResourceType holds the default value on creation for the "resource_type" field.
+	DefaultResourceType string
+	// DefaultResourceID holds the default value on creation for the "resource_id" field.
+	DefaultResourceID string
+	// DefaultExcerpt holds the default value on creation for the "excerpt" field.
+	DefaultExcerpt string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -133,6 +173,46 @@ func ByDispatched(opts ...sql.OrderTermOption) OrderOption {
 // ByAcknowledged orders the results by the acknowledged field.
 func ByAcknowledged(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAcknowledged, opts...).ToFunc()
+}
+
+// ByDispatchAttempts orders the results by the dispatch_attempts field.
+func ByDispatchAttempts(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchAttempts, opts...).ToFunc()
+}
+
+// ByDispatchOutcome orders the results by the dispatch_outcome field.
+func ByDispatchOutcome(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchOutcome, opts...).ToFunc()
+}
+
+// ByDispatchReason orders the results by the dispatch_reason field.
+func ByDispatchReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchReason, opts...).ToFunc()
+}
+
+// ByNextAttemptAt orders the results by the next_attempt_at field.
+func ByNextAttemptAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNextAttemptAt, opts...).ToFunc()
+}
+
+// ByKind orders the results by the kind field.
+func ByKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldKind, opts...).ToFunc()
+}
+
+// ByResourceType orders the results by the resource_type field.
+func ByResourceType(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldResourceType, opts...).ToFunc()
+}
+
+// ByResourceID orders the results by the resource_id field.
+func ByResourceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldResourceID, opts...).ToFunc()
+}
+
+// ByExcerpt orders the results by the excerpt field.
+func ByExcerpt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExcerpt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

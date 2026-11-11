@@ -15,9 +15,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // FederationConfig holds configuration for hub-hub federation authentication.
@@ -55,6 +58,43 @@ type TrustedIssuerConfig struct {
 	// Supports leading-wildcard suffix matching (e.g. "*@example.com").
 	// If empty, all emails accepted.
 	AllowedEmails []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
+
+	// AllowedGCPProjects admits SERVICE-ACCOUNT principals (Google issuer
+	// only) whose GCP project ID — parsed from the SA email — is listed
+	// (exact, case-insensitive). Empty means no service accounts are
+	// admitted. This is deliberately a distinct field from AllowedProjects:
+	// that field already means the Scion project ID matched against a
+	// federated hub agent token's project_id claim (issuer_type: hub,
+	// pkg/hub/federation_auth.go), and reusing it here would give one config
+	// key two unrelated meanings depending on issuer_type — misreadable, and
+	// the misreading fails open (see Validate's rule below).
+	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
+
+	// AllowedDomains constrains USER principals (Google issuer only) to these
+	// email domains (exact, case-insensitive, no wildcards, no subdomain
+	// matching). Empty means no issuer-level domain constraint — the Hub
+	// sign-in policy (authorized_domains, user_access_mode, admin_emails)
+	// still applies on top of this, for every user regardless of whether
+	// this field is set. Never consulted for a service-account principal:
+	// those are admitted by AllowedGCPProjects instead.
+	AllowedDomains []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
+
+	// AcceptUserTokens admits user access credentials (scion_token_kind
+	// "user") from this issuer. Only applicable to issuer_type "hub" (a
+	// peer Scion Hub); default false, which refuses them. A user credential
+	// must carry a verified email and no agent claims, and is subject to
+	// AllowedEmails and AllowedDomains (exact, case-insensitive domain
+	// match). Agent tokens from the issuer are unaffected. The hub reads
+	// the flag from the current configuration on every request.
+	AcceptUserTokens bool `json:"accept_user_tokens,omitempty" yaml:"accept_user_tokens,omitempty" koanf:"accept_user_tokens"`
+
+	// AllowVisitorGrants lets project owners and admins grant visitor
+	// access to users of this issuer (federation.project_visitors). It
+	// applies only to issuer_type "user" and "hub"; Validate rejects it on
+	// any other type. Default false: the hub accepts no visitor grant for
+	// the issuer. A grant's email must still pass AllowedEmails and
+	// AllowedDomains.
+	AllowVisitorGrants bool `json:"allow_visitor_grants,omitempty" yaml:"allow_visitor_grants,omitempty" koanf:"allow_visitor_grants"`
 }
 
 // FederationCacheConfig holds cache tuning parameters for federation JWKS fetching.
@@ -71,16 +111,127 @@ var allowedIssuerTypes = map[string]bool{
 	"user":            true,
 }
 
+// IssuerAllowsVisitorGrantsType reports whether issuerType (a
+// TrustedIssuerConfig.IssuerType value; empty means "hub") is one for which
+// allow_visitor_grants may be set: "user" or "hub".
+func IssuerAllowsVisitorGrantsType(issuerType string) bool {
+	return issuerType == "" || issuerType == "hub" || issuerType == "user"
+}
+
 // allowedAlgorithms is the set of algorithms permitted for federation token validation.
 var allowedAlgorithms = map[string]bool{
 	"RS256": true,
 	"ES256": true,
 }
 
+// googleIssuerURLs are the two issuer URL forms Google uses for its OIDC
+// issuer. Duplicated from pkg/hub's googleIssuerHTTPS/googleIssuerBare
+// constants (not imported, to avoid a circular import between pkg/config and
+// pkg/hub — the same reason IssuerType is a plain string on this struct).
+var googleIssuerURLs = map[string]bool{
+	"https://accounts.google.com": true,
+	"accounts.google.com":         true,
+}
+
+// isGoogleIssuerURL reports whether issuerURL is one of Google's OIDC issuer
+// forms. Gates AllowedGCPProjects (valid only for a Google issuer) and
+// to improve the existing AllowedProjects error message when an operator
+// most likely meant the Google-specific field instead.
+func isGoogleIssuerURL(issuerURL string) bool {
+	return googleIssuerURLs[strings.TrimRight(issuerURL, "/")]
+}
+
+// isActiveGoogleUserIssuer reports whether issuer is configured as the
+// Google issuer, issuer_type "user", with a non-empty expected_audience —
+// the exact shape the external-bearer path's googleTrust gate requires
+// (pkg/hub/auth_external_bearer.go) for the path to be reachable at all.
+// Any Google-issuer-scoped field that only takes effect through that gate
+// (AllowedGCPProjects, AllowedDomains) does nothing on any other shape, so
+// Validate rejects setting it there outright instead of silently accepting a
+// config no request path will ever enforce.
+func isActiveGoogleUserIssuer(issuer TrustedIssuerConfig) bool {
+	return isGoogleIssuerURL(issuer.IssuerURL) && issuer.IssuerType == "user" && issuer.ExpectedAudience != ""
+}
+
+// isHubUserTokenIssuer reports whether issuer is a peer hub issuer
+// (issuer_type "hub", or empty, which defaults to it) that accepts user
+// access credentials (AcceptUserTokens). AllowedDomains constrains those
+// credentials (pkg/hub/federation_auth.go), so Validate admits it on this
+// shape. The Google issuer is never a peer hub and is excluded.
+func isHubUserTokenIssuer(issuer TrustedIssuerConfig) bool {
+	isHub := issuer.IssuerType == "" || issuer.IssuerType == "hub"
+	return isHub && issuer.AcceptUserTokens && !isGoogleIssuerURL(issuer.IssuerURL)
+}
+
+// appendGoogleUserOnlyFieldError appends a validation error for a
+// Google-issuer-scoped field (named by fieldName) that is set on an issuer
+// which is not isActiveGoogleUserIssuer. Shared by AllowedGCPProjects and
+// AllowedDomains, which are validated identically: not applicable to any
+// non-Google issuer, and unenforceable on a Google issuer that isn't an
+// active user issuer.
+func appendGoogleUserOnlyFieldError(errs []ValidationError, i int, issuer TrustedIssuerConfig, fieldName string) []ValidationError {
+	path := fmt.Sprintf("trusted_issuers[%d].%s", i, fieldName)
+	if !isGoogleIssuerURL(issuer.IssuerURL) {
+		return append(errs, fedFieldError(path, "trusted_issuers[%d]: %s is only applicable to the Google issuer (%q)", i, fieldName, issuer.IssuerURL))
+	}
+	return append(errs, fedFieldError(path, "trusted_issuers[%d]: %s requires issuer_type \"user\" and a non-empty expected_audience on the Google issuer; nothing would enforce it otherwise", i, fieldName))
+}
+
+// fedFieldError is a federation validation failure at path (relative to
+// the federation block) with a formatted message.
+func fedFieldError(path, format string, args ...any) ValidationError {
+	return ValidationError{Path: path, Message: fmt.Sprintf(format, args...)}
+}
+
+// invalidDomainEntryReason reports why domain can never match domainOf's
+// parsed email domain (pkg/hub/auth_external_bearer.go: exact,
+// case-insensitive comparison, no wildcards, no subdomain matching), or ""
+// if the shape is fine. This does not check whether the domain is real or
+// reachable, only whether it is a shape that could ever compare equal to
+// something domainOf returns — an email address, a leading-wildcard pattern,
+// a URL or scheme/path fragment (e.g. a pasted "https://example.com" or
+// "example.com/"), whitespace, a leading/trailing dot, or a double dot never
+// can, and each is a plausible operator mistake worth catching at
+// config-validation time instead of a silent, permanent lockout.
+func invalidDomainEntryReason(domain string) string {
+	switch {
+	case domain == "":
+		return "must not be empty"
+	case strings.ContainsAny(domain, "@*"):
+		return `must be a bare domain, not an email address or wildcard pattern (no "@" or "*")`
+	case strings.ContainsAny(domain, "/:"):
+		return `must be a bare domain, not a URL or scheme/path fragment (no "/" or ":")`
+	case strings.IndexFunc(domain, unicode.IsSpace) >= 0:
+		return "must not contain whitespace"
+	case strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, "."):
+		return "must not have a leading or trailing dot"
+	case strings.Contains(domain, ".."):
+		return "must not contain a double dot"
+	default:
+		return ""
+	}
+}
+
 // Validate checks FederationConfig for configuration errors.
 // It returns a slice of all errors found (not just the first).
 func (c *FederationConfig) Validate() []error {
-	var errs []error
+	fields := c.ValidateFields()
+	if len(fields) == 0 {
+		return nil
+	}
+	errs := make([]error, 0, len(fields))
+	for _, f := range fields {
+		errs = append(errs, errors.New(f.Message))
+	}
+	return errs
+}
+
+// ValidateFields is Validate with each failure naming its field: Path is
+// relative to the federation block (for example
+// "trusted_issuers[0].issuer_url") and Message is the full message
+// Validate returns.
+func (c *FederationConfig) ValidateFields() []ValidationError {
+	var errs []ValidationError
 
 	if !c.Enabled {
 		return nil
@@ -88,13 +239,13 @@ func (c *FederationConfig) Validate() []error {
 
 	// Rule 1: When enabled, at least one trusted issuer is required.
 	if len(c.TrustedIssuers) == 0 {
-		errs = append(errs, fmt.Errorf("federation is enabled but no trusted_issuers are configured"))
+		errs = append(errs, fedFieldError("trusted_issuers", "federation is enabled but no trusted_issuers are configured"))
 	}
 
 	// Rule 3: Validate algorithms (if specified).
 	for _, alg := range c.Algorithms {
 		if !allowedAlgorithms[alg] {
-			errs = append(errs, fmt.Errorf("unsupported algorithm %q: only RS256 and ES256 are allowed", alg))
+			errs = append(errs, fedFieldError("algorithms", "unsupported algorithm %q: only RS256 and ES256 are allowed", alg))
 		}
 	}
 
@@ -103,19 +254,19 @@ func (c *FederationConfig) Validate() []error {
 	for i, issuer := range c.TrustedIssuers {
 		// Rule 2: Validate IssuerURL is a valid URL with http(s) scheme.
 		if issuer.IssuerURL == "" {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: issuer_url is required", i))
+			errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].issuer_url", i), "trusted_issuers[%d]: issuer_url is required", i))
 		} else {
 			u, err := url.Parse(issuer.IssuerURL)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: invalid issuer_url %q: %v", i, issuer.IssuerURL, err))
+				errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].issuer_url", i), "trusted_issuers[%d]: invalid issuer_url %q: %v", i, issuer.IssuerURL, err))
 			} else if u.Scheme != "https" && u.Scheme != "http" {
-				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: issuer_url %q must use https or http scheme", i, issuer.IssuerURL))
+				errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].issuer_url", i), "trusted_issuers[%d]: issuer_url %q must use https or http scheme", i, issuer.IssuerURL))
 			} else if u.Host == "" {
-				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: issuer_url %q has no host", i, issuer.IssuerURL))
+				errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].issuer_url", i), "trusted_issuers[%d]: issuer_url %q has no host", i, issuer.IssuerURL))
 			}
 
 			if seen[issuer.IssuerURL] {
-				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: duplicate issuer_url %q", i, issuer.IssuerURL))
+				errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].issuer_url", i), "trusted_issuers[%d]: duplicate issuer_url %q", i, issuer.IssuerURL))
 			}
 			seen[issuer.IssuerURL] = true
 		}
@@ -124,10 +275,10 @@ func (c *FederationConfig) Validate() []error {
 
 		// Rule 6: Validate issuer_type is a known value.
 		if !allowedIssuerTypes[issuer.IssuerType] {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: unknown issuer_type %q (must be \"hub\", \"service_account\", or \"user\")", i, issuer.IssuerType))
+			errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].issuer_type", i), "trusted_issuers[%d]: unknown issuer_type %q (must be \"hub\", \"service_account\", or \"user\")", i, issuer.IssuerType))
 		}
 		if issuer.IssuerType == "user" && issuer.DefaultRole == "admin" {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: default_role \"admin\" is not allowed for federated users", i))
+			errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].default_role", i), "trusted_issuers[%d]: default_role \"admin\" is not allowed for federated users", i))
 		}
 
 		// Rule 7: Non-hub issuers may omit jwks_url if OIDC discovery is available.
@@ -135,11 +286,76 @@ func (c *FederationConfig) Validate() []error {
 		isNonHub := issuer.IssuerType != "" && issuer.IssuerType != "hub"
 
 		// Rule 8: Warn if hub-specific fields are set on non-hub issuers.
+		// AllowedProjects here is the hub-federation Scion-project allowlist
+		// (matched against a federated agent token's project_id claim,
+		// pkg/hub/federation_auth.go) — unrelated to AllowedGCPProjects
+		// below. It stays an error on every non-hub issuer, including a
+		// Google one: a Google issuer wants allowed_gcp_projects instead, so
+		// the message says so when that's the likely mistake.
 		if isNonHub && len(issuer.AllowedProjects) > 0 {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_projects is not applicable for issuer_type %q", i, issuer.IssuerType))
+			msg := fmt.Sprintf("trusted_issuers[%d]: allowed_projects is not applicable for issuer_type %q", i, issuer.IssuerType)
+			if isGoogleIssuerURL(issuer.IssuerURL) {
+				msg += " (use allowed_gcp_projects for a Google issuer's service-account project allowlist)"
+			}
+			errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].allowed_projects", i), "%s", msg))
 		}
 		if isNonHub && len(issuer.AllowedRootUsers) > 0 {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_root_users is not applicable for issuer_type %q", i, issuer.IssuerType))
+			errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].allowed_root_users", i), "trusted_issuers[%d]: allowed_root_users is not applicable for issuer_type %q", i, issuer.IssuerType))
+		}
+
+		// Rule 9: AllowedGCPProjects (service-account admission by GCP
+		// project) only does anything on an ACTIVE Google
+		// user issuer (isActiveGoogleUserIssuer) — the one shape
+		// googleTrust actually reaches. Set anywhere else, it must not be
+		// silently ignored: that would let an operator believe they've
+		// scoped service-account admission when nothing enforces it — a
+		// Google issuer with the wrong issuer_type or no expected_audience
+		// is exactly as unenforced as a non-Google issuer. This is a hard
+		// error rather than a warning, so a misconfiguration is rejected
+		// when the config is loaded (startup fails; an admin save or hot
+		// reload is refused) instead of silently admitting nothing.
+		if len(issuer.AllowedGCPProjects) > 0 && !isActiveGoogleUserIssuer(issuer) {
+			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_gcp_projects")
+		}
+
+		// Rule 10: AllowedDomains (user-principal email-domain constraint)
+		// is validated like AllowedGCPProjects above — it only does
+		// anything on an ACTIVE Google user issuer — with one more shape:
+		// a hub issuer that accepts user access credentials
+		// (isHubUserTokenIssuer), where it constrains those credentials.
+		if len(issuer.AllowedDomains) > 0 && !isActiveGoogleUserIssuer(issuer) && !isHubUserTokenIssuer(issuer) {
+			if !isGoogleIssuerURL(issuer.IssuerURL) && !isNonHub {
+				errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].allowed_domains", i), "trusted_issuers[%d]: allowed_domains is only applicable to the Google issuer (%q), or to a hub issuer with accept_user_tokens", i, issuer.IssuerURL))
+			} else {
+				errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_domains")
+			}
+		}
+
+		// Rule 13: AcceptUserTokens selects how a hub issuer's credentials are
+		// read (pkg/hub/federation_auth.go); no other issuer type reads it,
+		// so setting it there is rejected rather than silently ignored.
+		if isNonHub && issuer.AcceptUserTokens {
+			errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].accept_user_tokens", i), "trusted_issuers[%d]: accept_user_tokens is not applicable for issuer_type %q (only \"hub\")", i, issuer.IssuerType))
+		}
+
+		// Rule 11: each allowed_domains entry must be a shape that
+		// domainOf's parsed email domain (pkg/hub/auth_external_bearer.go)
+		// could ever equal — any shape invalidDomainEntryReason rejects can
+		// never match, so an entry in one of those shapes silently locks out
+		// every user in the domain the operator meant to allow. Checked
+		// regardless of isActiveGoogleUserIssuer: a malformed entry is a
+		// mistake in every position, not just the active one.
+		for j, domain := range issuer.AllowedDomains {
+			if reason := invalidDomainEntryReason(domain); reason != "" {
+				errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].allowed_domains[%d]", i, j), "trusted_issuers[%d]: allowed_domains[%d] %q: %s", i, j, domain, reason))
+			}
+		}
+
+		// Rule 12: allow_visitor_grants admits visitor grants for users of
+		// the issuer, so it applies only to the issuer types whose issuer
+		// tokens identify users: "user", and "hub" (empty means "hub").
+		if issuer.AllowVisitorGrants && !IssuerAllowsVisitorGrantsType(issuer.IssuerType) {
+			errs = append(errs, fedFieldError(fmt.Sprintf("trusted_issuers[%d].allow_visitor_grants", i), "trusted_issuers[%d]: allow_visitor_grants is only applicable to issuer_type \"user\" or \"hub\", not %q", i, issuer.IssuerType))
 		}
 	}
 

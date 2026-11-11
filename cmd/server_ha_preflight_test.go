@@ -364,14 +364,14 @@ func TestIsHADeployment(t *testing.T) {
 // matching subtest here and update the chart condition in lockstep.
 //
 // TRIPWIRE: the GKE Helm chart transcribes these same conditions into template
-// logic gating the operator acknowledgement flag (acknowledgeHAUnlanded). If
-// you add a route here and not to the chart, the chart's condition
-// under-triggers: it renders an HA config without the acknowledgement, and that
-// config cannot boot. Remove or swap a route without touching the chart and it
-// over-triggers, demanding an acknowledgement for a deployment that is not HA.
-// So: change isHADeployment -> update the chart condition in lockstep -> add or
-// update the matching subtest below. To locate the chart condition (once the
-// GKE chart has landed), grep the deploy/helm tree for acknowledgeHAUnlanded.
+// logic (scion-hub.haRoutes) that decides when its hosted HA render checks run.
+// If you add a route here and not to the chart, the chart's condition
+// under-triggers: it renders an HA config without checking the IAP and
+// transport gates, and that config may not boot. Remove or swap a route without
+// touching the chart and it over-triggers, demanding HA settings for a
+// deployment that is not HA. So: change isHADeployment -> update the chart
+// condition in lockstep -> add or update the matching subtest below. To locate
+// the chart condition, grep the deploy/helm tree for scion-hub.haRoutes.
 //
 // Routes as of this writing:
 //  1. K_SERVICE env var set (Cloud Run)

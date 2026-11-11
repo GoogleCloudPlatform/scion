@@ -104,21 +104,12 @@ func runClean(cmd *cobra.Command, args []string) error {
 	// Determine if we should check Hub status
 	shouldCheckHub := !cleanSkipHubCheck
 
-	// If Hub is explicitly disabled in settings, ask if user wants to check anyway
-	if shouldCheckHub && settings != nil && !settings.IsHubEnabled() && !noHub {
-		if hubsync.ShowCheckHubAnywayPrompt(autoConfirm) {
-			shouldCheckHub = true
-		} else {
-			shouldCheckHub = false
-		}
-	}
-
 	// Check Hub status
 	hubLinked := false
 	hubReachable := false
 
 	if shouldCheckHub && settings != nil {
-		endpoint := GetHubEndpoint(settings)
+		endpoint := invocationHubEndpoint()
 		if endpoint != "" {
 			// Try to create Hub client and check connectivity
 			client, clientErr := getHubClient(settings)
@@ -142,7 +133,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 				} else {
 					// Hub unreachable - warn user
 					fmt.Println()
-					fmt.Printf("Warning: Hub at %s is not reachable.\n", endpoint)
+					fmt.Printf("Warning: Hub at %s is not reachable.\n", config.RedactURL(endpoint))
 					fmt.Println("Cleaning this project may leave it orphaned on the Hub.")
 					fmt.Println("You may need to manually remove it from the Hub later.")
 					fmt.Println()
@@ -161,8 +152,10 @@ func runClean(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Project '%s' is linked to the Hub.\n", projectName)
 
 		if hubsync.ShowCleanUnlinkPrompt(projectName, autoConfirm) {
-			// Unlink from Hub
-			if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
+			// Unlink from Hub as 'scion hub unlink' does (hub.linked=false,
+			// hub project ID cleared, link entry removed). The retired
+			// hub.enabled switch is not written.
+			if err := markProjectUnlinked(os.Stderr, resolvedPath, isGlobal); err != nil {
 				return fmt.Errorf("failed to unlink from Hub: %w", err)
 			}
 			fmt.Printf("Project '%s' has been unlinked from the Hub.\n", projectName)

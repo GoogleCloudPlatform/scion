@@ -1,0 +1,345 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package wsprotocol
+
+import (
+	"strings"
+	"time"
+)
+
+// PTY WebSocket close-code contract.
+//
+// These codes are sent in the WebSocket close frame that ends a PTY attach
+// (Hub -> web/CLI client), and in StreamCloseMessage.Code on the Hub <-> broker
+// control channel. The rule is that the hop that knows the cause chooses the
+// code, and later hops pass it through unchanged; a specific code is never
+// downgraded to 1000.
+//
+// Application codes use the RFC 6455 private range 4000-4999 as 4000 + the
+// nearest HTTP status. Reasons are machine-readable snake_case strings of at
+// most MaxCloseReasonBytes bytes.
+//
+// The client-side mirror of ClassifyPTYClose lives in
+// web/src/client/terminal-close-codes.ts. Both are checked against
+// testdata/pty_close_codes.json; change all three together.
+const (
+	// ClosePTYNormal (1000): clean detach. The tmux client detached, or the
+	// client closed deliberately. The tmux session still exists. Do not retry.
+	ClosePTYNormal = 1000
+	// ClosePTYGoingAway (1001): server process shutting down. Not emitted
+	// today: neither the Hub nor the broker has a base context that is
+	// cancelled on shutdown, so a restart is observed by clients as 1006.
+	// Retry.
+	ClosePTYGoingAway = 1001
+	// ClosePTYAbnormal (1006): TCP dropped without a close frame. Never sent;
+	// synthesized by the client library. Retry.
+	ClosePTYAbnormal = 1006
+	// ClosePTYInternalError (1011): unexpected server error, or a broker close
+	// code the Hub does not recognise. Retry once with normal backoff and full
+	// jitter (see PTYReconnectTiming).
+	ClosePTYInternalError = 1011
+	// ClosePTYServiceRestart (1012): reserved for a future graceful drain.
+	// Retry.
+	ClosePTYServiceRestart = 1012
+	// ClosePTYTryAgainLater (1013): overload. The Hub emits it, with reason
+	// "slow_consumer", when an attach client reads output too slowly and the
+	// stream's output buffer fills (pkg/hub StreamOutputLimit). Retry.
+	ClosePTYTryAgainLater = 1013
+
+	// ClosePTYProtocolError (4400): protocol error (bad_hello, bad_frame,
+	// unsupported_version, frame_too_large). Retrying with the same software
+	// will not help. Terminal.
+	ClosePTYProtocolError = 4400
+	// ClosePTYAuthRequired (4401): credentials or authorization no longer
+	// valid. Sent on the Conduit agent path when the stream authorization
+	// re-check closes a user's PTY stream (authz_expired, from
+	// pkg/hub/conduit_stream_authz.go), passed through by ptyLeafCloseCode
+	// in pkg/hub/pty_conduit.go. A failure before the stream opens surfaces
+	// as HTTP 401 on the handshake or preflight instead. Terminal.
+	ClosePTYAuthRequired = 4401
+	// ClosePTYForbidden (4403): attach not permitted. Sent on the Conduit
+	// agent path when the Hub refuses the stream open (forbidden, in
+	// ptyAgentOpenError, pkg/hub/pty_conduit.go) or the relay refuses it
+	// (conduit CloseForbidden, passed through by ptyLeafCloseCode). A refusal
+	// before the upgrade surfaces as HTTP 403 instead. Terminal.
+	ClosePTYForbidden = 4403
+	// ClosePTYAgentNotFound (4404): the broker cannot find the agent or its
+	// container. The Hub maps the legacy broker code 404 to this. Terminal.
+	ClosePTYAgentNotFound = 4404
+	// ClosePTYSuperseded (4409): session scope only (superseded_incarnation,
+	// legacy_hello_superseded). A PTY client is not expected to see it; if
+	// it does, it is terminal.
+	ClosePTYSuperseded = 4409
+	// ClosePTYSessionGone (4410): the tmux session no longer exists (agent
+	// exited, container stopped or removed). Terminal.
+	ClosePTYSessionGone = 4410
+	// ClosePTYCancelled (4499): the stream open was cancelled or timed out
+	// before it was accepted. Nothing for the client to resume. Terminal.
+	ClosePTYCancelled = 4499
+	// ClosePTYAttachUnsupported (4501): the matched runtime has no
+	// exec/attach/TTY primitive at all. Distinct from ClosePTYUpstreamUnavailable
+	// so a definitive "this runtime will never support attach" is never
+	// confused with a transient readiness failure that is worth retrying.
+	// Terminal.
+	ClosePTYAttachUnsupported = 4501
+	// ClosePTYUpstreamUnavailable (4503): planned or deliberate close that is
+	// safe to retry now (relay_restart, draining, superseded, not_serving), or
+	// the hop behind this one is temporarily gone (Hub <-> broker control
+	// channel dropped, stream open failed, tmux session not ready yet).
+	// Retry once, promptly, with full jitter (see PTYReconnectTiming).
+	ClosePTYUpstreamUnavailable = 4503
+	// ClosePTYUpstreamTimeout (4504): transient failure (registry_unavailable,
+	// grant_keys_unavailable, open_timeout, upstream_unreachable). Sent on
+	// the Conduit agent path: a PTY stream whose session is lost
+	// (upstream_unreachable, ptyLeafCloseForStream in pkg/hub/pty_conduit.go)
+	// or a conduit CloseRelayTimeout from the relay or target, passed through
+	// by ptyLeafCloseCode. The broker path does not send it. Retry once with
+	// normal backoff and full jitter (see PTYReconnectTiming).
+	ClosePTYUpstreamTimeout = 4504
+)
+
+// Close reasons emitted by the Hub.
+const (
+	CloseReasonBrokerDisconnected = "broker_disconnected"
+	CloseReasonStreamOpenFailed   = "stream_open_failed"
+	CloseReasonBrokerWriteFailed  = "broker_write_failed"
+	CloseReasonClientReadFailed   = "client_read_failed"
+	CloseReasonClientWriteFailed  = "client_write_failed"
+	CloseReasonInternalError      = "internal_error"
+)
+
+// Close reasons emitted by the broker's attach-end classifier
+// (pkg/runtimebroker classifyAttachEnd).
+const (
+	// CloseReasonRuntimeStreamDropped (4503): the tmux session is still
+	// alive, but the exec transport between the broker and the container
+	// ended abnormally (killed process, docker/podman exec transport drop,
+	// k8s apiserver stream error).
+	CloseReasonRuntimeStreamDropped = "runtime_stream_dropped"
+	// CloseReasonSessionEnded (4410): the tmux session is gone but the
+	// container/pod that hosted it still resolves.
+	CloseReasonSessionEnded = "session_ended"
+	// CloseReasonContainerRemoved (4410): the tmux session is gone and the
+	// agent's container/pod no longer resolves either.
+	CloseReasonContainerRemoved = "container_removed"
+	// CloseReasonAgentStopped (4410): the attach exec never started because
+	// the tmux session was never up, and the container itself is
+	// definitively not running (Exited/stopped, or errored). Unlike
+	// CloseReasonSessionNotReady, this cannot resolve itself: the agent
+	// must be started again before an attach can succeed.
+	CloseReasonAgentStopped = "agent_stopped"
+	// CloseReasonSessionNotReady (4503): the attach exec never started
+	// because the tmux session was not ready yet (e.g. the agent is still
+	// starting up), and the container itself still resolves. Retry.
+	CloseReasonSessionNotReady = "session_not_ready"
+	// CloseReasonLookupUnavailable (4503): the broker could not determine
+	// whether the agent's container still exists because the runtime's list
+	// call itself failed. This must never be reported as 4404 or 4410.
+	CloseReasonLookupUnavailable = "lookup_unavailable"
+	// CloseReasonProbeFailed (1011): the post-exit tmux has-session probe
+	// itself failed or timed out (runtime unreachable), so the broker cannot
+	// tell whether the session survived. Retry.
+	CloseReasonProbeFailed = "probe_failed"
+	// CloseReasonAgentNotFound (4404): the broker could not resolve the
+	// agent to a container at stream-open time.
+	CloseReasonAgentNotFound = "agent_not_found"
+	// CloseReasonRuntimeUnavailable (4503): the broker's agent lookup itself
+	// failed (the container runtime could not be listed) at stream-open
+	// time. Retry.
+	CloseReasonRuntimeUnavailable = "runtime_unavailable"
+)
+
+// Close reason emitted by the broker's attach-support pre-check, before any
+// work against the matched runtime starts (both the control-channel gate
+// and the direct-connect pre-upgrade path apply this same policy).
+const (
+	// CloseReasonAttachUnsupported (4501): the matched runtime has no
+	// exec/attach/TTY primitive at all.
+	CloseReasonAttachUnsupported = "attach_unsupported"
+)
+
+// CloseReasonInputOverflow (1009): the broker closed a stream whose input
+// exceeded its stream input limit (pkg/runtimebroker).
+const CloseReasonInputOverflow = "input_overflow"
+
+// ErrCodeRuntimeAttachUnsupported is the JSON error code
+// (ErrorResponse.Error.Code) a broker's direct-connect PTY endpoint returns
+// with HTTP 501, before any WebSocket upgrade, for the same attach-support
+// pre-check ClosePTYAttachUnsupported/CloseReasonAttachUnsupported cover
+// once a connection is already upgraded. pkg/runtimebroker writes this
+// value; pkg/wsclient reads it back to map a failed handshake to the same
+// fixed, actionable message the post-upgrade close code produces, so a
+// caller sees one consistent "attach is not supported" outcome regardless
+// of which of the two points rejected it.
+const ErrCodeRuntimeAttachUnsupported = "runtime_attach_unsupported"
+
+// MaxCloseReasonBytes is the largest reason RFC 6455 allows in a close frame
+// (125-byte control payload minus the 2-byte code).
+const MaxCloseReasonBytes = 123
+
+// CloseDisposition is what a PTY client should do after a close code.
+type CloseDisposition int
+
+const (
+	// DispositionDetached means stop; the session ended cleanly (1000).
+	DispositionDetached CloseDisposition = iota
+	// DispositionRetry means the cause is transient; a reconnect may succeed.
+	DispositionRetry
+	// DispositionTerminal means stop and report the reason; retrying will
+	// not help.
+	DispositionTerminal
+)
+
+// String returns the lower-case name used in testdata/pty_close_codes.json.
+func (d CloseDisposition) String() string {
+	switch d {
+	case DispositionDetached:
+		return "detached"
+	case DispositionRetry:
+		return "retry"
+	case DispositionTerminal:
+		return "terminal"
+	default:
+		return "unknown"
+	}
+}
+
+// ClassifyPTYClose maps a PTY WebSocket close code to a client disposition.
+// It is the single source of truth for clients; the TypeScript mirror must
+// agree with it on every row of testdata/pty_close_codes.json.
+func ClassifyPTYClose(code int) CloseDisposition {
+	switch {
+	case code == ClosePTYNormal:
+		return DispositionDetached
+	case code == ClosePTYProtocolError, code == ClosePTYAuthRequired,
+		code == ClosePTYForbidden, code == ClosePTYAgentNotFound,
+		code == ClosePTYSuperseded, code == ClosePTYSessionGone,
+		code == ClosePTYCancelled, code == ClosePTYAttachUnsupported:
+		return DispositionTerminal
+	case code == ClosePTYUpstreamUnavailable, code == ClosePTYUpstreamTimeout:
+		return DispositionRetry
+	case code >= 4000 && code <= 4999:
+		// Unknown application code: fail safe and do not hammer the server.
+		return DispositionTerminal
+	case code == 1002, code == 1003, code == 1007, code == 1008, code == 1009, code == 1010:
+		// Protocol and policy errors will not fix themselves.
+		return DispositionTerminal
+	default:
+		// 1001, 1005, 1006, 1011-1015, and anything else.
+		return DispositionRetry
+	}
+}
+
+// ReconnectTiming says whether, and how soon, a PTY client reconnects
+// automatically after a close code.
+type ReconnectTiming int
+
+const (
+	// ReconnectNever means the client does not reconnect by itself. This
+	// covers every detached and terminal code, and the retry codes the
+	// client leaves to the user (1001, 1006, 1013, ...).
+	ReconnectNever ReconnectTiming = iota
+	// ReconnectPrompt means reconnect once after a delay drawn uniformly
+	// from [0, PTYPromptReconnectMaxDelay] (4503).
+	ReconnectPrompt
+	// ReconnectBackoff means reconnect once after the normal exponential
+	// backoff with full jitter (4504, 1011).
+	ReconnectBackoff
+)
+
+// PTYPromptReconnectMaxDelay is the upper bound of the full-jitter window
+// for a ReconnectPrompt reconnect. It matches the relay's default
+// GoAway.reconnect_after_ms, so clients closed together by a drain spread
+// their reconnects over the same window instead of arriving at once.
+const PTYPromptReconnectMaxDelay = 5 * time.Second
+
+// PTYReconnectTiming maps a PTY close code to the client's automatic
+// reconnect behaviour. It builds on ClassifyPTYClose: only a code that
+// classifies as DispositionRetry can reconnect, and of those only 4503, 4504
+// and 1011 do so automatically. A client makes at most one reconnect attempt
+// per such close.
+func PTYReconnectTiming(code int) ReconnectTiming {
+	if ClassifyPTYClose(code) != DispositionRetry {
+		return ReconnectNever
+	}
+	switch code {
+	case ClosePTYUpstreamUnavailable:
+		return ReconnectPrompt
+	case ClosePTYUpstreamTimeout, ClosePTYInternalError:
+		return ReconnectBackoff
+	default:
+		return ReconnectNever
+	}
+}
+
+// MapBrokerStreamCloseCode maps a broker StreamCloseMessage.Code to the
+// WebSocket close code the Hub sends to the PTY client. Codes in 1000-1015
+// and 4000-4999 pass through. Brokers that predate the close-code contract
+// send 0 when the tmux client ended (mapped to 1000, as before), 404 when the
+// agent lookup failed (mapped to 4404), and 500 on other errors (mapped to
+// 1011); any other value is also mapped to 1011.
+func MapBrokerStreamCloseCode(code int) int {
+	switch {
+	case code == 0:
+		return ClosePTYNormal
+	case code == 404:
+		return ClosePTYAgentNotFound
+	case code >= 1000 && code <= 1015, code >= 4000 && code <= 4999:
+		return code
+	default:
+		return ClosePTYInternalError
+	}
+}
+
+// IsSendableCloseCode reports whether code may appear in a close frame on the
+// wire. RFC 6455 reserves 1004, 1005, 1006 and 1015 for local use, and codes
+// below 1000 or in 1016-2999 are not assigned.
+func IsSendableCloseCode(code int) bool {
+	switch {
+	case code == 1004, code == 1005, code == 1006, code == 1015:
+		return false
+	case code >= 1000 && code <= 1015:
+		return true
+	case code >= 3000 && code <= 4999:
+		return true
+	default:
+		return false
+	}
+}
+
+// TruncateCloseReason makes reason safe for a close frame: it drops invalid
+// UTF-8 (RFC 6455 section 8.1 requires clients to fail the connection on an
+// invalid reason, which would turn the real code into 1006), then shortens
+// the result to at most MaxCloseReasonBytes bytes without splitting a UTF-8
+// sequence.
+func TruncateCloseReason(reason string) string {
+	reason = strings.ToValidUTF8(reason, "")
+	if len(reason) <= MaxCloseReasonBytes {
+		return reason
+	}
+	cut := MaxCloseReasonBytes
+	// Back up to the start of a UTF-8 sequence (continuation bytes are 10xxxxxx).
+	for cut > 0 && reason[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return reason[:cut]
+}
+
+// PTYReasonManagedRuntime is the details.reason the Hub reports with its
+// 503 ErrCodeRuntimeAttachUnsupported PTY refusal when the agent runs on a
+// managed runtime (no terminal on any broker) and has no session that
+// serves a PTY. Clients map it to the "use scion message and scion look"
+// hint.
+const PTYReasonManagedRuntime = "managed_runtime"

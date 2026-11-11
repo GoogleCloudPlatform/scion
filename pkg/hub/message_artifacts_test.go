@@ -1,0 +1,400 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestAdmitMessageArtifacts pins the admission step: only well-formed
+// references the sender can read under its own credential survive; the
+// other hub-reserved keys are stripped; the input is never mutated; with
+// the feature off nothing is admitted.
+func TestAdmitMessageArtifacts(t *testing.T) {
+	srv, s, project, sender, _, _, _, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ident := tokenBackedSender(t, s, sender)
+	ctx := requestAuthCtx(context.Background(), ident)
+
+	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Mine")
+	elsewhere := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Not yours")
+	missing := uuid.NewString()
+
+	md := map[string]string{
+		"keep":                       "me",
+		messaging.MetaBodyOffloaded:  "spoofed",
+		artifacts.MessageMetadataKey: `["scion://artifact/` + own + `@1","scion://artifact/` + elsewhere + `","scion://artifact/` + missing + `","junk"]`,
+	}
+	before := map[string]string{}
+	for k, v := range md {
+		before[k] = v
+	}
+
+	out, admitted, warning := srv.admitMessageArtifacts(ctx, md, artifactRecipient{})
+	assert.Equal(t, before, md, "input metadata must not be mutated")
+	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own, Seq: 1}}, admitted)
+	assert.Equal(t, artifactRefsWarning(3, 0), warning, "unreadable, missing and malformed refs are all dropped")
+	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own, Seq: 1}), out[artifacts.MessageMetadataKey])
+	assert.Equal(t, "me", out["keep"])
+	assert.NotContains(t, out, messaging.MetaBodyOffloaded)
+
+	// The warning names no reference and no reason.
+	assert.NotContains(t, warning, elsewhere)
+	assert.NotContains(t, warning, missing)
+	assert.Empty(t, artifactRefsWarning(0, 0))
+
+	// Nothing admitted: the key is absent, not empty.
+	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})}, artifactRecipient{})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
+	assert.NotContains(t, out, artifacts.MessageMetadataKey)
+
+	// A sender identity the artifact service does not serve (no token id,
+	// as for in-process identities) admits nothing, even for its own artifact.
+	inProc := requestAuthCtx(context.Background(), agentCtxIdentity(sender))
+	_, admitted, warning = srv.admitMessageArtifacts(inProc, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})}, artifactRecipient{})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
+
+	// A context the hub built in process (identity only, no credential
+	// context from the authentication middleware) resolves nothing, even
+	// for a token-backed identity that owns the artifact.
+	identityOnly := contextWithIdentity(context.Background(), ident)
+	_, admitted, warning = srv.admitMessageArtifacts(identityOnly, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})}, artifactRecipient{})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
+	views, unchecked := srv.resolveArtifactRefs(identityOnly, []artifacts.MessageRef{{ArtifactID: own}})
+	assert.Zero(t, unchecked)
+	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(own, 0), ID: own}}, views)
+
+	// Feature off: nothing admitted, and the warning says the feature is off.
+	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.False(t, srv.experimentEnabled(experiments.Artifacts))
+	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})}, artifactRecipient{})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsDisabled(1), warning)
+	assert.Contains(t, warning, "not enabled on this hub")
+	assert.NotContains(t, out, artifacts.MessageMetadataKey)
+}
+
+// failGrantsArtifactStore is an artifact store whose grant reads fail.
+type failGrantsArtifactStore struct{ artifacts.Store }
+
+func (failGrantsArtifactStore) ListGrants(context.Context, string) ([]artifacts.Grant, error) {
+	return nil, errors.New("grants unavailable")
+}
+
+// TestAdmitMessageArtifacts_GrantReadFailure: a reference whose check needs
+// the artifact's grants, when they cannot be read, is not attached and is
+// reported to the sender with the server-error warning (a count only),
+// not taken for "you cannot read it". A missing id never reaches the grant
+// read and keeps the ordinary dropped-reference warning; the sender's own
+// artifact needs no grants and is still admitted.
+func TestAdmitMessageArtifacts_GrantReadFailure(t *testing.T) {
+	srv, s, project, sender, _, _, _, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ident := tokenBackedSender(t, s, sender)
+	ctx := requestAuthCtx(context.Background(), ident)
+
+	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Mine")
+	elsewhere := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Not yours")
+	missing := uuid.NewString()
+	srv.SetArtifactStore(failGrantsArtifactStore{st})
+
+	refs := []artifacts.MessageRef{{ArtifactID: own}, {ArtifactID: elsewhere}, {ArtifactID: missing}}
+	out, admitted, warning := srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(refs...)}, artifactRecipient{})
+	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own}}, admitted)
+	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own}), out[artifacts.MessageMetadataKey])
+	assert.Equal(t, artifactRefsWarning(1, 1), warning, "missing is dropped, the grant read failure is unchecked")
+	assert.Contains(t, warning, "server error")
+	assert.NotContains(t, warning, elsewhere)
+	assert.NotContains(t, warning, missing)
+
+	// Only the failing reference: the server-error warning alone.
+	_, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})}, artifactRecipient{})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsWarning(0, 1), warning)
+
+	// A view of it is unavailable, carrying only the reference.
+	views, unchecked := srv.resolveArtifactRefs(ctx, []artifacts.MessageRef{{ArtifactID: elsewhere}})
+	assert.Equal(t, 1, unchecked)
+	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(elsewhere, 0), ID: elsewhere}}, views)
+}
+
+// agentCtxIdentity is the in-process agent identity shape other tests use:
+// no token id, no scopes.
+func agentCtxIdentity(a *store.Agent) Identity {
+	return GetIdentityFromContext(agentCtx(context.Background(), a))
+}
+
+// TestMessageArtifacts_AgentDMDeliveryAndRecord: an agent DM with artifact
+// references delivers only the admitted refs, in metadata and as fetch-hint
+// lines in the rendered envelope (version or "current", no title); the
+// persisted body is unchanged; the refs are recorded for the message; the
+// sender gets a warning for what was dropped.
+func TestMessageArtifacts_AgentDMDeliveryAndRecord(t *testing.T) {
+	srv, s, project, sender, target, _, dispatcher, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	enableOffload(t, srv, 0, true) // envelope switch on, offload off
+	ident := tokenBackedSender(t, s, sender)
+
+	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Design doc")
+	pinned := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Pinned")
+	elsewhere := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Secret title")
+
+	body := "please review"
+	sm := &messages.StructuredMessage{
+		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Type: messages.TypeInstruction, Sender: "agent:" + sender.Slug, SenderID: sender.ID,
+		Recipient: "agent:" + target.Slug, RecipientID: target.ID, Msg: body,
+		Metadata: map[string]string{artifacts.MessageMetadataKey: refsValue(
+			artifacts.MessageRef{ArtifactID: own},
+			artifacts.MessageRef{ArtifactID: pinned, Seq: 1},
+			artifacts.MessageRef{ArtifactID: elsewhere},
+		)},
+	}
+	reqBody, err := json.Marshal(MessageRequest{StructuredMessage: sm})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+target.ProjectID+"/agents/"+target.ID+"/message", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(requestAuthCtx(req.Context(), ident))
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, target.ID)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var resp MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	// The target (paritySetup: no agent role) would get a token without
+	// project:artifact:read, so both admitted refs are counted for it
+	// (ptone/scion#4575).
+	assert.Equal(t, artifactRefsWarning(1, 0)+"; "+fmt.Sprintf(artifactRefsRecipientWarning, 2, target.Slug), resp.ArtifactWarning)
+	assert.NotContains(t, rr.Body.String(), "Secret title")
+
+	calls := dispatchesTo(dispatcher, target.ID)
+	require.Len(t, calls, 1)
+	got := calls[0].StructuredMessage
+	require.NotNil(t, got)
+	wantRefs := []artifacts.MessageRef{{ArtifactID: own}, {ArtifactID: pinned, Seq: 1}}
+	assert.Equal(t, refsValue(wantRefs...), got.Metadata[artifacts.MessageMetadataKey])
+	dt := got.DeliveryText
+	assert.Contains(t, dt, "Artifact: current - scion artifact get scion://artifact/"+own)
+	assert.Contains(t, dt, "Artifact: v1 - scion artifact get scion://artifact/"+pinned+"@1")
+	assert.NotContains(t, dt, elsewhere, "a dropped ref must not reach the recipient")
+	assert.NotContains(t, dt, "Design doc", "envelopes carry no titles")
+	assert.NotContains(t, dt, "Secret title")
+	assert.Equal(t, body, got.Msg, "the hint lines live in the rendered envelope only")
+
+	require.NotEmpty(t, resp.MessageID)
+	row, err := s.GetMessage(context.Background(), resp.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, body, row.Msg, "the persisted body is unchanged")
+
+	recorded, err := st.ListMessageRefs(context.Background(), []string{resp.MessageID})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, wantRefs, recorded[resp.MessageID])
+}
+
+// TestMessageArtifacts_ViewsAreReadCheckedPerViewer: the web view of a
+// message's references resolves under each viewer's own credential. A
+// viewer who cannot read an artifact sees only the reference, exactly as
+// for one that does not exist.
+func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
+	srv, s := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+
+	owner := &store.User{ID: tid("msgart-owner"), Email: "owner@test.example", DisplayName: "Owner Person",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, s.CreateUser(ctx, owner))
+
+	id := seedMessageArtifact(t, st, tid("msgart-project"), artifacts.PrincipalKindUser, owner.ID, "Quarterly report")
+	missing := uuid.NewString()
+	require.NoError(t, st.AddMessageRefs(ctx, "msg-1", []artifacts.MessageRef{{ArtifactID: id, Seq: 1}, {ArtifactID: missing}}))
+	require.NoError(t, st.AddMessageRefs(ctx, "msg-2", []artifacts.MessageRef{{ArtifactID: id}}))
+
+	ownerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
+	strangerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(tid("msgart-stranger"), "s@test.example", "S", "member", "web"))
+
+	views, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1", "msg-2", "msg-none"})
+	require.False(t, unavailable)
+	require.Len(t, views, 2)
+	var readable, gone chatArtifactRef
+	for _, v := range views["msg-1"] {
+		if v.ID == id {
+			readable = v
+		} else {
+			gone = v
+		}
+	}
+	assert.True(t, readable.Available)
+	assert.Equal(t, "Quarterly report", readable.Title)
+	assert.Equal(t, 1, readable.Version)
+	assert.Equal(t, "Owner Person", readable.OwnerName)
+	assert.False(t, gone.Available)
+	assert.Equal(t, chatArtifactRef{RefView: artifacts.RefView{Ref: artifacts.FormatRef(missing, 0), ID: missing}}, gone)
+
+	strangerViews, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1", "msg-2"})
+	require.False(t, unavailable)
+	require.Len(t, strangerViews, 2)
+	for msgID, list := range strangerViews {
+		for _, v := range list {
+			assert.False(t, v.Available, "%s: %+v", msgID, v)
+			assert.Empty(t, v.Title)
+			assert.Empty(t, v.OwnerName)
+			assert.Empty(t, v.OwnerRef)
+			assert.Zero(t, v.Version)
+		}
+	}
+
+	// An in-process user identity (no credential context) sees no titles,
+	// even as the owner.
+	inProcOwner := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "dispatch"))
+	inProcViews, _ := srv.messageArtifactViews(inProcOwner, []string{"msg-1", "msg-2"})
+	for _, list := range inProcViews {
+		for _, v := range list {
+			assert.False(t, v.Available, "%+v", v)
+			assert.Empty(t, v.Title)
+		}
+	}
+
+	// Feature off: no views at all.
+	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	views, unavailable = srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	assert.Nil(t, views)
+	assert.False(t, unavailable)
+}
+
+// TestMessageArtifacts_RefListReadFailure (ptone/scion#4295): when the
+// recorded references cannot be read, messageArtifactViews reports them
+// unavailable and returns no views, for a reader and a non-reader alike,
+// instead of "no references". Once the read works again each viewer sees
+// exactly what it saw before.
+func TestMessageArtifacts_RefListReadFailure(t *testing.T) {
+	srv, s := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+
+	owner := &store.User{ID: tid("msgart-fail-owner"), Email: "fail-owner@test.example", DisplayName: "Owner Person",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	id := seedMessageArtifact(t, st, tid("msgart-fail-project"), artifacts.PrincipalKindUser, owner.ID, "Quarterly report")
+	require.NoError(t, st.AddMessageRefs(ctx, "msg-1", []artifacts.MessageRef{{ArtifactID: id}}))
+
+	ownerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
+	strangerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(tid("msgart-fail-stranger"), "s@test.example", "S", "member", "web"))
+
+	beforeOwner, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	require.False(t, unavailable)
+	require.True(t, beforeOwner["msg-1"][0].Available)
+	beforeStranger, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1"})
+	require.False(t, unavailable)
+	require.False(t, beforeStranger["msg-1"][0].Available)
+
+	srv.SetArtifactStore(failListRefsArtifactStore{st})
+	for name, vctx := range map[string]context.Context{"owner": ownerCtx, "stranger": strangerCtx} {
+		views, unavailable := srv.messageArtifactViews(vctx, []string{"msg-1", "msg-none"})
+		assert.True(t, unavailable, name)
+		assert.Nil(t, views, name)
+	}
+	// No message ids: nothing is read, nothing is unavailable.
+	views, unavailable := srv.messageArtifactViews(ownerCtx, nil)
+	assert.Nil(t, views)
+	assert.False(t, unavailable)
+
+	srv.SetArtifactStore(st)
+	afterOwner, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	assert.False(t, unavailable)
+	assert.Equal(t, beforeOwner, afterOwner)
+	afterStranger, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1"})
+	assert.False(t, unavailable)
+	assert.Equal(t, beforeStranger, afterStranger)
+}
+
+// TestMessageArtifacts_UnreadableIsByteIdenticalToMissing: what a reader
+// gets for an artifact it cannot read is byte for byte what it gets for one
+// that does not exist, apart from the id it named itself: the web view's
+// JSON, and the sender's warning and resulting metadata.
+func TestMessageArtifacts_UnreadableIsByteIdenticalToMissing(t *testing.T) {
+	srv, s, _, sender, _, _, _, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ident := tokenBackedSender(t, s, sender)
+	senderCtx := requestAuthCtx(context.Background(), ident)
+
+	unreadable := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Secret title")
+	missing := uuid.NewString()
+
+	normalize := func(b []byte, id string) string { return strings.ReplaceAll(string(b), id, "<id>") }
+
+	// Web views, single and pinned refs.
+	for _, seq := range []int{0, 1} {
+		uMsg, mMsg := fmt.Sprintf("u-%d", seq), fmt.Sprintf("m-%d", seq)
+		require.NoError(t, st.AddMessageRefs(context.Background(), uMsg, []artifacts.MessageRef{{ArtifactID: unreadable, Seq: seq}}))
+		require.NoError(t, st.AddMessageRefs(context.Background(), mMsg, []artifacts.MessageRef{{ArtifactID: missing, Seq: seq}}))
+		views, unavailable := srv.messageArtifactViews(senderCtx, []string{uMsg, mMsg})
+		require.False(t, unavailable)
+		u, err := json.Marshal(views[uMsg])
+		require.NoError(t, err)
+		m, err := json.Marshal(views[mMsg])
+		require.NoError(t, err)
+		assert.Equal(t, normalize(m, missing), normalize(u, unreadable), "seq %d", seq)
+		assert.NotContains(t, string(u), "Secret title")
+	}
+
+	// Send-time admission: same metadata, same admitted refs, same warning.
+	outU, admU, warnU := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: unreadable})}, artifactRecipient{})
+	outM, admM, warnM := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: missing})}, artifactRecipient{})
+	assert.Equal(t, outM, outU)
+	assert.Equal(t, admM, admU)
+	assert.Equal(t, warnM, warnU)
+	assert.NotEmpty(t, warnU)
+}
+
+// TestSanitizeCrossProjectObserver_DropsArtifactRefs: a cross-project
+// observer copy loses the artifact references and the admitted flag along
+// with the body.
+func TestSanitizeCrossProjectObserver_DropsArtifactRefs(t *testing.T) {
+	md := map[string]string{"keep": "me", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: uuid.NewString()})}
+	msg := &messages.StructuredMessage{Msg: "body", Metadata: md, ArtifactRefsAdmitted: true}
+	sanitizeCrossProjectObserver(msg)
+	assert.Empty(t, msg.Msg)
+	assert.False(t, msg.ArtifactRefsAdmitted)
+	assert.NotContains(t, msg.Metadata, artifacts.MessageMetadataKey)
+	assert.Equal(t, "me", msg.Metadata["keep"])
+	assert.Contains(t, md, artifacts.MessageMetadataKey, "the caller's map is not mutated")
+}

@@ -180,3 +180,55 @@ func TestAdvisoryLock_NotAcquiredReturnsNilHandle(t *testing.T) {
 	assert.False(t, acquired2)
 	assert.Nil(t, handle2)
 }
+
+// newCleanPostgresStore opens the test database with the agent-list cache
+// emptied.
+func newCleanPostgresStore(t *testing.T) Store {
+	t.Helper()
+	url := testPostgresURL(t)
+	store, err := NewPostgresStore(url)
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+	db, err := sql.Open("pgx", url)
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`DELETE FROM discord_user_project_agents`)
+	require.NoError(t, err)
+	return store
+}
+
+func TestPostgres_ProjectAgents_PerUser(t *testing.T) {
+	testProjectAgentsPerUser(t, newCleanPostgresStore(t))
+}
+
+func TestPostgres_ProjectAgents_EvictsExpiredEntries(t *testing.T) {
+	testProjectAgentsEviction(t, newCleanPostgresStore(t))
+}
+
+func TestPostgres_ProjectAgents_EmptyUserNotServed(t *testing.T) {
+	testProjectAgentsEmptyUserNotServed(t, newCleanPostgresStore(t))
+}
+
+func TestPostgres_ProjectAgents_ExpiredEntryNotServed(t *testing.T) {
+	testProjectAgentsExpiredNotServed(t, newCleanPostgresStore(t))
+}
+
+func TestPostgres_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
+	url := testPostgresURL(t)
+	db, err := sql.Open("pgx", url)
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`DROP TABLE IF EXISTS discord_project_agents`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE discord_project_agents (project_id TEXT PRIMARY KEY, agent_slugs TEXT NOT NULL DEFAULT '[]', refreshed_at TIMESTAMPTZ NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO discord_project_agents VALUES ('proj-1', '["coder"]', $1)`, time.Now().UTC())
+	require.NoError(t, err)
+
+	store := newCleanPostgresStore(t)
+
+	var oldTables int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'discord_project_agents'`).Scan(&oldTables))
+	assert.Zero(t, oldTables, "the project-keyed cache table is dropped")
+	testProjectAgentsDropsProjectKeyedCache(t, store)
+}

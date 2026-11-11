@@ -98,10 +98,15 @@ def _build_vertex_env(ctx: scion_harness.ProvisionContext) -> dict[str, str]:
     project_id = _resolve_vertex_var(ctx, "VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
     if project_id:
         env["VERTEX_PROJECT_ID"] = project_id
-    region = _resolve_vertex_var(
-        ctx, "VERTEX_REGION", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION",
-        default="us-central1",
+    # VERTEX_REGION first, then the shared order LOCATION > REGION
+    # (ptone/scion#4719). Hermes does not read CLOUD_ML_REGION.
+    _, region = scion_harness.resolve_vertex_location(
+        lambda k: ctx.read_secret(k, env_fallback=True),
+        warn_fn=ctx.warn,
+        preferred=("VERTEX_REGION",),
+        include_ml_region=False,
     )
+    region = region or "us-central1"
     env["VERTEX_REGION"] = region
     creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     if creds_path:
@@ -268,9 +273,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     }
 
     # Model resolution passthrough.
-    resolved_model = str(ctx.model_resolution.get("resolved_model") or "").strip()
-    if not resolved_model:
-        resolved_model = os.environ.get("SCION_MODEL", "").strip()
+    resolved_model = scion_harness.resolve_model(ctx)
     if resolved_model:
         env_payload["HERMES_INFERENCE_MODEL"] = resolved_model
     elif resolved.method == "vertex-ai":

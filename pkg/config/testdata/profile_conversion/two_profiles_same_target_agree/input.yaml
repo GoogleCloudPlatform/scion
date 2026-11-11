@@ -1,0 +1,20 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+profiles:
+  a:
+    runtime: cluster
+    image_registry: reg.example/team
+    clone_depth: "5"
+    resources:
+      requests:
+        memory: 2Gi
+  b:
+    runtime: cluster
+    image_registry: reg.example/team
+    clone_depth: "5"
+    resources:
+      requests:
+        memory: 2Gi

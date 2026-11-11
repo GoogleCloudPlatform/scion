@@ -15,8 +15,11 @@
 package transfer
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +61,51 @@ func TestNormalizeFileContent_MixedLineEndings(t *testing.T) {
 	got := NormalizeFileContent(input)
 	if string(got) != string(want) {
 		t.Errorf("NormalizeFileContent mixed:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestNormalizeFileContent_UTF8SampleBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"two_byte", "é"},
+		{"three_byte", "界"},
+		{"four_byte", "🌍"},
+	} {
+		// Include every split inside the rune and both aligned boundaries.
+		for n := 0; n <= len(tc.text); n++ {
+			t.Run(fmt.Sprintf("%s/%d_bytes_in_sample", tc.name, n), func(t *testing.T) {
+				prefix := strings.Repeat("a", 8192-n-2)
+				input := []byte(prefix + "\r\n" + tc.text + "\r\n")
+				want := []byte(prefix + "\n" + tc.text + "\n")
+				if got := NormalizeFileContent(input); !bytes.Equal(got, want) {
+					t.Errorf("UTF-8 text was not normalized at the sample boundary: got %d bytes, want %d", len(got), len(want))
+				}
+			})
+		}
+	}
+}
+
+func TestNormalizeFileContent_BinarySampleBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tail string
+	}{
+		{"null", "\x00\r\n"},
+		{"invalid_lead", "\xff\r\n"},
+		{"invalid_continuation", "\xe2A\x80\r\n"},
+		{"truncated_rune", "\xf0\x9f\x8c"},
+		{"stray_continuations", "\x80\x80\x80\x80\x80\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The first tail byte is inside the sample; any remaining bytes
+			// are beyond it. Keep CRLF before the boundary in every case.
+			input := []byte("\r\n" + strings.Repeat("a", 8192-3) + tc.tail)
+			if got := NormalizeFileContent(input); !bytes.Equal(got, input) {
+				t.Error("binary content was normalized at the sample boundary")
+			}
+		})
 	}
 }
 

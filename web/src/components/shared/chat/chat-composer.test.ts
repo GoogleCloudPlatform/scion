@@ -23,9 +23,8 @@
  * away both halves of it.
  */
 
-// @vitest-environment happy-dom
-
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -394,5 +393,507 @@ describe('composer — paste-to-attachment', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(apiFetch).not.toHaveBeenCalled();
     expect(showToast).not.toHaveBeenCalled();
+  });
+});
+
+// ── Caret-end focus hardening (reply target set before sl-textarea upgrades) ──
+
+/**
+ * `focusTextareaCaretEnd()` (triggered by a `replyTo` change) reaches into
+ * `<sl-textarea>`'s shadow DOM for the native `<textarea>`. If that lookup
+ * runs before `<sl-textarea>` has finished its own first render, the shadow
+ * DOM is still empty and the lookup returns null, silently dropping focus.
+ * No code path sets `replyTo` that early today (see chat-thread.test.ts's
+ * reply-focus suite for the real flow), but the composer hardens against it:
+ * retry once after the child's own `updateComplete`, and fall back to
+ * focusing the `<sl-textarea>` host if the inner textarea still can't be
+ * found.
+ */
+describe('composer — caret-end focus hardening when sl-textarea is not yet upgraded', () => {
+  async function mountBare(): Promise<any> {
+    const el = document.createElement('scion-chat-composer') as any;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    const slTextarea = el.shadowRoot.querySelector('sl-textarea');
+    await slTextarea.updateComplete;
+    return { el, slTextarea };
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('retries after the child upgrades instead of dropping focus, keeping the caret at the end', async () => {
+    const { el, slTextarea } = await mountBare();
+    const textarea = slTextarea.shadowRoot.querySelector('textarea') as HTMLTextAreaElement;
+
+    // Simulate an in-progress draft the user already typed, caret left at
+    // the start — a real input event so `el.text` matches the DOM value and
+    // Lit's `live()` binding won't itself reset the caret on the next render.
+    textarea.value = 'draft so far';
+    textarea.selectionStart = textarea.selectionEnd = 0;
+    textarea.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    const realGetTextareaElement = el.getTextareaElement.bind(el);
+    let calls = 0;
+    // First lookup simulates <sl-textarea> not having rendered its shadow
+    // DOM yet; later lookups behave normally.
+    el.getTextareaElement = (): HTMLTextAreaElement | null => {
+      calls++;
+      return calls === 1 ? null : realGetTextareaElement();
+    };
+
+    el.replyTo = { messageId: 'm1', senderName: 'Ann', content: 'hi' };
+    await el.updateComplete;
+
+    await vi.waitFor(() => {
+      expect(slTextarea.shadowRoot?.activeElement).toBe(textarea);
+      expect(textarea.selectionStart).toBe('draft so far'.length);
+      expect(textarea.selectionEnd).toBe('draft so far'.length);
+    });
+    // Confirms the retry branch, not just the first-try success path, ran.
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('falls back to focusing the sl-textarea host if the inner textarea never appears', async () => {
+    const { el, slTextarea } = await mountBare();
+    el.getTextareaElement = (): null => null;
+
+    el.replyTo = { messageId: 'm1', senderName: 'Ann', content: 'hi' };
+    await el.updateComplete;
+
+    await vi.waitFor(() => {
+      expect(el.shadowRoot.activeElement).toBe(slTextarea);
+    });
+  });
+});
+
+describe('isComposing', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  function stubTouchPrimary(touch: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: touch && query.includes('pointer: coarse'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  async function mountFocused(): Promise<any> {
+    const el = createComposer();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    Object.defineProperty(el.shadowRoot, 'activeElement', {
+      configurable: true,
+      get: () => el.shadowRoot.querySelector('sl-textarea'),
+    });
+    return el;
+  }
+
+  it('is true with draft text on any device', async () => {
+    stubTouchPrimary(false);
+    const el = createComposer();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.isComposing).toBe(false);
+    el.text = '   ';
+    expect(el.isComposing).toBe(false);
+    el.text = 'half a thought';
+    expect(el.isComposing).toBe(true);
+  });
+
+  it('on desktop, focus alone is not composing (it stays after every send)', async () => {
+    stubTouchPrimary(false);
+    const el = await mountFocused();
+    expect(el.isComposing).toBe(false);
+  });
+
+  it('on touch, focus means the keyboard is up, so it counts', async () => {
+    stubTouchPrimary(true);
+    const el = await mountFocused();
+    expect(el.isComposing).toBe(true);
+  });
+});
+
+/**
+ * A DM belongs to no project: the hub accepts only a project-less upload
+ * there and refuses a project-scoped one at send ("attachment … is not
+ * available in this conversation", ptone/scion#5084). The composer can hold a
+ * projectId in a DM (an agent DM carries the agent's project, a DM opened in a
+ * project scope carries that project), so the upload must leave it out.
+ */
+describe('composer — upload project scope', () => {
+  /** The FormData of the single upload request made so far. */
+  function uploadForm(): FormData {
+    const call = apiFetch.mock.calls.find((c: any[]) => c[0] === '/api/v1/chat/attachments') as
+      | any[]
+      | undefined;
+    expect(call).toBeTruthy();
+    return (call![1] as RequestInit).body as FormData;
+  }
+
+  for (const [label, projectId] of [
+    ['an agent DM (agent project)', 'proj-agent'],
+    ['a DM opened in a project scope', 'proj-scope'],
+    ['a DM with no project', ''],
+  ] as const) {
+    it(`sends no project_id in ${label}`, async () => {
+      const el = document.createElement('scion-chat-composer') as any;
+      el.conversationMode = 'dm';
+      el.projectId = projectId;
+      respondWith(201, { attachments: [STORED], failures: [] });
+
+      await selectFiles(el, ['compose.yaml']);
+
+      const form = uploadForm();
+      expect(form.has('project_id')).toBe(false);
+      expect(form.getAll('files')).toHaveLength(1);
+      expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    });
+  }
+
+  it('sends the project_id in a group or topic conversation', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'thread';
+    el.projectId = 'proj-1';
+    respondWith(201, { attachments: [STORED], failures: [] });
+
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(uploadForm().get('project_id')).toBe('proj-1');
+  });
+
+  it('treats a dm: conversation key as a DM even without conversationMode', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = '';
+    el.conversationKey = 'dm:user:u1:user:u2';
+    el.projectId = 'proj-scope';
+    respondWith(201, { attachments: [STORED], failures: [] });
+
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(uploadForm().has('project_id')).toBe(false);
+  });
+
+  it('a topic key with thread mode still sends the project_id', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic-a';
+    el.projectId = 'proj-1';
+    respondWith(201, { attachments: [STORED], failures: [] });
+
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(uploadForm().get('project_id')).toBe('proj-1');
+  });
+});
+
+/**
+ * The composer is reused across conversations. What was pending in one
+ * conversation must not be sent in the next: a topic upload carries the
+ * topic's project, which a DM refuses at send.
+ */
+describe('composer — conversation switch', () => {
+  // Drafts live in localStorage; each test starts and ends with none.
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  /** Mount a composer open on topic A. */
+  async function mountTopic(): Promise<any> {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic-a';
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    return el;
+  }
+
+  /** Switch the mounted composer to DM B. */
+  async function switchToDM(el: any): Promise<void> {
+    el.conversationMode = 'dm';
+    el.conversationKey = 'dm:user:u1:user:u2';
+    await el.updateComplete;
+  }
+
+  function uploadCalls(): any[][] {
+    return apiFetch.mock.calls.filter((c: any[]) => c[0] === '/api/v1/chat/attachments');
+  }
+
+  it('drops topic uploads on a switch; the next DM upload has no project_id', async () => {
+    const el = await mountTopic();
+    respondWith(201, {
+      attachments: [STORED],
+      failures: [{ name: 'bad.exe', error: 'not accepted' }],
+    });
+    await selectFiles(el, ['compose.yaml', 'bad.exe']);
+    expect((uploadCalls()[0][1].body as FormData).get('project_id')).toBe('proj-1');
+    expect(el.pendingFiles).toHaveLength(1);
+    expect(el.uploadFailures).toHaveLength(1);
+
+    await switchToDM(el);
+    expect(el.pendingFiles).toEqual([]);
+    expect(el.uploadFailures).toEqual([]);
+
+    respondWith(201, { attachments: [{ ...STORED, id: 'att-2' }], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    expect((uploadCalls()[1][1].body as FormData).has('project_id')).toBe(false);
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-2']);
+  });
+
+  it('does not send an artifact picked in topic A in DM B', async () => {
+    const el = await mountTopic();
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    await el.updateComplete;
+    expect(el.pendingArtifacts).toHaveLength(1);
+
+    await switchToDM(el);
+    expect(el.pendingArtifacts).toEqual([]);
+
+    el.text = 'hello';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty('artifactRefs');
+    expect(sent[0].attachmentIds).toEqual([]);
+  });
+
+  /** Make the next apiFetch call wait until the returned settle function runs. */
+  function deferUpload(): (settle: () => Response | Error) => void {
+    let resolve!: (r: Response) => void;
+    let reject!: (e: Error) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        })
+    );
+    return (settle) => {
+      const out = settle();
+      if (out instanceof Error) reject(out);
+      else resolve(out);
+    };
+  }
+
+  function storedWithFailure(): Response {
+    const body = { attachments: [STORED], failures: [{ name: 'bad.exe', error: 'not accepted' }] };
+    return new Response(JSON.stringify(body), { status: 201 });
+  }
+
+  function requestError(): Response {
+    return new Response(JSON.stringify({ message: 'Attachments not available' }), { status: 503 });
+  }
+
+  function networkError(): Error {
+    return new Error('network down');
+  }
+
+  const LATE_OUTCOMES: Array<[string, () => Response | Error]> = [
+    ['stored files and per-file failures', storedWithFailure],
+    ['a whole-request error', requestError],
+    ['a network error', networkError],
+  ];
+
+  for (const [label, outcome] of LATE_OUTCOMES) {
+    it(`drops ${label} from an upload that settles after a switch`, async () => {
+      const el = await mountTopic();
+      const errors: string[] = [];
+      el.addEventListener('composer-error', (e: CustomEvent<{ message: string }>) =>
+        errors.push(e.detail.message)
+      );
+      const settle = deferUpload();
+
+      const upload = el.uploadFiles([new File(['content'], 'compose.yaml')]);
+      await vi.waitFor(() => expect(uploadCalls()).toHaveLength(1));
+      expect(el.uploading).toBe(true);
+
+      await switchToDM(el);
+      expect(el.uploading).toBe(false);
+
+      settle(outcome);
+      await upload;
+      await el.updateComplete;
+
+      expect(el.pendingFiles).toEqual([]);
+      expect(el.uploadFailures).toEqual([]);
+      expect(errors).toEqual([]);
+      expect(el.uploading).toBe(false);
+    });
+  }
+
+  it('a topic send that fails after a switch restores nothing into the DM', async () => {
+    const { chatDraftStorageKey } = await import('../../../client/chat-drafts.js');
+    const el = await mountTopic();
+    respondWith(201, { attachments: [STORED], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].attachmentIds).toEqual(['att-1']);
+
+    await switchToDM(el);
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles).toEqual([]);
+    expect(el.pendingArtifacts).toEqual([]);
+    expect(el.text).toBe('');
+    // The text is kept as the topic's draft, under the usual draft rules.
+    expect(localStorage.getItem(chatDraftStorageKey('topic-a'))).toBe('for the topic');
+    expect(localStorage.getItem(chatDraftStorageKey('dm:user:u1:user:u2'))).toBeNull();
+  });
+
+  it("a topic send that fails after a switch leaves the DM's own upload alone", async () => {
+    const el = await mountTopic();
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+
+    await switchToDM(el);
+    respondWith(201, { attachments: [{ ...STORED, id: 'att-dm' }], failures: [] });
+    await selectFiles(el, ['dm.txt']);
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-dm']);
+    expect(el.text).toBe('');
+  });
+
+  it('a schedule that fails after a switch restores nothing into the DM', async () => {
+    const { chatDraftStorageKey } = await import('../../../client/chat-drafts.js');
+    const el = await mountTopic();
+    el.text = 'send this later';
+    const scheduled: any[] = [];
+    el.addEventListener('chat-schedule', (e: CustomEvent) => scheduled.push(e.detail));
+    el.doSchedule('2026-10-15T09:00:00Z');
+    expect(scheduled).toHaveLength(1);
+    expect(el.text).toBe('');
+
+    await switchToDM(el);
+    el.text = 'typed in the DM';
+    scheduled[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.text).toBe('typed in the DM');
+    expect(el.pendingFiles).toEqual([]);
+    expect(el.pendingArtifacts).toEqual([]);
+    expect(localStorage.getItem(chatDraftStorageKey('topic-a'))).toBe('send this later');
+    expect(localStorage.getItem(chatDraftStorageKey('dm:user:u1:user:u2'))).toBeNull();
+  });
+
+  it('a send that fails after switching away and back restores everything', async () => {
+    const el = await mountTopic();
+    respondWith(201, { attachments: [STORED], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+
+    await switchToDM(el);
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic-a';
+    await el.updateComplete;
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    expect(el.pendingArtifacts).toHaveLength(1);
+    expect(el.text).toBe('for the topic');
+  });
+
+  it('a topic send that fails without a switch restores files and artifacts', async () => {
+    const el = await mountTopic();
+    respondWith(201, { attachments: [STORED], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+    expect(el.pendingFiles).toEqual([]);
+
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    expect(el.pendingArtifacts).toHaveLength(1);
+    expect(el.text).toBe('for the topic');
+  });
+
+  it("keeps the indicator on while a DM upload runs after topic A's settles", async () => {
+    const el = await mountTopic();
+    const settleA = deferUpload();
+    const uploadA = el.uploadFiles([new File(['a'], 'a.txt')]);
+    await vi.waitFor(() => expect(uploadCalls()).toHaveLength(1));
+
+    await switchToDM(el);
+    const settleB = deferUpload();
+    const uploadB = el.uploadFiles([new File(['b'], 'b.txt')]);
+    await vi.waitFor(() => expect(uploadCalls()).toHaveLength(2));
+    expect(el.uploading).toBe(true);
+
+    settleA(() => new Response(JSON.stringify({ attachments: [STORED] }), { status: 201 }));
+    await uploadA;
+    expect(el.uploading).toBe(true);
+    expect(el.pendingFiles).toEqual([]);
+
+    const bodyB = JSON.stringify({ attachments: [{ ...STORED, id: 'att-b' }] });
+    settleB(() => new Response(bodyB, { status: 201 }));
+    await uploadB;
+    expect(el.uploading).toBe(false);
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-b']);
+  });
+
+  it('still applies an upload that settles without a switch', async () => {
+    const el = await mountTopic();
+    const settle = deferUpload();
+    const upload = el.uploadFiles([new File(['content'], 'compose.yaml')]);
+    await vi.waitFor(() => expect(uploadCalls()).toHaveLength(1));
+
+    settle(() => new Response(JSON.stringify({ attachments: [STORED] }), { status: 201 }));
+    await upload;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    expect(el.uploading).toBe(false);
   });
 });

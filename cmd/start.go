@@ -52,20 +52,20 @@ func init() {
 
 	startCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path or project-relative subdirectory to mount as /workspace")
 
-	startCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
+	startCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 
 	startCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Notification flag — on by default for Hub mode; use --no-notify to opt out
+	// Notification flag — on by default; use --no-notify to opt out
 	startCmd.Flags().BoolVar(&startNoNotify, "no-notify", false, "Do not subscribe to notifications for the spawned agent")
 
 	// Back-compat: accept --notify without error (it's now the default)
 	startCmd.Flags().BoolVar(&startNotifyDeprecated, "notify", false, "")
 	_ = startCmd.Flags().MarkDeprecated("notify", "notifications are now enabled by default; remove --notify from your instructions")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	startCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	startCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	startCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
@@ -74,14 +74,18 @@ func init() {
 	startCmd.Flags().BoolVar(&enableTelemetry, "enable-telemetry", false, "Explicitly enable telemetry for this agent")
 	startCmd.Flags().BoolVar(&disableTelemetry, "disable-telemetry", false, "Explicitly disable telemetry for this agent")
 
+	// Explicit opt-in for agent log level (agents do not inherit --debug)
+	startCmd.Flags().StringVar(&agentLogLevelFlag, agentLogLevelFlagName, "", agentLogLevelFlagUsage)
+
 	// Inline config flag
 	startCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+	startCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
 
 	// Model flag
 	startCmd.Flags().StringVar(&modelFlag, "model", "", "Model to use: alias (small, medium, large, extra-large/xl) or explicit model ID")
 
 	// Thinking level flag
-	startCmd.Flags().IntVar(&thinkingLevelFlag, "thinking-level", -1, "Thinking level (0-100) to inject into agent config")
+	startCmd.Flags().StringVar(&thinkingLevelFlag, "thinking-level", "", thinkingLevelFlagUsage)
 
 	// Label flags
 	startCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
@@ -94,11 +98,19 @@ func init() {
 
 	// Agent message mode flag
 	startCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
-		"Agent message mode: none, lineage, branch, project\n"+
+		"Agent message mode: none, lineage, branch, project, hub\n"+
 			"Controls which agents and users this agent can message.\n"+
-			"Default: inherited from template, parent, or 'project'.")
+			"Default: the template's mode, else the parent agent's, else 'project'.")
+
+	// Hub launch wait flags
+	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Return once the Hub accepts the agent, without waiting for it to be running")
+	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "How long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
+	startCmd.Flags().BoolVar(&startWaitReady, "wait-ready", false, "After the agent is running, also wait until its harness accepts input (shown as \"starting\" until then). "+
+		"--wait-timeout, if set, bounds the whole wait; otherwise the readiness wait is limited to 2m. Exits 3 if the agent is not ready in time (it is left running)")
+
+	startCmd.Flags().BoolVar(&sendEnvFlag, sendEnvFlagName, false, sendEnvFlagUsage)
 
 	// GCP service account assignment flag
-	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 
 }

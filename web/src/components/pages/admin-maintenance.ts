@@ -24,10 +24,34 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { waitForHubRestart } from '../../client/hub-restart.js';
+import { withTimeout } from '../../client/with-timeout.js';
+import { stateManager } from '../../client/state.js';
+import { canReissueAllScopes } from '../../lib/admin-permissions.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
+import {
+  LAST_UPDATE_LABELS,
+  isOlderClass,
+  renderInstallerUnsupported,
+  rollbackTarget,
+} from './admin-maintenance-update-card.js';
+import type {
+  LastUpdate,
+  PendingUpdate,
+  ViewRunDetail,
+  UpdateRequestDetail,
+  UpdateStatus,
+} from './admin-maintenance-update-card.js';
+
+export type { LastUpdate, PendingUpdate, UpdateStatus };
 
 interface MaintenanceOperation {
   id: string;
@@ -43,10 +67,23 @@ interface MaintenanceOperation {
   result?: string;
 }
 
+/**
+ * Run status of a maintenance operation or migration. `restarting` is in
+ * progress: an update-binary run whose binary is installed and whose hub is
+ * about to restart; the hub settles it on boot.
+ */
+export type MaintenanceRunStatus = 'pending' | 'running' | 'restarting' | 'completed' | 'failed';
+
+/** Whether a run status means the run has not finished yet. */
+export function isRunInProgress(status: string | undefined): boolean {
+  return status === 'running' || status === 'restarting';
+}
+
 interface MaintenanceRun {
   id: string;
   operationKey?: string;
-  status: string;
+  /** A {@link MaintenanceRunStatus}; unknown values render as-is. */
+  status: MaintenanceRunStatus | (string & {});
   startedAt: string;
   completedAt?: string;
   startedBy?: string;
@@ -58,9 +95,23 @@ interface MaintenanceOperationWithRun extends MaintenanceOperation {
   lastRun?: MaintenanceRun;
 }
 
+/**
+ * Last systemd unit check of Rebuild from git, from the unitStatus field of
+ * GET /api/v1/admin/maintenance/operations. Only match and drift are stored.
+ */
+interface UnitDriftStatus {
+  status: 'match' | 'drift';
+  checkedAt: string;
+  commit: string;
+  branch: string;
+  service: string;
+  summary?: string[];
+}
+
 interface MaintenanceResponse {
   migrations: MaintenanceOperation[] | null;
   operations: MaintenanceOperationWithRun[] | null;
+  unitStatus?: UnitDriftStatus;
 }
 
 interface UpdateCommitInfo {
@@ -68,7 +119,9 @@ interface UpdateCommitInfo {
   subject: string;
 }
 
-interface UpdateCheckResult {
+/** Source-tier update check result (git-based). */
+interface SourceUpdateCheckResult {
+  tier: 'source';
   update_available: boolean;
   current_commit: string;
   latest_commit: string;
@@ -78,8 +131,381 @@ interface UpdateCheckResult {
   new_commits?: UpdateCommitInfo[];
 }
 
+/** Binary-tier update check result (release-based). */
+interface BinaryUpdateCheckResult {
+  tier: 'binary';
+  update_available: boolean;
+  current_version: string;
+  latest_version: string;
+  channel: string;
+  release_url?: string;
+}
+
+type UpdateCheckResult = SourceUpdateCheckResult | BinaryUpdateCheckResult;
+
+/** Stored update notification from GET /api/v1/admin/maintenance/update-available. */
+interface UpdateAvailableResponse {
+  update_available: boolean;
+  update?: {
+    version: string;
+    channel: string;
+    release_url?: string;
+    detected_at: string;
+  };
+}
+
+/** Whether a parsed body has the parts of an update-status the page relies on. */
+function isUpdateStatus(data: unknown): data is UpdateStatus {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Partial<UpdateStatus>;
+  return (
+    !!d.current &&
+    !!d.installer &&
+    !!d.channel &&
+    (d.mode?.effective === 'git' || d.mode?.effective === 'release')
+  );
+}
+
+/** A string field of a hub error's details, or '' when absent or not a string. */
+function detailString(details: Record<string, unknown> | undefined, key: string): string {
+  const v = details?.[key];
+  return typeof v === 'string' ? v : '';
+}
+
+/**
+ * A readable message for a rejected update-binary run request, by the
+ * error code the hub sends. details is the error envelope's details,
+ * when the hub sent any.
+ */
+export function describeUpdateRunError(
+  code: string,
+  message: string,
+  target: string,
+  details?: Record<string, unknown>
+): string {
+  const tag = detailString(details, 'target') || target;
+  switch (code) {
+    case 'already_running':
+      return `The hub is already running ${target}. ${message}`;
+    case 'below_downgrade_floor': {
+      const floor = detailString(details, 'floor');
+      return (
+        `${tag} is older than this hub's downgrade floor` +
+        `${floor ? ` (${floor})` : ''} and cannot be installed. ${message}`
+      );
+    }
+    case 'downgrade_unsupported_driver':
+      return (
+        `${tag} is older than the running version, and this hub's database ` +
+        `cannot be snapshotted for a rollback, so it cannot be installed. ${message}`
+      );
+    case 'downgrade_requires_confirmation':
+      return `${tag} is older than the running version and needs a typed confirmation. ${message}`;
+    case 'invalid_param':
+      return `The hub rejected the update request (invalid parameter): ${message}`;
+    case 'unknown_param':
+      return `The hub rejected the update request (unknown parameter): ${message}`;
+    default:
+      return `Update to ${target} could not start: ${message}`;
+  }
+}
+
+/**
+ * The details of a 409 downgrade_requires_confirmation: what the operator
+ * confirms by typing target, the resolved tag the hub will install.
+ */
+export interface DowngradeConfirmation {
+  target: string;
+  /** The running version, or "(git build)". */
+  current: string;
+  /** downgrade or switch-older. */
+  releaseClass: string;
+  floor: string;
+  /** The hub's risk list; it names the version order and the snapshot path. */
+  risks: string[];
+}
+
+/**
+ * The typed-confirmation facts of a downgrade_requires_confirmation error,
+ * or null when its details lack the target tag.
+ */
+export function downgradeConfirmationFrom(
+  details: Record<string, unknown> | undefined
+): DowngradeConfirmation | null {
+  const target = detailString(details, 'target');
+  if (!target) return null;
+  const risks = details?.['risks'];
+  return {
+    target,
+    current: detailString(details, 'current'),
+    releaseClass: detailString(details, 'class'),
+    floor: detailString(details, 'floor'),
+    risks: Array.isArray(risks) ? risks.filter((r): r is string => typeof r === 'string') : [],
+  };
+}
+
+/**
+ * The version /healthz must report once the hub restarts on a pending
+ * update: its target release tag. A rebuild from Git (mode git) names its
+ * build git-<sha12>, which /healthz does not report, so the restart is
+ * recognised by uptime alone (null).
+ */
+export function expectedRestartVersion(pending: PendingUpdate): string | null {
+  if (pending.mode === 'git') return null;
+  return pending.to || null;
+}
+
+/**
+ * The toast for a recorded update result. A rollback names the release
+ * the boot-failure guard restored (restored, else from) and the one that
+ * failed (to).
+ */
+export function lastUpdateMessage(last: LastUpdate): string {
+  if (last.status === 'verified') return `Hub updated to ${last.to} (verified).`;
+  if (last.status === 'rolled_back') {
+    return `Rolled back to ${rollbackTarget(last)} after ${last.to} failed to start.`;
+  }
+  return `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`;
+}
+
+/** The operations that install the hub binary and restart the hub. */
+type HubBinaryOperation = 'update-binary' | 'rebuild-server';
+const HUB_BINARY_OPERATIONS: readonly HubBinaryOperation[] = ['update-binary', 'rebuild-server'];
+
+/**
+ * An update-binary or rebuild-server run this page follows through the hub
+ * restart: one it started, or one the hub's pendingUpdate names.
+ */
+interface TrackedUpdate {
+  runId: string;
+  /** The run's operation. */
+  operationKey: HubBinaryOperation;
+  /** What was asked for: a tag, or latest:<channel>. */
+  target: string;
+  /** The tag the hub must come back on; null when not known. */
+  expectVersion: string | null;
+  /** Last run status seen by a successful poll. */
+  lastStatus: string;
+  /**
+   * The version the hub ran when the update started (or when this page
+   * picked the run up); undefined when not known. Recorded once, so a
+   * status reload during the restart does not change it.
+   */
+  fromVersion?: string | undefined;
+}
+
+/** Channel, pin and class of an update picked in the release picker. */
+interface UpdateConfirmOptions {
+  channel: string;
+  pin: string;
+  releaseClass: string;
+}
+
+/** How long hubErrorEnvelope waits for an error body. */
+const ERROR_BODY_TIMEOUT_MS = 5_000;
+
+/**
+ * The hub's own error envelope ({error: {code, message}}) of a failed
+ * response, or null when the body is something else, such as a reverse
+ * proxy's 502 page while the hub is down, or when it does not arrive
+ * within timeoutMs.
+ */
+export async function hubErrorEnvelope(
+  res: Response,
+  timeoutMs = ERROR_BODY_TIMEOUT_MS
+): Promise<{ code: string; message: string } | null> {
+  try {
+    // Bounded: a body that stalls after the headers counts as not the
+    // hub's envelope, so the caller does not hang on it.
+    const body = (await withTimeout(res.json() as Promise<unknown>, timeoutMs)) as
+      | { error?: { code?: unknown; message?: unknown } }
+      | null
+      | undefined;
+    const err = body?.error;
+    if (err && typeof err === 'object' && typeof err.code === 'string' && err.code) {
+      const message = typeof err.message === 'string' && err.message ? err.message : err.code;
+      return { code: err.code, message };
+    }
+  } catch {
+    // Not JSON: not the hub's envelope.
+  }
+  return null;
+}
+
+/** Maintenance mode state from GET and PUT /api/v1/admin/maintenance. */
+interface MaintenanceStateResponse {
+  enabled: boolean;
+  break_glass?: boolean;
+  /** The message blocked users see; the hub's default when none is saved. */
+  message?: string;
+}
+
+/**
+ * One failed agent in a reset-auth-all result. For a classified failure
+ * `error` is a plain reason, not the raw error; `code` names the category.
+ */
+interface ResetAuthAllFailure {
+  id: string;
+  name: string;
+  error: string;
+  /** Failure category, e.g. delegation_creator_missing or agent_not_in_standing. */
+  code?: string;
+  /** Deny cause of a structural delegation denial. */
+  cause?: string;
+  /** Creator (depth 1) or ancestor whose delegation is missing. */
+  ancestor_id?: string;
+  ancestor_depth?: number;
+}
+
+/**
+ * Result of POST /api/v1/admin/agents/reset-auth-all. The hub sends null
+ * for an empty list. failed_by_code counts the failures per code, with
+ * "unclassified" for failures that carry none.
+ */
+interface ResetAuthAllResult {
+  succeeded: { id: string; name: string }[] | null;
+  failed: ResetAuthAllFailure[] | null;
+  total: number;
+  failed_by_code?: Record<string, number>;
+}
+
+/** One agent's outcome in a bulk scope re-issue. */
+interface ScopeReissueAgent {
+  id: string;
+  name: string;
+  project_id?: string;
+  depth?: number;
+  /** changed | noop | refused | push_failed */
+  outcome: string;
+  cause?: string;
+  added?: string[] | null;
+  removed?: string[] | null;
+  role_before?: string;
+  role_after?: string;
+  op_id?: string;
+  dispatch_error?: string;
+  /**
+   * Set on a changed agent whose new credential was delivered but whose
+   * running agent did not confirm the reload.
+   */
+  reload_unconfirmed?: string;
+}
+
+/** An agent named in one of the bulk scope re-issue result lists. */
+interface ScopeReissueRef {
+  id: string;
+  name: string;
+  cause?: string;
+}
+
+/**
+ * Result of POST /api/v1/admin/agents/reset-auth-all with
+ * {"reissue_scopes": true}. The hub sends null for an empty list.
+ */
+interface ScopeReissueAllResult {
+  batch_op_id: string;
+  dry_run: boolean;
+  total: number;
+  succeeded: ScopeReissueRef[] | null;
+  noop: ScopeReissueRef[] | null;
+  refused: ScopeReissueRef[] | null;
+  push_failed: ScopeReissueRef[] | null;
+  agents: ScopeReissueAgent[] | null;
+  depth_unresolved: string[] | null;
+  batch_audit_recorded: boolean;
+}
+
+/** The number of agents whose reload the running agent did not confirm. */
+function reloadUnconfirmedCount(r: ScopeReissueAllResult): number {
+  return (r.agents ?? []).filter((a) => !!a.reload_unconfirmed).length;
+}
+
+/** The counts line of a scope re-issue result, worded as the CLI does. */
+function scopeReissueSummary(r: ScopeReissueAllResult): string {
+  const verb = r.dry_run ? 'would change' : 'changed';
+  return (
+    `${r.total} agents: ${r.succeeded?.length ?? 0} ${verb}, ` +
+    `${r.noop?.length ?? 0} unchanged, ${r.refused?.length ?? 0} refused, ` +
+    `${r.push_failed?.length ?? 0} token not delivered, ` +
+    `${reloadUnconfirmedCount(r)} reload unconfirmed`
+  );
+}
+
+/** Per-agent lines for every agent whose outcome is not noop. */
+function scopeReissueAgentLines(r: ScopeReissueAllResult): string {
+  const lines: string[] = [];
+  for (const a of r.agents ?? []) {
+    if (a.outcome === 'noop') continue;
+    lines.push(`${a.name || a.id} (${a.id}) ${a.outcome}${a.cause ? `: ${a.cause}` : ''}`);
+    if (a.role_after && a.role_before !== a.role_after) {
+      lines.push(`  role:     ${a.role_before ?? ''} -> ${a.role_after}`);
+    }
+    if (a.added?.length) lines.push(`  added:    ${a.added.join(', ')}`);
+    if (a.removed?.length) lines.push(`  removed:  ${a.removed.join(', ')}`);
+    if (a.dispatch_error) lines.push(`  token not delivered: ${a.dispatch_error}`);
+    if (a.reload_unconfirmed) lines.push(`  reload unconfirmed: ${a.reload_unconfirmed}`);
+  }
+  return lines.join('\n');
+}
+
+/** The note for agents the bulk run could not order by delegation depth. */
+function unresolvedNote(n: number): string {
+  return (
+    `${n} agents could not be ordered (their delegation record could not be read); ` +
+    'see their results below.'
+  );
+}
+
+/** Display labels for reset-auth-all failure codes. */
+const RESET_AUTH_CODE_LABELS: Record<string, string> = {
+  delegation_creator_missing: 'Creator delegation missing',
+  delegation_own_missing: 'Own delegation missing',
+  delegation_ceiling: 'Delegation chain invalid',
+  agent_not_in_standing: 'Not in good standing',
+  runtime_unavailable: 'Runtime unavailable',
+  reload_unconfirmed: 'Reload unconfirmed',
+  internal_error: 'Internal error',
+  unclassified: 'Other',
+};
+
+function resetAuthCodeLabel(code: string): string {
+  return RESET_AUTH_CODE_LABELS[code] ?? code;
+}
+
+/** The per-category failure counts, sorted by code, on one line. */
+function resetAuthCategorySummary(result: ResetAuthAllResult): string {
+  return Object.entries(result.failed_by_code ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([code, n]) => `${resetAuthCodeLabel(code)}: ${n}`)
+    .join(' \u00b7 ');
+}
+
+/** One failed agent: its name, the reason and, when coded, the category. */
+function resetAuthFailureLine(f: ResetAuthAllFailure): string {
+  const category = f.code ? ` [${resetAuthCodeLabel(f.code)}]` : '';
+  return `${f.name || f.id}: ${f.error}${category}`;
+}
+
+/**
+ * How long Restart Hub waits for the hub to come back. Shorter than the
+ * update default: a plain restart does not install anything.
+ */
+const RESTART_HUB_TIMEOUT_MS = 60_000;
+
+/**
+ * Failed list polls in a row, while an update run is in progress, after
+ * which the page treats the hub as restarting and waits on /healthz.
+ */
+const FAILED_POLLS_BEFORE_RECONNECT = 2;
+
+/** Minimum gap between run status checks during a restart wait. */
+const RUN_CHECK_INTERVAL_MS = 5_000;
+
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state()
   private loading = true;
 
@@ -108,6 +534,13 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private runInProgress = false;
 
+  /**
+   * Open state of the completed-migrations group. Kept on the component so it
+   * survives reloads that swap the page content for the loading spinner.
+   */
+  @state()
+  private completedMigrationsOpen = false;
+
   /** Polling timer for running operations/migrations. */
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -122,6 +555,28 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Whether maintenance mode is enabled. */
   @state()
   private maintenanceEnabled = false;
+
+  /**
+   * True when the hub reports break_glass: a workstation hub started in
+   * admin mode (SCION_SERVER_ADMIN_MODE / settings.yaml admin_mode) stays in
+   * maintenance whatever is saved here.
+   */
+  @state()
+  private maintenanceBreakGlass = false;
+
+  /**
+   * The maintenance message blocked users see, as the hub last reported it
+   * (its default when none is saved), and the edit in progress
+   * (ptone/scion#3925).
+   */
+  @state()
+  private maintenanceMessage = '';
+
+  @state()
+  private maintenanceMessageDraft = '';
+
+  @state()
+  private maintenanceMessageSaving = false;
 
   /** Run detail currently being viewed. */
   @state()
@@ -141,13 +596,113 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   /** Result of the last bulk reset-auth request. */
   @state()
-  private resetAuthAllResult: {
-    succeeded: { id: string; name: string }[];
-    failed: { id: string; name: string; error: string }[];
-    total: number;
-  } | null = null;
+  private resetAuthAllResult: ResetAuthAllResult | null = null;
 
-  /** Update check state for rebuild-server. */
+  /**
+   * Whether the scope re-issue controls are shown: the user is a
+   * super-admin per the shared admin status. The hub stays the authority.
+   */
+  @state()
+  private canReissueScopes = false;
+
+  /** Whether a scope re-issue request (dry run or apply) is in-flight. */
+  @state()
+  private reissueLoading = false;
+
+  /** Result of the last scope re-issue request. */
+  @state()
+  private reissueResult: ScopeReissueAllResult | null = null;
+
+  /** Error of the last scope re-issue request. */
+  @state()
+  private reissueError: string | null = null;
+
+  /** Whether the apply confirmation dialog is open. */
+  @state()
+  private reissueConfirmOpen = false;
+
+  /** Server version, mode and installer, from GET .../update-status. */
+  @state()
+  private updateStatus: UpdateStatus | null = null;
+
+  /** Load error of update-status; the page does not guess the mode then. */
+  @state()
+  private updateStatusError: string | null = null;
+
+  /** Target tag of the update being confirmed in the dialog (null: closed). */
+  @state()
+  private updateConfirmTarget: string | null = null;
+
+  /**
+   * Channel, pin and class of a target picked in the release picker; null
+   * for the banner and the operation card, which post pin 'latest' only.
+   */
+  @state()
+  private updateConfirmOptions: UpdateConfirmOptions | null = null;
+
+  /**
+   * The hub's downgrade_requires_confirmation facts while the typed
+   * confirmation is open (null: closed). It replaces the Update Hub dialog
+   * for the same target and options.
+   */
+  @state()
+  private downgradeConfirm: DowngradeConfirmation | null = null;
+
+  /** What the operator typed in the downgrade confirmation. */
+  @state()
+  private downgradeTyped = '';
+
+  /**
+   * Whether the downgrade sl-dialog is open. It is rendered closed and
+   * opened after its first update (see focusDowngradeConfirm).
+   */
+  @state()
+  private downgradeDialogOpen = false;
+
+  /** The update run followed through the restart (null: none). */
+  @state()
+  private trackedUpdate: TrackedUpdate | null = null;
+
+  /** Stops the update restart wait when the page is left. */
+  private updateWaitAbort: AbortController | null = null;
+
+  /** Stops the Restart Hub wait when the page is left. */
+  private restartWaitAbort: AbortController | null = null;
+
+  /**
+   * Id of the restarting run whose pendingUpdate was already checked, so a
+   * run that is not followed is peeked once, not on every poll.
+   */
+  private peekedRestartingRunId: string | null = null;
+
+  /** Consecutive failed list polls while the tracked update is in progress. */
+  private failedPollsWhileUpdating = 0;
+
+  /** True while waiting for the hub to come back after an update restart. */
+  @state()
+  private updateReconnecting = false;
+
+  /** Shown when the hub did not come back on the update target in time. */
+  @state()
+  private updateReconnectError: string | null = null;
+
+  /** Stored update-available notification (from scheduled check). */
+  @state()
+  private updateAvailable: UpdateAvailableResponse | null = null;
+
+  /** Last systemd unit check of Rebuild from git (null when none). */
+  @state()
+  private unitStatus: UnitDriftStatus | null = null;
+
+  /** Whether an update-binary operation is being triggered. */
+  @state()
+  private applyUpdateLoading = false;
+
+  /** Whether the dismiss request is in-flight. */
+  @state()
+  private dismissUpdateLoading = false;
+
+  /** Update check state for rebuild-server / check-for-updates. */
   @state()
   private updateCheckLoading = false;
 
@@ -182,6 +737,17 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
 
     /* -- Maintenance mode toggle ------------------------------------------ */
+
+    .maintenance-message {
+      margin-top: 1rem;
+      max-width: 40rem;
+    }
+
+    .maintenance-message-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
 
     .maintenance-mode-toggle {
       display: flex;
@@ -267,6 +833,27 @@ export class ScionPageAdminMaintenance extends LitElement {
       gap: 1rem;
     }
 
+    .card-list + .completed-migrations {
+      display: block;
+      margin-top: 1rem;
+    }
+
+    .completed-migrations::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .completed-migrations::part(header) {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      padding: 0.875rem 1rem;
+    }
+
+    .completed-migrations::part(content) {
+      padding: 0 1rem 1rem 1rem;
+    }
+
     .card {
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius, 0.5rem);
@@ -336,6 +923,22 @@ export class ScionPageAdminMaintenance extends LitElement {
       margin-top: 0.75rem;
     }
 
+    .reissue-scopes {
+      margin-top: 1rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .reissue-scopes .card-footer {
+      margin-top: 0;
+      margin-bottom: 0.5rem;
+    }
+
+    .reissue-actions {
+      display: inline-flex;
+      gap: 0.5rem;
+    }
+
     /* -- Result log ------------------------------------------------------- */
 
     .result-log {
@@ -382,7 +985,8 @@ export class ScionPageAdminMaintenance extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
     }
 
-    .status-badge.running {
+    .status-badge.running,
+    .status-badge.restarting {
       background: var(--sl-color-primary-100, #dbeafe);
       color: var(--sl-color-primary-700, #1d4ed8);
     }
@@ -512,6 +1116,18 @@ export class ScionPageAdminMaintenance extends LitElement {
       line-height: 1.5;
     }
 
+    .downgrade-risks {
+      margin: 0;
+      padding-left: 1.25rem;
+      color: var(--scion-text, #1e293b);
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+
+    .downgrade-risks li + li {
+      margin-top: 0.25rem;
+    }
+
     /* -- Empty state ------------------------------------------------------ */
 
     .empty-inline {
@@ -572,28 +1188,173 @@ export class ScionPageAdminMaintenance extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 1rem;
     }
+
+    /* -- Update available banner (top-level) ------------------------------- */
+
+    .update-available-banner {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      background: var(--sl-color-primary-50, #eff6ff);
+    }
+
+    .update-available-banner sl-icon {
+      font-size: 1.25rem;
+      color: var(--sl-color-primary-600, #2563eb);
+      flex-shrink: 0;
+    }
+
+    .update-available-banner .banner-text {
+      flex: 1;
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .update-available-banner .banner-text strong {
+      font-weight: 600;
+    }
+
+    .unit-drift-banner {
+      align-items: flex-start;
+      border-color: var(--sl-color-warning-300, #fcd34d);
+      background: var(--sl-color-warning-50, #fffbeb);
+    }
+
+    .unit-drift-banner sl-icon {
+      color: var(--sl-color-warning-600, #d97706);
+    }
+
+    .unit-drift-banner .unit-drift-summary {
+      margin-top: 0.5rem;
+    }
+
+    .unit-drift-banner .unit-drift-note {
+      display: block;
+      margin-top: 0.25rem;
+      font-size: 0.8125rem;
+    }
+
+    .update-available-banner .banner-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    /* -- Binary update check result --------------------------------------- */
+
+    .release-info {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      margin-top: 0.375rem;
+      font-size: 0.8125rem;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .release-info .release-field {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .release-info .release-label {
+      color: var(--scion-text-muted, #64748b);
+      min-width: 7rem;
+    }
+
+    .release-info a {
+      color: var(--sl-color-primary-600, #2563eb);
+      text-decoration: none;
+    }
+
+    .release-info a:hover {
+      text-decoration: underline;
+    }
   `;
 
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadData();
+    void this.fetchUpdateStatus();
     void this.fetchMaintenanceState();
+    void this.fetchUpdateAvailable();
+    void this.loadReissueCapability();
+  }
+
+  private async loadReissueCapability(): Promise<void> {
+    try {
+      const status = await loadAdminStatus(stateManager.getCurrentUserId());
+      this.canReissueScopes = canReissueAllScopes(status);
+    } catch {
+      this.canReissueScopes = false;
+    }
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
+    this.updateWaitAbort?.abort();
+    this.updateWaitAbort = null;
+    this.restartWaitAbort?.abort();
+    this.restartWaitAbort = null;
   }
 
   private async fetchMaintenanceState(): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/admin/maintenance');
       if (res.ok) {
-        const data = await res.json();
-        this.maintenanceEnabled = data.enabled;
+        const data = (await res.json()) as MaintenanceStateResponse;
+        this.applyMaintenanceState(data);
       }
     } catch {
       // Silently ignore — toggle will default to off.
+    }
+  }
+
+  /**
+   * Applies a maintenance state response. The message draft follows the
+   * reported message unless the admin is editing it.
+   */
+  private applyMaintenanceState(data: MaintenanceStateResponse): void {
+    this.maintenanceEnabled = data.enabled;
+    this.maintenanceBreakGlass = data.break_glass === true;
+    if (typeof data.message === 'string') {
+      const editing = this.maintenanceMessageDraft !== this.maintenanceMessage;
+      this.maintenanceMessage = data.message;
+      if (!editing) this.maintenanceMessageDraft = data.message;
+    }
+  }
+
+  /**
+   * Saves the maintenance message only: the body omits enabled, so the
+   * mode is unchanged. An empty message ("") returns to the hub's default.
+   */
+  private async saveMaintenanceMessage(message: string): Promise<void> {
+    this.maintenanceMessageSaving = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as MaintenanceStateResponse;
+      // The saved message replaces the draft.
+      this.maintenanceMessageDraft = typeof data.message === 'string' ? data.message : message;
+      this.applyMaintenanceState(data);
+      showToast(
+        message === '' ? 'Maintenance message reset to the default.' : 'Maintenance message saved.',
+        'success'
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to save the maintenance message');
+    } finally {
+      this.maintenanceMessageSaving = false;
     }
   }
 
@@ -605,12 +1366,533 @@ export class ScionPageAdminMaintenance extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newValue }),
       });
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as MaintenanceStateResponse;
+      this.applyMaintenanceState(data);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update maintenance mode');
+      // The toggle renders from maintenanceEnabled, which is set only from a
+      // server response; re-read it so the toggle shows the saved state.
+      await this.fetchMaintenanceState();
+    }
+  }
+
+  private async fetchUpdateAvailable(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-available');
       if (res.ok) {
-        const data = await res.json();
-        this.maintenanceEnabled = data.enabled;
+        const data = (await res.json()) as UpdateAvailableResponse;
+        this.updateAvailable = data;
       }
     } catch {
-      // Silently ignore — keep current state on failure.
+      // Silently ignore — banner will not show.
+    }
+  }
+
+  /**
+   * Loads GET .../update-status. On failure the page shows an error and
+   * hides the mode-specific operations rather than guessing the mode.
+   */
+  private async fetchUpdateStatus(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status');
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data: unknown = await res.json();
+      if (!isUpdateStatus(data)) {
+        throw new Error('Unexpected update-status response');
+      }
+      this.updateStatus = data;
+      this.updateStatusError = null;
+    } catch (err) {
+      this.updateStatus = null;
+      this.updateStatusError = err instanceof Error ? err.message : 'Failed to load update status';
+    }
+  }
+
+  /**
+   * Opens the update dialog from the update-binary operation card. The
+   * target is the notified or checked release tag when one is known;
+   * otherwise check-updates resolves the latest tag in the hub's channel,
+   * so the page knows which version the hub must come back on. Only when
+   * that fails is latest:<channel> posted, for the hub to resolve.
+   */
+  private async openUpdateFromCard(): Promise<void> {
+    const notified = this.updateAvailable?.update_available
+      ? this.updateAvailable.update?.version
+      : undefined;
+    if (notified) {
+      this.openUpdateConfirm(notified);
+      return;
+    }
+    let checked = this.updateCheckResult;
+    if (checked?.tier !== 'binary') {
+      await this.checkForUpdates();
+      checked = this.updateCheckResult;
+    }
+    if (checked?.tier === 'binary') {
+      if (!checked.update_available) {
+        showToast(`Already up to date (${checked.current_version}).`, 'success');
+        return;
+      }
+      if (checked.latest_version) {
+        this.openUpdateConfirm(checked.latest_version);
+        return;
+      }
+    }
+    const channel = this.updateStatus?.channel.effective;
+    this.openUpdateConfirm(channel ? `latest:${channel}` : null);
+  }
+
+  private openUpdateConfirm(
+    target: string | null,
+    options: UpdateConfirmOptions | null = null
+  ): void {
+    if (!target) {
+      showToast('No update target is known: update status has not loaded.');
+      return;
+    }
+    this.updateConfirmTarget = target;
+    this.updateConfirmOptions = options;
+    // A new update starts at the Update Hub step, never at a confirmation
+    // left over from an earlier target.
+    this.resetDowngradeConfirm();
+  }
+
+  /** Ends the typed confirmation step. */
+  private resetDowngradeConfirm(): void {
+    this.downgradeConfirm = null;
+    this.downgradeTyped = '';
+    this.downgradeDialogOpen = false;
+  }
+
+  /** Closes the update dialogs (both steps); not while a request is in flight. */
+  private closeUpdateConfirm(e?: Event): void {
+    if (this.applyUpdateLoading) {
+      e?.preventDefault();
+      return;
+    }
+    this.updateConfirmTarget = null;
+    this.updateConfirmOptions = null;
+    this.resetDowngradeConfirm();
+  }
+
+  /**
+   * Moves focus into the typed confirmation. An sl-dialog created already
+   * open activates its modal but never sets the initial focus: Shoelace
+   * focuses the [autofocus] element (or the panel) only when open changes
+   * after the first update. So the dialog is rendered closed and opened
+   * here once it has updated. On a re-prompt for another tag the dialog is
+   * already open; the input is focused directly once it is enabled again.
+   */
+  private async focusDowngradeConfirm(): Promise<void> {
+    const dialog = this.renderRoot.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('sl-dialog.downgrade-confirm');
+    if (!dialog) return;
+    if (!this.downgradeDialogOpen) {
+      await dialog.updateComplete;
+      if (this.downgradeConfirm) this.downgradeDialogOpen = true;
+      return;
+    }
+    await this.updateComplete;
+    const input = this.renderRoot.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('sl-input.downgrade-typed');
+    // sl-input enables its inner input in its own update.
+    await input?.updateComplete;
+    input?.focus();
+  }
+
+  protected override updated(changed: PropertyValues): void {
+    super.updated(changed);
+    if (changed.has('downgradeConfirm') && this.downgradeConfirm) {
+      void this.focusDowngradeConfirm();
+    }
+  }
+
+  /** Re-posts the update with confirm_downgrade once the typed tag matches. */
+  private confirmDowngrade(): void {
+    const d = this.downgradeConfirm;
+    if (!d || this.downgradeTyped !== d.target || this.applyUpdateLoading) return;
+    void this.applyUpdate(d.target);
+  }
+
+  /**
+   * Starts update-binary for the confirmed target. The request carries only
+   * target_version, pin and (from the release picker) channel; the hub
+   * resolves the release assets itself. An older target is refused with
+   * 409 downgrade_requires_confirmation; its details open the typed
+   * confirmation, which posts again with confirmDowngrade, the resolved tag
+   * the operator typed.
+   */
+  private async applyUpdate(confirmDowngrade?: string): Promise<void> {
+    const target = this.updateConfirmTarget;
+    if (!target) return;
+    const options = this.updateConfirmOptions;
+    const params: Record<string, string> = options
+      ? { target_version: target, channel: options.channel, pin: options.pin }
+      : { target_version: target, pin: 'latest' };
+    if (confirmDowngrade) params['confirm_downgrade'] = confirmDowngrade;
+    const fromVersion = this.updateStatus?.current.version;
+    this.applyUpdateLoading = true;
+    try {
+      const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params }),
+      });
+
+      if (!response.ok) {
+        const info = await parseApiError(response, `HTTP ${response.status}`);
+        const confirmation =
+          info.code === 'downgrade_requires_confirmation'
+            ? downgradeConfirmationFrom(info.details)
+            : null;
+        if (confirmation) {
+          if (confirmDowngrade && confirmation.target !== confirmDowngrade) {
+            // The confirmed tag no longer matches (for example latest moved):
+            // ask again for the tag the hub resolves now.
+            showToast(
+              `The hub now resolves the update to ${confirmation.target}; type that tag to confirm.`,
+              'warning'
+            );
+          }
+          this.downgradeConfirm = confirmation;
+          this.downgradeTyped = '';
+          return;
+        }
+        throw new Error(describeUpdateRunError(info.code, info.message, target, info.details));
+      }
+      const started = (await response.json().catch(() => ({}))) as { runId?: string };
+
+      showToast(
+        `Update to ${target} started. The hub will restart when it is installed.`,
+        'success'
+      );
+      this.updateConfirmTarget = null;
+      this.updateConfirmOptions = null;
+      this.resetDowngradeConfirm();
+      this.updateAvailable = null;
+      this.updateReconnectError = null;
+      if (started.runId) {
+        this.trackedUpdate = {
+          runId: started.runId,
+          operationKey: 'update-binary',
+          target,
+          // A confirmed downgrade names the tag the hub resolved, also for
+          // latest:<channel>.
+          expectVersion: confirmDowngrade ?? (target.startsWith('latest:') ? null : target),
+          lastStatus: 'running',
+          fromVersion,
+        };
+      } else {
+        // Without a run id no result can be tied to this update; the run
+        // is still followed if a poll sees it running (trackUpdateRun).
+        showToast('The hub did not return a run id; follow the update in Run History.', 'warning');
+      }
+
+      // Reload operations and poll the run (see trackUpdateRun). A polling
+      // load: if the hub is already going down, the failure counts towards
+      // the restart wait instead of replacing the page with an error.
+      await this.loadData(true);
+      this.startPolling();
+    } catch (err) {
+      // The dialog stays open so the user can read the error and cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start binary update');
+    } finally {
+      this.applyUpdateLoading = false;
+    }
+  }
+
+  /**
+   * Follows a run that is already restarting when the page first sees it,
+   * only when a fresh pendingUpdate names it. A restarting run without one
+   * (for example one boot reconciliation did not settle) is shown as in
+   * progress and polled, but not waited for. Checked once per run.
+   */
+  private async adoptRestartingRun(
+    run: MaintenanceRun,
+    operationKey: HubBinaryOperation
+  ): Promise<void> {
+    if (this.peekedRestartingRunId === run.id) return;
+    this.peekedRestartingRunId = run.id;
+    const pending = await this.peekPendingUpdate();
+    if (!this.isConnected) return;
+    if (this.trackedUpdate || !pending?.runId || pending.runId !== run.id) return;
+    this.trackedUpdate = {
+      runId: run.id,
+      operationKey,
+      target: pending.to,
+      expectVersion: expectedRestartVersion(pending),
+      lastStatus: 'restarting',
+      fromVersion: pending.from || this.updateStatus?.current.version,
+    };
+    void this.reconnectAfterUpdate();
+  }
+
+  private operationRun(key: HubBinaryOperation): MaintenanceRun | undefined {
+    return this.operations.find((op) => op.key === key)?.lastRun;
+  }
+
+  /** Whether an update-binary or rebuild-server run is in progress. */
+  private hubBinaryRunInProgress(): boolean {
+    return HUB_BINARY_OPERATIONS.some((key) => isRunInProgress(this.operationRun(key)?.status));
+  }
+
+  /**
+   * Called after each successful list load: follows the update-binary run.
+   * A run seen running is followed whoever started it (another tab, a
+   * reload during the download); restarting switches to the hub restart
+   * wait; a finished run (the restart came and went between polls, or the
+   * run failed before it) reports its result.
+   */
+  private trackUpdateRun(): void {
+    if (!this.isConnected) return;
+    if (!this.trackedUpdate) {
+      for (const key of HUB_BINARY_OPERATIONS) {
+        const run = this.operationRun(key);
+        if (run?.status === 'running') {
+          this.trackedUpdate = {
+            runId: run.id,
+            operationKey: key,
+            target: '',
+            expectVersion: null,
+            lastStatus: 'running',
+            fromVersion: this.updateStatus?.current.version,
+          };
+          break;
+        }
+      }
+    }
+    const tracked = this.trackedUpdate;
+    if (!tracked) {
+      for (const key of HUB_BINARY_OPERATIONS) {
+        const run = this.operationRun(key);
+        if (run?.status === 'restarting') {
+          void this.adoptRestartingRun(run, key);
+          return;
+        }
+      }
+      return;
+    }
+    const run = this.operationRun(tracked.operationKey);
+    if (!run || run.id !== tracked.runId) return;
+    tracked.lastStatus = run.status;
+    if (run.status === 'restarting') {
+      void this.reconnectAfterUpdate();
+    } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
+      this.trackedUpdate = null;
+      void this.fetchUpdateStatus().then(() => {
+        this.refreshUpdateNoticesAfterRun(tracked);
+        this.reportUpdateResult(tracked, run.status);
+      });
+    }
+  }
+
+  /**
+   * The version the hub ran before a tracked update: the one recorded when
+   * the run was tracked, else the hub's own record for this run
+   * (pendingUpdate.from while it restarts, lastUpdate.from once settled).
+   * A run adopted on first load may be tracked before update-status has
+   * loaded. Undefined when none is known.
+   */
+  private updateFromVersion(tracked: TrackedUpdate): string | undefined {
+    if (tracked.fromVersion) return tracked.fromVersion;
+    const pending = this.updateStatus?.pendingUpdate ?? null;
+    if (pending && pending.runId === tracked.runId && pending.from) return pending.from;
+    const last = this.updateStatus?.lastUpdate ?? null;
+    if (last && last.runId === tracked.runId && last.from) return last.from;
+    return undefined;
+  }
+
+  /**
+   * Brings the "Update available" notices up to date once an update run
+   * has ended and update-status has been reloaded (ptone/scion#6557).
+   *
+   * - The hub recorded this run as verified and runs a different version
+   *   than before it: the notices were computed against the old version.
+   *   The update check result is dropped, and the stored notification is
+   *   cleared and re-read.
+   * - Otherwise (failed, rolled back, not verified yet, or a version not
+   *   known): the check result stays, and the stored notification is only
+   *   re-read. Starting the update hid the banner, and the hub keeps the
+   *   notification for a retry, so the banner comes back.
+   *
+   * fetchUpdateAvailable handles its own errors and is not awaited.
+   */
+  private refreshUpdateNoticesAfterRun(tracked: TrackedUpdate): void {
+    const from = this.updateFromVersion(tracked);
+    const after = this.updateStatus?.current.version;
+    const last = this.updateStatus?.lastUpdate ?? null;
+    const verified = !!last && last.runId === tracked.runId && last.status === 'verified';
+    if (verified && from && after && from !== after) {
+      this.updateCheckResult = null;
+      this.updateCheckError = null;
+      // Cleared first: if the re-read fails, a notice about the old
+      // version must not stay up.
+      this.updateAvailable = null;
+    }
+    void this.fetchUpdateAvailable();
+  }
+
+  /** When the restart wait last checked the run status (epoch ms). */
+  private lastRunCheckAt = 0;
+
+  /**
+   * For the restart wait, while the hub answers but has not restarted:
+   * whether the run has already finished (for example Restart() failed
+   * and the run was marked failed), so the wait need not run out. Reads
+   * the list without touching page state, at most every few seconds.
+   */
+  private async trackedRunFinished(
+    runId: string,
+    operationKey: HubBinaryOperation,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.lastRunCheckAt < RUN_CHECK_INTERVAL_MS) return false;
+    this.lastRunCheckAt = now;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/operations', {
+        authErrors: 'caller',
+        signal,
+      });
+      if (!res.ok) return false;
+      const data = (await res.json()) as MaintenanceResponse;
+      const run = (data.operations ?? []).find((op) => op.key === operationKey)?.lastRun;
+      return !!run && run.id === runId && !isRunInProgress(run.status);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Reads pendingUpdate without touching the page state: the hub may be
+   * going down, and a failure must not replace the header with an error.
+   */
+  private async peekPendingUpdate(): Promise<PendingUpdate | null> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status', {
+        authErrors: 'caller',
+      });
+      if (!res.ok) return null;
+      const data: unknown = await res.json();
+      return isUpdateStatus(data) ? data.pendingUpdate : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Waits for the hub to restart after the tracked update run reached
+   * restarting (or a poll failed while it was in progress), then reloads
+   * update-status and reports this run's result.
+   */
+  private async reconnectAfterUpdate(): Promise<void> {
+    const tracked = this.trackedUpdate;
+    // A poll or peek that resolves after the page was left must not start
+    // a wait nothing would abort.
+    if (this.updateReconnecting || !tracked || !this.isConnected) return;
+    // This run is handled here: if it is still restarting after the wait,
+    // the post-wait reload must not adopt it for a second wait.
+    this.peekedRestartingRunId = tracked.runId;
+    this.updateReconnecting = true;
+    this.updateReconnectError = null;
+    this.stopPolling();
+    this.updateWaitAbort?.abort();
+    this.updateWaitAbort = new AbortController();
+    const signal = this.updateWaitAbort.signal;
+    try {
+      if (!tracked.expectVersion && tracked.operationKey === 'update-binary') {
+        // latest:<channel>: the hub writes the concrete tag to pendingUpdate
+        // just before it restarts; it may still answer.
+        const pending = await this.peekPendingUpdate();
+        if (pending && pending.runId === tracked.runId) {
+          const expect = expectedRestartVersion(pending);
+          if (expect) this.trackedUpdate = { ...tracked, expectVersion: expect };
+        }
+      }
+      const expectVersion = this.trackedUpdate?.expectVersion ?? undefined;
+      const result = await waitForHubRestart({
+        expectVersion,
+        signal,
+        stopWhen: () => this.trackedRunFinished(tracked.runId, tracked.operationKey, signal),
+      });
+      if (!result.ok && result.aborted) return;
+      this.trackedUpdate = null;
+      if (!result.ok && !result.observed) {
+        this.updateReconnectError = this.notBackMessage(expectVersion);
+        return;
+      }
+      // The hub answers (on the target, or on another version after the
+      // wait ran out): show what it recorded.
+      await this.fetchUpdateStatus();
+      await this.loadData(true);
+      const run = this.operationRun(tracked.operationKey);
+      const runIsTracked = !!run && run.id === tracked.runId;
+      if (!result.ok && runIsTracked && run.status === 'running') {
+        // A blip, not a restart: the run is still going; keep polling it.
+        this.trackedUpdate = { ...tracked, lastStatus: 'running' };
+        this.startPolling();
+        return;
+      }
+      this.refreshUpdateNoticesAfterRun(tracked);
+      if (result.ok) {
+        this.reportUpdateResult(tracked, 'restarted');
+        return;
+      }
+      const recorded = this.updateStatus?.lastUpdate?.runId === tracked.runId;
+      if (recorded || (runIsTracked && run.status === 'failed')) {
+        this.reportUpdateResult(tracked, run?.status ?? '');
+        return;
+      }
+      this.updateReconnectError = this.notBackMessage(expectVersion);
+    } finally {
+      this.updateReconnecting = false;
+    }
+  }
+
+  private notBackMessage(expectVersion: string | undefined): string {
+    return (
+      `Hub did not come back on ${expectVersion ?? 'the new version'}. ` +
+      'Check journalctl -u scion-hub'
+    );
+  }
+
+  /**
+   * Reports the outcome of a tracked run from lastUpdate, but only when
+   * lastUpdate belongs to that run; an older result is never reported as
+   * this run's.
+   */
+  private reportUpdateResult(tracked: TrackedUpdate, runStatus: string): void {
+    const last = this.updateStatus?.lastUpdate;
+    if (last && tracked.runId && last.runId === tracked.runId) {
+      showToast(lastUpdateMessage(last), last.status === 'verified' ? 'success' : 'warning');
+    } else if (runStatus === 'failed') {
+      const target = tracked.target || 'the new version';
+      showToast(`Update to ${target} failed. See the run log.`, 'warning');
+    } else {
+      showToast('Hub restarted; the update result is not recorded yet.', 'warning');
+    }
+  }
+
+  private async dismissUpdate(): Promise<void> {
+    this.dismissUpdateLoading = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-available', {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        this.updateAvailable = null;
+      }
+    } catch {
+      showToast('Failed to dismiss update notification');
+    } finally {
+      this.dismissUpdateLoading = false;
     }
   }
 
@@ -640,11 +1922,21 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (JSON.stringify(this.operations) !== JSON.stringify(newOperations)) {
         this.operations = newOperations;
       }
+      const newUnitStatus = data.unitStatus ?? null;
+      if (JSON.stringify(this.unitStatus) !== JSON.stringify(newUnitStatus)) {
+        this.unitStatus = newUnitStatus;
+      }
+
+      this.failedPollsWhileUpdating = 0;
+      // A later successful load recovers a page left on the error view.
+      if (this.error) this.error = null;
+      this.trackUpdateRun();
+      if (this.updateReconnecting && this.trackedUpdate) return;
 
       // Start polling if any migration or operation run is active.
       const hasRunning =
         this.migrations.some((m) => m.status === 'running') ||
-        this.operations.some((op) => op.lastRun?.status === 'running');
+        this.operations.some((op) => isRunInProgress(op.lastRun?.status));
       if (hasRunning) {
         this.startPolling();
       } else {
@@ -652,6 +1944,18 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load maintenance operations:', err);
+      // The hub stops answering when it restarts; usually the poll never
+      // sees the brief restarting status, only failures. One failure may be
+      // a blip during the download; a second in a row starts the wait.
+      if (isPolling && this.trackedUpdate && isRunInProgress(this.trackedUpdate.lastStatus)) {
+        this.failedPollsWhileUpdating++;
+        if (
+          this.trackedUpdate.lastStatus === 'restarting' ||
+          this.failedPollsWhileUpdating >= FAILED_POLLS_BEFORE_RECONNECT
+        ) {
+          void this.reconnectAfterUpdate();
+        }
+      }
       if (!isPolling) {
         this.error = err instanceof Error ? err.message : 'Failed to load maintenance operations';
       }
@@ -663,7 +1967,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private startPolling(): void {
-    if (this.pollTimer) return;
+    if (this.pollTimer || !this.isConnected) return;
     this.pollTimer = setInterval(() => void this.loadData(true), 3000);
   }
 
@@ -676,61 +1980,17 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private formatDate(dateString: string | undefined): string {
     if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString, 'date');
   }
 
   private formatDateTime(dateString: string | undefined): string {
     if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString);
   }
 
   private formatRelativeTime(dateString: string | undefined): string {
-    if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (!dateString || Number.isNaN(new Date(dateString).getTime())) return '';
+    return formatRelative(dateString);
   }
 
   private formatDuration(startStr: string, endStr?: string): string {
@@ -759,6 +2019,8 @@ export class ScionPageAdminMaintenance extends LitElement {
         return 'exclamation-circle-fill';
       case 'running':
         return 'hourglass-split';
+      case 'restarting':
+        return 'arrow-repeat';
       default:
         return 'circle';
     }
@@ -810,7 +2072,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start migration:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start migration';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start migration');
     } finally {
       this.runInProgress = false;
     }
@@ -837,14 +2101,20 @@ export class ScionPageAdminMaintenance extends LitElement {
         throw new Error(errMsg);
       }
 
+      const key = this.runDialogKey;
       this.runDialogKey = null;
 
-      // Reload and start polling for status.
-      await this.loadData();
+      // Reload and start polling for status. A rebuild restarts the hub:
+      // its run is followed like an update (trackUpdateRun), and the
+      // polling load lets a hub already going down count towards the
+      // restart wait instead of replacing the page with an error.
+      await this.loadData(key === 'rebuild-server');
       this.startPolling();
     } catch (err) {
       console.error('Failed to start operation:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start operation';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start operation');
     } finally {
       this.runInProgress = false;
     }
@@ -935,6 +2205,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           ? this.renderError()
           : this.renderContent()}
       ${this.renderRunDialog()} ${this.renderRunDetailDialog()} ${this.renderRestartDialog()}
+      ${this.renderReissueConfirmDialog()} ${this.renderUpdateConfirmDialog()}
     `;
   }
 
@@ -964,8 +2235,278 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private renderContent() {
     return html`
-      ${this.renderMaintenanceMode()} ${this.renderQuickActions()} ${this.renderMigrations()}
-      ${this.renderOperations()}
+      ${this.renderServerVersion()} ${this.renderUpdateAvailableBanner()}
+      ${this.renderUnitDriftBanner()} ${this.renderMaintenanceMode()} ${this.renderQuickActions()}
+      ${this.renderMigrations()} ${this.renderOperations()}
+    `;
+  }
+
+  /**
+   * Banner shown while the last Rebuild from git found the installed systemd
+   * unit different from the template. It carries the full remediation, as the
+   * run log may be missing or superseded. All values are text bindings.
+   */
+  private renderUnitDriftBanner() {
+    const st = this.unitStatus;
+    if (!st || st.status !== 'drift') {
+      return nothing;
+    }
+    const where = st.commit ? `commit ${st.commit}` : 'the checked-out commit';
+    const rev = st.branch ? `${where} on branch ${st.branch}` : where;
+    const checked = this.formatDateTime(st.checkedAt) || 'unknown time';
+    const summary = st.summary ?? [];
+    return html`
+      <div class="update-available-banner unit-drift-banner">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        <span class="banner-text">
+          <strong>Re-provision needed:</strong> the installed systemd unit for ${st.service} differs
+          from the template (checked ${checked}). Rebuild from git updates the binary only.
+          <br />
+          To apply the template, run <code>scripts/starter-hub/gce-start-hub.sh --full</code> from
+          the workstation and checkout used to provision this hub, at ${rev}, with the same flags
+          and environment used at provisioning (for example --no-tls, HUB_BASE_URL). Running it
+          without the original flags can reconfigure the hub (for example enable TLS on a --no-tls
+          hub). --full also re-applies settings.yaml, hub.env, the Caddyfile and the sudoers rules
+          from that workstation, then restarts the hub.
+          <br />
+          Intentional local changes belong in a drop-in (${st.service}.d), which is not compared.
+          This notice clears after a Rebuild from git reports a match.
+          ${summary.length
+            ? html`<div class="result-log unit-drift-summary">${summary.join('\n')}</div>`
+            : nothing}
+          <span class="unit-drift-note">Details may also be in the Rebuild from git run log.</span>
+        </span>
+      </div>
+    `;
+  }
+
+  /**
+   * "Server Version & Updates" card. It shows update-status and picks a
+   * release; the update itself (confirm, run, restart wait) stays here.
+   */
+  private renderServerVersion() {
+    const busy =
+      this.applyUpdateLoading || this.updateReconnecting || this.hubBinaryRunInProgress();
+    return html`
+      <scion-admin-maintenance-update-card
+        .status=${this.updateStatus}
+        .statusError=${this.updateStatusError}
+        ?reconnecting=${this.updateReconnecting}
+        .reconnectVersion=${this.trackedUpdate?.expectVersion ?? null}
+        .reconnectError=${this.updateReconnectError}
+        ?busy=${busy}
+        @reload-status=${() => this.fetchUpdateStatus()}
+        @view-run=${(e: CustomEvent<ViewRunDetail>) =>
+          void this.viewRunDetail({
+            id: e.detail.runId,
+            operationKey: e.detail.operationKey,
+            status: '',
+            startedAt: '',
+          })}
+        @rebuild-request=${() => this.openRunDialog('rebuild-server', 'operation')}
+        @update-request=${(e: CustomEvent<UpdateRequestDetail>) =>
+          this.openUpdateConfirm(e.detail.target, {
+            channel: e.detail.channel,
+            pin: e.detail.pin,
+            releaseClass: e.detail.releaseClass,
+          })}
+      ></scion-admin-maintenance-update-card>
+    `;
+  }
+
+  /** What a picker update changes besides the version: channel and pin. */
+  private renderUpdateConfirmDetails(
+    target: string,
+    options: UpdateConfirmOptions | null
+  ): TemplateResult | typeof nothing {
+    if (!options) return nothing;
+    const from = this.updateStatus?.channel.effective || this.updateStatus?.current.channel;
+    return html`
+      ${options.releaseClass === 'switch-newer' || (from && from !== options.channel)
+        ? html`<p class="confirm-channel-switch">
+            This switches the
+            hub${from ? html` from the <strong>${from}</strong> channel` : nothing} to the
+            <strong>${options.channel}</strong> channel.
+          </p>`
+        : nothing}
+      ${options.pin === 'latest'
+        ? html`<p class="confirm-pin">
+            The hub follows the latest <strong>${options.channel}</strong> release.
+          </p>`
+        : html`<p class="confirm-pin">
+            The hub stays pinned to <strong>${target}</strong>: automatic updates do not move it
+            until you pick Latest again.
+          </p>`}
+    `;
+  }
+
+  private renderUpdateConfirmDialog() {
+    const target = this.updateConfirmTarget;
+    if (!target) return nothing;
+    if (this.downgradeConfirm) return this.renderDowngradeConfirmDialog(this.downgradeConfirm);
+    const latestChannel = target.startsWith('latest:') ? target.slice('latest:'.length) : null;
+    const unsupported = this.updateStatus ? !this.updateStatus.installer.supported : false;
+    return html`
+      <sl-dialog
+        label="Update Hub"
+        open
+        @sl-request-close=${(e: Event): void => this.closeUpdateConfirm(e)}
+      >
+        <div class="dialog-body">
+          <p>
+            ${latestChannel
+              ? html`Update the hub to the latest release in the
+                  <strong>${latestChannel}</strong> channel?`
+              : html`Update the hub to <strong>${target}</strong>?`}
+          </p>
+          ${this.renderUpdateConfirmDetails(target, this.updateConfirmOptions)}
+          ${isOlderClass(this.updateConfirmOptions?.releaseClass)
+            ? html`<p class="confirm-older">
+                <strong>${target}</strong> is older than the running version. The hub lists the
+                risks next, and you confirm by typing the tag.
+              </p>`
+            : nothing}
+          ${this.updateStatus?.downgrade?.snapshotsSupported
+            ? html`<p class="confirm-snapshot">
+                The hub takes a database snapshot before it installs the new binary.
+              </p>`
+            : nothing}
+          <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
+            The hub restarts once the new binary is installed. You will temporarily lose
+            connectivity; this page reconnects when the hub is back.
+          </p>
+          ${unsupported && this.updateStatus
+            ? renderInstallerUnsupported(this.updateStatus)
+            : nothing}
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => this.closeUpdateConfirm()}
+          ?disabled=${this.applyUpdateLoading}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="warning"
+          class="confirm-update"
+          ?loading=${this.applyUpdateLoading}
+          ?disabled=${unsupported}
+          @click=${() => this.applyUpdate()}
+        >
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Update &amp; Restart
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  /**
+   * Second step for an older target: the hub's risk list from the 409
+   * downgrade_requires_confirmation, and a field where the operator types
+   * the exact tag. Confirm stays disabled until it matches; Cancel ends the
+   * update without another request. The risks are the hub's own (they
+   * already name the version order and the snapshot path); the floor,
+   * which they do not include, is added, and the versions are spelled out
+   * only when the hub sent no risks.
+   */
+  private renderDowngradeConfirmDialog(d: DowngradeConfirmation): TemplateResult {
+    const matches = this.downgradeTyped === d.target;
+    const label = d.releaseClass === 'switch-older' ? 'Confirm Older Release' : 'Confirm Downgrade';
+    return html`
+      <sl-dialog
+        class="downgrade-confirm"
+        label=${label}
+        ?open=${this.downgradeDialogOpen}
+        @sl-request-close=${(e: Event): void => this.closeUpdateConfirm(e)}
+      >
+        <div class="dialog-body">
+          ${d.risks.length
+            ? html`<ul class="downgrade-risks">
+                ${d.risks.map((r) => html`<li>${r}</li>`)}
+              </ul>`
+            : html`<p class="downgrade-versions">
+                Install <strong>${d.target}</strong>, which is older than the running version
+                <strong>${d.current || 'unknown'}</strong>?
+              </p>`}
+          ${d.floor
+            ? html`<p class="downgrade-floor">
+                This hub cannot go below its downgrade floor, <strong>${d.floor}</strong>.
+              </p>`
+            : nothing}
+          <sl-input
+            class="downgrade-typed"
+            label=${`Type ${d.target} to confirm`}
+            autocomplete="off"
+            spellcheck="false"
+            autofocus
+            .value=${this.downgradeTyped}
+            ?disabled=${this.applyUpdateLoading}
+            @sl-input=${(e: Event): void => {
+              this.downgradeTyped = (e.target as HTMLElement & { value: string }).value;
+            }}
+            @keydown=${(e: KeyboardEvent): void => {
+              if (e.key === 'Enter') this.confirmDowngrade();
+            }}
+          ></sl-input>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          class="downgrade-cancel"
+          ?disabled=${this.applyUpdateLoading}
+          @click=${(): void => this.closeUpdateConfirm()}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="danger"
+          class="confirm-downgrade"
+          ?loading=${this.applyUpdateLoading}
+          ?disabled=${!matches}
+          @click=${(): void => this.confirmDowngrade()}
+        >
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Install ${d.target} &amp; Restart
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderUpdateAvailableBanner() {
+    if (!this.updateAvailable?.update_available || !this.updateAvailable.update) {
+      return nothing;
+    }
+
+    const update = this.updateAvailable.update;
+
+    return html`
+      <div class="update-available-banner">
+        <sl-icon name="arrow-up-circle"></sl-icon>
+        <span class="banner-text">
+          <strong>Update available: ${update.version}</strong>
+          ${update.channel ? html` (${update.channel} channel)` : nothing}
+        </span>
+        <div class="banner-actions">
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.applyUpdateLoading}
+            @click=${() => this.openUpdateConfirm(update.version)}
+          >
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Apply Update
+          </sl-button>
+          <sl-button
+            variant="default"
+            size="small"
+            ?loading=${this.dismissUpdateLoading}
+            @click=${() => this.dismissUpdate()}
+          >
+            Dismiss
+          </sl-button>
+        </div>
+      </div>
     `;
   }
 
@@ -1028,21 +2569,214 @@ export class ScionPageAdminMaintenance extends LitElement {
                       ${this.resetAuthAllResult.failed?.length ?? 0}
                     </span>
                   </div>
+                  ${Object.keys(this.resetAuthAllResult.failed_by_code ?? {}).length > 0
+                    ? html`
+                        <div class="card-meta reset-auth-categories">
+                          <span>${resetAuthCategorySummary(this.resetAuthAllResult)}</span>
+                        </div>
+                      `
+                    : nothing}
                   ${(this.resetAuthAllResult.failed?.length ?? 0) > 0
                     ? html`
                         <div class="result-log result-error">
-                          ${this.resetAuthAllResult.failed
-                            .map((f) => `${f.name || f.id}: ${f.error}`)
-                            .join('\n')}
+                          ${this.resetAuthAllResult.failed!.map(resetAuthFailureLine).join('\n')}
                         </div>
                       `
                     : nothing}
                 `
               : nothing}
+            ${this.canReissueScopes ? this.renderReissueScopes() : nothing}
           </div>
         </div>
       </div>
     `;
+  }
+
+  private renderReissueScopes() {
+    return html`
+      <div class="reissue-scopes">
+        <div class="card-footer">
+          <span class="card-title">Re-issue scopes</span>
+          <span class="reissue-actions">
+            <sl-button
+              class="reissue-dry-run"
+              size="small"
+              ?disabled=${this.reissueLoading}
+              ?loading=${this.reissueLoading && !this.reissueConfirmOpen}
+              @click=${() => this.handleReissueDryRun()}
+            >
+              <sl-icon slot="prefix" name="shield-check"></sl-icon>
+              Dry Run
+            </sl-button>
+            ${this.reissueResult?.dry_run
+              ? html`
+                  <sl-button
+                    class="reissue-apply"
+                    variant="warning"
+                    size="small"
+                    ?disabled=${this.reissueLoading}
+                    @click=${() => this.openReissueConfirm()}
+                  >
+                    <sl-icon slot="prefix" name="key"></sl-icon>
+                    Apply
+                  </sl-button>
+                `
+              : nothing}
+          </span>
+        </div>
+        <div class="card-description">
+          Re-issue every agent's role scopes from its delegator's current authority, the same as
+          scion reset-auth --all --reissue-scopes. A dry run shows what would change; nothing
+          changes until you apply it.
+        </div>
+        ${this.reissueError
+          ? html`<div class="result-log result-error reissue-error">${this.reissueError}</div>`
+          : nothing}
+        ${this.reissueResult ? this.renderReissueResult(this.reissueResult) : nothing}
+      </div>
+    `;
+  }
+
+  private renderReissueResult(r: ScopeReissueAllResult) {
+    const lines = scopeReissueAgentLines(r);
+    const unresolved = r.depth_unresolved?.length ?? 0;
+    const pushFailed = r.push_failed?.length ?? 0;
+    const warnings: string[] = [];
+    if (!r.batch_audit_recorded) {
+      warnings.push(
+        `The hub could not record the batch audit entry (batch ${r.batch_op_id}); ` +
+          'the per-agent results stand.'
+      );
+    }
+    if (pushFailed > 0) {
+      warnings.push(
+        `${pushFailed} agents did not receive their new token; run reset-auth for each.`
+      );
+    }
+    const reloadUnconfirmed = reloadUnconfirmedCount(r);
+    if (reloadUnconfirmed > 0) {
+      warnings.push(
+        `${reloadUnconfirmed} agents received their new token but did not confirm the reload; ` +
+          'if one keeps failing to authenticate, restart it.'
+      );
+    }
+    return html`
+      <div class="card-meta reissue-summary">
+        <span>${scopeReissueSummary(r)}</span>
+      </div>
+      ${r.dry_run
+        ? html`
+            <div class="card-meta reissue-dry-run-note">
+              <span>Dry run: nothing was changed. Apply to make these changes.</span>
+            </div>
+          `
+        : nothing}
+      ${unresolved > 0
+        ? html`
+            <div class="card-meta reissue-unresolved">
+              <span>${unresolvedNote(unresolved)}</span>
+            </div>
+          `
+        : nothing}
+      ${lines ? html`<div class="result-log reissue-agents">${lines}</div>` : nothing}
+      ${warnings.length > 0
+        ? html`<div class="result-log result-error reissue-warnings">${warnings.join('\n')}</div>`
+        : nothing}
+    `;
+  }
+
+  private renderReissueConfirmDialog() {
+    if (!this.reissueConfirmOpen) return nothing;
+    const r = this.reissueResult;
+    return html`
+      <sl-dialog
+        class="reissue-confirm"
+        label="Apply Scope Re-issue"
+        open
+        @sl-request-close=${(e: Event) => this.closeReissueConfirm(e)}
+      >
+        <div class="dialog-body">
+          <p>Re-issue role scopes for every agent on the hub?</p>
+          ${r ? html`<p>Last dry run: ${scopeReissueSummary(r)}.</p>` : nothing}
+          <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
+            Changed agents get new tokens with their re-issued scopes. The result may differ from
+            the dry run if agents changed since.
+          </p>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          class="reissue-cancel"
+          ?disabled=${this.reissueLoading}
+          @click=${() => this.closeReissueConfirm()}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="warning"
+          class="reissue-confirm-apply"
+          ?loading=${this.reissueLoading}
+          @click=${() => this.handleReissueApply()}
+        >
+          <sl-icon slot="prefix" name="key"></sl-icon>
+          Apply
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private openReissueConfirm(): void {
+    if (this.reissueResult?.dry_run) this.reissueConfirmOpen = true;
+  }
+
+  /**
+   * Closes the apply confirmation. While a request is in flight the dialog
+   * stays open: the sl-request-close event is cancelled so it is not hidden.
+   */
+  private closeReissueConfirm(e?: Event): void {
+    if (this.reissueLoading) {
+      e?.preventDefault();
+      return;
+    }
+    this.reissueConfirmOpen = false;
+  }
+
+  /** Runs the bulk scope re-issue as a dry run and shows its result. */
+  private async handleReissueDryRun(): Promise<void> {
+    await this.runReissue(true);
+  }
+
+  /**
+   * Applies the bulk scope re-issue; reached only from the confirm dialog.
+   * A click while a request is in flight sends nothing.
+   */
+  private async handleReissueApply(): Promise<void> {
+    if (!this.reissueConfirmOpen || this.reissueLoading) return;
+    await this.runReissue(false);
+    this.reissueConfirmOpen = false;
+  }
+
+  private async runReissue(dryRun: boolean): Promise<void> {
+    this.reissueLoading = true;
+    this.reissueError = null;
+    this.reissueResult = null;
+    try {
+      const response = await apiFetch('/api/v1/admin/agents/reset-auth-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reissue_scopes: true, dry_run: dryRun }),
+        suppressAccessDeniedToast: true,
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.reissueResult = (await response.json()) as ScopeReissueAllResult;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to re-issue scopes';
+      this.reissueError = `${dryRun ? 'Dry run' : 'Apply'} failed: ${msg}`;
+    } finally {
+      this.reissueLoading = false;
+    }
   }
 
   private async handleResetAuthAll() {
@@ -1056,7 +2790,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         const errMsg = await extractApiError(response, `HTTP ${response.status}`);
         throw new Error(errMsg);
       }
-      this.resetAuthAllResult = await response.json();
+      this.resetAuthAllResult = (await response.json()) as ResetAuthAllResult;
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to reset auth for all agents');
     } finally {
@@ -1074,6 +2808,13 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
   }
 
+  /** A fresh signal for the Restart Hub wait, aborted on disconnect. */
+  private newRestartHubSignal(): AbortSignal {
+    this.restartWaitAbort?.abort();
+    this.restartWaitAbort = new AbortController();
+    return this.restartWaitAbort.signal;
+  }
+
   private async handleRestartHub(): Promise<void> {
     this.restartLoading = true;
     this.restartDialogOpen = false;
@@ -1081,92 +2822,48 @@ export class ScionPageAdminMaintenance extends LitElement {
     // Fire the restart request. The server will restart and likely drop the
     // connection before a response arrives, so we expect a network error or
     // 502 from the reverse proxy. Either outcome means the restart was
-    // initiated — not that it failed.
+    // initiated — not that it failed. Only the hub's own error envelope
+    // (for example 409 conflict while an update runs) means
+    // it refused, and then there is nothing to wait for.
     try {
-      await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
+      const res = await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
+      const refusal = res.ok ? null : await hubErrorEnvelope(res);
+      if (refusal) {
+        // apiFetch already shows the access-denied toast for a 403.
+        if (res.status !== 403) {
+          showToast(`Restart refused: ${refusal.message}`, 'warning');
+        }
+        this.restartLoading = false;
+        return;
+      }
     } catch {
       // Expected — the server went away.
     }
 
-    // Poll /healthz until the server comes back with a small uptime,
-    // confirming the process actually restarted.
-    const POLL_TIMEOUT_MS = 30_000;
-    const INITIAL_DELAY_MS = 500;
-    const MAX_INTERVAL_MS = 2000;
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-
-    await new Promise<void>((resolve) => setTimeout(resolve, INITIAL_DELAY_MS));
-
-    let interval = 1000;
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch('/healthz', { credentials: 'include' });
-        if (res.ok) {
-          const data = (await res.json()) as { uptime?: string };
-          // The uptime field is a Go duration string like "3.12s" or "1m5s".
-          // A small uptime (< 120s) confirms a fresh restart rather than
-          // a response from a server that never went down.
-          const uptimeSeconds = this.parseGoUptimeSeconds(data.uptime);
-          if (uptimeSeconds !== null) {
-            if (uptimeSeconds < 120) {
-              showToast('Server restarted successfully.', 'success');
-            } else {
-              showToast(
-                `Server responded but appears not to have restarted (uptime: ${data.uptime}).`,
-                'warning'
-              );
-            }
-            this.restartLoading = false;
-            return;
-          }
-        }
-      } catch {
-        // Server still down — keep polling.
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, interval));
-      interval = Math.min(interval * 1.5, MAX_INTERVAL_MS);
-    }
-
-    // Timed out — server did not come back within the polling window.
-    showToast('Server did not respond after restart. It may still be starting up.', 'warning', {
-      icon: 'exclamation-triangle',
-      duration: 10000,
+    // Wait for /healthz to answer with a fresh uptime, confirming the
+    // process actually restarted.
+    const result = await waitForHubRestart({
+      timeoutMs: RESTART_HUB_TIMEOUT_MS,
+      signal: this.newRestartHubSignal(),
     });
-    this.restartLoading = false;
-  }
-
-  /**
-   * Parse a Go duration string (e.g. "3s", "1m5s", "2h3m") into total seconds.
-   * Returns null if the format is unrecognized.
-   */
-  private parseGoUptimeSeconds(uptime: string | undefined): number | null {
-    if (!uptime) return null;
-    let total = 0;
-    let matched = false;
-    const re = /(\d+(?:\.\d+)?)(h|m|s|ms|µs|ns)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(uptime)) !== null) {
-      matched = true;
-      const val = parseFloat(m[1]);
-      switch (m[2]) {
-        case 'h':
-          total += val * 3600;
-          break;
-        case 'm':
-          total += val * 60;
-          break;
-        case 's':
-          total += val;
-          break;
-        case 'ms':
-          total += val / 1000;
-          break;
-        case 'µs':
-        case 'ns':
-          break; // negligible
-      }
+    if (!result.ok && result.aborted) {
+      this.restartLoading = false;
+      return;
     }
-    return matched ? total : null;
+    if (result.ok) {
+      showToast('Server restarted successfully.', 'success');
+    } else if (result.observed) {
+      showToast(
+        `Server responded but appears not to have restarted (uptime: ${result.observed.uptime ?? 'unknown'}).`,
+        'warning'
+      );
+    } else {
+      showToast('Server did not respond after restart. It may still be starting up.', 'warning', {
+        icon: 'exclamation-triangle',
+        duration: 10000,
+      });
+    }
+    this.restartLoading = false;
   }
 
   private renderMaintenanceMode() {
@@ -1181,7 +2878,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           <button
             class="toggle-track ${this.maintenanceEnabled ? 'active' : ''}"
             @click=${() => {
-              this.toggleMaintenance();
+              void this.toggleMaintenance();
             }}
             aria-label="Toggle maintenance mode"
           >
@@ -1189,11 +2886,67 @@ export class ScionPageAdminMaintenance extends LitElement {
           </button>
           <span class="toggle-label"> ${this.maintenanceEnabled ? 'Enabled' : 'Disabled'} </span>
         </div>
+        ${this.renderMaintenanceMessage()}
+        ${this.maintenanceBreakGlass
+          ? html`<p class="section-description break-glass-notice">
+              Maintenance mode is forced on by the server's startup configuration
+              (SCION_SERVER_ADMIN_MODE or <code>admin_mode</code> in settings.yaml). Turning it off
+              here is saved but has no effect until the server is restarted without that setting.
+              <code>admin_mode</code> in settings.yaml can only be cleared by editing the file.
+            </p>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  /**
+   * The message blocked users see while maintenance mode is on: shown and
+   * editable whether or not the mode is on, so it can be set in advance.
+   */
+  private renderMaintenanceMessage(): TemplateResult {
+    const draft = this.maintenanceMessageDraft;
+    const unchanged = draft === this.maintenanceMessage;
+    return html`
+      <div class="maintenance-message">
+        <sl-textarea
+          label="Message shown to blocked users"
+          rows="2"
+          resize="auto"
+          .value=${draft}
+          ?disabled=${this.maintenanceMessageSaving}
+          @sl-input=${(e: Event): void => {
+            this.maintenanceMessageDraft = (e.target as HTMLTextAreaElement).value;
+          }}
+        ></sl-textarea>
+        <div class="maintenance-message-actions">
+          <sl-button
+            size="small"
+            variant="primary"
+            class="save-maintenance-message"
+            ?disabled=${unchanged || draft.trim() === ''}
+            ?loading=${this.maintenanceMessageSaving}
+            @click=${(): void => {
+              void this.saveMaintenanceMessage(draft);
+            }}
+            >Save message</sl-button
+          >
+          <sl-button
+            size="small"
+            class="reset-maintenance-message"
+            ?disabled=${this.maintenanceMessageSaving}
+            @click=${(): void => {
+              void this.saveMaintenanceMessage('');
+            }}
+            >Use the default message</sl-button
+          >
+        </div>
       </div>
     `;
   }
 
   private renderMigrations() {
+    const completed = this.migrations.filter((m) => m.status === 'completed');
+    const active = this.migrations.filter((m) => m.status !== 'completed');
     return html`
       <div class="section">
         <h2 class="section-title">Migrations</h2>
@@ -1204,12 +2957,42 @@ export class ScionPageAdminMaintenance extends LitElement {
         ${this.migrations.length === 0
           ? html`<div class="empty-inline">No migrations registered.</div>`
           : html`
-              <div class="card-list">
-                ${this.migrations.map((m) => this.renderMigrationCard(m))}
-              </div>
+              ${active.length > 0
+                ? html`
+                    <div class="card-list">${active.map((m) => this.renderMigrationCard(m))}</div>
+                  `
+                : nothing}
+              ${this.renderCompletedMigrations(completed)}
             `}
       </div>
     `;
+  }
+
+  /**
+   * Completed migrations are grouped in one collapsible element, collapsed by
+   * default. Its open state is tracked in completedMigrationsOpen from
+   * sl-show/sl-hide and bound back, so it is kept across poll refreshes and
+   * across reloads that re-create the element.
+   */
+  private renderCompletedMigrations(completed: MaintenanceOperation[]) {
+    if (completed.length === 0) return nothing;
+    return html`
+      <sl-details
+        class="completed-migrations"
+        summary="Completed migrations (${completed.length})"
+        ?open=${this.completedMigrationsOpen}
+        @sl-show=${(e: Event) => this.onCompletedMigrationsToggle(e, true)}
+        @sl-hide=${(e: Event) => this.onCompletedMigrationsToggle(e, false)}
+      >
+        <div class="card-list">${completed.map((m) => this.renderMigrationCard(m))}</div>
+      </sl-details>
+    `;
+  }
+
+  private onCompletedMigrationsToggle(e: Event, open: boolean): void {
+    // Ignore sl-show/sl-hide bubbling up from elements inside the cards.
+    if (e.target !== e.currentTarget) return;
+    this.completedMigrationsOpen = open;
   }
 
   private renderMigrationCard(m: MaintenanceOperation) {
@@ -1263,29 +3046,58 @@ export class ScionPageAdminMaintenance extends LitElement {
     `;
   }
 
+  /** Operations hidden in release mode (they need the git checkout). */
+  private static readonly SOURCE_ONLY_OPS = new Set([
+    'rebuild-server',
+    'rebuild-web',
+    'rebuild-container-binaries',
+  ]);
+
+  /** Operations hidden in git mode. */
+  private static readonly BINARY_ONLY_OPS = new Set(['update-binary']);
+
+  /**
+   * Operations shown for the hub's effective mode from update-status. Until
+   * it loads (or when it fails), both mode-specific sets stay hidden.
+   */
+  private get visibleOperations(): MaintenanceOperationWithRun[] {
+    const mode = this.updateStatus?.mode.effective;
+    const hidden = (key: string): boolean => {
+      if (mode === 'git') return ScionPageAdminMaintenance.BINARY_ONLY_OPS.has(key);
+      if (mode === 'release') return ScionPageAdminMaintenance.SOURCE_ONLY_OPS.has(key);
+      return (
+        ScionPageAdminMaintenance.SOURCE_ONLY_OPS.has(key) ||
+        ScionPageAdminMaintenance.BINARY_ONLY_OPS.has(key)
+      );
+    };
+    // With a repository configured, Rebuild lives in the update card's
+    // Git panel.
+    const inCard = (key: string): boolean =>
+      key === 'rebuild-server' && !!this.updateStatus?.mode.repoConfigured;
+    return this.operations.filter((op) => !hidden(op.key) && !inCard(op.key));
+  }
+
   private renderOperations() {
+    const ops = this.visibleOperations;
     return html`
       <div class="section">
         <h2 class="section-title">Routine Operations</h2>
         <p class="section-description">
           Repeatable infrastructure tasks that can be run on demand.
         </p>
-        ${this.operations.length === 0
+        ${ops.length === 0
           ? html`<div class="empty-inline">No operations registered.</div>`
-          : html`
-              <div class="card-list">
-                ${this.operations.map((op) => this.renderOperationCard(op))}
-              </div>
-            `}
+          : html` <div class="card-list">${ops.map((op) => this.renderOperationCard(op))}</div> `}
       </div>
     `;
   }
 
   private renderOperationCard(op: MaintenanceOperationWithRun) {
-    const isRunning = op.lastRun?.status === 'running';
+    const isRunning = isRunInProgress(op.lastRun?.status);
     const historyExpanded = this.expandedHistory.has(op.key);
     const runs = this.runHistory.get(op.key) ?? [];
-    const isRebuild = op.key === 'rebuild-server';
+    const showCheckButton = op.key === 'rebuild-server' || op.key === 'update-binary';
+    const isDestructiveOp = op.key === 'rebuild-server' || op.key === 'update-binary';
 
     return html`
       <div class="card">
@@ -1294,7 +3106,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? html`<sl-spinner style="font-size: 1.25rem;"></sl-spinner>`
             : html`<sl-icon name="play-circle" class="pending"></sl-icon>`}
           <span class="card-title">${op.title}</span>
-          ${isRebuild
+          ${showCheckButton
             ? html`
                 <sl-button
                   size="small"
@@ -1309,12 +3121,17 @@ export class ScionPageAdminMaintenance extends LitElement {
               `
             : nothing}
           ${isRunning
-            ? html`<sl-button size="small" disabled loading>Running...</sl-button>`
+            ? html`<sl-button size="small" disabled loading
+                >${op.lastRun?.status === 'restarting' ? 'Restarting...' : 'Running...'}</sl-button
+              >`
             : html`
                 <sl-button
-                  variant="primary"
+                  variant="${isDestructiveOp ? 'warning' : 'primary'}"
                   size="small"
-                  @click=${() => this.openRunDialog(op.key, 'operation')}
+                  @click=${() =>
+                    op.key === 'update-binary'
+                      ? void this.openUpdateFromCard()
+                      : this.openRunDialog(op.key, 'operation')}
                 >
                   <sl-icon slot="prefix" name="play-circle"></sl-icon>
                   Run
@@ -1322,7 +3139,7 @@ export class ScionPageAdminMaintenance extends LitElement {
               `}
         </div>
         <div class="card-description">${op.description}</div>
-        ${isRebuild ? this.renderUpdateCheckBanner() : nothing}
+        ${showCheckButton ? this.renderUpdateCheckBanner() : nothing}
         ${op.lastRun
           ? html`
               <div class="card-meta">
@@ -1442,7 +3259,8 @@ export class ScionPageAdminMaintenance extends LitElement {
     const operation = this.operations.find((op) => op.key === this.runDialogKey);
     if (!operation) return nothing;
 
-    const isDestructive = this.runDialogKey === 'rebuild-server';
+    const isDestructive =
+      this.runDialogKey === 'rebuild-server' || this.runDialogKey === 'update-binary';
 
     return html`
       <sl-dialog label="Run Operation" open @sl-request-close=${() => this.closeRunDialog()}>
@@ -1571,6 +3389,16 @@ export class ScionPageAdminMaintenance extends LitElement {
     const r = this.updateCheckResult;
     if (!r) return nothing;
 
+    // Binary-tier result: version-based display.
+    if (r.tier === 'binary') {
+      return this.renderBinaryUpdateCheckBanner(r);
+    }
+
+    // Source-tier result: git commit-based display.
+    return this.renderSourceUpdateCheckBanner(r);
+  }
+
+  private renderSourceUpdateCheckBanner(r: SourceUpdateCheckResult) {
     const branchLabel =
       r.current_branch && r.current_branch !== 'main'
         ? html` on <code>${r.current_branch}</code>`
@@ -1603,6 +3431,50 @@ export class ScionPageAdminMaintenance extends LitElement {
               </div>
             `
           : nothing}
+      </div>
+    `;
+  }
+
+  private renderBinaryUpdateCheckBanner(r: BinaryUpdateCheckResult) {
+    if (!r.update_available) {
+      return html`
+        <div class="update-check-banner up-to-date">
+          <div class="update-check-header">
+            <sl-icon name="check-circle"></sl-icon>
+            Server is up to date (${r.current_version})
+          </div>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="update-check-banner">
+        <div class="update-check-header">
+          <sl-icon name="info-circle"></sl-icon>
+          Update available
+        </div>
+        <div class="release-info">
+          <div class="release-field">
+            <span class="release-label">Current version:</span>
+            <span>${r.current_version}</span>
+          </div>
+          <div class="release-field">
+            <span class="release-label">Latest version:</span>
+            <span>${r.latest_version}</span>
+          </div>
+          <div class="release-field">
+            <span class="release-label">Channel:</span>
+            <span>${r.channel}</span>
+          </div>
+          ${r.release_url
+            ? html`
+                <div class="release-field">
+                  <span class="release-label">Release notes:</span>
+                  ${renderReleaseNotesLink(r.release_url)}
+                </div>
+              `
+            : nothing}
+        </div>
       </div>
     `;
   }

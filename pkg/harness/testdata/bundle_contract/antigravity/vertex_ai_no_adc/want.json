@@ -1,0 +1,12 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "vertex-ai",
+    "harness": "antigravity"
+  },
+  "env": {
+    "AGY_ADC_AUTH": "true",
+    "GOOGLE_CLOUD_PROJECT": "my-gcp-project",
+    "GOOGLE_CLOUD_LOCATION": "global"
+  }
+}

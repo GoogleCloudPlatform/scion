@@ -452,7 +452,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
         case <-r.Context().Done():
             return
         case <-time.After(30 * time.Second):
-            fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+            fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
             flusher.Flush()
         }
     }

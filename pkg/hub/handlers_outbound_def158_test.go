@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -58,12 +57,10 @@ func def158BrokerSetup(t *testing.T) (
 	srv, s, project, agent, user = def138Setup(t)
 	ctx := context.Background()
 
-	// WebChatStore — also sets up ChatNotifier.
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	// WebChatStore.
+	db := openTestMemorySQLite(t, "sqlite")
 
-	wcs = NewWebChatStore(db, "sqlite3")
+	wcs = NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -82,10 +79,9 @@ func def158BrokerSetup(t *testing.T) (
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
-	// Wire the WebChatStore and ChatNotifier into the broker.
+	// Wire the WebChatStore into the broker.
 	srv.mu.RLock()
 	proxy.webChatStore = srv.webChatStore
-	proxy.chatNotifier = srv.chatNotifier
 	srv.mu.RUnlock()
 
 	// Subscribe the project so deliverToUser actually fires.
@@ -96,7 +92,7 @@ func def158BrokerSetup(t *testing.T) (
 	enableReadSwitch(t, srv)
 
 	// Create the DM conversation.
-	dmKey, err = messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
 	require.NoError(t, err)
 
 	dmConv, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
@@ -111,27 +107,6 @@ func def158BrokerSetup(t *testing.T) (
 	require.NoError(t, wcs.RecordChannel(ctx, user.ID, project.ID, agent.ID, "web", time.Now()))
 
 	return srv, s, wcs, project, agent, user, dmConv, dmKey
-}
-
-// postConvRefNoRecipient sends an outbound message with conversation_ref
-// but NO explicit recipient — the exact shape the CLI produces.
-func postConvRefNoRecipient(t *testing.T, srv *Server, projectID, agentID, msg, convRef string) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Msg:             msg,
-		ConversationRef: convRef,
-	})
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/agents/"+agentID+"/outbound-message",
-		bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
 }
 
 // readConversationHistoryAsUser calls GET /api/v1/chat/conversations/{key}/messages
@@ -226,10 +201,8 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -247,7 +220,6 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	srv.SetMessageBrokerProxy(proxy)
 	srv.mu.RLock()
 	proxy.webChatStore = srv.webChatStore
-	proxy.chatNotifier = srv.chatNotifier
 	srv.mu.RUnlock()
 	proxy.subscribeProjectUserMessages(project.ID)
 
@@ -397,54 +369,66 @@ func TestDEF158_AC4_InvalidChannel_Rejected_ConvRefPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-6: TouchDMActivity and NotifyDMReceived fire for the conv-ref direct
-// case. Behavioural assertion, not field inspection.
+// AC-6: TouchDMActivity fires for the conv-ref direct case and no DM
+// notification row is created. Behavioural assertion, not field inspection.
 // ---------------------------------------------------------------------------
 
-func TestDEF158_AC6_Notification_And_Watermark_Fire(t *testing.T) {
+func TestDEF158_AC6_Watermark_Fires_NoNotificationRow(t *testing.T) {
 	srv, s, wcs, project, agent, user, dmConv, dmKey := def158BrokerSetup(t)
 	ctx := context.Background()
 
 	// Register DM participants so TouchDMActivity has rows to update.
 	registerDMParticipants(ctx, wcs, dmKey)
 
+	// deliverToUser publishes user.<id>.message via PublishUserMessage
+	// immediately after TouchDMActivity, on the same goroutine (the
+	// InProcessEventBus subscriber dispatch goroutine). Waiting on that
+	// event is therefore a deterministic proof that the watermark write
+	// has already been attempted, regardless of dispatch scheduling delay.
+	bp := srv.GetMessageBrokerProxy()
+	require.NotNil(t, bp, "broker proxy must be wired by def158BrokerSetup")
+	cep, ok := bp.events.(*ChannelEventPublisher)
+	require.True(t, ok, "broker proxy events publisher must be a *ChannelEventPublisher in this test setup")
+	userMsgEvents, unsubscribe := cep.Subscribe("user." + user.ID + ".message")
+	defer unsubscribe()
+
 	rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID,
 		"signal test", "conv:"+dmConv.ID)
 	require.Equal(t, http.StatusOK, rr.Code,
 		"send must succeed; body: %s", rr.Body.String())
 
+	// Block for the completion signal rather than polling on a fixed
+	// budget. The timeout here is a deadlock backstop, not the
+	// synchronization mechanism.
+	select {
+	case <-userMsgEvents:
+	case <-time.After(10 * time.Second):
+		t.Fatal("AC-6: timed out waiting for user.message event — deliverToUser did not run")
+	}
+
 	// C2: prove the watermark fires — TouchDMActivity updates
 	// webchat_dm.last_message_id. Check behaviourally via ListDMs, not by
-	// field inspection of ThreadID.
-	require.Eventually(t, func() bool {
-		dms, err := wcs.ListDMs(ctx, user.ID)
-		if err != nil {
-			return false
+	// field inspection of ThreadID. The user.message event above is
+	// published strictly after TouchDMActivity in deliverToUser, so no
+	// polling is needed here.
+	dms, err := wcs.ListDMs(ctx, user.ID)
+	require.NoError(t, err)
+	found := false
+	for _, dm := range dms {
+		if dm.ConversationKey == dmKey && dm.LastMessageID != "" {
+			found = true
+			break
 		}
-		for _, dm := range dms {
-			if dm.ConversationKey == dmKey && dm.LastMessageID != "" {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 50*time.Millisecond,
+	}
+	require.True(t, found,
 		"AC-6: TouchDMActivity did not fire — no DM watermark for user+dmKey")
 
-	// C2: prove NotifyDMReceived fires — it creates a notification in the
-	// store. The goroutine needs a moment to complete.
-	require.Eventually(t, func() bool {
-		notifs, err := s.GetNotifications(ctx, "user", user.ID, false)
-		if err != nil {
-			return false
-		}
-		for _, n := range notifs {
-			if n.Status == ChatNotificationDMReceived {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 50*time.Millisecond,
-		"AC-6: NotifyDMReceived did not fire — no DM notification for recipient")
+	// Chat messages no longer create notification rows: the agent reply
+	// into the DM must leave the recipient's bell empty. The user.message
+	// event above is published after every write deliverToUser makes.
+	notifs, err := s.GetNotifications(ctx, "user", user.ID, false)
+	require.NoError(t, err)
+	require.Empty(t, notifs, "AC-6: an agent DM reply must not create a notification row")
 }
 
 // ---------------------------------------------------------------------------
@@ -519,12 +503,10 @@ func TestDEF158_AC7_OriginalValidation_StillRejects(t *testing.T) {
 //       message is absent from every read path.
 //   (2) ThreadID="" — TouchDMActivity (messagebroker.go:583) is gated on
 //       storeMsg.ThreadID != "", so no unread-dot watermark fires.
-//   (3) ThreadID="" — NotifyDMReceived (messagebroker.go:606) is gated on
-//       storeMsg.ThreadID != "", so no notification fires.
 // There is no single suppression point; the lived experience is "invisible."
 //
 // Correct behaviour: Channel and ThreadID should be populated so the message
-// is visible in history, generates a watermark, and produces a notification —
+// is visible in history and generates a watermark —
 // the same shape sendAgentRouted writes for user→agent DMs
 // (handlers_chat_v2.go:1059).
 //
@@ -554,10 +536,8 @@ func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	proxy.subscribeProjectUserMessages(project.ID)
 
 	// WebChatStore for affinity lookups — but do NOT seed any affinity.
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

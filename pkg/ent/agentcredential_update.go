@@ -70,6 +70,26 @@ func (_u *AgentCredentialUpdate) SetNillableTokenJtiHash(v *string) *AgentCreden
 	return _u
 }
 
+// SetRunID sets the "run_id" field.
+func (_u *AgentCredentialUpdate) SetRunID(v string) *AgentCredentialUpdate {
+	_u.mutation.SetRunID(v)
+	return _u
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_u *AgentCredentialUpdate) SetNillableRunID(v *string) *AgentCredentialUpdate {
+	if v != nil {
+		_u.SetRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (_u *AgentCredentialUpdate) ClearRunID() *AgentCredentialUpdate {
+	_u.mutation.ClearRunID()
+	return _u
+}
+
 // SetExpiresAt sets the "expires_at" field.
 func (_u *AgentCredentialUpdate) SetExpiresAt(v time.Time) *AgentCredentialUpdate {
 	_u.mutation.SetExpiresAt(v)
@@ -237,6 +257,12 @@ func (_u *AgentCredentialUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if value, ok := _u.mutation.TokenJtiHash(); ok {
 		_spec.SetField(agentcredential.FieldTokenJtiHash, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.RunID(); ok {
+		_spec.SetField(agentcredential.FieldRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunIDCleared() {
+		_spec.ClearField(agentcredential.FieldRunID, field.TypeString)
+	}
 	if value, ok := _u.mutation.ExpiresAt(); ok {
 		_spec.SetField(agentcredential.FieldExpiresAt, field.TypeTime, value)
 	}
@@ -323,6 +349,26 @@ func (_u *AgentCredentialUpdateOne) SetNillableTokenJtiHash(v *string) *AgentCre
 	if v != nil {
 		_u.SetTokenJtiHash(*v)
 	}
+	return _u
+}
+
+// SetRunID sets the "run_id" field.
+func (_u *AgentCredentialUpdateOne) SetRunID(v string) *AgentCredentialUpdateOne {
+	_u.mutation.SetRunID(v)
+	return _u
+}
+
+// SetNillableRunID sets the "run_id" field if the given value is not nil.
+func (_u *AgentCredentialUpdateOne) SetNillableRunID(v *string) *AgentCredentialUpdateOne {
+	if v != nil {
+		_u.SetRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (_u *AgentCredentialUpdateOne) ClearRunID() *AgentCredentialUpdateOne {
+	_u.mutation.ClearRunID()
 	return _u
 }
 
@@ -522,6 +568,12 @@ func (_u *AgentCredentialUpdateOne) sqlSave(ctx context.Context) (_node *AgentCr
 	}
 	if value, ok := _u.mutation.TokenJtiHash(); ok {
 		_spec.SetField(agentcredential.FieldTokenJtiHash, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RunID(); ok {
+		_spec.SetField(agentcredential.FieldRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunIDCleared() {
+		_spec.ClearField(agentcredential.FieldRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.ExpiresAt(); ok {
 		_spec.SetField(agentcredential.FieldExpiresAt, field.TypeTime, value)

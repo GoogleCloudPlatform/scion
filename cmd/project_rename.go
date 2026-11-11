@@ -54,7 +54,7 @@ Requires Hub connectivity.`,
 
 		newSlug := api.Slugify(newName)
 		if newSlug == "" {
-			return fmt.Errorf("invalid new name: must contain at least one alphanumeric character")
+			return newUsageError("invalid new name: must contain at least one alphanumeric character")
 		}
 
 		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
@@ -67,7 +67,7 @@ Requires Hub connectivity.`,
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		client, err := getHubClient(settings)
+		client, uat, err := getHubClientUAT(settings)
 		if err != nil {
 			return err
 		}
@@ -75,7 +75,7 @@ Requires Hub connectivity.`,
 		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
-		project, err := resolveProjectByNameOrID(ctx, client, projectRef)
+		project, err := resolveProjectByNameOrID(ctx, client, projectRef, uat)
 		if err != nil {
 			return fmt.Errorf("failed to find project: %w", err)
 		}

@@ -18,6 +18,7 @@ func TestVersionCommand(t *testing.T) {
 }
 
 func TestVersionCommandExecution(t *testing.T) {
+	resetRootCmdState(t)
 	// Capture output
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)

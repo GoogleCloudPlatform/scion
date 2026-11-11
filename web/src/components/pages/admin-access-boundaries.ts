@@ -29,7 +29,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
 import {
   list,
   resetAllSequences,
@@ -49,6 +48,9 @@ import type {
   PageToken,
 } from '../../shared/access-boundaries.js';
 import { canAccessBoundary } from '../../shared/access-boundaries.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstant, formatRelative, zoneLabel } from '../../utils/time.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -73,6 +75,9 @@ interface SortConfig {
 
 @customElement('scion-page-admin-access-boundaries')
 export class ScionPageAdminAccessBoundaries extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   // --- Data state ---
   @state() private loading = true;
   @state() private items: AccessBoundarySummary[] = [];
@@ -856,9 +861,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     if (this.filterRisk) params.set('risk', this.filterRisk);
     if (this.currentPageToken) params.set('pageToken', this.currentPageToken);
 
-    const qs = params.toString();
-    const newUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
-    window.history.replaceState({}, '', newUrl);
+    replaceSearch(params);
   }
 
   // ---------------------------------------------------------------------------
@@ -1069,27 +1072,6 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   // Display helpers
   // ---------------------------------------------------------------------------
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) return rtf.format(-diffSeconds, 'second');
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
-  }
-
   private statusLabel(status: AccessBoundaryStatus): string {
     switch (status) {
       case 'active':
@@ -1214,26 +1196,14 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     if (!schedule) return 'Always';
     const { notBefore, expiresAt } = schedule;
     if (!notBefore && !expiresAt) return 'Always';
+    const from = notBefore ? formatInstant(notBefore, 'datetime-full') : '';
+    const until = expiresAt ? formatInstant(expiresAt, 'datetime-full') : '';
     const parts: string[] = [];
-    if (notBefore) {
-      try {
-        parts.push(
-          `From ${new Date(notBefore).toLocaleDateString('en', { month: 'short', day: 'numeric' })}`
-        );
-      } catch {
-        parts.push(`From ${notBefore}`);
-      }
-    }
-    if (expiresAt) {
-      try {
-        parts.push(
-          `Until ${new Date(expiresAt).toLocaleDateString('en', { month: 'short', day: 'numeric' })}`
-        );
-      } catch {
-        parts.push(`Until ${expiresAt}`);
-      }
-    }
-    return parts.join(' ');
+    if (notBefore) parts.push(`From ${from || notBefore}`);
+    if (expiresAt) parts.push(`Until ${until || expiresAt}`);
+    // One zone label for both bounds, and only when at least one of them was
+    // actually converted (an unparsable raw value is not in any zone).
+    return from || until ? `${parts.join(' ')} (${zoneLabel()})` : parts.join(' ');
   }
 
   private get canCreate(): boolean {
@@ -1657,7 +1627,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
         </td>
         <td class="hide-tablet">${this.renderAffectedCount(item)}</td>
         <td>
-          <span class="meta-text">${this.formatRelativeTime(item.updatedAt)}</span>
+          <span class="meta-text">${formatRelative(item.updatedAt)}</span>
         </td>
       </tr>
     `;
@@ -1748,7 +1718,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
                 </div>
                 <div>
                   <div class="mobile-card-label">Updated</div>
-                  <span class="meta-text">${this.formatRelativeTime(item.updatedAt)}</span>
+                  <span class="meta-text">${formatRelative(item.updatedAt)}</span>
                 </div>
               </div>
               ${item.risk?.length

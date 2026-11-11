@@ -46,14 +46,6 @@
 # that the hub completes AutoMigrate through it are three separate claims and
 # all three are unrun.
 
-# STILL REQUIRED, AND THE REASON HAS CHANGED. The postgres driver alone makes
-# the hub's isHADeployment test true, so the hosted HA preflight runs. This
-# phase lands one of its unlandable gates - server.database.url, which is now
-# rendered - but the ingress/IAP gates remain, so the preflight would still
-# abort. The flag comes out when ingress/IAP lands, not when this file was
-# written.
-acknowledgeHAUnlanded: true
-
 hub:
   hubId: ci-cloudsql
   name: CI Cloud SQL Hub
@@ -90,6 +82,21 @@ storage:
   provider: gcs
   bucket: ci-cloudsql-hub-blobs
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   mode: proxy
   sessionSecret: ci-cloudsql-session-secret-not-real
+  # PROBE VALUES, not real resources. An HA shape under auth.mode proxy, so the
+  # preflight requires all of these. The Cloud Run audience form, so both shapes
+  # the hub accepts are covered by an HA fixture.
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-ci-cloudsql
+  transport:
+    mode: iap
+    oidcAudience: probe-ci-cloudsql-oauth-client.apps.googleusercontent.com
+    platformAuthSa: probe-ci-cloudsql@probe-project.iam.gserviceaccount.com

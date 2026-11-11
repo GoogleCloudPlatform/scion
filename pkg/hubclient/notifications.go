@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"net/url"
 	"time"
 
@@ -58,36 +57,23 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`
 	Acknowledged   bool      `json:"acknowledged"`
 	CreatedAt      time.Time `json:"createdAt"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (n *Notification) UnmarshalJSON(data []byte) error {
-	type Alias Notification
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(n),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if n.ProjectID == "" && aux.GroveID != "" {
-		n.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (n Notification) MarshalJSON() ([]byte, error) {
-	type Alias Notification
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(n),
-		GroveID: n.ProjectID,
-	})
+	// DispatchAttempts counts delivery attempts to a subscriber agent (0 for
+	// rows stored before attempts were recorded).
+	DispatchAttempts int `json:"dispatchAttempts"`
+	// DispatchOutcome is "delivered", "failed", or empty when no outcome is
+	// recorded.
+	DispatchOutcome string `json:"dispatchOutcome"`
+	// Kind says what produced the notification (for example
+	// "artifact_grant"), or is empty when it is not classified.
+	Kind string `json:"kind,omitempty"`
+	// ResourceType and ResourceID name the thing the notification is about
+	// (for example "artifact" and an artifact id), or are empty.
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	// Excerpt is text another principal wrote (for a review summary, the
+	// start of the reviewer's summary note), kept apart from Message.
+	// Show it as plain text only.
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 // List returns notifications for the current user.
@@ -163,36 +149,6 @@ type CreateSubscriptionRequest struct {
 	TriggerActivities []string `json:"triggerActivities"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateSubscriptionRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateSubscriptionRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateSubscriptionRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateSubscriptionRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // UpdateSubscriptionRequest is the request body for updating a subscription.
 type UpdateSubscriptionRequest struct {
 	TriggerActivities []string `json:"triggerActivities"`
@@ -218,43 +174,13 @@ type Subscription struct {
 	CreatedBy         string    `json:"createdBy"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (s *Subscription) UnmarshalJSON(data []byte) error {
-	type Alias Subscription
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.ProjectID == "" && aux.GroveID != "" {
-		s.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (s Subscription) MarshalJSON() ([]byte, error) {
-	type Alias Subscription
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(s),
-		GroveID: s.ProjectID,
-	})
-}
-
 // Create creates a new notification subscription.
 func (s *subscriptionService) Create(ctx context.Context, req *CreateSubscriptionRequest) (*Subscription, error) {
 	resp, err := s.c.post(ctx, "/api/v1/notifications/subscriptions", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Subscription](resp)
+	return apiclient.DecodeRequired[Subscription](resp)
 }
 
 // List returns subscriptions for the current user.
@@ -263,7 +189,6 @@ func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsO
 	if opts != nil {
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.AgentID != "" {
 			query.Set("agentId", opts.AgentID)
@@ -293,7 +218,7 @@ func (s *subscriptionService) Update(ctx context.Context, id string, req *Update
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Subscription](resp)
+	return apiclient.DecodeRequired[Subscription](resp)
 }
 
 // Delete removes a subscription by ID.
@@ -346,36 +271,6 @@ type CreateSubscriptionTemplateRequest struct {
 	ProjectID         string   `json:"projectId"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateSubscriptionTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateSubscriptionTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateSubscriptionTemplateRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateSubscriptionTemplateRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
 // SubscriptionTemplate represents a subscription template from the Hub API.
 type SubscriptionTemplate struct {
 	ID                string   `json:"id"`
@@ -386,43 +281,13 @@ type SubscriptionTemplate struct {
 	CreatedBy         string   `json:"createdBy"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (t *SubscriptionTemplate) UnmarshalJSON(data []byte) error {
-	type Alias SubscriptionTemplate
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(t),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if t.ProjectID == "" && aux.GroveID != "" {
-		t.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (t SubscriptionTemplate) MarshalJSON() ([]byte, error) {
-	type Alias SubscriptionTemplate
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(t),
-		GroveID: t.ProjectID,
-	})
-}
-
 // Create creates a new subscription template.
 func (s *subscriptionTemplateService) Create(ctx context.Context, req *CreateSubscriptionTemplateRequest) (*SubscriptionTemplate, error) {
 	resp, err := s.c.post(ctx, "/api/v1/notifications/templates", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SubscriptionTemplate](resp)
+	return apiclient.DecodeRequired[SubscriptionTemplate](resp)
 }
 
 // List returns subscription templates, optionally filtered by project.
@@ -430,7 +295,6 @@ func (s *subscriptionTemplateService) List(ctx context.Context, projectID string
 	query := url.Values{}
 	if projectID != "" {
 		query.Set("projectId", projectID)
-		query.Set("groveId", projectID)
 	}
 	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications/templates", query, nil)
 	if err != nil {
@@ -464,7 +328,7 @@ func (s *subscriptionService) BulkDelete(ctx context.Context, ids []string) (int
 	if err != nil {
 		return 0, err
 	}
-	result, err := apiclient.DecodeResponse[struct {
+	result, err := apiclient.DecodeRequired[struct {
 		Deleted int `json:"deleted"`
 	}](resp)
 	if err != nil {

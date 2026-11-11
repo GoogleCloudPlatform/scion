@@ -35,11 +35,11 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -47,11 +47,6 @@ const (
 	defaultDBPath        = "telegram_v2.db"
 	askUserExpiry        = 30 * time.Minute
 )
-
-// legacyProjectsRoot is the base path for legacy download directories
-// when no downloads_path override or shared-dir config is available.
-// Extracted as a var to allow tests to redirect to a temp directory.
-var legacyProjectsRoot = "/home/scion/.scion/projects"
 
 // TelegramBrokerV2 implements plugin.MessageBrokerPluginInterface with
 // dynamic group-link routing, inline keyboard support, and persistent
@@ -73,16 +68,33 @@ type TelegramBrokerV2 struct {
 
 	store Store
 
-	commands     *CommandHandler
-	callbacks    *CallbackHandler
-	registration *RegistrationHandler
-	hubClient    HubClient
+	// gen counts the handlers that may still use the store and send queue
+	// of the current configuration. A reconfigure closes the previous
+	// store and send queue once the previous generation's handlers finish.
+	gen *configGen
+	// retiring tracks the goroutines that shut down resources of earlier
+	// configurations.
+	retiring sync.WaitGroup
+	// lastRetired is closed when the most recent retirement has finished.
+	// Each retirement waits for the one before it, so a configuration's
+	// resources outlive the handlers of every older configuration.
+	lastRetired chan struct{}
+
+	hubClient HubClient
 
 	subs map[string]bool
 
+	// pollCancel stops the running poll loop; nil when none runs. pollDone
+	// is closed when the most recent poll loop has exited. It is kept after
+	// that loop is stopped: the next loop waits for it before polling, so
+	// two loops never run at once.
 	pollCancel context.CancelFunc
 	pollDone   chan struct{}
-	lastOffset int64
+	// lastOffsets maps a bot ID to the last update ID handled for that bot.
+	// Update IDs are per bot, so each bot resumes from its own offset. Only
+	// the running poll loop reads or writes it; loops never overlap, and
+	// each starts after the previous one has exited.
+	lastOffsets map[int64]int64
 
 	sentIDs   map[string]time.Time
 	sentIDsMu sync.Mutex
@@ -91,11 +103,23 @@ type TelegramBrokerV2 struct {
 
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID → slug
-	downloadsPath  string            // override for file download directory; empty = default
 
 	// Webhook mode fields.
 	inboundMode   string // "poll" (default) or "webhook"
 	webhookServer *WebhookServer
+	// webhookURL and webhookSecret are the webhook settings of the current
+	// configuration. RegisterWebhook registers them.
+	webhookURL    string
+	webhookSecret string
+	// webhookRegistered is set while this instance holds the webhook
+	// registration made by RegisterWebhook (standalone HA lock holder), so
+	// a reconfigure registers the new webhook settings too.
+	webhookRegistered bool
+	// webhookMu serialises Configure, RegisterWebhook and DeregisterWebhook,
+	// so the registration always carries the current webhook settings. It
+	// is taken before b.mu, and RegisterWebhook makes its network call
+	// without holding b.mu.
+	webhookMu sync.Mutex
 
 	InboundHandler func(topic string, msg *messages.StructuredMessage)
 
@@ -104,7 +128,175 @@ type TelegramBrokerV2 struct {
 	errorCooldown           map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
 	errorCooldownMu         sync.Mutex
 	errorCooldownCheckCount int
+
+	// userProjects caches, per linked-user principal, the project IDs that
+	// user can read (or that the list failed). Used to scope notification
+	// DMs. userProjectsGroup makes concurrent misses for one user share a
+	// single hub call.
+	userProjects      map[string]userProjectsEntry
+	userProjectsMu    sync.Mutex
+	userProjectsGroup singleflight.Group
 }
+
+// configGen is one successful configuration. Handlers hold the generation
+// that was current when they started until they finish, and use its API
+// client and component handlers throughout, so a reconfigure does not
+// switch a running handler to another client or bot.
+//
+// The fields below active are set under b.mu before b.mu is released by
+// the Configure that created the generation, and are not changed after.
+// Some are set after the poll loop or webhook server has started, so
+// handlers must obtain g under b.mu, through acquireGen, acquireGenLocked
+// or acquireGenIfCurrent, and may then read these fields without b.mu. The
+// poll loop receives g from startPolling under b.mu and reads only api and
+// botID before it acquires g.
+type configGen struct {
+	active sync.WaitGroup
+
+	api          *TelegramAPIClient
+	botID        int64
+	commands     *CommandHandler
+	callbacks    *CallbackHandler
+	registration *RegistrationHandler
+}
+
+// acquireGen registers a handler with the current configuration and returns
+// it (nil when the broker is not configured) and the function that releases
+// it. Callers must not hold b.mu.
+func (b *TelegramBrokerV2) acquireGen() (g *configGen, release func()) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.acquireGenLocked()
+}
+
+// acquireGenLocked is acquireGen for callers that hold b.mu.
+func (b *TelegramBrokerV2) acquireGenLocked() (g *configGen, release func()) {
+	g = b.gen
+	if g == nil {
+		return nil, func() {}
+	}
+	g.active.Add(1)
+	return g, g.active.Done
+}
+
+// acquireGenIfCurrent registers a handler with g if g is still the current
+// configuration and reports whether it did. A generation that a reconfigure
+// has replaced is not acquired: its retirement may already be waiting for
+// its handlers to finish.
+func (b *TelegramBrokerV2) acquireGenIfCurrent(g *configGen) (release func(), ok bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if g == nil || b.gen != g {
+		return nil, false
+	}
+	g.active.Add(1)
+	return g.active.Done, true
+}
+
+// retiredConfig holds the resources a reconfigure replaced. Nil fields are
+// skipped.
+type retiredConfig struct {
+	webhookServer *WebhookServer
+	gen           *configGen
+	sendQueue     *SendQueue
+	store         Store
+	// pollDone is closed when the poll loop a switch to webhook mode
+	// stopped has exited. Configure waits for it after releasing b.mu.
+	pollDone <-chan struct{}
+	// prev is closed when the previous retirement has finished; done is
+	// closed when this one has.
+	prev <-chan struct{}
+	done chan struct{}
+}
+
+// handlerWaitWarnAfter is how long a wait for running handlers lasts before
+// it logs a warning (and again each time this period passes). Tests shorten it.
+var handlerWaitWarnAfter = 30 * time.Second
+
+// waitForHandlers waits for the handlers counted in g to finish, logging a
+// warning while they take longer than handlerWaitWarnAfter. It does not give
+// up: closing the store or send queue under a running handler is the failure
+// this wait exists to prevent. Handlers are bounded by their HTTP client and
+// context timeouts.
+func waitForHandlers(g *configGen, log *slog.Logger, what string) {
+	finished := make(chan struct{})
+	go func() {
+		g.active.Wait()
+		close(finished)
+	}()
+	start := time.Now()
+	for {
+		select {
+		case <-finished:
+			return
+		case <-time.After(handlerWaitWarnAfter):
+			log.Warn("Still waiting for running handlers before closing "+what,
+				"waited", time.Since(start).Round(time.Second))
+		}
+	}
+}
+
+// shutdown stops the replaced webhook server, waits for the previous
+// retirement and for the handlers of the replaced configuration to finish,
+// then closes its send queue (messages still queued are sent first) and its
+// store.
+//
+// Handlers keep their configuration's API client and component handlers.
+// The component handlers (command, callback and registration) hold the store
+// that was current when they were created, so waiting for this
+// configuration's handlers keeps this store open until they have finished.
+// The broker's own handler code reads the broker's current store at each
+// use, so a handler of an older configuration may also be using this store;
+// waiting for the previous retirement, which itself waited for the older
+// handlers, keeps it open until those handlers have finished too.
+func (r *retiredConfig) shutdown(log *slog.Logger) {
+	if r.done != nil {
+		defer close(r.done)
+	}
+	if r.webhookServer != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := r.webhookServer.Stop(stopCtx); err != nil {
+			log.Warn("Failed to stop the previous webhook server", "error", err)
+		}
+		stopCancel()
+	}
+	if r.prev != nil {
+		<-r.prev
+	}
+	if r.gen != nil {
+		waitForHandlers(r.gen, log, "the previous store and send queue")
+	}
+	if r.sendQueue != nil {
+		r.sendQueue.Close()
+	}
+	if r.store != nil {
+		if err := r.store.Close(); err != nil {
+			log.Warn("Failed to close the previous store", "error", err)
+		}
+	}
+}
+
+type userProjectsEntry struct {
+	ids       map[string]bool
+	failed    bool
+	fetchedAt time.Time
+}
+
+// ttl returns how long the entry is reused.
+func (e userProjectsEntry) ttl() time.Duration {
+	if e.failed {
+		return userProjectsFailureTTL
+	}
+	return userProjectsCacheTTL
+}
+
+// userProjectsCacheTTL bounds how long a user's readable-project set is
+// reused for notification DMs.
+const userProjectsCacheTTL = time.Minute
+
+// userProjectsFailureTTL bounds how long a failed project list is
+// remembered; notification DMs for that user are not sent meanwhile.
+const userProjectsFailureTTL = time.Minute
 
 // NewV2 creates a new TelegramBrokerV2 with the given logger.
 func NewV2(log *slog.Logger) *TelegramBrokerV2 {
@@ -131,9 +323,190 @@ func (b *TelegramBrokerV2) SetHostCallbacks(hc plugin.HostCallbacks) {
 }
 
 // Configure sets up the v2 Telegram broker from the provided config map.
+//
+// The whole config is validated before any Telegram API call, so a
+// misconfigured plugin fails fast. Every error return happens before the
+// broker is changed, so a failed reconfigure leaves the running store, API
+// client, settings and webhook server in place.
+//
+// A successful reconfigure shuts down the resources it replaced (store, send
+// queue, webhook server) in the background, after the handlers that started
+// under the previous configuration have finished.
+//
+// Configure returns an error once the broker is closed.
 func (b *TelegramBrokerV2) Configure(config map[string]string) error {
+	b.webhookMu.Lock()
+	defer b.webhookMu.Unlock()
+
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	retired, err := b.configureLocked(config)
+	if retired != nil {
+		b.retiring.Add(1)
+	}
+	b.mu.Unlock()
+
+	// The poll loop's handlers take b.mu, so wait for it only now.
+	if retired != nil && retired.pollDone != nil {
+		<-retired.pollDone
+	}
+	if retired != nil {
+		// Read the logger here: the goroutine outlives Configure and must
+		// not read mutable broker fields.
+		log := b.log
+		go func() {
+			defer b.retiring.Done()
+			retired.shutdown(log)
+		}()
+	}
+	return err
+}
+
+// configureLocked applies config with b.mu held. On success it returns the
+// resources of the previous configuration for the caller to shut down.
+func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredConfig, error) {
+	// Close has shut down (or is shutting down) the current resources; a
+	// configuration committed now would retire them a second time and
+	// leave its own resources open.
+	if b.closed {
+		return nil, fmt.Errorf("telegram v2 broker is closed")
+	}
+
+	botToken := config["bot_token"]
+	if botToken == "" {
+		return nil, fmt.Errorf("bot_token is required")
+	}
+
+	// Parse optional agent cache TTL.
+	agentCacheTTL := b.agentCacheTTL
+	if v, ok := config["agent_cache_ttl"]; ok && v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid agent_cache_ttl: %w", err)
+		}
+		if d < 0 {
+			b.log.Warn("agent_cache_ttl is negative; using the default",
+				"agent_cache_ttl", d, "default", defaultAgentCacheTTL)
+			d = defaultAgentCacheTTL
+		}
+		if d > maxAgentCacheTTL {
+			b.log.Warn("agent_cache_ttl is longer than the agent-cache retention allows; clamping",
+				"agent_cache_ttl", d, "max", maxAgentCacheTTL)
+			d = maxAgentCacheTTL
+		}
+		agentCacheTTL = d
+	}
+
+	// Parse inbound mode: "poll" (default) or "webhook".
+	inboundMode := "poll"
+	if v, ok := config["inbound_mode"]; ok && v != "" {
+		switch v {
+		case "poll", "webhook":
+			inboundMode = v
+		default:
+			return nil, fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
+		}
+	}
+
+	webhookURL := config["webhook_url"]
+	webhookSecret := config["webhook_secret"]
+	if inboundMode == "webhook" {
+		if webhookURL == "" {
+			return nil, fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
+		}
+		// The webhook listener verifies every inbound request against this
+		// secret, so it is required in webhook mode, including standalone HA
+		// mode (skip_set_webhook=true).
+		if webhookSecret == "" {
+			return nil, fmt.Errorf("webhook_secret is required when inbound_mode is \"webhook\"")
+		}
+	}
+
+	// Open the store and check the bot token with a new API client. Neither
+	// replaces the running ones until the Telegram calls below succeed.
+	api := NewAPIClient(botToken, config["api_base_url"])
+
+	// Initialize store: Postgres if database_url is set, otherwise SQLite.
+	var store Store
+	if databaseURL, ok := config["database_url"]; ok && databaseURL != "" {
+		s, err := NewPostgresStore(databaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("init postgres store: %w", err)
+		}
+		store = s
+	} else {
+		dbPath := config["db_path"]
+		if dbPath == "" {
+			dbPath = defaultDBPath
+		}
+		s, err := openSQLiteStore(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("init store: %w", err)
+		}
+		store = s
+	}
+
+	// Validate bot token.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bot, err := api.GetMe(ctx)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("failed to validate bot token: %w", err)
+	}
+
+	// Bind a new webhook listener before setWebhook and before changing the
+	// broker, so an unavailable address fails with nothing changed. When the
+	// running server already listens on the configured address (Configure is
+	// called twice: first with plugin config, then with hub credentials), it
+	// keeps serving and only its secret is updated below.
+	var newWebhookServer *WebhookServer
+	if inboundMode == "webhook" {
+		webhookListen := config["webhook_listen"]
+		if webhookListen == "" {
+			webhookListen = ":9094"
+		}
+		if b.webhookServer == nil || b.webhookServer.listenAddr != webhookListen {
+			newWebhookServer = NewWebhookServer(webhookListen, webhookSecret, b.handleWebhookUpdate, b.log)
+			if _, err := newWebhookServer.Listen(); err != nil {
+				store.Close()
+				return nil, fmt.Errorf("failed to start webhook server: %w", err)
+			}
+		}
+	}
+
+	// In standalone HA mode, skip_set_webhook=true means this instance
+	// should start the HTTP listener but NOT call setWebhook. Only the
+	// lock holder calls RegisterWebhook() separately; once it has, a
+	// reconfigure registers the new webhook settings here.
+	if inboundMode == "webhook" && (config["skip_set_webhook"] != "true" || b.webhookRegistered) {
+		if err := api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
+			if newWebhookServer != nil {
+				_ = newWebhookServer.Stop(ctx)
+			}
+			store.Close()
+			return nil, fmt.Errorf("failed to set webhook: %w", err)
+		}
+	}
+
+	// Leaving webhook mode: remove the webhook registration, or getUpdates
+	// fails with a conflict and polling cannot start.
+	//
+	// For the same bot (also when its credential was rotated, which revokes
+	// the old one), delete through the new client; a failure fails the
+	// reconfigure. When the new configuration uses a different bot, the
+	// old bot's webhook does not block this bot's polling, so remove it
+	// through the old client on a best-effort basis.
+	if inboundMode != "webhook" && b.inboundMode == "webhook" {
+		if b.botInfo != nil && b.botInfo.ID != bot.ID {
+			if err := b.api.DeleteWebhook(ctx); err != nil {
+				b.log.Warn("Failed to delete the previous bot's webhook", "error", err)
+			}
+		} else if err := api.DeleteWebhook(ctx); err != nil {
+			store.Close()
+			return nil, fmt.Errorf("failed to delete webhook: %w", err)
+		}
+	}
 
 	if v, ok := config["hub_url"]; ok {
 		b.hubURL = v
@@ -148,13 +521,25 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		b.pluginName = v
 	}
 
-	botToken, ok := config["bot_token"]
-	if !ok || botToken == "" {
-		return fmt.Errorf("bot_token is required")
+	// Commit. The previous store, send queue and generation are retired;
+	// the webhook server is added below if it is replaced or no longer used.
+	retired := &retiredConfig{
+		gen: b.gen, sendQueue: b.sendQueue, store: b.store,
+		prev: b.lastRetired, done: make(chan struct{}),
 	}
+	b.lastRetired = retired.done
+	b.gen = &configGen{api: api, botID: bot.ID}
 
-	baseURL := config["api_base_url"]
-	b.api = NewAPIClient(botToken, baseURL)
+	b.api = api
+	b.store = store
+	b.botInfo = bot
+	b.agentCacheTTL = agentCacheTTL
+	b.inboundMode = inboundMode
+	b.webhookURL = webhookURL
+	b.webhookSecret = webhookSecret
+	if inboundMode != "webhook" {
+		b.webhookRegistered = false
+	}
 
 	// Initialize send queue with rate limiting.
 	sqSize := 0
@@ -171,49 +556,11 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 	b.sendQueue = NewSendQueue(b.api, b.log, sqSize, sqDelay)
 
-	// Parse optional agent cache TTL.
-	if v, ok := config["agent_cache_ttl"]; ok && v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid agent_cache_ttl: %w", err)
-		}
-		b.agentCacheTTL = d
-	}
-
-	// Parse optional downloads directory override.
+	// downloads_path is retired: inbound attachments go through the hub.
 	if v, ok := config["downloads_path"]; ok && v != "" {
-		b.downloadsPath = v
+		b.log.Warn("The downloads_path setting is no longer supported and is ignored; " +
+			"inbound attachments are delivered through the hub. Remove it from the plugin configuration.")
 	}
-
-	// Initialize store: Postgres if database_url is set, otherwise SQLite.
-	if databaseURL, ok := config["database_url"]; ok && databaseURL != "" {
-		store, err := NewPostgresStore(databaseURL)
-		if err != nil {
-			return fmt.Errorf("init postgres store: %w", err)
-		}
-		b.store = store
-	} else {
-		dbPath := config["db_path"]
-		if dbPath == "" {
-			dbPath = defaultDBPath
-		}
-		store, err := NewSQLiteStore(dbPath)
-		if err != nil {
-			return fmt.Errorf("init store: %w", err)
-		}
-		b.store = store
-	}
-
-	// Validate bot token.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	bot, err := b.api.GetMe(ctx)
-	if err != nil {
-		b.store.Close()
-		return fmt.Errorf("failed to validate bot token: %w", err)
-	}
-	b.botInfo = bot
 
 	if !bot.CanReadAllGroupMessages {
 		b.log.Warn("Bot has privacy mode enabled (can_read_all_group_messages=false). " +
@@ -224,96 +571,66 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 
 	b.registerBotCommands(ctx)
 
-	// Parse inbound mode: "poll" (default) or "webhook".
-	b.inboundMode = "poll"
-	if v, ok := config["inbound_mode"]; ok && v != "" {
-		switch v {
-		case "poll", "webhook":
-			b.inboundMode = v
-		default:
-			b.store.Close()
-			return fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
+	// Switch the webhook server: serve the listener bound above in place of
+	// the old server, or keep the running server with the new credential. In
+	// poll mode a running webhook server is no longer used. A replaced
+	// server is stopped after b.mu is released.
+	if inboundMode == "webhook" {
+		if newWebhookServer != nil {
+			retired.webhookServer = b.webhookServer
+			// Listen succeeded above, so Serve cannot fail here.
+			if err := newWebhookServer.Serve(); err != nil {
+				b.log.Error("Failed to serve webhook listener", "error", err)
+			}
+			b.webhookServer = newWebhookServer
+		} else {
+			b.webhookServer.SetSecretToken(webhookSecret)
 		}
+	} else if b.webhookServer != nil {
+		retired.webhookServer = b.webhookServer
+		b.webhookServer = nil
 	}
 
-	// Set up webhook if configured.
-	if b.inboundMode == "webhook" {
-		webhookURL, ok := config["webhook_url"]
-		if !ok || webhookURL == "" {
-			b.store.Close()
-			return fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
-		}
-
-		webhookListen := config["webhook_listen"]
-		if webhookListen == "" {
-			webhookListen = ":9094"
-		}
-
-		webhookSecret := config["webhook_secret"]
-
-		// In standalone HA mode, skip_set_webhook=true means this instance
-		// should start the HTTP listener but NOT call setWebhook. Only the
-		// lock holder calls RegisterWebhook() separately.
-		skipSetWebhook := config["skip_set_webhook"] == "true"
-		if !skipSetWebhook {
-			if err := b.api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
-				b.store.Close()
-				return fmt.Errorf("failed to set webhook: %w", err)
-			}
-		}
-
-		// Stop any existing webhook server before starting a new one.
-		// Configure() is called twice (first with plugin config, then with hub
-		// credentials). The second call must not fail on port-already-bound.
-		if b.webhookServer != nil {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = b.webhookServer.Stop(stopCtx)
-			stopCancel()
-			b.webhookServer = nil
-		}
-
-		// Create and start the webhook server.
-		b.webhookServer = NewWebhookServer(webhookListen, webhookSecret, func(update Update) {
-			if update.CallbackQuery != nil {
-				cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cbCancel()
-				b.handleCallbackQuery(cbCtx, update.CallbackQuery)
-			}
-			if update.Message != nil {
-				b.handleIncomingMessageV2(update.Message)
-			}
-		}, b.log)
-
-		if _, err := b.webhookServer.Start(); err != nil {
-			b.store.Close()
-			return fmt.Errorf("failed to start webhook server: %w", err)
-		}
+	// Switch inbound delivery: stop the running poll loop, which polls with
+	// the previous client. Webhook mode waits for it to exit (Configure
+	// does so after releasing b.mu). Poll mode starts a new loop with the
+	// new client for the existing subscriptions; the new loop waits for the
+	// old one to exit before it polls, so Configure need not wait for a
+	// running handler.
+	pollDone := b.stopPollingLocked()
+	if inboundMode == "webhook" {
+		retired.pollDone = pollDone
+	} else if len(b.subs) > 0 {
+		b.startPolling()
 	}
 
 	// Resolve transport auth for IAP-protected hub endpoints.
 	// Uses the same ResolveBrokerTransport pattern as the runtime broker.
 	transportMode := config["transport_mode"]
 	transportAudience := config["transport_audience"]
-	src, mode, tErr := transportauth.ResolveBrokerTransport(transportMode, transportAudience, nil)
+	src, mode, tErr := resolveBrokerTransport(transportMode, transportAudience, nil)
 	if tErr != nil {
 		b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", tErr)
 	}
+	// Build a new client from the default transport (nil) each time, so
+	// transport auth wraps it once however often the broker is
+	// reconfigured, and handlers of the previous configuration keep the
+	// client they started with.
+	var transport http.RoundTripper
 	if src != nil {
-		if b.httpClient == nil {
-			b.httpClient = &http.Client{Timeout: 10 * time.Second}
-		}
-		b.httpClient.Transport = transportauth.Wrap(b.httpClient.Transport, src, mode)
+		transport = transportauth.Wrap(transport, src, mode)
 		b.log.Info("Transport auth configured for Telegram v2 broker",
 			"mode", transportMode, "audience", transportAudience)
 	}
+	b.httpClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
 	// Create hub client, sharing the broker's (possibly wrapped) httpClient.
 	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID, b.httpClient)
 
 	// Create component handlers.
-	b.commands = NewCommandHandler(b.store, b.api, b.hubClient, bot.Username, b.log)
-	b.callbacks = NewCallbackHandler(b.store, b.api, b.hubClient, b.log)
-	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
+	b.gen.commands = NewCommandHandler(b.store, b.api, b.hubClient, bot.Username, b.log)
+	b.gen.callbacks = NewCallbackHandler(b.store, b.api, b.hubClient, b.log)
+	b.gen.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
 
 	// Handle v1 migration: import chat routes as group links.
 	if routesJSON, ok := config["v1_chat_routes"]; ok && routesJSON != "" {
@@ -337,8 +654,8 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 			for id, slug := range m {
 				projects = append(projects, ProjectOption{ID: id, Slug: slug})
 			}
-			b.commands.SetProjects(projects)
-			b.callbacks.SetProjects(projects)
+			b.gen.commands.SetProjects(projects)
+			b.gen.callbacks.SetProjects(projects)
 		}
 	}
 
@@ -363,31 +680,85 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"store_backend", storeBackend,
 		"inbound_mode", b.inboundMode,
 	)
-	return nil
+	return retired, nil
 }
 
-// RegisterWebhook calls the Telegram setWebhook API to register this instance's
-// webhook URL. In standalone HA mode, only the lock holder should call this.
-func (b *TelegramBrokerV2) RegisterWebhook(webhookURL, webhookSecret string) error {
+// openSQLiteStore opens the SQLite store in Configure. Tests replace it to
+// observe the store a Configure call opens.
+var openSQLiteStore = NewSQLiteStore
+
+// resolveBrokerTransport resolves transport auth in Configure. Tests replace
+// it to supply a token source.
+var resolveBrokerTransport = transportauth.ResolveBrokerTransport
+
+// callbackHandleTimeout bounds the handling of one callback query, received
+// by webhook or by long polling.
+const callbackHandleTimeout = 10 * time.Second
+
+// handleWebhookUpdate dispatches an update received by the webhook server,
+// with the configuration current when it arrives.
+func (b *TelegramBrokerV2) handleWebhookUpdate(update Update) {
+	g, release := b.acquireGen()
+	defer release()
+	if g == nil {
+		return
+	}
+	if update.CallbackQuery != nil {
+		cbCtx, cbCancel := context.WithTimeout(context.Background(), callbackHandleTimeout)
+		defer cbCancel()
+		b.handleCallbackQuery(cbCtx, g, update.CallbackQuery)
+	}
+	if update.Message != nil {
+		b.handleIncomingMessageV2(g, update.Message)
+	}
+}
+
+// RegisterWebhook calls the Telegram setWebhook API to register the webhook
+// URL and credential of the current configuration. In standalone HA mode,
+// only the lock holder should call this. Until DeregisterWebhook, each
+// reconfigure registers its webhook settings as well.
+//
+// webhookMu keeps a concurrent reconfigure from changing the settings while
+// they are registered; b.mu is not held during the call, so handlers keep
+// running.
+func (b *TelegramBrokerV2) RegisterWebhook() error {
+	b.webhookMu.Lock()
+	defer b.webhookMu.Unlock()
+
 	b.mu.RLock()
-	api := b.api
+	api, mode := b.api, b.inboundMode
+	webhookURL, webhookSecret := b.webhookURL, b.webhookSecret
 	b.mu.RUnlock()
 
 	if api == nil {
 		return fmt.Errorf("broker not configured")
 	}
+	if mode != "webhook" {
+		return fmt.Errorf("broker is not in webhook mode")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return api.SetWebhook(ctx, webhookURL, webhookSecret)
+	if err := api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	b.webhookRegistered = true
+	b.mu.Unlock()
+	return nil
 }
 
 // DeregisterWebhook calls the Telegram deleteWebhook API to remove the
 // webhook registration. Called when the lock holder loses the lock.
 func (b *TelegramBrokerV2) DeregisterWebhook() error {
-	b.mu.RLock()
+	b.webhookMu.Lock()
+	defer b.webhookMu.Unlock()
+
+	b.mu.Lock()
 	api := b.api
-	b.mu.RUnlock()
+	b.webhookRegistered = false
+	b.mu.Unlock()
 
 	if api == nil {
 		return nil
@@ -465,6 +836,24 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 		return
 	}
 
+	// The broker's project list is fetched at most once per import, and
+	// only when a route needs it.
+	var (
+		projects       []ProjectOption
+		projectsLoaded bool
+	)
+	brokerProjects := func() []ProjectOption {
+		if projectsLoaded || b.hubClient == nil {
+			return projects
+		}
+		projectsLoaded = true
+		var err error
+		if projects, err = b.hubClient.ListProjectsFresh(ctx); err != nil {
+			b.log.Warn("Could not list broker projects for v1 route import", "error", err)
+		}
+		return projects
+	}
+
 	imported := 0
 	for chatIDStr, topic := range raw {
 		chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
@@ -482,22 +871,18 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 			continue
 		}
 
-		projectID, agentSlug := parseTopicComponents(topic)
-		// Attempt to resolve the project slug from the hub. Falls back to
-		// the project ID if the hub is unavailable during migration.
+		projectID, agentSlug := parseTopicComponents(normalizeV1RouteTopic(topic))
+		// Resolve the project slug from the broker's project list, falling
+		// back to the project ID if the hub is unavailable during migration.
 		projectSlug := projectID
-		if b.hubClient != nil {
-			if projects, err := b.hubClient.ListProjects(ctx); err == nil {
-				for _, p := range projects {
-					if p.ID == projectID {
-						if p.Slug != "" {
-							projectSlug = p.Slug
-						} else if p.Name != "" {
-							projectSlug = p.Name
-						}
-						break
-					}
+		for _, p := range brokerProjects() {
+			if p.ID == projectID {
+				if p.Slug != "" {
+					projectSlug = p.Slug
+				} else if p.Name != "" {
+					projectSlug = p.Name
 				}
+				break
 			}
 		}
 		link := &GroupLink{
@@ -527,24 +912,23 @@ func (b *TelegramBrokerV2) importV1UserMappings(ctx context.Context, mappingsJSO
 		b.log.Warn("Failed to parse v1 user_mappings for migration", "error", err)
 		return
 	}
-	if err := b.registration.ImportV1Mappings(ctx, raw); err != nil {
+	if err := b.gen.registration.ImportV1Mappings(ctx, raw); err != nil {
 		b.log.Warn("V1 user mapping import had errors", "error", err)
 	}
 }
 
 // parseTopicComponents extracts projectID and agentSlug from a broker topic.
-// Legacy scion.grove topics are accepted by projectcompat at this adapter boundary.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err == nil {
 		projectID = parsed.ProjectID
-		if parsed.Kind == projectcompat.TopicKindAgent {
+		if parsed.Kind == projectkeys.TopicKindAgent {
 			agentSlug = parsed.Actor
 		}
 	} else {
 		parts := strings.Split(topic, ".")
 		for i, part := range parts {
-			if (part == "grove" || part == "project") && i+1 < len(parts) {
+			if part == "project" && i+1 < len(parts) {
 				projectID = parts[i+1]
 			}
 			if part == "agent" && i+1 < len(parts) {
@@ -556,6 +940,21 @@ func parseTopicComponents(topic string) (projectID, agentSlug string) {
 		projectID = topic
 	}
 	return projectID, agentSlug
+}
+
+// v1LegacyRouteTopicPrefix is the topic prefix used by v1 chat-route exports.
+// v1 exports are an immutable snapshot format, so this is the only place
+// that recognizes it: normalizeV1RouteTopic rewrites it to the canonical
+// prefix before the route is parsed.
+const v1LegacyRouteTopicPrefix = "scion.grove."
+
+// normalizeV1RouteTopic rewrites a v1 chat-route export's topic string to use
+// the canonical topic prefix, if it still uses the frozen v1 prefix.
+func normalizeV1RouteTopic(topic string) string {
+	if rest, ok := strings.CutPrefix(topic, v1LegacyRouteTopicPrefix); ok {
+		return projectkeys.CanonicalTopicPrefix + "." + rest
+	}
+	return topic
 }
 
 // --- Publish (outbound: Hub → Telegram) ---
@@ -570,7 +969,9 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	api := b.api
 	store := b.store
 	sq := b.sendQueue
+	_, release := b.acquireGenLocked()
 	b.mu.RUnlock()
+	defer release()
 
 	if api == nil {
 		return fmt.Errorf("telegram v2 broker not configured")
@@ -678,7 +1079,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Priority 2: Look up via ConversationContext for the recipient.
 	if len(chatIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
-		chatIDs = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
+		var denied bool
+		chatIDs, denied = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
+		if denied {
+			// The recipient is a linked user who cannot read the project
+			// (or the check failed): drop rather than broadcast. The reason
+			// was logged by resolveRecipientChats.
+			return nil
+		}
 	}
 
 	// Priority 3: Broadcast to all GroupLinks for the project.
@@ -724,27 +1132,11 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 	}
 
-	// Commentary filter: suppress assistant-reply messages per group link setting.
+	// Discard the retired end-of-turn assistant-reply mirror; an older hub
+	// may still forward it.
 	if msg != nil && msg.Type == messages.TypeAssistantReply {
-		filtered := make([]int64, 0, len(chatIDs))
-		for _, chatID := range chatIDs {
-			link, err := store.GetGroupLink(ctx, chatID)
-			if err != nil {
-				b.log.Warn("Failed to load group link for commentary check", "chat_id", chatID, "error", err)
-				filtered = append(filtered, chatID)
-				continue
-			}
-			if link == nil || link.ShowAssistantReply {
-				filtered = append(filtered, chatID)
-				continue
-			}
-			b.log.Debug("Suppressed assistant-reply message (commentary off)",
-				"chat_id", chatID, "sender", msg.Sender)
-		}
-		chatIDs = filtered
-		if len(chatIDs) == 0 {
-			return nil
-		}
+		b.log.Debug("Discarding retired assistant-reply message", "sender", msg.Sender)
+		return nil
 	}
 
 	// Handle InputNeeded messages with inline keyboards.
@@ -772,8 +1164,15 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		if attachPath != "" {
 			// Translate /workspace/<file> → /home/scion/.scion/projects/<projectSlug>/<file>
 			// Agent containers mount the hub's project directory as /workspace.
-			attachPath = b.resolveAttachmentPath(ctx, store, attachPath, projectID)
-			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath, threadOpts...)
+			resolved, err := b.resolveAttachmentPath(ctx, store, attachPath, projectID)
+			if err != nil {
+				// Never open the unresolved path on this host; deliver the
+				// message text without the attachment.
+				b.log.Error("Skipping attachment that could not be resolved",
+					"attach_path", attachPath, "project_id", projectID, "error", err)
+			} else {
+				return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, resolved, threadOpts...)
+			}
 		}
 	}
 
@@ -784,7 +1183,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		if strings.HasPrefix(msg.Recipient, "user:") {
 			recipientUsername = b.resolveRecipientUsername(ctx, store, msg.Recipient)
 		}
-		// Fallback: extract user ID from topic (scion.grove.<id>.user.<userid>.messages)
+		// Fallback: extract user ID from topic (scion.project.<id>.user.<userid>.messages)
 		if recipientUsername == "" {
 			if userID := extractUserIDFromTopic(topic); userID != "" {
 				recipientUsername = b.resolveRecipientUsername(ctx, store, "user:"+userID)
@@ -945,11 +1344,15 @@ func resolveOutboundMentions(ctx context.Context, store Store, text string) stri
 // It first attempts email-based lookup via GetUserMappingByEmail; if that fails
 // (e.g. because the hub rewrote the recipient to a display name), it falls back
 // to looking up the scion user UUID via GetUserMappingByScionUserID.
-func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient, recipientID, projectID, agentSlug string) []int64 {
+//
+// denied is true when the recipient is a linked user who cannot read the
+// project (or the check failed); the message must then not be sent to any
+// chat for that recipient.
+func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient, recipientID, projectID, agentSlug string) (chats []int64, denied bool) {
 	// Extract email from "user:email@example.com" format.
 	email := strings.TrimPrefix(recipient, "user:")
 	if email == recipient {
-		return nil
+		return nil, false
 	}
 
 	mapping, err := b.store.GetUserMappingByEmail(ctx, email)
@@ -970,15 +1373,20 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 	}
 
 	if err != nil || mapping == nil {
-		return nil
+		return nil, false
+	}
+
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Not routing to recipient's chat", reason, projectID)
+		return nil, true
 	}
 
 	cc, err := b.store.GetConversationContext(ctx, mapping.TelegramUserID, projectID, agentSlug)
 	if err != nil || cc == nil {
-		return nil
+		return nil, false
 	}
 
-	return []int64{cc.LastChatID}
+	return []int64{cc.LastChatID}, false
 }
 
 // publishInputNeeded sends an InputNeeded message with an inline keyboard.
@@ -1131,6 +1539,11 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		}
 	}
 
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Dropping state-change DM", reason, projectID)
+		return nil
+	}
+
 	tgUserID, err := strconv.ParseInt(mapping.TelegramUserID, 10, 64)
 	if err != nil {
 		b.log.Warn("Invalid Telegram user ID in mapping", "telegram_user_id", mapping.TelegramUserID, "error", err)
@@ -1194,6 +1607,11 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 	}
 	if mapping == nil {
 		b.log.Debug("No user mapping for input-needed recipient, dropping", "recipient", recipientVal)
+		return nil
+	}
+
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Dropping input-needed DM", reason, projectID)
 		return nil
 	}
 
@@ -1264,8 +1682,12 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 //   - /workspace/.scion-volumes/<name>/<file> → same as /scion-volumes/<name>/<file>
 //
 // Also accepts bare relative paths and "workspace/" without leading slash.
-// Falls back to the original path if translation is not possible.
-func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+// Any path that cannot be translated (one that climbs out of the
+// workspace, another absolute path, a project with no known slug, or a
+// result outside the project directory) returns an error and no path, as
+// does a shared dir path that cannot be resolved: the container path must
+// never be opened on this host.
+func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) (string, error) {
 	originalPath := attachPath
 
 	// Handle /scion-volumes/<name>/... container-internal shared dir paths.
@@ -1286,14 +1708,12 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	case !strings.HasPrefix(attachPath, "/"):
 		relPath = attachPath
 	default:
-		return attachPath
+		return "", fmt.Errorf("attachment path %q is not a workspace or shared dir path", attachPath)
 	}
 
 	relPath = filepath.Clean(relPath)
 	if strings.HasPrefix(relPath, "..") || (filepath.IsAbs(relPath) && relPath != ".") {
-		b.log.Warn("Attachment path escapes workspace, ignoring translation",
-			"attach_path", attachPath, "rel_path", relPath)
-		return attachPath
+		return "", fmt.Errorf("attachment path %q is outside the workspace", attachPath)
 	}
 
 	// In-workspace shared dirs are mounted at /workspace/.scion-volumes/<name>
@@ -1303,14 +1723,12 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 		return b.resolveSharedDirAttachmentPath(ctx, store, containerPath, projectID)
 	}
 	if relPath == ".scion-volumes" {
-		return attachPath
+		return "", fmt.Errorf("attachment path %q names the shared dirs root, not a shared dir", attachPath)
 	}
 
 	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" {
-		b.log.Debug("Attachment path unchanged, no project slug found",
-			"original", originalPath, "project_id", projectID)
-		return attachPath
+		return "", fmt.Errorf("attachment path %q: no project slug found for project %q", attachPath, projectID)
 	}
 
 	projectDir := filepath.Join("/home/scion/.scion/projects", slug)
@@ -1320,72 +1738,67 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	} else {
 		hostPath = filepath.Join(projectDir, relPath)
 		if !strings.HasPrefix(hostPath, projectDir+"/") {
-			b.log.Warn("Resolved attachment path escapes project directory",
-				"host_path", hostPath, "expected_prefix", projectDir+"/")
-			return attachPath
+			return "", fmt.Errorf("attachment path %q resolves outside the project directory", attachPath)
 		}
 	}
 
 	b.log.Debug("Resolved attachment path", "original", originalPath, "resolved", hostPath)
-	return hostPath
+	return hostPath, nil
 }
 
 // resolveSharedDirAttachmentPath translates a container-internal shared dir
 // path (/scion-volumes/<name>/...) to the host-side path under
-// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/.
-func (b *TelegramBrokerV2) resolveSharedDirAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/ (or the
+// nfs-backed directory, per the shared dir's storage backend). It returns
+// an error, and no path, whenever the path is unsafe or cannot be
+// resolved; the caller must skip the attachment rather than open the
+// container path on this host.
+func (b *TelegramBrokerV2) resolveSharedDirAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) (string, error) {
 	trimmed := strings.TrimPrefix(attachPath, "/scion-volumes/")
 	if trimmed == "" || trimmed == attachPath {
-		b.log.Warn("Invalid shared dir attachment path", "attach_path", attachPath)
-		return attachPath
+		return "", fmt.Errorf("invalid shared dir attachment path %q", attachPath)
 	}
 
 	parts := strings.SplitN(trimmed, "/", 2)
 	sharedDirName := parts[0]
 	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." {
-		b.log.Warn("Invalid shared dir name in attachment path",
-			"attach_path", attachPath, "shared_dir_name", sharedDirName)
-		return attachPath
+		return "", fmt.Errorf("invalid shared dir name %q in attachment path %q", sharedDirName, attachPath)
 	}
 	relPath := ""
 	if len(parts) > 1 {
 		relPath = filepath.Clean(parts[1])
 		if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
-			b.log.Warn("Shared dir attachment path escapes directory",
-				"attach_path", attachPath, "rel_path", relPath)
-			return attachPath
+			return "", fmt.Errorf("shared dir attachment path %q leaves its shared dir", attachPath)
 		}
 	}
 
 	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" || projectID == "" {
-		b.log.Debug("Shared dir path unchanged, no project slug or ID",
-			"original", attachPath, "project_id", projectID)
-		return attachPath
+		return "", fmt.Errorf("no project slug or ID for shared dir attachment path %q", attachPath)
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		b.log.Warn("Failed to resolve home dir for shared dir path", "error", err)
-		return attachPath
+		return "", fmt.Errorf("resolve home dir for shared dir path: %w", err)
 	}
 
-	sharedDirBase := config.SharedDirHostPath(home, slug, projectID, sharedDirName)
+	sharedDirBase, err := resolveSharedDirHostPath(home, slug, projectID, sharedDirName)
+	if err != nil {
+		return "", fmt.Errorf("resolve shared dir %q: %w", sharedDirName, err)
+	}
 	var hostPath string
 	if relPath == "" || relPath == "." {
 		hostPath = sharedDirBase
 	} else {
 		hostPath = filepath.Join(sharedDirBase, relPath)
 		if !strings.HasPrefix(hostPath, sharedDirBase+string(filepath.Separator)) {
-			b.log.Warn("Resolved shared dir path escapes directory",
-				"host_path", hostPath, "expected_prefix", sharedDirBase+string(filepath.Separator))
-			return attachPath
+			return "", fmt.Errorf("shared dir attachment path %q leaves its shared dir", attachPath)
 		}
 	}
 
 	b.log.Debug("Resolved shared dir attachment path",
 		"original", attachPath, "resolved", hostPath)
-	return hostPath
+	return hostPath, nil
 }
 
 // resolveProjectSlug looks up the project slug from the store (group links)
@@ -1415,7 +1828,7 @@ func (b *TelegramBrokerV2) resolveProjectSlug(ctx context.Context, store Store, 
 // volumes. A future telegram_attachment_url metadata key should support
 // fetching the file from a URL (e.g. GCS signed URL) instead.
 func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, attachPath string, opts ...SendOption) error {
-	f, err := os.Open(attachPath)
+	f, err := openAttachmentFile(attachPath)
 	if err != nil {
 		b.log.Error("Failed to open attachment file",
 			"path", attachPath, "error", err)
@@ -1506,6 +1919,11 @@ func (b *TelegramBrokerV2) Unsubscribe(pattern string) error {
 	return nil
 }
 
+// Close shuts the broker down: it waits for earlier configurations to finish
+// retiring, stops inbound delivery, waits for running handlers, then closes
+// the send queue and the store. The waits for handlers have no deadline (a
+// warning is logged while they run long); handlers are bounded by their HTTP
+// client and context timeouts. Configure fails once Close has started.
 func (b *TelegramBrokerV2) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -1519,9 +1937,14 @@ func (b *TelegramBrokerV2) Close() error {
 	webhookSrv := b.webhookServer
 	inboundMode := b.inboundMode
 	sendQueue := b.sendQueue
+	gen := b.gen
 	b.mu.Unlock()
 
-	// Shut down inbound transport.
+	// Let earlier configurations finish shutting down first.
+	b.retiring.Wait()
+
+	// Shut down inbound transport. The poll loop is stopped in either mode.
+	b.stopPolling()
 	if inboundMode == "webhook" {
 		// Remove the webhook registration from Telegram.
 		if api != nil {
@@ -1539,8 +1962,11 @@ func (b *TelegramBrokerV2) Close() error {
 			}
 			stopCancel()
 		}
-	} else {
-		b.stopPolling()
+	}
+
+	// Handlers still running must finish before the store is closed.
+	if gen != nil {
+		waitForHandlers(gen, b.log, "the store and send queue")
 	}
 
 	if sendQueue != nil {
@@ -1600,45 +2026,69 @@ func (b *TelegramBrokerV2) HealthCheck() (*plugin.HealthStatus, error) {
 
 // --- Long polling ---
 
+// startPolling starts the poll loop with the current API client unless one
+// runs or the broker is in webhook mode. Must be called with b.mu held.
 func (b *TelegramBrokerV2) startPolling() {
 	if b.inboundMode == "webhook" {
 		return // webhook mode handles inbound via HTTP
 	}
-	if b.pollCancel != nil {
+	if b.pollCancel != nil || b.gen == nil {
 		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	prev := b.pollDone
+	done := make(chan struct{})
 	b.pollCancel = cancel
-	b.pollDone = make(chan struct{})
+	b.pollDone = done
 
-	go b.pollLoop(ctx)
+	go b.pollLoop(ctx, b.gen, prev, done)
 	b.log.Info("Telegram v2 polling started")
 }
 
-func (b *TelegramBrokerV2) stopPolling() {
-	b.mu.RLock()
-	cancel := b.pollCancel
-	done := b.pollDone
-	b.mu.RUnlock()
-
-	if cancel == nil {
-		return
+// stopPollingLocked cancels the running poll loop, if any, and returns a
+// channel that is closed once the most recent loop has exited (nil if none
+// was ever started). Must be called with b.mu held; the caller waits on the
+// channel after releasing b.mu, because the loop's handlers take b.mu.
+func (b *TelegramBrokerV2) stopPollingLocked() <-chan struct{} {
+	if b.pollCancel != nil {
+		b.pollCancel()
+		b.pollCancel = nil
 	}
+	return b.pollDone
+}
 
-	cancel()
+// stopPolling stops the poll loop and waits for it to exit. Callers must not
+// hold b.mu.
+func (b *TelegramBrokerV2) stopPolling() {
+	b.mu.Lock()
+	done := b.stopPollingLocked()
+	b.mu.Unlock()
+
 	if done != nil {
 		<-done
 	}
-
-	b.mu.Lock()
-	b.pollCancel = nil
-	b.pollDone = nil
-	b.mu.Unlock()
 }
 
-func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
-	defer close(b.pollDone)
+// pollLoop long-polls Telegram with the client of configuration g until ctx
+// is cancelled, then closes done. It first waits for the previous loop
+// (prev) to exit. A reconfigure replaces the configuration under b.mu and
+// restarts the loop; updates this loop fetched are handled with g only.
+//
+// The update offset is kept per bot: the loop resumes from the last update
+// handled for its bot (also with a rotated credential), and from the start
+// for a bot not polled before. Carrying another bot's offset would make
+// this bot's earlier updates look confirmed. Keeping the offset of a bot
+// that was switched away from means its handled but not yet confirmed
+// updates are not handled again when it returns.
+func (b *TelegramBrokerV2) pollLoop(ctx context.Context, g *configGen, prev <-chan struct{}, done chan struct{}) {
+	defer close(done)
+	if prev != nil {
+		<-prev
+	}
+	if b.lastOffsets == nil {
+		b.lastOffsets = make(map[int64]int64)
+	}
 
 	for {
 		select {
@@ -1647,7 +2097,7 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
 		default:
 		}
 
-		updates, err := b.getUpdatesV2(ctx, b.lastOffset+1, longPollTimeout)
+		updates, err := b.getUpdatesV2(ctx, g.api, b.lastOffsets[g.botID]+1, longPollTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -1661,21 +2111,46 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
 			continue
 		}
 
+		// Stop between updates once cancelled or once g is no longer the
+		// current configuration: the next loop fetches the rest of the batch
+		// again (for the same bot), as its offset has not passed them. An
+		// update being handled when the loop is stopped (for example by a
+		// reconfigure) still finishes with g; see handlePolledUpdate.
 		for _, update := range updates {
-			b.lastOffset = update.UpdateID
-			if update.CallbackQuery != nil {
-				b.handleCallbackQuery(ctx, update.CallbackQuery)
+			if ctx.Err() != nil {
+				return
 			}
-			if update.Message != nil {
-				b.handleIncomingMessageV2(update.Message)
+			release, ok := b.acquireGenIfCurrent(g)
+			if !ok {
+				return
 			}
+			b.lastOffsets[g.botID] = update.UpdateID
+			b.handlePolledUpdate(ctx, g, update)
+			release()
 		}
+	}
+}
+
+// handlePolledUpdate dispatches an update received by long polling with the
+// configuration g that polled it; the caller holds g. ctx is the poll loop's
+// context. A callback is handled with a context that stopping the loop does
+// not cancel, so it finishes, but that is bounded by callbackHandleTimeout
+// like the webhook path, so Close and a switch to webhook mode, which wait
+// for the loop, stay bounded.
+func (b *TelegramBrokerV2) handlePolledUpdate(ctx context.Context, g *configGen, update Update) {
+	if update.CallbackQuery != nil {
+		cbCtx, cbCancel := context.WithTimeout(context.WithoutCancel(ctx), callbackHandleTimeout)
+		defer cbCancel()
+		b.handleCallbackQuery(cbCtx, g, update.CallbackQuery)
+	}
+	if update.Message != nil {
+		b.handleIncomingMessageV2(g, update.Message)
 	}
 }
 
 // getUpdatesV2 calls GetUpdates with both "message" and "callback_query"
 // in allowed_updates, extending the v1 behavior.
-func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeout int) ([]Update, error) {
+func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, api *TelegramAPIClient, offset int64, timeout int) ([]Update, error) {
 	body := getUpdatesRequest{
 		Offset:         offset,
 		Timeout:        timeout,
@@ -1687,15 +2162,15 @@ func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeo
 		return nil, fmt.Errorf("marshal getUpdates request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", b.api.methodURL("getUpdates"), bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", api.methodURL("getUpdates"), bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("create getUpdates request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := b.api.pollClient.Do(req)
+	resp, err := api.pollClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("getUpdates request failed: %w", b.api.redactToken(err))
+		return nil, fmt.Errorf("getUpdates request failed: %w", api.redactToken(err))
 	}
 	defer resp.Body.Close()
 
@@ -1718,7 +2193,9 @@ func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeo
 
 // --- Inbound message handling ---
 
-func (b *TelegramBrokerV2) handleIncomingMessageV2(tgMsg *TGMessage) {
+// handleIncomingMessageV2 handles a message with the API client and
+// component handlers of configuration g.
+func (b *TelegramBrokerV2) handleIncomingMessageV2(g *configGen, tgMsg *TGMessage) {
 	if tgMsg == nil {
 		return
 	}
@@ -1752,7 +2229,7 @@ func (b *TelegramBrokerV2) handleIncomingMessageV2(tgMsg *TGMessage) {
 
 	// Command handling.
 	if strings.HasPrefix(tgMsg.Text, "/") {
-		if b.handleCommandV2(tgMsg) {
+		if b.handleCommandV2(g, tgMsg) {
 			return
 		}
 	}
@@ -1763,7 +2240,7 @@ func (b *TelegramBrokerV2) handleIncomingMessageV2(tgMsg *TGMessage) {
 	if chatID > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		b.api.SendMessage(ctx, chatID,
+		g.api.SendMessage(ctx, chatID,
 			"I respond to commands and @-mentions in group chats.\n\n"+
 				"Commands: /register, /unregister, /status, /help",
 			"")
@@ -1771,11 +2248,11 @@ func (b *TelegramBrokerV2) handleIncomingMessageV2(tgMsg *TGMessage) {
 	}
 
 	// Group message — @-mention routing.
-	b.handleGroupMessage(tgMsg)
+	b.handleGroupMessage(g, tgMsg)
 }
 
 // handleCommandV2 dispatches commands to the appropriate handler.
-func (b *TelegramBrokerV2) handleCommandV2(tgMsg *TGMessage) bool {
+func (b *TelegramBrokerV2) handleCommandV2(g *configGen, tgMsg *TGMessage) bool {
 	text := strings.TrimSpace(tgMsg.Text)
 	cmd := text
 	if idx := strings.Index(cmd, " "); idx != -1 {
@@ -1788,21 +2265,23 @@ func (b *TelegramBrokerV2) handleCommandV2(tgMsg *TGMessage) bool {
 	switch cmd {
 	case "/register":
 		if strings.Contains(text, "confirm") {
-			b.registration.HandleRegisterConfirm(tgMsg)
+			g.registration.HandleRegisterConfirm(tgMsg)
 		} else {
-			b.registration.HandleRegister(tgMsg)
+			g.registration.HandleRegister(tgMsg)
 		}
 		return true
 	case "/unregister":
-		b.registration.HandleUnregister(tgMsg)
+		g.registration.HandleUnregister(tgMsg)
 		return true
 	}
 
-	return b.commands.HandleCommand(tgMsg)
+	return g.commands.HandleCommand(tgMsg)
 }
 
-// handleGroupMessage processes a group message through @-mention routing.
-func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
+// handleGroupMessage processes a group message through @-mention routing,
+// replying through the API client of configuration g.
+func (b *TelegramBrokerV2) handleGroupMessage(g *configGen, tgMsg *TGMessage) {
+	api := g.api
 	chatID := tgMsg.Chat.ID
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1817,13 +2296,12 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
-	// Get project agents (with cache refresh).
-	agents := b.getProjectAgents(ctx, link.ProjectID)
-
 	b.mu.RLock()
 	botUsername := ""
+	botID := int64(0)
 	if b.botInfo != nil {
 		botUsername = b.botInfo.Username
+		botID = b.botInfo.ID
 	}
 	b.mu.RUnlock()
 
@@ -1837,6 +2315,29 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 	}
 
+	// Resolve the sender's link before any agent-cache access: a sender
+	// the plugin cannot act as is never routed nor served cached data.
+	senderLookup := b.lookupSender(ctx, tgMsg.From)
+	if senderLookup.err != nil {
+		b.log.Debug("Message from unresolved sender not routed", "chat_id", chatID, "reason", senderLookup.err)
+		b.replyUnresolvedSender(ctx, api, tgMsg, botUsername, effectiveDefault, senderLookup.err)
+		return
+	}
+
+	// Get project agents (cached per user, refreshed as the sender).
+	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderLookup)
+	listUnavailable := func(replyTo int64) {
+		b.replyAgentListUnavailable(ctx, api, chatID, replyTo, agentsErr, senderLookup.email(), link.ProjectSlug)
+	}
+	// replyDenied tells a sender the hub denies why their message was not
+	// routed, at most once per suppression window.
+	replyDenied := func() {
+		if b.shouldSuppressError(chatID, int(tgMsg.MessageThreadID), agentListSuppressKey(agentsErr, tgMsg.From)) {
+			return
+		}
+		listUnavailable(tgMsg.MessageID)
+	}
+
 	// Resolve target agents from @-mentions.
 	targets, isAll := resolveTargetAgents(tgMsg, botUsername, effectiveDefault, agents)
 
@@ -1846,17 +2347,13 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		if tgMsg.ReplyToMessage.From != nil {
 			replyFromID = tgMsg.ReplyToMessage.From.ID
 		}
-		botID := int64(0)
-		if b.botInfo != nil {
-			botID = b.botInfo.ID
-		}
 		b.log.Debug("Fallback1: checking reply-to message", "reply_from_id", replyFromID, "bot_id", botID)
 		replyText := tgMsg.ReplyToMessage.Text
 		if len([]rune(replyText)) > 100 {
 			replyText = string([]rune(replyText)[:100])
 		}
 		b.log.Debug("Fallback1: reply-to message text sample", "text_prefix", replyText)
-		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+		if b.isReplyToBot(tgMsg) {
 			slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text)
 			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug)
 			if slug != "" {
@@ -1871,7 +2368,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// Fallback 2: most recent conversation context for this user+project.
 	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
 		b.log.Debug("Fallback1: failed - trying conversation context")
-		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+		if b.isReplyToBot(tgMsg) {
 			if tgMsg.From != nil {
 				senderIDStr := strconv.FormatInt(tgMsg.From.ID, 10)
 				cc, err := b.store.GetLatestConversationContext(ctx, senderIDStr, link.ProjectID)
@@ -1903,13 +2400,17 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				if tgMsg.MessageThreadID != 0 {
 					threadID = int(tgMsg.MessageThreadID)
 				}
-				if !b.shouldSuppressError(chatID, threadID, "default_agent_not_found") {
-					replyTo := ""
-					if tgMsg.MessageID != 0 {
-						replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
+				errorType := "default_agent_not_found"
+				if agentsErr != nil {
+					errorType = agentListSuppressKey(agentsErr, tgMsg.From)
+				}
+				if !b.shouldSuppressError(chatID, threadID, errorType) {
+					if agentsErr != nil {
+						listUnavailable(tgMsg.MessageID)
+					} else {
+						errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
+						api.SendMessageWithKeyboard(ctx, chatID, errMsg, "", nil, tgMsg.MessageID) //nolint:errcheck
 					}
-					errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
-					b.api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
 				}
 				return
 			}
@@ -1923,8 +2424,19 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		if isBotMentioned(tgMsg, botUsername) {
 			unresolved := extractUnresolvedMentions(tgMsg.Text, botUsername, agents)
 			if len(unresolved) > 0 {
+				if isForbiddenHubError(agentsErr) {
+					replyDenied()
+					return
+				}
+				if agentsErr != nil {
+					listUnavailable(0)
+					return
+				}
 				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
-				b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
+				api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
+			} else if isForbiddenHubError(agentsErr) {
+				// The bot was addressed by a sender the hub denies.
+				replyDenied()
 			}
 		} else {
 			// Check for @tokens not matching any known agent. Filter out
@@ -1939,51 +2451,41 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 						typos = append(typos, "@"+name)
 					}
 				}
-				if len(typos) > 0 {
+				if len(typos) > 0 && isForbiddenHubError(agentsErr) {
+					replyDenied()
+				} else if len(typos) > 0 && agentsErr != nil {
+					listUnavailable(0)
+				} else if len(typos) > 0 {
 					errMsg := fmt.Sprintf("Unknown agent(s): %s. Use /agents to see available agents.", strings.Join(typos, ", "))
-					b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
+					api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
 				}
 			}
 		}
 		return
 	}
 
-	// Determine sender identity.
-	sender := "telegram:unknown"
-	senderID := ""
-	if tgMsg.From != nil {
-		senderID = strconv.FormatInt(tgMsg.From.ID, 10)
-		if tgMsg.From.Username != "" {
-			sender = "telegram:" + tgMsg.From.Username
-		} else {
-			sender = "telegram:" + senderID
-		}
+	// A sender the hub denies (including a link it no longer accepts) is
+	// never routed. The message resolved to a target (e.g. a reply to a bot
+	// message), so the sender is told why instead of it being delivered.
+	// Messages that resolve to no target were answered or ignored above.
+	if isForbiddenHubError(agentsErr) {
+		replyDenied()
+		return
 	}
 
-	// Check for scion identity mapping — unregistered users cannot route messages.
-	// hubSenderID carries the resolved Hub user UUID (when registered) for the
-	// outbound StructuredMessage.SenderID; senderID itself must stay the raw
-	// Telegram numeric ID since it also keys ConversationContext.TelegramUserID
-	// below. Without this split, the Hub's reply-affinity lookup
-	// (webchat_conversation_context, keyed by Hub user ID) never matches what
-	// gets recorded here, so an agent's reply falls back to whatever channel
-	// that Hub user last used elsewhere (e.g. the web dashboard) instead of
-	// routing back to Telegram.
+	// Sender identity. senderID stays the raw Telegram numeric ID since it
+	// keys ConversationContext.TelegramUserID below; hubSenderID carries
+	// the resolved Hub user UUID for the outbound
+	// StructuredMessage.SenderID. Without this split, the Hub's
+	// reply-affinity lookup (webchat_conversation_context, keyed by Hub user
+	// ID) never matches what gets recorded here, so an agent's reply falls
+	// back to whatever channel that Hub user last used elsewhere (e.g. the
+	// web dashboard) instead of routing back to Telegram.
+	senderID := strconv.FormatInt(tgMsg.From.ID, 10)
+	sender := senderLookup.principal
 	hubSenderID := senderID
-	if senderID != "" {
-		mapping, err := b.store.GetUserMapping(ctx, senderID)
-		if err == nil && mapping != nil {
-			if mapping.ScionEmail != "" {
-				sender = "user:" + mapping.ScionEmail
-			}
-			if mapping.ScionUserID != "" {
-				hubSenderID = mapping.ScionUserID
-			}
-		} else if mapping == nil {
-			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
-			b.api.SendMessage(ctx, chatID, "Please /register first to use this bot.", "")
-			return
-		}
+	if senderLookup.mapping.ScionUserID != "" {
+		hubSenderID = senderLookup.mapping.ScionUserID
 	}
 
 	// Resolve @username mentions to scion user identities and replace
@@ -2066,15 +2568,23 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	cleanText := stripMentions(resolvedText, botUsername, stripSlugs)
 	cleanText = strings.TrimSpace(cleanText)
 
-	// Download file attachments (photos/documents/audio/video).
-	var attachmentPath, placeholder string
-	if tgMsg.Photo != nil || tgMsg.Document != nil || tgMsg.Audio != nil || tgMsg.Video != nil {
-		var err error
-		attachmentPath, placeholder, err = b.downloadTelegramFile(ctx, tgMsg, link.ProjectSlug, link.ProjectID)
-		if err != nil {
-			b.log.Error("Failed to download telegram file", "error", err)
-			b.api.SendMessage(ctx, chatID, "Failed to process attachment: "+err.Error(), "")
+	// File attachments (photos/documents/audio/video): the hub decides,
+	// before anything is downloaded or written, whether and how the file
+	// goes to the recipients (the targets and the body-mentioned agents).
+	var attachment *inboundAttachment
+	var placeholder string
+	if _, ok := telegramAttachmentOf(tgMsg); ok {
+		plan := b.prepareInboundAttachment(ctx, api, tgMsg, link, sender,
+			inboundRecipients(targets, classified, isAll), cleanText != "")
+		if plan.refused {
+			return
 		}
+		attachment = plan.attachment
+		if attachment != nil {
+			placeholder = attachment.att.placeholder()
+		}
+		// A staged entry no recipient accepted is removed after the sends.
+		defer b.finishInboundAttachment(attachment)
 	}
 
 	// Build final message text: clean text + attachment placeholder.
@@ -2122,7 +2632,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 		}
 
-		topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+		topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
@@ -2146,10 +2656,6 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			msg.ThreadID = strconv.FormatInt(tgMsg.MessageThreadID, 10)
 		}
 
-		if attachmentPath != "" {
-			msg.Attachments = []string{attachmentPath}
-		}
-
 		if resolvedMentionsJSON != "" {
 			msg.Metadata["resolved_mentions"] = resolvedMentionsJSON
 		}
@@ -2162,7 +2668,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		b.log.Debug("Delivering inbound message",
 			"topic", topic, "sender", sender, "agent", agentSlug)
 
-		statusCode, deliveryErr := b.deliverInboundWithFeedback(ctx, topic, msg)
+		statusCode, deliveryErr, _ := b.sendInbound(ctx, api, tgMsg, link.ProjectID, agentSlug, topic, msg, attachment)
 		if statusCode >= 400 && deliveryErr != "" {
 			threadID := 0
 			if tgMsg.MessageThreadID != 0 {
@@ -2175,11 +2681,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				errorType = "permission_denied"
 			}
 			if !b.shouldSuppressError(chatID, threadID, errorType) {
-				replyTo := ""
-				if tgMsg.MessageID != 0 {
-					replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
-				}
-				b.api.SendMessage(ctx, chatID, "Message delivery failed: "+deliveryErr, replyTo) //nolint:errcheck
+				api.SendMessageWithKeyboard(ctx, chatID, "Message delivery failed: "+deliveryErr, "", nil, tgMsg.MessageID) //nolint:errcheck
 			}
 		}
 	}
@@ -2225,7 +2727,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 
 			mentionRecipient := "agent:" + mention.Name
-			mentionTopic := projectcompat.AgentTopic(link.ProjectID, mention.Name)
+			mentionTopic := projectkeys.AgentTopic(link.ProjectID, mention.Name)
 
 			mentionMsg := messages.NewMention(sender, mentionRecipient, mentionText, mentionSource)
 			mentionMsg.SenderID = senderID
@@ -2238,10 +2740,6 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				mentionMsg.ThreadID = strconv.FormatInt(tgMsg.MessageThreadID, 10)
 			}
 
-			if attachmentPath != "" {
-				mentionMsg.Attachments = []string{attachmentPath}
-			}
-
 			if resolvedMentionsJSON != "" {
 				mentionMsg.Metadata["resolved_mentions"] = resolvedMentionsJSON
 			}
@@ -2250,145 +2748,33 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				"topic", mentionTopic, "sender", sender, "mentioned_agent", mention.Name,
 				"mention_source", mentionSource)
 
-			b.deliverInboundWithFeedback(ctx, mentionTopic, mentionMsg) //nolint:errcheck
+			b.sendInbound(ctx, api, tgMsg, link.ProjectID, mention.Name, mentionTopic, mentionMsg, attachment) //nolint:errcheck
 		}
 	}
 }
 
+// maxTelegramFileSize is the largest file the Bot API lets a bot download.
 const maxTelegramFileSize = 20 * 1024 * 1024 // 20 MB
 
-// downloadTelegramFile downloads a photo, document, audio, or video from a
-// Telegram message and saves it so the agent can access it. Returns the
-// agent-visible path and a placeholder string for the message body.
-//
-// The function uses a three-tier fallback for the destination directory:
-//  1. downloadsPath config (highest priority)
-//  2. Shared dir infrastructure via config.SharedDirHostPath — writes to the host
-//     and exposes the file at /scion-volumes/scratchpad/.attachments/_telegram/
-//  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
-func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMessage, projectSlug, projectID string) (agentPath, placeholder string, err error) {
-	var fileID, fileName, fileType string
-	var fileSize int64
-
-	switch {
-	case tgMsg.Document != nil:
-		fileID = tgMsg.Document.FileID
-		fileSize = tgMsg.Document.FileSize
-		fileName = tgMsg.Document.FileName
-		if fileName == "" {
-			fileName = tgMsg.Document.FileUniqueID
+// inboundRecipients returns every agent a group message is sent to: the
+// targets, then the body-mentioned agents that are not targets.
+func inboundRecipients(targets []string, classified ClassifiedMentions, isAll bool) []string {
+	out := append([]string(nil), targets...)
+	if isAll {
+		return out
+	}
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		seen[strings.ToLower(t)] = true
+	}
+	for _, m := range classified.BodyMentions {
+		if m.Kind != "agent" || seen[strings.ToLower(m.Name)] {
+			continue
 		}
-		fileType = "Document"
-	case len(tgMsg.Photo) > 0:
-		largest := tgMsg.Photo[len(tgMsg.Photo)-1]
-		fileID = largest.FileID
-		fileSize = largest.FileSize
-		fileName = fmt.Sprintf("photo_%s.jpg", largest.FileUniqueID)
-		fileType = "Photo"
-	case tgMsg.Audio != nil:
-		fileID = tgMsg.Audio.FileID
-		fileSize = tgMsg.Audio.FileSize
-		fileName = tgMsg.Audio.FileName
-		if fileName == "" {
-			// Build a descriptive name from title/performer if available.
-			if tgMsg.Audio.Title != "" {
-				fileName = tgMsg.Audio.Title + ".ogg"
-			} else {
-				fileName = fmt.Sprintf("audio_%s.ogg", tgMsg.Audio.FileUniqueID)
-			}
-		}
-		fileType = "Audio"
-	case tgMsg.Video != nil:
-		fileID = tgMsg.Video.FileID
-		fileSize = tgMsg.Video.FileSize
-		fileName = tgMsg.Video.FileName
-		if fileName == "" {
-			fileName = fmt.Sprintf("video_%s.mp4", tgMsg.Video.FileUniqueID)
-		}
-		fileType = "Video"
-	default:
-		return "", "", fmt.Errorf("message has no downloadable attachment")
+		seen[strings.ToLower(m.Name)] = true
+		out = append(out, m.Name)
 	}
-
-	// Sanitize the filename to prevent path traversal via user-controlled
-	// fields (e.g. Document.FileName, Audio.Title). Replacing backslashes
-	// with forward slashes first ensures that both Windows and Unix path
-	// separators are stripped regardless of the host OS.
-	fileName = filepath.Base(strings.ReplaceAll(fileName, "\\", "/"))
-	if fileName == "." || fileName == "" {
-		fileName = fmt.Sprintf("file_%s", fileID)
-	}
-
-	if fileSize > maxTelegramFileSize {
-		return "", "", fmt.Errorf("file too large (%d bytes, max %d)", fileSize, maxTelegramFileSize)
-	}
-
-	tgFile, err := b.api.GetFile(ctx, fileID)
-	if err != nil {
-		return "", "", fmt.Errorf("getFile: %w", err)
-	}
-
-	body, err := b.api.DownloadFile(ctx, tgFile.FilePath)
-	if err != nil {
-		return "", "", fmt.Errorf("download file: %w", err)
-	}
-	defer body.Close()
-
-	timestamp := time.Now().UnixNano()
-	destName := fmt.Sprintf("tg_%d_%s", timestamp, fileName)
-
-	// Route attachments through the shared dir infrastructure so container-based
-	// agents can access them at /scion-volumes/scratchpad/.attachments/_telegram/.
-	var hostDir string
-	var useSharedDir bool
-	if b.downloadsPath != "" {
-		hostDir = b.downloadsPath
-	} else if projectID != "" {
-		home, homeErr := os.UserHomeDir()
-		if homeErr == nil {
-			// NOTE: SharedDirHostPath is a pure path computation; it does not verify that
-			// "scratchpad" is actually configured on the project. If it is not configured,
-			// the file will be written to the host but won't be visible inside the agent
-			// container. Projects using container-based agents should always have
-			// scratchpad configured.
-			sharedDirBase := config.SharedDirHostPath(home, projectSlug, projectID, "scratchpad")
-			hostDir = filepath.Join(sharedDirBase, ".attachments", "_telegram")
-			useSharedDir = true
-		}
-	}
-	if hostDir == "" {
-		hostDir = filepath.Join(legacyProjectsRoot, projectSlug, "downloads")
-	}
-	if err := os.MkdirAll(hostDir, 0o755); err != nil {
-		return "", "", fmt.Errorf("create downloads dir: %w", err)
-	}
-
-	destPath := filepath.Join(hostDir, destName)
-	f, err := os.Create(destPath)
-	if err != nil {
-		return "", "", fmt.Errorf("create file: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := io.Copy(f, body); err != nil {
-		os.Remove(destPath)
-		return "", "", fmt.Errorf("write file: %w", err)
-	}
-
-	if b.downloadsPath != "" {
-		agentPath = filepath.Join(b.downloadsPath, destName)
-	} else if useSharedDir {
-		agentPath = filepath.Join("/scion-volumes/scratchpad/.attachments/_telegram", destName)
-	} else {
-		agentPath = filepath.Join("/workspace/downloads", destName)
-	}
-	agentPath = filepath.ToSlash(agentPath)
-	placeholder = fmt.Sprintf("📎 [%s attached: %s]", fileType, fileName)
-
-	b.log.Info("Downloaded telegram file",
-		"type", fileType, "file", fileName, "path", destPath, "agent_path", agentPath)
-
-	return agentPath, placeholder, nil
+	return out
 }
 
 // resolveUserMentions extracts @username and text_mention entities from a
@@ -2529,8 +2915,10 @@ func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMes
 
 // --- Callback query handling ---
 
-func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *CallbackQuery) {
-	resp, err := b.callbacks.HandleCallback(ctx, cb)
+// handleCallbackQuery handles a callback query with the callback handler of
+// configuration g.
+func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, g *configGen, cb *CallbackQuery) {
+	resp, err := g.callbacks.HandleCallback(ctx, cb)
 	if err != nil {
 		b.log.Error("Callback handling failed", "error", err, "data", cb.Data)
 		return
@@ -2541,7 +2929,7 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	}
 
 	// Deliver the ask-user response to the hub.
-	topic := projectcompat.AgentTopic(resp.ProjectID, resp.AgentSlug)
+	topic := projectkeys.AgentTopic(resp.ProjectID, resp.AgentSlug)
 
 	// Determine sender identity from the callback user.
 	sender := "telegram:unknown"
@@ -2584,27 +2972,212 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	b.deliverInbound(topic, msg)
 }
 
+// --- Recipient project access ---
+
+// recipientCanReadProject reports whether the linked user in mapping can
+// read projectID, listing that user's projects as that user. Results and
+// failures are cached briefly per user. It returns false when the user
+// cannot be acted as or the list cannot be fetched, so notifications are
+// not sent for projects the user may not be able to read.
+func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping *TelegramUserMapping, projectID string) (bool, readDenial) {
+	principal := linkedUserPrincipal(mapping)
+	// Agent topics always carry a project; an empty one fails closed.
+	if principal == "" || projectID == "" || b.hubClient == nil {
+		return false, readDenialCheckFailed
+	}
+
+	entry, ok := b.cachedUserProjects(principal)
+	if !ok {
+		ch := b.userProjectsGroup.DoChan(principal, func() (interface{}, error) {
+			// A caller arriving after a shared call finished finds its
+			// result here instead of starting another call.
+			if e, ok := b.cachedUserProjects(principal); ok {
+				return e, nil
+			}
+			// The shared call runs on its own bounded context so it can
+			// finish and fill the cache after any one caller stops waiting.
+			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userProjectsFetchTimeout)
+			defer cancel()
+			return b.fetchUserProjects(fetchCtx, principal), nil
+		})
+		select {
+		case res := <-ch:
+			entry = res.Val.(userProjectsEntry)
+		case <-ctx.Done():
+			// The caller stopped waiting: treat as not readable.
+			return false, readDenialCallerGaveUp
+		}
+	}
+	if entry.failed {
+		return false, readDenialCheckFailed
+	}
+	if !entry.ids[projectID] {
+		return false, readDenialCannotRead
+	}
+	return true, ""
+}
+
+// readDenial says why recipientCanReadProject returned false.
+type readDenial string
+
+const (
+	// readDenialCannotRead: the user's project list does not include the
+	// project.
+	readDenialCannotRead readDenial = "cannot read project"
+	// readDenialCheckFailed: the check could not be made (no usable link,
+	// no hub, or the project list failed); fails closed.
+	readDenialCheckFailed readDenial = "project check failed"
+	// readDenialCallerGaveUp: the caller's context ended while waiting;
+	// fails closed.
+	readDenialCallerGaveUp readDenial = "caller stopped waiting"
+)
+
+// logReadDenial logs a notification dropped by the project read check: a
+// plain denial at Debug, a fail-closed drop at Warn.
+func (b *TelegramBrokerV2) logReadDenial(msg string, reason readDenial, projectID string) {
+	if reason == readDenialCannotRead {
+		b.log.Debug(msg, "project_id", projectID, "reason", string(reason))
+		return
+	}
+	b.log.Warn(msg, "project_id", projectID, "reason", string(reason))
+}
+
+// cachedUserProjects returns the unexpired cache entry for principal.
+func (b *TelegramBrokerV2) cachedUserProjects(principal string) (userProjectsEntry, bool) {
+	b.userProjectsMu.Lock()
+	defer b.userProjectsMu.Unlock()
+	e, ok := b.userProjects[principal]
+	if !ok || time.Since(e.fetchedAt) >= e.ttl() {
+		return userProjectsEntry{}, false
+	}
+	return e, true
+}
+
+// userProjectsFetchTimeout bounds one shared recipient project-list call.
+const userProjectsFetchTimeout = 10 * time.Second
+
+// fetchUserProjects lists the user's projects as that user and caches the
+// result or any failure (including a timeout), evicting expired entries.
+func (b *TelegramBrokerV2) fetchUserProjects(ctx context.Context, principal string) userProjectsEntry {
+	entry := userProjectsEntry{fetchedAt: time.Now()}
+	projects, err := b.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		b.log.Warn("Failed to list projects for notification recipient", "error", err)
+		entry.failed = true
+	} else {
+		entry.ids = make(map[string]bool, len(projects))
+		for _, p := range projects {
+			entry.ids[p.ID] = true
+		}
+	}
+
+	b.userProjectsMu.Lock()
+	defer b.userProjectsMu.Unlock()
+	if b.userProjects == nil {
+		b.userProjects = make(map[string]userProjectsEntry)
+	}
+	for k, e := range b.userProjects {
+		if time.Since(e.fetchedAt) >= e.ttl() {
+			delete(b.userProjects, k)
+		}
+	}
+	b.userProjects[principal] = entry
+	return entry
+}
+
 // --- Agent cache ---
 
-func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string) []string {
-	cached, err := b.store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
+// errHubNotConfigured reports that no hub client is configured.
+var errHubNotConfigured = errors.New("hub client not configured")
+
+// errSenderNotLinked reports that the message sender is unknown or has no
+// linked Scion account.
+var errSenderNotLinked = errors.New("sender has no linked Scion account")
+
+// errSenderLinkStale reports that the sender's link mapping has no Scion
+// email, so the plugin cannot act as that user.
+var errSenderLinkStale = errors.New("sender's linked Scion account has no email")
+
+// errSenderLookupFailed reports that the sender's link mapping could not be
+// read from the store.
+var errSenderLookupFailed = errors.New("sender link lookup failed")
+
+// senderLink is the result of looking up a message sender's link mapping.
+type senderLink struct {
+	mapping   *TelegramUserMapping
+	principal string
+	// err is errSenderNotLinked, errSenderLinkStale or errSenderLookupFailed
+	// when the plugin cannot act as the sender.
+	err error
+}
+
+// email returns the sender's linked Scion email, or "" when unknown.
+func (l *senderLink) email() string {
+	if l == nil || l.mapping == nil {
+		return ""
+	}
+	return l.mapping.ScionEmail
+}
+
+// lookupSender looks up the sender's link mapping and the principal to act
+// as.
+func (b *TelegramBrokerV2) lookupSender(ctx context.Context, sender *TGUser) *senderLink {
+	if sender == nil {
+		return &senderLink{err: errSenderNotLinked}
+	}
+	mapping, err := b.store.GetUserMapping(ctx, strconv.FormatInt(sender.ID, 10))
+	switch {
+	case err != nil:
+		b.log.Warn("Failed to look up sender mapping", "error", err)
+		return &senderLink{err: errSenderLookupFailed}
+	case mapping == nil:
+		return &senderLink{err: errSenderNotLinked}
+	}
+	l := &senderLink{mapping: mapping, principal: linkedUserPrincipal(mapping)}
+	if l.principal == "" {
+		l.err = errSenderLinkStale
+	}
+	return l
+}
+
+// getProjectAgents returns the agent slugs of a project for routing a
+// message from the resolved sender in link (link.err must be nil).
+//
+// The cache is kept per user and project: the sender is only served a list
+// fetched as themselves. When their entry is stale the list is refreshed
+// from the hub as the sender; a stale entry also covers a failed refresh,
+// except when the hub denies the sender. A non-nil error is the hub error
+// when no list is available.
+func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string, link *senderLink) ([]string, error) {
+	cached, cacheErr := b.store.GetProjectAgents(ctx, link.principal, projectID)
+	if cacheErr != nil {
+		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", cacheErr)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
-		return agentSlugs(cached.Agents)
+		return agentSlugs(cached.Agents), nil
 	}
 
-	agents, err := b.hubClient.ListAgents(ctx, projectID)
+	if b.hubClient == nil {
+		if cached != nil {
+			return agentSlugs(cached.Agents), nil
+		}
+		return nil, errHubNotConfigured
+	}
+
+	agents, err := b.hubClient.ListAgents(ctx, projectID, link.principal)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
-		if cached != nil {
-			return agentSlugs(cached.Agents)
+		// A stale cache covers an unavailable hub, not a denial: when the
+		// sender is denied (or their link is no longer accepted) the error
+		// is returned so they are told why and nothing is delivered.
+		if cached != nil && !isForbiddenHubError(err) {
+			return agentSlugs(cached.Agents), nil
 		}
-		return nil
+		return nil, err
 	}
 
 	saveErr := b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        link.principal,
 		ProjectID:   projectID,
 		Agents:      agents,
 		RefreshedAt: time.Now(),
@@ -2613,7 +3186,98 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
 	}
 
-	return agentSlugs(agents)
+	return agentSlugs(agents), nil
+}
+
+// replyUnresolvedSender answers a group message whose sender cannot be
+// acted as (unknown sender, not linked, link without email, or lookup
+// failure). Nothing derived from the agent cache is used. A sender who
+// addresses the bot is told what to do. A sender with a link that needs
+// re-registering, or whose link could not be read, is also told when the
+// message would go to the default agent. Other messages are ignored.
+func (b *TelegramBrokerV2) replyUnresolvedSender(ctx context.Context, api *TelegramAPIClient, tgMsg *TGMessage, botUsername, effectiveDefault string, lookupErr error) {
+	addressed := isBotMentioned(tgMsg, botUsername) || b.isReplyToBot(tgMsg)
+	text, kind := registerHint, ""
+	switch {
+	case errors.Is(lookupErr, errSenderLinkStale):
+		text, kind = staleLinkText, "stale_link"
+	case errors.Is(lookupErr, errSenderLookupFailed):
+		text, kind = "Something went wrong. Please try again.", "lookup_failed"
+	}
+	if !addressed {
+		// A message that would go to the default agent is answered for a
+		// link that needs attention, at most once per suppression window
+		// per sender.
+		if kind == "" || !defaultAgentApplies(tgMsg, botUsername, effectiveDefault) {
+			return
+		}
+		key := "unresolved_sender:" + kind
+		if tgMsg.From != nil {
+			key += ":" + strconv.FormatInt(tgMsg.From.ID, 10)
+		}
+		if b.shouldSuppressError(tgMsg.Chat.ID, int(tgMsg.MessageThreadID), key) {
+			return
+		}
+	}
+	api.SendMessage(ctx, tgMsg.Chat.ID, text, "") //nolint:errcheck
+}
+
+// defaultAgentApplies reports whether an unaddressed message would go to
+// the group's default agent: plain text or an attachment, not a command,
+// not leading with an @mention. It does not use the agent list.
+func defaultAgentApplies(tgMsg *TGMessage, botUsername, effectiveDefault string) bool {
+	if effectiveDefault == "" {
+		return false
+	}
+	if tgMsg.Photo != nil || tgMsg.Document != nil || tgMsg.Audio != nil || tgMsg.Video != nil {
+		return true
+	}
+	text := strings.TrimSpace(tgMsg.Text)
+	return text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, nil)
+}
+
+// isReplyToBot reports whether the message replies to a message the bot
+// sent.
+func (b *TelegramBrokerV2) isReplyToBot(tgMsg *TGMessage) bool {
+	if tgMsg.ReplyToMessage == nil || tgMsg.ReplyToMessage.From == nil {
+		return false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.botInfo != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID
+}
+
+// agentListSuppressKey returns the repeated-reply suppression key for an
+// agent-list failure, keyed per error kind and sender so one user's reply
+// does not suppress a different reply to another user.
+func agentListSuppressKey(err error, sender *TGUser) string {
+	key := "agent_list_unavailable:" + agentListErrorKind(err)
+	if sender != nil {
+		key += ":" + strconv.FormatInt(sender.ID, 10)
+	}
+	return key
+}
+
+// agentListErrorKind names the kind of agent-list failure, for keying
+// repeated-reply suppression.
+func agentListErrorKind(err error) string {
+	switch {
+	case isStaleLinkError(err):
+		return "stale_link"
+	case isForbiddenHubError(err):
+		return "forbidden"
+	default:
+		return "unavailable"
+	}
+}
+
+// replyAgentListUnavailable tells the sender why their message could not be
+// routed when no agent list is available, instead of reporting the
+// addressed agent as missing. A nonzero replyTo threads the reply to that
+// message.
+func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, api *TelegramAPIClient, chatID int64, replyTo int64, listErr error, email, project string) {
+	text := hubErrorText(listErr, email, project, "Couldn't fetch the agent list for this project. Please try again later.")
+	api.SendMessageWithKeyboard(ctx, chatID, text, "", nil, replyTo) //nolint:errcheck
 }
 
 // --- Hub delivery (reuses the same pattern as v1) ---
@@ -2711,6 +3375,23 @@ func (b *TelegramBrokerV2) shouldSuppressError(chatID int64, threadID int, error
 // returns the HTTP status code and parsed error message (if any) so the
 // caller can report delivery failures back to the originating chat.
 func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic string, msg *messages.StructuredMessage) (statusCode int, errMsg string) {
+	return b.deliverInboundWithAttachments(ctx, topic, msg, nil)
+}
+
+// deliverInboundWithAttachments is deliverInboundWithFeedback for a
+// message that names the sender's hub uploads by id. A hub that could not
+// be reached answers 502 here.
+func (b *TelegramBrokerV2) deliverInboundWithAttachments(ctx context.Context, topic string, msg *messages.StructuredMessage, attachmentIDs []string) (statusCode int, errMsg string) {
+	statusCode, errMsg, _ = b.deliverInboundOutcome(ctx, topic, msg, attachmentIDs)
+	return statusCode, errMsg
+}
+
+// deliverInboundOutcome is deliverInboundWithAttachments that also reports
+// whether the outcome is known: answered is false when the request may
+// have reached the hub but no answer came back (a transport error, a
+// timeout or a cancellation), so the hub may still deliver the message.
+// It is true for a real hub answer, and for a request that was never sent.
+func (b *TelegramBrokerV2) deliverInboundOutcome(ctx context.Context, topic string, msg *messages.StructuredMessage, attachmentIDs []string) (statusCode int, errMsg string, answered bool) {
 	b.mu.RLock()
 	handler := b.InboundHandler
 	hubURL := b.hubURL
@@ -2721,29 +3402,30 @@ func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic
 
 	if handler != nil {
 		handler(topic, msg)
-		return http.StatusOK, ""
+		return http.StatusOK, "", true
 	}
 
 	if hubURL == "" {
 		b.log.Debug("No hub URL configured, dropping inbound message", "topic", topic)
-		return http.StatusOK, ""
+		return http.StatusOK, "", true
 	}
 
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:         topic,
+		Message:       msg,
+		AttachmentIDs: attachmentIDs,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		b.log.Error("Failed to marshal inbound message", "error", err)
-		return http.StatusInternalServerError, "internal error"
+		return http.StatusInternalServerError, "internal error", true
 	}
 
 	inboundURL := hubURL + "/api/v1/broker/inbound"
 	req, err := http.NewRequestWithContext(ctx, "POST", inboundURL, bytes.NewReader(body))
 	if err != nil {
 		b.log.Error("Failed to create inbound request", "error", err)
-		return http.StatusInternalServerError, "internal error"
+		return http.StatusInternalServerError, "internal error", true
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -2752,14 +3434,14 @@ func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic
 	if brokerID != "" && hmacKey != "" {
 		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
 			b.log.Error("Failed to sign inbound request", "error", err)
-			return http.StatusInternalServerError, "internal error"
+			return http.StatusInternalServerError, "internal error", true
 		}
 	}
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
 		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
-		return http.StatusBadGateway, "delivery failed"
+		return http.StatusBadGateway, "delivery failed", false
 	}
 	defer resp.Body.Close()
 
@@ -2779,13 +3461,13 @@ func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic
 			if rem, ok := hubErr.Error.Details["remediation"].(string); ok && rem != "" {
 				errDetail += " " + rem
 			}
-			return resp.StatusCode, errDetail
+			return resp.StatusCode, errDetail, true
 		}
-		return resp.StatusCode, fmt.Sprintf("delivery failed (HTTP %d)", resp.StatusCode)
+		return resp.StatusCode, fmt.Sprintf("delivery failed (HTTP %d)", resp.StatusCode), true
 	}
 
 	io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, ""
+	return resp.StatusCode, "", true
 }
 
 // signInboundRequest signs an HTTP request with HMAC auth.
@@ -2872,7 +3554,7 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string, recipien
 }
 
 // extractUserIDFromTopic extracts the user ID from a topic of the form
-// scion.grove.<id>.user.<userid>.messages or scion.project.<id>.user.<userid>.messages.
+// scion.project.<id>.user.<userid>.messages.
 func extractUserIDFromTopic(topic string) string {
 	parts := strings.Split(topic, ".")
 	for i, p := range parts {

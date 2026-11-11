@@ -36,9 +36,11 @@ This script's job is therefore minimal:
   2. Fail (exit 1) with an actionable message if no method is available.
   3. Write outputs/resolved-auth.json describing the choice (for diagnostics
      and resume-time consistency).
-  4. Write outputs/env.json — for api-key/auth-file this is empty (the
-     harness child already inherits the projected env); for vertex-ai it
-     contains ${VAR} placeholders so the host can expand at launch.
+  4. Write outputs/env.json — always carries SCION_USAGE_SOURCE=hooks (the
+     D10 opt-in for hook-sourced usage; see dialect.yaml); for vertex-ai it
+     additionally contains ${VAR} placeholders so the host can expand at
+     launch. For api-key/auth-file, that usage-source entry is the only one
+     (the harness child otherwise inherits the projected env as-is).
 
 The script is intentionally stdlib-only so it works on any container image
 that ships python3 (declared in config.yaml's required_image_tools).
@@ -60,7 +62,16 @@ assert sh.INTERFACE_VERSION >= 2, (
 )
 
 OPENCODE_AUTH_FILE = "~/.local/share/opencode/auth.json"
-OPENCODE_CONFIG_FILE = "~/.config/opencode/.opencode.json"
+# opencode 1.x loads config.json, opencode.json and opencode.jsonc from
+# ~/.config/opencode (sst/opencode packages/opencode/src/config/config.ts).
+# The legacy Go-opencode ".opencode.json" is not read (ptone/scion#2679).
+OPENCODE_CONFIG_FILE = "~/.config/opencode/opencode.json"
+OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
+LEGACY_CONFIG_FILE = "~/.config/opencode/.opencode.json"
+
+# Model IDs use opencode's provider/model form (models.dev catalog).
+VERTEX_DEFAULT_MODEL = "google-vertex/gemini-2.5-pro"
+VERTEX_DEFAULT_SMALL_MODEL = "google-vertex/gemini-2.5-flash"
 
 VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai")
 
@@ -82,7 +93,8 @@ AUTH = sh.AuthSpec(
 # ---------------------------------------------------------------------------
 
 _VERTEX_PROJECT_VARS = ("GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT")
-_VERTEX_LOCATION_VARS = ("GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION")
+# Shared precedence LOCATION > REGION (ptone/scion#4719), then VERTEX_LOCATION.
+_VERTEX_LOCATION_VARS = sh.vertex_location_keys(include_ml_region=False, fallback=("VERTEX_LOCATION",))
 
 
 def _has_vertex(ctx: sh.ProvisionContext) -> bool:
@@ -120,6 +132,11 @@ def _vertex_env_overlay(ctx: sh.ProvisionContext) -> dict[str, str]:
     env_keys = ctx.env_keys
     project_key = next((k for k in _VERTEX_PROJECT_VARS if k in env_keys), "")
     location_key = next((k for k in _VERTEX_LOCATION_VARS if k in env_keys), "")
+    if location_key in (sh.VERTEX_LOCATION_KEY, sh.VERTEX_REGION_KEY):
+        sh.warn_vertex_location_conflict(
+            lambda k: ctx.read_secret(k, env_fallback=True) if k in env_keys else "",
+            ctx.warn,
+        )
 
     env: dict[str, str] = {}
     if project_key:
@@ -143,7 +160,7 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
     """Translate a universal MCPServerConfig into OpenCode's native shape.
 
     OpenCode uses a different schema from Claude/Gemini:
-      - parent key is "mcpServers" (matching the Go config struct)
+      - parent key is "mcp" (opencode.json)
       - "type": "local" | "remote" instead of stdio/sse/streamable-http
       - local entries take a single "command" array (no separate args)
       - local env var key is "environment" (not "env")
@@ -202,74 +219,106 @@ def _write_opencode_auth_file(ctx: sh.ProvisionContext) -> None:
     sh.atomic_write_text(target, content, mode=0o600)
 
 
-def _write_mcp_config(servers: dict[str, Any]) -> None:
-    """Merge translated MCP servers into ~/.config/opencode/.opencode.json."""
-    config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
-    config_data: dict[str, Any] = {}
-    if os.path.isfile(config_path):
-        try:
-            existing = sh.load_json(config_path)
-        except (OSError, json.JSONDecodeError):
-            existing = {}
-        if isinstance(existing, dict):
-            config_data = existing
+def _load_config() -> dict[str, Any] | None:
+    """Load ~/.config/opencode/opencode.json: {} if absent, None if unusable.
 
-    mcp_block = config_data.get("mcpServers")
+    opencode parses the file as JSONC, so a file that json.load rejects can
+    still be valid for opencode. None means: leave the file as it is.
+    """
+    config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        existing = sh.load_json(config_path)
+    except (OSError, ValueError):
+        return None
+    return existing if isinstance(existing, dict) else None
+
+
+def _save_config(config_data: dict[str, Any]) -> None:
+    config_data.setdefault("$schema", OPENCODE_CONFIG_SCHEMA)
+    sh.atomic_write_json(sh.expand_path(OPENCODE_CONFIG_FILE), config_data)
+
+
+def _write_mcp_config(servers: dict[str, Any]) -> None:
+    """Merge translated MCP servers into the config's top-level "mcp" map."""
+    config_data = _load_config()
+    if config_data is None:
+        raise OSError(f"{sh.expand_path(OPENCODE_CONFIG_FILE)} is left unchanged")
+    mcp_block = config_data.get("mcp")
     if not isinstance(mcp_block, dict):
         mcp_block = {}
     for name, native in servers.items():
         mcp_block[name] = native
-    config_data["mcpServers"] = mcp_block
-    sh.atomic_write_json(config_path, config_data)
+    config_data["mcp"] = mcp_block
+    _save_config(config_data)
 
 
 def _write_vertex_provider_config() -> None:
-    """Write vertex-ai provider config into ~/.config/opencode/.opencode.json.
+    """Point opencode at Gemini on Vertex AI.
 
-    Sets providers.copilot.apiKey to empty string so viper config values
-    override defaults, preventing GITHUB_TOKEN from being used even if
-    the launch wrapper does not strip it.  Also sets vertex models for all agent
-    types so opencode defaults to Gemini via VertexAI.
+    opencode's google-vertex provider autoloads from GOOGLE_CLOUD_PROJECT /
+    VERTEX_LOCATION (set by _vertex_env_overlay), so only default models are
+    needed here. Neither default replaces a model already in the file; an
+    explicit SCION_MODEL still wins (_write_model_config). github-copilot is
+    disabled so a stray GITHUB_TOKEN cannot make opencode pick Copilot over
+    Vertex, in case the launch wrapper does not strip it.
     """
-    config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
-    config_data: dict[str, Any] = {}
-    if os.path.isfile(config_path):
-        try:
-            existing = sh.load_json(config_path)
-        except (OSError, json.JSONDecodeError):
-            existing = {}
-        if isinstance(existing, dict):
-            config_data = existing
-
-    providers = config_data.setdefault("providers", {})
-    providers["copilot"] = {"apiKey": ""}
-
-    agents = config_data.setdefault("agents", {})
-    agents["coder"] = {"model": "vertexai.gemini-2.5"}
-    agents["summarizer"] = {"model": "vertexai.gemini-2.5"}
-    agents["task"] = {"model": "vertexai.gemini-2.5-flash"}
-    agents["title"] = {"model": "vertexai.gemini-2.5-flash"}
-
-    sh.atomic_write_json(config_path, config_data)
+    config_data = _load_config()
+    if config_data is None:
+        return
+    config_data.setdefault("model", VERTEX_DEFAULT_MODEL)
+    config_data.setdefault("small_model", VERTEX_DEFAULT_SMALL_MODEL)
+    disabled = config_data.get("disabled_providers")
+    if not isinstance(disabled, list):
+        disabled = []
+    if "github-copilot" not in disabled:
+        disabled.append("github-copilot")
+    config_data["disabled_providers"] = disabled
+    _save_config(config_data)
 
 
-def _write_model_config(model: str) -> None:
-    """Write the resolved model into ~/.config/opencode/.opencode.json."""
-    config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
-    config_data: dict[str, Any] = {}
-    if os.path.isfile(config_path):
-        try:
-            existing = sh.load_json(config_path)
-        except (OSError, json.JSONDecodeError):
-            existing = {}
-        if isinstance(existing, dict):
-            config_data = existing
+def _write_model_config(ctx: sh.ProvisionContext, model: str, method: str) -> bool:
+    """Write the resolved model into the config; return True if written.
 
-    if model:
+    A "model" already in the file is kept. Without vertex-ai, values equal
+    to the Vertex defaults (an earlier provision's) are removed.
+    """
+    config_data = _load_config()
+    if config_data is None:
+        return False
+    provider, _, model_id = model.partition("/")
+    written = bool(provider and model_id)
+    if written:
         config_data["model"] = model
-    else:
-        config_data.pop("model", None)
-    sh.atomic_write_json(config_path, config_data)
+    elif model:
+        ctx.warn(f"model {model!r} is not in provider/model form; model not changed")
+    if method != "vertex-ai":
+        if not written and config_data.get("model") == VERTEX_DEFAULT_MODEL:
+            del config_data["model"]
+        if config_data.get("small_model") == VERTEX_DEFAULT_SMALL_MODEL:
+            del config_data["small_model"]
+        if config_data.get("disabled_providers") == ["github-copilot"]:
+            del config_data["disabled_providers"]
+    _save_config(config_data)
+    return written
+
+
+def _remove_legacy_seed(ctx: sh.ProvisionContext) -> None:
+    """Remove the unread legacy .opencode.json if it holds only the old seed."""
+    path = sh.expand_path(LEGACY_CONFIG_FILE)
+    if not os.path.isfile(path):
+        return
+    try:
+        if sh.load_json(path) == {"$schema": OPENCODE_CONFIG_SCHEMA, "theme": "matrix"}:
+            os.remove(path)
+            return
+    except (OSError, ValueError):
+        pass
+    ctx.info(
+        f"{path} is not read by opencode 1.x; "
+        "move any settings you added to opencode.json"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -297,30 +346,44 @@ def provision(ctx: sh.ProvisionContext) -> None:
                 raise
 
     extra: dict[str, Any] = {}
-    env: dict[str, str] = {}
+    # OpenCode has no native OTel usage signal (config.yaml's
+    # capabilities.telemetry.native_emitter is "no"), so its model calls and
+    # tokens are published from hooks instead, via scion-bridge.js's
+    # step-finish-derived model-end events. Per design D10 (the vetting
+    # gate), a harness publishes hook-sourced usage only once its mapping is
+    # captured and tested against a real CLI version -- see dialect.yaml and
+    # the fixtures under pkg/sciontool/hooks/dialects/testdata/opencode/.
+    # This is narrow to usage only (D4): tool, session and turn hook
+    # telemetry are unaffected by this variable either way.
+    env: dict[str, str] = {"SCION_USAGE_SOURCE": "hooks"}
 
     if resolved.method == "auth-file":
         _write_opencode_auth_file(ctx)
         extra["auth_file_written"] = True
 
+    if _load_config() is None:
+        ctx.warn(
+            f"{sh.expand_path(OPENCODE_CONFIG_FILE)} is not a plain JSON object and is left "
+            "unchanged; scion model, MCP and Vertex AI settings are not applied to it"
+        )
+
     if resolved.method == "vertex-ai":
         extra["vertex_project_env"] = "VERTEXAI_PROJECT"
         extra["vertex_location_env"] = "VERTEXAI_LOCATION"
-        env = _vertex_env_overlay(ctx)
+        env.update(_vertex_env_overlay(ctx))
         _write_vertex_provider_config()
 
     ctx.write_outputs(resolved, env=env, extra=extra)
 
     sh.apply_mcp_translated(ctx, _translate_mcp_server, _write_mcp_config)
 
-    resolved_model = str(ctx.model_resolution.get("resolved_model") or "").strip()
-    if not resolved_model:
-        resolved_model = os.environ.get("SCION_MODEL", "").strip()
-    _write_model_config(resolved_model)
+    resolved_model = sh.resolve_model(ctx)
+    model_written = _write_model_config(ctx, resolved_model, resolved.method)
+    _remove_legacy_seed(ctx)
 
     _prefetch_models_catalog(ctx)
 
-    ctx.info(f"method={resolved.method}" + (f" model={resolved_model}" if resolved_model else ""))
+    ctx.info(f"method={resolved.method}" + (f" model={resolved_model}" if model_written else ""))
 
 
 # ---------------------------------------------------------------------------

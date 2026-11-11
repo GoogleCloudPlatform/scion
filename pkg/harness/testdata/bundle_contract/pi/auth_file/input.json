@@ -1,0 +1,12 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [],
+    "env_secret_files": {},
+    "files": [],
+    "file_secret_files": {
+      "PI_AUTH": "$HOME/.scion/harness/secrets/PI_AUTH"
+    }
+  },
+  "harness_config": {}
+}

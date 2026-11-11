@@ -1,0 +1,5 @@
+schema_version: "1"
+active_profile: local
+server:
+    broker:
+        broker_id: b-2

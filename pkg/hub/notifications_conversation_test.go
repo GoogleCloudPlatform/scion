@@ -42,13 +42,12 @@ func TestCreateInboxMessage_StampsConversationID(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "conv-agent",
-		Slug:       "conv-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Runtime:    "managed",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "conv-agent",
+		Slug:      "conv-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -100,6 +99,84 @@ func TestCreateInboxMessage_StampsConversationID(t *testing.T) {
 	}
 }
 
+// TestCreateInboxMessage_StampsDispatchStateDispatched is a regression test
+// for nc-promote-busy round 2 (R2): createInboxMessage persists an
+// agent-to-user inbox notification, and that persist is itself the
+// delivery. Leaving DispatchState unset falls through to the Ent schema's
+// "pending" default and is never transitioned — the same omission fixed for
+// deliverToUser and deliveryUserDirect — which would put the row on the
+// sweep-then-purge path and silently delete it after 7 days.
+func TestCreateInboxMessage_StampsDispatchStateDispatched(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "dispatch-stamp-project",
+		Slug: "dispatch-stamp-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "dispatch-agent",
+		Slug:      "dispatch-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "dispatchuser@example.com",
+		DisplayName: "DispatchUser",
+	}
+	if err := s.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	spy := &spyEventPublisher{}
+	nd := NewNotificationDispatcher(s, spy, func() AgentDispatcher { return nil }, slog.Default())
+
+	sub := &store.NotificationSubscription{
+		ID:             api.NewUUID(),
+		Scope:          store.SubscriptionScopeAgent,
+		AgentID:        agent.ID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   user.ID,
+		ProjectID:      project.ID,
+	}
+
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: sub.ID,
+		AgentID:        agent.ID,
+		ProjectID:      project.ID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   user.ID,
+		Status:         "WAITING_FOR_INPUT",
+		Message:        "Agent needs input",
+	}
+
+	nd.createInboxMessage(ctx, sub, notif, agent)
+
+	msgs := spy.getUserMessages()
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one published user message, got none")
+	}
+	last := msgs[len(msgs)-1]
+	if last.DispatchState != store.MessageDispatchDispatched {
+		t.Fatalf("expected DispatchState %q, got %q — an unset value defaults "+
+			"to \"pending\" and is never transitioned, so the sweep would "+
+			"eventually delete this notification", store.MessageDispatchDispatched, last.DispatchState)
+	}
+}
+
 // TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic verifies that when
 // the subscriber has a non-UUID SubscriberID (e.g. a slug or federated identity),
 // createInboxMessage does not panic and the persisted message has an empty
@@ -122,13 +199,12 @@ func TestCreateInboxMessage_NonUUIDSubscriber_NoStampNoPanic(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "conv-noid-agent",
-		Slug:       "conv-noid-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Runtime:    "managed",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "conv-noid-agent",
+		Slug:      "conv-noid-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Runtime:   "managed",
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)

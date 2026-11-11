@@ -24,48 +24,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// noopDispatcher is a minimal AgentDispatcher that does nothing.
-type noopDispatcher struct{}
-
-func (noopDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
-	agent.Phase = string(state.PhaseRunning)
-	return nil
-}
-func (noopDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error { return nil }
-func (noopDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
-	return nil
-}
-func (noopDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error      { return nil }
-func (noopDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error   { return nil }
-func (noopDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error { return nil }
-func (noopDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
-	return nil
-}
-func (noopDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
-	return nil
-}
-func (noopDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
-	return false, nil
-}
-func (noopDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	agent.Phase = string(state.PhaseRunning)
-	return nil, nil
-}
-func (noopDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
-}
-func (noopDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return "", 0, nil
-}
-func (noopDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
-}
 
 // setupEventTestServer creates a test server with an event publisher, project, broker, and dispatcher.
 func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPublisher, *store.Project) {
@@ -96,6 +58,7 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))

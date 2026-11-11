@@ -1,0 +1,4506 @@
+/**
+ * Tests for TerminalWorkspaceRoot: data-effective-layout attribute
+ * and focus outline suppression in single-pane mode (#1716).
+ */
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from 'vitest';
+import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import { TerminalSessionRegistry, type TerminalSession } from './terminal-sessions.js';
+import type { Agent } from '../shared/types.js';
+import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
+import {
+  TERMINAL_DRAG_MIME,
+  TERMINAL_PALETTE_NEW_AGENT_EVENT,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
+  type TerminalPaletteNewAgentDetail,
+} from './terminal-workspace-events.js';
+import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
+import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
+import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
+import type { PaletteCandidate } from './palette-types.js';
+import { AgentStore } from './agent-store.js';
+import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
+import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import {
+  TERMINALS_OPEN_ELSEWHERE_HELP,
+  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_STATUS,
+} from './terminal-palette-open.js';
+import { requestUrl } from './__fixtures__/request-url.js';
+
+// Mock terminal-pane custom element before importing workspace root
+vi.mock('@xterm/xterm', () => ({
+  Terminal: class {
+    cols = 80;
+    rows = 24;
+    dispose = vi.fn();
+    reset = vi.fn();
+    write = vi.fn();
+    /** Stands in for xterm's own helper textarea, its keyboard input. */
+    textarea: HTMLTextAreaElement | null = null;
+    focus = vi.fn(() => this.textarea?.focus());
+    blur = vi.fn(() => this.textarea?.blur());
+    refresh = vi.fn();
+    parser = { registerOscHandler: vi.fn() };
+    loadAddon = vi.fn();
+    open = vi.fn((parent: HTMLElement) => {
+      this.textarea = document.createElement('textarea');
+      this.textarea.className = 'xterm-helper-textarea';
+      parent.append(this.textarea);
+    });
+    onData = vi.fn();
+    onBinary = vi.fn();
+    attachCustomKeyEventHandler = vi.fn();
+  },
+}));
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: class {
+    fit = vi.fn();
+  },
+}));
+vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
+vi.mock('@xterm/xterm/css/xterm.css?inline', () => ({ default: '' }));
+
+/**
+ * Lets a test replace the palette's Agents load; every other test gets the
+ * real one, over a fresh agent store per test (standing in for the
+ * singleton) that reads the stubbed fetch.
+ */
+const paletteLoad = vi.hoisted(() => ({
+  override: null as
+    | null
+    | ((options: TerminalPaletteAgentsLoadOptions) => Promise<PaletteCandidate[]>),
+  store: null as AgentStore | null,
+  /** Replaces the hub entry's retain once, when set (cleared after use). */
+  retainOverride: null as null | (() => () => void),
+}));
+function paletteStore(): AgentStore {
+  if (!paletteLoad.store) throw new Error('no agent store for this test');
+  return paletteLoad.store;
+}
+vi.mock('./terminal-palette-data.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./terminal-palette-data.js')>();
+  return {
+    ...actual,
+    loadTerminalPaletteAgents: (
+      options: TerminalPaletteAgentsLoadOptions
+    ): Promise<PaletteCandidate[]> =>
+      paletteLoad.override
+        ? paletteLoad.override(options)
+        : actual.loadTerminalPaletteAgents(options),
+    retainTerminalPaletteAgents: (
+      ...args: Parameters<typeof actual.retainTerminalPaletteAgents>
+    ): (() => void) => {
+      const override = paletteLoad.retainOverride;
+      paletteLoad.retainOverride = null;
+      return override ? override() : actual.retainTerminalPaletteAgents(...args);
+    },
+  };
+});
+/** The store singleton, as the palette data module sees it: this test's store. */
+vi.mock('./agent-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./agent-store.js')>();
+  const agentStore = new Proxy({} as AgentStore, {
+    get: (_target, key): unknown => {
+      const store = paletteStore();
+      const value: unknown = Reflect.get(store, key);
+      return typeof value === 'function' ? (value as () => unknown).bind(store) : value;
+    },
+  });
+  return { ...actual, agentStore };
+});
+
+beforeEach(() => {
+  // The feed's stream never opens here: walks start once the (zero)
+  // connect wait is over, and a ready list revalidates on every load.
+  vi.stubGlobal('EventSource', FakeEventSource);
+  paletteLoad.store = new AgentStore({
+    events: null,
+    visibility: null,
+    connectTimeoutMs: 0,
+    currentUserId: (): string => '',
+  });
+});
+
+afterEach(() => {
+  paletteLoad.store?.destroy();
+  paletteLoad.store = null;
+});
+
+let WorkspaceRoot: typeof TerminalWorkspaceRoot;
+
+beforeAll(async () => {
+  // Ensure custom element is registered
+  await import('../components/terminal/terminal-pane.js');
+  const mod = await import('./terminal-workspace-root.js');
+  WorkspaceRoot = mod.TerminalWorkspaceRoot;
+});
+
+function getPaneHost(root: TerminalWorkspaceRoot): HTMLElement {
+  return root.element.querySelector('.terminal-pane-host') as HTMLElement;
+}
+
+/** Flush queueMicrotask-based refresh. */
+async function flush(): Promise<void> {
+  await Promise.resolve();
+}
+
+describe('data-effective-layout attribute (#1716)', () => {
+  let root: TerminalWorkspaceRoot;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: '11111111-1111-4111-8111-111111111111',
+              name: 'test',
+              phase: 'running',
+            }),
+            { status: 200 }
+          )
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to single on initial load', () => {
+    const host = getPaneHost(root);
+    expect(host.dataset.effectiveLayout).toBe('single');
+  });
+
+  it('updates to two-columns when layout is changed', async () => {
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    const host = getPaneHost(root);
+    expect(host.dataset.effectiveLayout).toBe('two-columns');
+  });
+
+  it('updates to two-rows when layout is changed', async () => {
+    root.layoutManager.setLayout('two-rows');
+    await flush();
+    const host = getPaneHost(root);
+    expect(host.dataset.effectiveLayout).toBe('two-rows');
+  });
+
+  it('updates to four when layout is changed', async () => {
+    root.layoutManager.setLayout('four');
+    await flush();
+    const host = getPaneHost(root);
+    expect(host.dataset.effectiveLayout).toBe('four');
+  });
+
+  it('reverts to single when switching back from multi-pane', async () => {
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(getPaneHost(root).dataset.effectiveLayout).toBe('two-columns');
+    root.layoutManager.setLayout('single');
+    await flush();
+    expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+  });
+
+  it('overrides to single in narrow viewport regardless of active preset', async () => {
+    // Simulate narrow viewport by mocking matchMedia
+    const narrowQuery = { matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    vi.spyOn(window, 'matchMedia').mockReturnValue(narrowQuery as unknown as MediaQueryList);
+
+    // Recreate root with the narrow mock in place
+    root.dispose();
+    root.element.remove();
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+  });
+
+  it('overrides to single when a pane is zoomed', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+
+    // Create a session so we can zoom it
+    const session = root.create(registry, '11111111-1111-4111-8111-111111111111');
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(getPaneHost(root).dataset.effectiveLayout).toBe('two-columns');
+
+    root.layoutManager.zoom(session.state.key);
+    await flush();
+    expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+  });
+});
+
+describe('compact pane headers in 4-up and narrow layouts (ptone/scion#4324)', () => {
+  let root: TerminalWorkspaceRoot;
+  let registry: TerminalSessionRegistry;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    stubWebSocketAndEventSource();
+    registry = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'c' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mount(): ScionTerminalPane {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(registry, AGENT_ID);
+    return paneFor(root, AGENT_ID);
+  }
+
+  it('compacts the header in the 4-up layout, and not in a wide single pane', async () => {
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+
+  it('compacts the header on a narrow viewport, in any preset', async () => {
+    mockNarrowViewport();
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+  });
+
+  it('a pane zoomed from 4-up fills the host and gets its full header back', async () => {
+    const pane = mount();
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.zoom(pane.session!.state.key);
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+});
+
+describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
+  let root: TerminalWorkspaceRoot;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function placeholders(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-slot-placeholder'),
+    ].filter((ph) => !ph.hidden);
+  }
+
+  /** Overlays that cover the whole pane host when shown. */
+  function visibleOverlays(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-empty, .terminal-status'),
+    ].filter((el) => !el.hidden);
+  }
+
+  function dropOn(el: HTMLElement, sessionKey: string): void {
+    const data = new Map<string, string>([[TERMINAL_DRAG_MIME, sessionKey]]);
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(event, 'dataTransfer', {
+      value: {
+        types: [...data.keys()],
+        getData: (type: string): string => data.get(type) ?? '',
+      },
+    });
+    el.dispatchEvent(event);
+  }
+
+  const presets = [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const;
+
+  it.each(presets)('shows %s placeholders with no terminals open', async (preset, count) => {
+    root.layoutManager.setLayout(preset);
+    await flush();
+    expect(placeholders()).toHaveLength(count);
+    expect(visibleOverlays()).toEqual([]);
+  });
+
+  it.each(presets)(
+    'swaps the %s empty state for placeholders when a narrow viewport widens',
+    async (preset, count) => {
+      let onChange: (() => void) | null = null;
+      const query = {
+        matches: true,
+        addEventListener: vi.fn((_type: string, cb: () => void) => {
+          onChange = cb;
+        }),
+        removeEventListener: vi.fn(),
+      };
+      const realMatchMedia = window.matchMedia.bind(window);
+      vi.spyOn(window, 'matchMedia').mockImplementation((q: string) =>
+        q === '(max-width: 760px)' ? (query as unknown as MediaQueryList) : realMatchMedia(q)
+      );
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(placeholders()).toEqual([]);
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+
+      query.matches = false;
+      expect(onChange).not.toBeNull();
+      onChange!();
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe(preset);
+      expect(placeholders()).toHaveLength(count);
+      expect(visibleOverlays()).toEqual([]);
+    }
+  );
+
+  it.each(presets)(
+    'shows the empty state for %s on a narrow viewport with no terminals open',
+    async (preset) => {
+      mockNarrowViewport();
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+      expect(placeholders()).toEqual([]);
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+    }
+  );
+
+  it('shows only the empty state in the single layout with no terminals open', async () => {
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+    expect(overlays[0].textContent).toBe('No terminals are open.');
+  });
+
+  it('shows the status message when terminals are open but none is selected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, AGENT_ID, { deferConnect: true }));
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('shows the status message again after the selected terminal is closed', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    const session = root.create(registry, AGENT_ID);
+    root.select(session);
+    await flush();
+    root.withAutoSelectSuspended(() =>
+      root.create(registry, '22222222-2222-4222-8222-222222222222', { deferConnect: true })
+    );
+    root.withAutoSelectSuspended(() => session.close());
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('keeps a message set through setStatus visible with no terminals open', async () => {
+    root.setStatus('Waiting for the owning tab to select this terminal.');
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
+    expect(overlays[1].textContent).toBe('Waiting for the owning tab to select this terminal.');
+  });
+
+  describe('status action button (ptone/scion#3328)', () => {
+    function actionButton(): HTMLButtonElement {
+      return getPaneHost(root).querySelector<HTMLButtonElement>('.terminal-status-action')!;
+    }
+
+    it('shows the action with the status message and runs it on click', async () => {
+      const onClick = vi.fn();
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick });
+      await flush();
+      const button = actionButton();
+      expect(button.hidden).toBe(false);
+      expect(button.textContent).toBe('Move terminals to this window');
+      expect(button.disabled).toBe(false);
+      button.click();
+      expect(onClick).toHaveBeenCalledOnce();
+      // The status text itself is unchanged by the button, and it replaces
+      // the empty state (ptone/scion#4324).
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+    });
+
+    it('a fresh window with terminals open elsewhere shows that state and the move button, not the empty state (ptone/scion#4324)', async () => {
+      // No pane in this window; main.ts found the terminals held by another
+      // window and set the non-owner state.
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      expect(actionButton().hidden).toBe(false);
+      expect(actionButton().textContent).toBe('Move terminals to this window');
+    });
+
+    const help = {
+      label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+      text: TERMINALS_OPEN_ELSEWHERE_HELP,
+    };
+
+    it.each(['single', 'two-columns', 'two-rows', 'four'] as const)(
+      'shows the one state text with its labelled help trigger in the %s layout (ptone/scion#4324)',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        const status = overlays[0];
+        expect(status.querySelector('.terminal-status-text')!.textContent).toBe(
+          'Terminals open in another window'
+        );
+        // The "?" follows the text, as the trigger of a dropdown with the help.
+        const dropdown = status.querySelector('sl-dropdown.terminal-status-help')!;
+        expect(dropdown.previousElementSibling?.className).toBe('terminal-status-text');
+        const trigger = dropdown.querySelector('sl-icon-button[slot="trigger"]')!;
+        expect(trigger.getAttribute('name')).toBe('question-circle');
+        expect(trigger.getAttribute('label')).toBe('About terminals open in another window');
+        expect(dropdown.querySelector('.terminal-status-help-panel')!.textContent).toBe(
+          TERMINALS_OPEN_ELSEWHERE_HELP
+        );
+        expect(actionButton().hidden).toBe(false);
+      }
+    );
+
+    it('drops the help with the state: a later status and clearStatus show none', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.setStatus('Terminals could not be moved: no answer');
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays()[1].textContent).toBe('Terminals could not be moved: no answer');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.clearStatus();
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+    });
+
+    it('with no terminals anywhere, a fresh window still shows the empty state', async () => {
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it('disables the button while a move runs and hides it when removed', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Moving terminals…', disabled: true, onClick: () => {} });
+      await flush();
+      expect(actionButton().disabled).toBe(true);
+      expect(actionButton().textContent).toBe('Moving terminals…');
+      root.setStatusAction(null);
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it.each(['two-columns', 'four'] as const)(
+      'shows the status and its action over %s placeholders',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+        expect(actionButton().hidden).toBe(false);
+        // Without an action, the placeholders show as before.
+        root.setStatusAction(null);
+        await flush();
+        expect(visibleOverlays()).toEqual([]);
+        expect(actionButton().hidden).toBe(true);
+      }
+    );
+
+    it('clearStatus returns to the normal empty viewer without an action', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      root.clearStatus();
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it('is hidden by default and cleared once a terminal is selected', async () => {
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      expect(actionButton().hidden).toBe(false);
+      root.select(root.create(registry, AGENT_ID));
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      // Closing the selected terminal brings back the default status, without the action.
+      root.withAutoSelectSuspended(() => registry.list()[0].close());
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
+  });
+
+  it.each(presets)(
+    'shows %s placeholders that accept a drop when no slot is filled',
+    async (preset, count) => {
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      const session = root.create(registry, AGENT_ID);
+      root.layoutManager.setLayout(preset);
+      await flush();
+
+      expect(root.layoutManager.getVisibleSlots().every((s) => s === null)).toBe(true);
+      const slots = placeholders();
+      expect(slots).toHaveLength(count);
+      expect(slots.map((ph) => ph.dataset.slotIndex)).toEqual(
+        Array.from({ length: count }, (_, i) => String(i))
+      );
+      expect(visibleOverlays()).toEqual([]);
+
+      for (let i = 0; i < count; i++) {
+        const target = getPaneHost(root).querySelector<HTMLElement>(
+          `.terminal-slot-placeholder[data-slot-index="${i}"]`
+        );
+        expect(target).not.toBeNull();
+        dropOn(target!, session.state.key);
+        await flush();
+        const visible = root.layoutManager.getVisibleSlots();
+        expect(visible[i]).toBe(session.state.key);
+        expect(visible.filter((s) => s !== null)).toHaveLength(1);
+      }
+    }
+  );
+});
+describe('focus outline suppression in single-pane mode (#1716)', () => {
+  let root: TerminalWorkspaceRoot;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: '11111111-1111-4111-8111-111111111111',
+              name: 'test',
+              phase: 'running',
+            }),
+            { status: 200 }
+          )
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('CSS focus rule targets only multi-pane layouts via data-effective-layout', () => {
+    // Verify the installed stylesheet contains the scoped selector
+    const styles = document.querySelectorAll('style');
+    let found = false;
+    for (const style of styles) {
+      const text = style.textContent ?? '';
+      if (
+        text.includes("data-effective-layout='two-columns']") &&
+        text.includes("data-effective-layout='two-rows']") &&
+        text.includes("data-effective-layout='four']") &&
+        text.includes('scion-terminal-pane[data-focused]')
+      ) {
+        found = true;
+        // Ensure the old unconditional rule is gone
+        // The old rule was: scion-terminal-pane[data-focused] { outline: ... }
+        // without the parent selector prefix
+        const lines = text.split('\n');
+        const unconditionalFocusRule = lines.some(
+          (line) =>
+            line.trim().startsWith('scion-terminal-pane[data-focused]') &&
+            !line.includes('data-effective-layout')
+        );
+        expect(unconditionalFocusRule).toBe(false);
+        break;
+      }
+    }
+    expect(found).toBe(true);
+  });
+
+  it('data-effective-layout is single when in single-pane mode so CSS focus rule does not match', () => {
+    const host = getPaneHost(root);
+    // In single-pane mode (default), the CSS selector won't match because
+    // data-effective-layout='single' is not in the selector list
+    expect(host.dataset.effectiveLayout).toBe('single');
+  });
+
+  it('switching from multi-pane to single-pane changes data-effective-layout so focus outline CSS stops applying', async () => {
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    const host = getPaneHost(root);
+    expect(host.dataset.effectiveLayout).toBe('two-columns');
+
+    root.layoutManager.setLayout('single');
+    await flush();
+    expect(host.dataset.effectiveLayout).toBe('single');
+    // CSS rule no longer matches because data-effective-layout='single' is not targeted
+  });
+
+  it('switching from single-pane to multi-pane restores data-effective-layout so focus outline CSS applies', async () => {
+    const host = getPaneHost(root);
+    expect(host.dataset.effectiveLayout).toBe('single');
+
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(host.dataset.effectiveLayout).toBe('two-columns');
+    // CSS rule now matches again for focused panes
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pane host background behind empty slot placeholders (ptone/scion#3803)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('pane host background follows the theme only behind placeholders (#3803)', () => {
+  const AGENT_A = '11111111-1111-4111-8111-111111111111';
+  const AGENT_B = '22222222-2222-4222-8222-222222222222';
+  // --scion-bg values of the light and dark theme blocks in theme.css.
+  const THEMES = { light: 'rgb(248, 250, 252)', dark: 'rgb(15, 23, 42)' } as const;
+  const TERMINAL_HOST_BG = '#111827';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_A, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'test' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    document.documentElement.style.removeProperty('--scion-bg');
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function hostBackground(): string {
+    return getComputedStyle(getPaneHost(root)).backgroundColor;
+  }
+
+  function keyFor(agentId: string): string {
+    const key = root.findSessionKeyByAgentId(agentId);
+    if (!key) throw new Error(`No session for agent ${agentId}`);
+    return key;
+  }
+
+  for (const [theme, bg] of Object.entries(THEMES)) {
+    describe(`${theme} theme`, () => {
+      beforeEach(() => {
+        document.documentElement.style.setProperty('--scion-bg', bg);
+      });
+
+      it('empty multi-pane slots sit on the theme background', async () => {
+        root.layoutManager.setLayout('four');
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(4);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a partly filled layout keeps the theme background behind its placeholders', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(1);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a fully populated multi-pane layout keeps the dark terminal host', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.create(reg, AGENT_B);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        root.layoutManager.place(keyFor(AGENT_B), 'two-columns', 1);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(0);
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+
+      it('a single populated pane keeps the dark terminal host', async () => {
+        root.create(reg, AGENT_A);
+        await flush();
+        expect(root.layoutManager.getState().active).toBe('single');
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+    });
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// URL layout sync (#1715)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('URL layout sync (#1715)', () => {
+  let root: TerminalWorkspaceRoot;
+  let replaceStateSpy: MockInstance<History['replaceState']>;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: '11111111-1111-4111-8111-111111111111',
+              name: 'test',
+              phase: 'running',
+            }),
+            { status: 200 }
+          )
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    replaceStateSpy = vi.spyOn(window.history, 'replaceState');
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('getActiveSlotAgentIds returns null for empty layout', () => {
+    const ids = root.getActiveSlotAgentIds();
+    expect(ids).toEqual([null]);
+  });
+
+  it('getActiveSlotAgentIds returns agent IDs for occupied slots', () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    root.create(registry, '11111111-1111-4111-8111-111111111111');
+    const ids = root.getActiveSlotAgentIds();
+    // In single mode, should show the agent ID
+    expect(ids[0]).toBe('11111111-1111-4111-8111-111111111111');
+  });
+
+  it('findSessionKeyByAgentId returns key for existing session', () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    const session = root.create(registry, '11111111-1111-4111-8111-111111111111');
+    const key = root.findSessionKeyByAgentId('11111111-1111-4111-8111-111111111111');
+    expect(key).toBe(session.state.key);
+  });
+
+  it('findSessionKeyByAgentId returns null for unknown agent', () => {
+    const key = root.findSessionKeyByAgentId('99999999-9999-4999-8999-999999999999');
+    expect(key).toBeNull();
+  });
+
+  it('syncUrlFromLayout updates URL via replaceState for multi-pane presets', () => {
+    replaceStateSpy.mockClear();
+    root.layoutManager.setLayout('two-columns');
+    // Subscriber triggers syncUrlFromLayout synchronously
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
+    const layoutCall = urls.find((u: string) => u.includes('lv=1'));
+    expect(layoutCall).toBeTruthy();
+    expect(layoutCall).toContain('lp=two-columns');
+  });
+
+  it('syncUrlFromLayout clears layout params in single mode', () => {
+    // Switch to multi-pane first so params are set
+    root.layoutManager.setLayout('two-columns');
+    replaceStateSpy.mockClear();
+    root.layoutManager.setLayout('single');
+    // In single mode, URL should not contain layout params
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
+    const lastUrl = urls[urls.length - 1];
+    if (lastUrl) {
+      expect(lastUrl).not.toContain('lv=1');
+      expect(lastUrl).not.toContain('lp=');
+    }
+  });
+
+  it('syncUrlFromLayout is suppressed when flag is set', () => {
+    replaceStateSpy.mockClear();
+    root.setSuppressUrlSync(true);
+    root.layoutManager.setLayout('four');
+    // Subscriber was called but syncUrlFromLayout should have been a no-op
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
+    const layoutCall = urls.find((u: string) => u.includes('lp=four'));
+    expect(layoutCall).toBeUndefined();
+    root.setSuppressUrlSync(false);
+  });
+
+  it('layout changes trigger URL sync via subscriber', async () => {
+    replaceStateSpy.mockClear();
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    // Should have been called at least once with two-columns
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
+    expect(urls.length).toBeGreaterThan(0);
+    const layoutCall = urls.find((u: string) => u.includes('lp=two-columns'));
+    expect(layoutCall).toBeTruthy();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// SSE bridge: re-arm auto-reconnect once the agent is confirmed running again
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state reason disarmed the session', () => {
+  class FakeSocket {
+    static instances: FakeSocket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    send = vi.fn();
+    close = vi.fn();
+    constructor(readonly url: string) {
+      FakeSocket.instances.push(this);
+    }
+    open(): void {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    data(payload = ''): void {
+      this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+    }
+  }
+  class FakeEventSource extends EventTarget {
+    static instances: FakeEventSource[] = [];
+    onopen: (() => void) | null = null;
+    close = vi.fn();
+    constructor(readonly url: string) {
+      super();
+      FakeEventSource.instances.push(this);
+    }
+  }
+
+  // Distinct from the '11111111-...' ID other describe blocks in this file
+  // use: those blocks leave sessions un-disposed (root.element.remove() does
+  // not call registry.dispose()), and a shared ID would let a stale session's
+  // fetch race this test's phase-keyed response.
+  const agentId = '55555555-5555-4555-8555-555555555555';
+  let root: TerminalWorkspaceRoot;
+  let fetcher: ReturnType<typeof vi.fn>;
+  let agentPhase: string;
+
+  function agentResponse(phase: string, activity?: string): Response {
+    return new Response(JSON.stringify({ id: agentId, name: 'test', phase, activity }), {
+      status: 200,
+    });
+  }
+
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    FakeEventSource.instances = [];
+    agentPhase = 'running';
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    // Keyed by phase state, not a mockResolvedValueOnce queue: a stale
+    // session from another test polling the same global fetch mock cannot
+    // steal this test's queued response out of order.
+    fetcher = vi.fn(() => Promise.resolve(agentResponse(agentPhase)));
+    vi.stubGlobal('fetch', fetcher);
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('EventSource', FakeEventSource);
+    // A pane attaches only once it is shown and measurable, so give the
+    // container a size (happy-dom does no layout).
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Other describe blocks in this file leave sessions un-disposed
+   * (root.element.remove() alone does not call registry.dispose()), and a
+   * stale one can still poll the shared stubbed WebSocket/fetch globals
+   * across a microtask boundary. Filter by this test's own unique agentId
+   * rather than trusting array position.
+   */
+  function mySocket(): FakeSocket {
+    const found = FakeSocket.instances.filter((s) => s.url.includes(agentId));
+    return found[found.length - 1];
+  }
+
+  /**
+   * The session's own agent SSE stream. Showing the workspace also opens the
+   * palette's project-wide stream, so array position is not reliable.
+   */
+  function mySource(): FakeEventSource {
+    const found = FakeEventSource.instances.filter((s) => s.url.includes(agentId));
+    return found[found.length - 1];
+  }
+
+  /**
+   * Opens the session in a shown workspace so its pane attaches, confirms
+   * the stream live, then hides the workspace before the test's drop. A
+   * hidden pane is never frontmost on its own, so each test drives
+   * frontmost explicitly and exercises the SSE bridge rather than the
+   * visible pane's own reconnect.
+   */
+  async function attachVisibleThenHide(
+    registry: TerminalSessionRegistry
+  ): Promise<{ session: TerminalSession; socket: FakeSocket }> {
+    root.show(true);
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    const socket = mySocket();
+    socket.open();
+    socket.data();
+    expect(session.state.connection).toBe('connected');
+    root.show(false);
+    const pane = root.element.querySelector('scion-terminal-pane') as HTMLElement;
+    await vi.waitFor(() => expect(pane.hidden).toBe(true));
+    return { session, socket };
+  }
+
+  it('an agent-phase reason (the WS drop reached the client before SSE reported it) still re-arms once SSE confirms running', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2',
+    });
+    const { session, socket } = await attachVisibleThenHide(registry);
+    session.setFrontmost(true);
+
+    // The common ordering: the WebSocket drop reaches the client, and the
+    // frontmost auto-attempt's own agent fetch already sees the agent
+    // stopped, before SSE's own stopped event arrives.
+    agentPhase = 'stopped';
+    socket.readyState = 3;
+    socket.onclose?.({ code: 1006 });
+    await vi.waitFor(() => expect(session.reconnecting).toBe(false));
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-phase');
+
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
+    source.onopen?.();
+
+    // The workspace root's own async layout/visibility refresh (queued via
+    // queueMicrotask) can toggle this pane's setVisible in between; the
+    // waitFor above let those settle. Re-assert frontmost so this test
+    // exercises the SSE bridge itself, not layout-refresh timing.
+    session.setFrontmost(true);
+
+    // SSE now reports the agent stopped (arriving after the WS drop above):
+    // the bridge's markUnavailable('agent-stopped') branch is guarded by
+    // connection !== 'unavailable', so it must not fire, and the more
+    // specific agent-phase reason must survive.
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'stopped' } }),
+      })
+    );
+    expect(session.state.disconnectReason).toBe('agent-phase');
+    expect(session.reconnecting).toBe(false);
+
+    // SSE then reports the agent running again: the bridge must re-arm even
+    // though the reason is agent-phase, not agent-stopped.
+    agentPhase = 'running';
+    session.setFrontmost(true);
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'running' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(true);
+  });
+
+  it('SSE reporting the agent running but offline does not re-arm (does not burn the single attempt)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2-offline',
+    });
+    const { session, socket } = await attachVisibleThenHide(registry);
+    session.setFrontmost(true);
+
+    agentPhase = 'stopped';
+    socket.readyState = 3;
+    socket.onclose?.({ code: 1006 });
+    await vi.waitFor(() => expect(session.reconnecting).toBe(false));
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-phase');
+
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
+    source.onopen?.();
+    session.setFrontmost(true);
+
+    // SSE reports the agent running again, but still offline (e.g. the
+    // runtime has not reported activity yet): the bridge's activity gate
+    // must withhold noteAgentAvailable() so an offline-but-running agent
+    // does not burn the session's single foregrounding attempt.
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'running', activity: 'offline' },
+        }),
+      })
+    );
+    expect(session.reconnecting).toBe(false);
+    expect(session.state.connection).toBe('unavailable');
+  });
+
+  it('a crashed agent (SSE phase error, not stopped) still re-arms once it reports running again (ptone/scion#2096)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2-error-phase',
+    });
+    const { session } = await attachVisibleThenHide(registry);
+    expect(session.state.connection).toBe('connected');
+
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
+    source.onopen?.();
+
+    // The container crashes: SSE reports phase 'error', not 'stopped'. The
+    // bridge's markUnavailable branch must treat the two the same.
+    agentPhase = 'error';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'error' } }),
+      })
+    );
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+
+    session.setFrontmost(true);
+    expect(session.reconnecting).toBe(false); // still crashed: foregrounding alone never dials
+
+    // The agent restarts and SSE reports it running again.
+    agentPhase = 'running';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'running' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(true);
+  });
+
+  it('a 4410 agent_stopped close racing stale SSE "running" snapshots does not re-arm until SSE independently confirms the agent down (ptone/scion#2096)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2-stale-running-race',
+    });
+    const { session, socket } = await attachVisibleThenHide(registry);
+    session.setFrontmost(true);
+
+    // The broker's own open-time check already knows the container is down
+    // and closes with 4410 agent_stopped, but SSE's polled view has not
+    // caught up: agentPhase (what the next fetch/status event reports)
+    // stays 'running' for now.
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
+    source.onopen?.();
+    session.setFrontmost(true);
+
+    // N stale snapshots, still reporting the pre-crash phase: none may dial.
+    for (let i = 0; i < 3; i++) {
+      source.dispatchEvent(
+        new MessageEvent('update', {
+          data: JSON.stringify({
+            subject: `agent.${agentId}.status`,
+            data: { phase: 'running', activity: i % 2 === 0 ? 'working' : 'idle' },
+          }),
+        })
+      );
+    }
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances.filter((s) => s.url.includes(agentId))).toHaveLength(1);
+
+    // SSE catches up and reports the agent actually down. This alone must
+    // not dial either — it is the observation, not the re-arm trigger.
+    agentPhase = 'error';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'error' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(false);
+    expect(session.state.connection).toBe('unavailable');
+
+    // Only now does a genuine transition back to running re-arm, with
+    // exactly one attempt.
+    agentPhase = 'running';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'running' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(true);
+  });
+});
+
+describe('a pane that has never been shown (ptone/scion#4170)', () => {
+  class FakeSocket {
+    static instances: FakeSocket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    send = vi.fn();
+    close = vi.fn();
+    constructor(readonly url: string) {
+      FakeSocket.instances.push(this);
+    }
+    open(): void {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    data(payload = ''): void {
+      this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+    }
+  }
+  class SilentEventSource extends EventTarget {
+    onopen: (() => void) | null = null;
+    close = vi.fn();
+    constructor(readonly url: string) {
+      super();
+    }
+  }
+
+  const agentId = '77777777-7777-4777-8777-777777777777';
+  let root: TerminalWorkspaceRoot;
+  let mod: typeof import('./terminal-workspace-root.js');
+
+  beforeEach(async () => {
+    mod = await import('./terminal-workspace-root.js');
+    FakeSocket.instances = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: agentId, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('EventSource', SilentEventSource);
+    // happy-dom does no layout: give a shown pane a measurable container.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mySocket(): FakeSocket | undefined {
+    return FakeSocket.instances.filter((s) => s.url.includes(agentId)).at(-1);
+  }
+
+  function railItem(): HTMLElement {
+    return root.element.querySelector('.terminal-rail-item') as HTMLElement;
+  }
+
+  function railStatus(): string {
+    return railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!.title;
+  }
+
+  it('shows a neutral "Not opened yet" dot, not Connecting, and does not attach', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(session.state.connection).toBe('loading');
+    expect(mySocket()).toBeUndefined();
+    expect(railItem().dataset.dot).toBe('neutral');
+    expect(railStatus()).toContain('Hollow dot: Not opened yet');
+    expect(railStatus()).not.toContain('Connecting');
+    expect(railStatus()).not.toContain('Pending');
+  });
+
+  it('on reveal goes through Connecting, then connected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-reveal',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+
+    root.show(true);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    await vi.waitFor(() => expect(session.state.connection).toBe('connecting'));
+    await vi.waitFor(() => expect(railItem().dataset.dot).toBe('amber'));
+    expect(railStatus()).toContain('Amber dot: Connecting');
+
+    const socket = mySocket()!;
+    socket.open();
+    socket.data();
+    await vi.waitFor(() => expect(railItem().dataset.dot).toBe('green'));
+    expect(railStatus()).toContain('Green dot: Connected');
+
+    // Hiding it again later does not bring the never-shown state back.
+    root.show(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(railItem().dataset.dot).toBe('green');
+  });
+
+  it('a pane shown but not yet measurable leaves Not opened yet for Connecting', async () => {
+    // Shown, but the container has no size yet: the pane keeps waiting, so
+    // the session stays loading and only the shown state moves the dot.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(0);
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-unmeasured',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+
+    root.show(true);
+    // The first show queues its own rail refresh: one microtask later the
+    // row already reads Connecting, before any other update re-renders it.
+    await Promise.resolve();
+    expect(railItem().dataset.dot).toBe('amber');
+    expect(railStatus()).toContain('Amber dot: Connecting');
+    expect(railStatus()).not.toContain('Not opened yet');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(session.state.connection).toBe('loading');
+    expect(mySocket()).toBeUndefined();
+  });
+
+  it('a session re-created for the same agent after close is never-shown again', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-recreate',
+    });
+    const first = root.create(registry, agentId);
+    root.show(true);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    const socket = mySocket()!;
+    socket.open();
+    socket.data();
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('green'));
+    const key = first.state.key;
+
+    first.close();
+    await vi.waitFor(() => expect(railItem()).toBeNull());
+    root.show(false);
+
+    const second = root.create(registry, agentId);
+    expect(second).not.toBe(first);
+    expect(second.state.key).toBe(key);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+    expect(railStatus()).toContain('Hollow dot: Not opened yet');
+    expect(second.state.connection).toBe('loading');
+  });
+
+  it('a revealed pane still loading reads Connecting, not Not opened yet', () => {
+    const loading = {
+      state: { connection: 'loading', disconnectReason: null },
+      metadata: { availability: 'loading', agent: null, error: null },
+    } as unknown as Parameters<typeof mod.connectionDot>[0];
+    expect(mod.connectionDot(loading, true)).toEqual({
+      colour: 'neutral',
+      meaning: 'Not opened yet',
+    });
+    expect(mod.connectionDot(loading, false)).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    expect(mod.connectionDot(loading)).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    // Only a pending session can be never-shown: other states keep their dot.
+    for (const connection of ['connecting', 'connected', 'idle', 'disconnected'] as const) {
+      const entry = { ...loading, state: { connection, disconnectReason: null } } as typeof loading;
+      expect(mod.connectionDot(entry, true)).toEqual(mod.connectionDot(entry, false));
+    }
+  });
+
+  it('isInactiveEntry counts a never-shown pane like a connected one, so filter and sort are unchanged', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-inactive',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+    const entry = {
+      state: session.state,
+      metadata: registry.metadata.get(agentId) ?? {
+        agent: null,
+        availability: 'loading' as const,
+        error: null,
+      },
+    };
+    expect(entry.state.connection).toBe('loading');
+    expect(mod.isInactiveEntry(entry)).toBe(false);
+    expect(
+      mod.isInactiveEntry({ ...entry, state: { ...entry.state, connection: 'connected' } })
+    ).toBe(false);
+  });
+});
+
+describe('idle entries', () => {
+  class FakeSocket {
+    static instances: FakeSocket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    send = vi.fn();
+    close = vi.fn();
+    constructor(readonly url: string) {
+      FakeSocket.instances.push(this);
+    }
+    open(): void {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    data(payload = ''): void {
+      this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+    }
+  }
+  class FakeEventSource extends EventTarget {
+    static instances: FakeEventSource[] = [];
+    onopen: (() => void) | null = null;
+    close = vi.fn();
+    constructor(readonly url: string) {
+      super();
+      FakeEventSource.instances.push(this);
+    }
+  }
+
+  const agentId = '66666666-6666-4666-8666-666666666666';
+  let root: TerminalWorkspaceRoot;
+  let fetcher: ReturnType<typeof vi.fn>;
+  let agentPhase: string;
+
+  function agentResponse(phase: string, activity?: string): Response {
+    return new Response(JSON.stringify({ id: agentId, name: 'test', phase, activity }), {
+      status: 200,
+    });
+  }
+
+  function mySource(): FakeEventSource {
+    return FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  }
+
+  function railItem(): HTMLElement {
+    return root.element.querySelector('.terminal-rail-item') as HTMLElement;
+  }
+
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    FakeEventSource.instances = [];
+    agentPhase = 'running';
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    fetcher = vi.fn(() => Promise.resolve(agentResponse(agentPhase)));
+    vi.stubGlobal('fetch', fetcher);
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('EventSource', FakeEventSource);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // create(..., { deferConnect: true }) itself only skips its own
+  // layoutManager.open() call; syncSessions()'s separate "no active
+  // session" auto-select fallback would otherwise still pick up a lone new
+  // entry. The real restore path always wraps entry creation in
+  // withAutoSelectSuspended for exactly this reason, so these tests do the
+  // same to observe a deliberately-idle, unselected entry.
+  it('deferConnect leaves layoutManager state unchanged and creates no socket', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i1',
+    });
+    const before = root.layoutManager.getState();
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    expect(root.layoutManager.getState()).toEqual(before);
+    expect(session.state.connection).toBe('idle');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('idle copy: rail says "Not connected", no Reconnect button in rail or pane, no error styling', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i2',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    await flush();
+
+    const item = railItem();
+    expect(item.dataset.connection).toBe('idle');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    const dot = item.querySelector<HTMLElement>('.terminal-connection-dot');
+    expect(dot?.title).toContain('Not connected');
+    const reconnectBtn = item.querySelector<HTMLButtonElement>(
+      '[aria-label^="Reconnect"].terminal-icon-action'
+    );
+    expect(reconnectBtn?.disabled).toBe(true);
+
+    const pane = root.element.querySelector('scion-terminal-pane')!;
+    const paneReconnect = pane.shadowRoot?.querySelector('.reconnect-btn');
+    expect(paneReconnect).toBeNull();
+    const idleOverlay = pane.shadowRoot?.querySelector('.idle-overlay');
+    expect(idleOverlay).not.toBeNull();
+    expect(idleOverlay?.textContent).toContain('Select this terminal to connect');
+    const errorBanner = pane.shadowRoot?.querySelector('.error-banner');
+    expect(errorBanner).toBeNull();
+  });
+
+  it('rail row shows the project name with the full name in its title', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p1',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-1',
+      project: 'A rather long project name',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const item = railItem();
+    const text = item.querySelector('.terminal-rail-text')!;
+    expect(text.children).toHaveLength(2);
+    const project = item.querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('A rather long project name');
+    expect(project?.title).toBe('A rather long project name');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in A rather long project name, Grey dot: Not connected, metadata pending'
+    );
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(
+      'Grey dot: Not connected'
+    );
+  });
+
+  it('rail row falls back to the project id when the project name is unknown', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p2',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-2',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const project = railItem().querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('project-id-2');
+    expect(project?.title).toBe('project-id-2');
+    const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in project-id-2, Grey dot: Not connected, metadata pending'
+    );
+  });
+
+  it('rail row omits the project line when no agent metadata is loaded', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p3',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    await flush();
+
+    const item = railItem();
+    expect(item.querySelector('.terminal-project-name')).toBeNull();
+    expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')!.title).toBe(
+      'Grey dot: Not connected'
+    );
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      `Show terminal for ${agentId}, Grey dot: Not connected, metadata pending`
+    );
+  });
+
+  it('selecting an idle entry connects it', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i3',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    expect(session.state.connection).toBe('idle');
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // Selecting moves the pane into the visible slot, which drives
+    // setFrontmost(true) and, from 'idle', connect(). The session-level
+    // mechanics of a connect attempt are already covered by
+    // terminal-sessions.test.ts; here it is enough to prove selection is
+    // what triggers it, by observing the agent-fetch and pty-preflight
+    // requests.
+    root.select(session);
+    await flush();
+    expect(session.state.connection).not.toBe('idle');
+    await vi.waitFor(() =>
+      expect(fetcher.mock.calls.some(([url]) => String(url).includes('/pty'))).toBe(true)
+    );
+  });
+
+  // select() is also the path the saved-terminal-list restore feature uses
+  // to focus the persisted frontmost entry once it has been created idle
+  // (see terminal-persistence.ts), not just the user clicking a rail item —
+  // so a restored frontmost entering view must engage frame mode exactly
+  // like any other route into show(true), with no separate wiring needed.
+  it('selecting an idle entry also enters frame mode, the same as show(true)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i3-frame',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    const start = _appFrameRefCountForTests();
+
+    root.select(session);
+    expect(_appFrameRefCountForTests()).toBe(start + 1);
+
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('withAutoSelectSuspended: creating into an empty workspace selects nothing inside, but auto-selects outside', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i4',
+    });
+    root.withAutoSelectSuspended(() => {
+      root.create(registry, agentId, { deferConnect: true });
+    });
+    await flush();
+    expect(root.layoutManager.getState().single[0]).toBeNull();
+
+    const agentId2 = '77777777-7777-4777-8777-777777777777';
+    fetcher = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ id: agentId2, name: 'test2', phase: agentPhase }), {
+          status: 200,
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetcher);
+    // Closing the idle entry drives the registry back to empty, then a
+    // normal (non-suspended) create auto-selects as usual.
+    registry.list()[0].close();
+    await flush();
+    const session2 = root.create(registry, agentId2);
+    await flush();
+    expect(root.layoutManager.getState().single[0]).toBe(session2.state.key);
+  });
+
+  it('idle and metadata: a stopped agent stays idle; selecting it while still stopped shows unavailable', async () => {
+    agentPhase = 'stopped';
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i5',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
+    mySource().onopen?.();
+    mySource().dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'stopped' } }),
+      })
+    );
+    // Stays idle: marking a never-connected entry unavailable would strand
+    // it (noteAgentAvailable requires everConnected).
+    expect(session.state.connection).toBe('idle');
+
+    // Selecting while still stopped behaves like today's open of a stopped
+    // agent: the attempt fails unavailable. (The independent metadata poll
+    // and the session's own attach() can race on which one first classifies
+    // the failure, so either agent-state reason is acceptable here; both
+    // are in AGENT_UNAVAILABLE_REASONS and render the same "Unavailable"
+    // copy.)
+    root.select(session);
+    await flush();
+    await vi.waitFor(() => expect(session.state.connection).toBe('unavailable'));
+    expect(['agent-phase', 'agent-stopped']).toContain(session.state.disconnectReason);
+  });
+
+  it('idle and metadata: a stopped agent stays idle until selected; selecting it once it is running connects', async () => {
+    agentPhase = 'stopped';
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i5b',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    expect(session.state.connection).toBe('idle');
+
+    // The agent restarts before the user ever selects the idle entry. Idle
+    // entries ignore the SSE bridge's running-rearm branch regardless (it
+    // only acts on 'unavailable' sessions), but selecting always drives a
+    // fresh connect() / attach() that sees the agent's current state.
+    agentPhase = 'running';
+    root.select(session);
+    await flush();
+    expect(session.state.connection).not.toBe('idle');
+    await vi.waitFor(() =>
+      expect(fetcher.mock.calls.some(([url]) => String(url).includes('/pty'))).toBe(true)
+    );
+  });
+
+  it('idle and metadata: a deleted agent shows "Agent was deleted." and selecting it starts no attempt', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i6',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
+    mySource().onopen?.();
+    mySource().dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.deleted`, data: {} }),
+      })
+    );
+    await vi.waitFor(() => expect(session.state.connection).toBe('unavailable'));
+    expect(session.state.disconnectReason).toBe('agent-deleted');
+    expect(session.state.error).toBe('Agent was deleted.');
+
+    // Selecting starts no attempt: setFrontmost(true) on a non-idle,
+    // never-connected session falls to maybeAutoAttempt(), which requires
+    // everConnected and so no-ops. (The metadata layer's own background poll
+    // calls fetch independently of selection, so asserting on the session's
+    // own connection/disconnectReason here is the precise check; the global
+    // fetch mock is shared with that poll.)
+    root.select(session);
+    await flush();
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-deleted');
+  });
+});
+
+describe('show() frame-mode ref counting', () => {
+  let root: TerminalWorkspaceRoot;
+  let startCount: number;
+
+  beforeEach(() => {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    startCount = _appFrameRefCountForTests();
+  });
+
+  afterEach(() => {
+    // show(false) only releases the ref if this root itself currently holds
+    // one (its own _frameEntered flag), so one call is enough regardless of
+    // which test ran — no loop needed. The count comparison (rather than a
+    // bare call) fails loudly if a test left the ref unbalanced instead of
+    // silently leaking state into other test files.
+    root.show(false);
+    root.dispose();
+    root.element.remove();
+    expect(_appFrameRefCountForTests()).toBe(startCount);
+  });
+
+  it('enters frame mode on the first show(true) and exits on show(false)', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(true);
+    expect(_appFrameRefCountForTests()).toBe(start + 1);
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('a repeated show(true) (successive /terminals navigations) does not inflate the count', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(true);
+    root.show(true);
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('a redundant show(false) before ever showing is a no-op', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+});
+
+describe('an open on-screen keyboard collapses the chrome around the terminal (ptone/scion#5059)', () => {
+  let root: TerminalWorkspaceRoot;
+
+  /**
+   * Creates and shows the root with the keyboard up or not, as
+   * client/viewport.ts marks it. Each test reads one state only: happy-dom
+   * clears its computed-style cache on child-list mutations, not on
+   * attribute changes, so the state is set before the root is added and read.
+   */
+  function showRoot({ keyboard }: { keyboard: boolean }): void {
+    if (keyboard) document.documentElement.dataset['keyboard'] = 'open';
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+  }
+
+  afterEach(() => {
+    document.documentElement.removeAttribute('data-keyboard');
+    root.show(false);
+    root.dispose();
+    root.element.remove();
+  });
+
+  function part(selector: string): HTMLElement {
+    const el = root.element.querySelector<HTMLElement>(selector);
+    if (!el) throw new Error(`No ${selector} in the workspace`);
+    return el;
+  }
+
+  /** The workspace parts that are not terminal panes. */
+  function chrome(): Record<string, HTMLElement> {
+    return {
+      banner: part('.terminal-test-hub-banner'),
+      header: part('scion-header'),
+      rail: part('.terminal-rail'),
+      layoutBar: part('.terminal-layout-bar'),
+    };
+  }
+
+  function display(el: HTMLElement): string {
+    return getComputedStyle(el).display;
+  }
+
+  function shellGrid(): { columns: string; rows: string } {
+    const style = getComputedStyle(part('.terminal-workspace-shell'));
+    return { columns: style.gridTemplateColumns, rows: style.gridTemplateRows };
+  }
+
+  const ONE_CELL = 'minmax(0, 1fr)';
+
+  it('shows the chrome while no keyboard is up', () => {
+    showRoot({ keyboard: false });
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+  });
+
+  it('hides the header, banner, Open terminals rail and Layout bar while the keyboard is up', () => {
+    showRoot({ keyboard: true });
+    for (const el of Object.values(chrome())) expect(display(el)).toBe('none');
+    // The terminal panes stay: the pane area takes the whole frame.
+    expect(display(part('.terminal-pane-area'))).not.toBe('none');
+    expect(display(part('.terminal-pane-host'))).not.toBe('none');
+  });
+
+  it('shows the chrome again once the keyboard has closed', () => {
+    // viewport.ts sets the attribute while the keyboard is up and removes it
+    // when the keyboard closes.
+    document.documentElement.dataset['keyboard'] = 'open';
+    delete document.documentElement.dataset['keyboard'];
+    showRoot({ keyboard: false });
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+  });
+
+  it('keeps the wide shell in two columns while no keyboard is up', () => {
+    showRoot({ keyboard: false });
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+  });
+
+  it('collapses the wide shell to one cell while the keyboard is up', () => {
+    // Otherwise the pane area, now the only grid item, drops into the rail column.
+    showRoot({ keyboard: true });
+    expect(shellGrid()).toEqual({ columns: ONE_CELL, rows: ONE_CELL });
+  });
+
+  it('collapses the narrow shell too: the keyboard rule follows and outranks the 760px rule', () => {
+    // happy-dom does not apply the (max-width: 760px) rule in this setup, so
+    // the narrow case is checked on the stylesheet text instead.
+    showRoot({ keyboard: false });
+    const css = root.element.querySelector('style')?.textContent ?? '';
+    const narrowStart = css.indexOf('@media (max-width: 760px) {');
+    const selector = "html[data-keyboard='open'] #terminal-workspace .terminal-workspace-shell";
+    const ruleStart = css.indexOf(`${selector} {`);
+    expect(narrowStart).toBeGreaterThan(-1);
+    expect(ruleStart).toBeGreaterThan(-1);
+
+    // Outside any @media block: every brace before it is closed.
+    const before = css.slice(0, ruleStart);
+    expect(before.split('{').length).toBe(before.split('}').length);
+    // After the 760px block, which sets .terminal-workspace-shell (0,1,0);
+    // the keyboard selector, (1,2,1), outranks it as well.
+    expect(ruleStart).toBeGreaterThan(narrowStart);
+    expect(css.slice(narrowStart, ruleStart)).toContain('.terminal-workspace-shell {');
+
+    const body = css.slice(ruleStart, css.indexOf('}', ruleStart));
+    expect(body).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(body).toMatch(/grid-template-rows:\s*minmax\(0, 1fr\);/);
+  });
+});
+// ────────────────────────────────────────────────────────────────────────────
+// "Jump to agent" palette
+// ────────────────────────────────────────────────────────────────────────────
+
+const AGENT_A = '11111111-1111-4111-8111-111111111111';
+const AGENT_B = '22222222-2222-4222-8222-222222222222';
+const AGENT_C = '33333333-3333-4333-8333-333333333333';
+const AGENT_NEW = '44444444-4444-4444-8444-444444444444';
+
+/** The real agent-list shape the palette's own fetch reads; everything else (session/metadata opens) gets a single-agent detail response regardless of URL, matching the other describe blocks' fetch stub above. */
+function stubFetchForPalette(
+  listedAgents: Array<{ id: string; name?: string; phase?: string; attach?: boolean }>
+): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => {
+      if (typeof url === 'string' && url.startsWith('/api/v1/agents?')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: listedAgents.map((a) => ({
+                id: a.id,
+                name: a.name ?? a.id,
+                phase: a.phase ?? 'running',
+                _capabilities: { actions: a.attach === false ? [] : ['attach'] },
+              })),
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: AGENT_A, name: 'test', phase: 'running' }), {
+          status: 200,
+        })
+      );
+    })
+  );
+}
+
+function stubWebSocketAndEventSource(): void {
+  vi.stubGlobal(
+    'WebSocket',
+    class {
+      onopen = null;
+      onclose = null;
+      send = vi.fn();
+      close = vi.fn();
+      readyState = 0;
+    }
+  );
+  vi.stubGlobal(
+    'EventSource',
+    class extends EventTarget {
+      onopen = null;
+      close = vi.fn();
+      constructor(public url: string) {
+        super();
+      }
+    }
+  );
+}
+
+/** Waits for the lazily created palette element and its first render. */
+/** Fires `type` from the palette's own dialog, composed, as Shoelace does. */
+function fireFromDialog(palette: ScionQuickPalette, type: 'sl-hide' | 'sl-after-hide'): void {
+  palette
+    .shadowRoot!.querySelector('sl-dialog')!
+    .dispatchEvent(new Event(type, { bubbles: true, composed: true }));
+}
+
+async function waitForPalette(root: TerminalWorkspaceRoot): Promise<ScionQuickPalette> {
+  const palette = await vi.waitFor(
+    () => {
+      const el = root.element.querySelector('scion-quick-palette');
+      if (!el) throw new Error('palette not mounted yet');
+      return el;
+    },
+    { timeout: 5000 }
+  );
+  await palette.updateComplete;
+  return palette;
+}
+
+/** The "Jump to agent" button in the rail's pinned footer. */
+function jumpButton(root: TerminalWorkspaceRoot): HTMLButtonElement {
+  const btn = root.element.querySelector<HTMLButtonElement>(
+    '.terminal-rail > .terminal-rail-footer > .terminal-jump-btn'
+  );
+  if (!btn) throw new Error('Jump to agent footer button not found');
+  return btn;
+}
+
+function requestPaletteOpen(root: TerminalWorkspaceRoot): void {
+  jumpButton(root).click();
+}
+
+/** Opens the palette and waits until it is open with its Agents group loaded. */
+async function openLoadedPalette(root: TerminalWorkspaceRoot): Promise<ScionQuickPalette> {
+  requestPaletteOpen(root);
+  const palette = await waitForPalette(root);
+  await vi.waitFor(() => {
+    expect(palette.open).toBe(true);
+    expect(palette.groups.agents?.status).toBe('ready');
+  });
+  return palette;
+}
+
+function selectAgent(palette: ScionQuickPalette, agentId: string): void {
+  palette.dispatchEvent(
+    new CustomEvent('palette-select', {
+      detail: { target: { kind: 'agent', agentId, displayName: agentId } },
+    })
+  );
+}
+
+/** Opens the palette, waits for the Agents group, and picks `agentId`. */
+async function pickFromPalette(
+  root: TerminalWorkspaceRoot,
+  agentId: string
+): Promise<ScionQuickPalette> {
+  const palette = await openLoadedPalette(root);
+  selectAgent(palette, agentId);
+  return palette;
+}
+
+function paneFor(root: TerminalWorkspaceRoot, agentId: string): ScionTerminalPane {
+  const pane = Array.from(root.element.querySelectorAll('scion-terminal-pane')).find(
+    (el) => el.agentId === agentId
+  );
+  if (!pane) throw new Error(`No pane found for agent ${agentId}`);
+  return pane;
+}
+
+/** Records the paths of the workspace's own `nav-click` events (the rail's navigation). */
+function recordNavigation(root: TerminalWorkspaceRoot): string[] {
+  const paths: string[] = [];
+  root.element.addEventListener('nav-click', (e) =>
+    paths.push((e as CustomEvent<{ path: string }>).detail.path)
+  );
+  return paths;
+}
+
+/** Waits past Shoelace's after-hide focus restore, which runs in a timeout. */
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function mockNarrowViewport(): void {
+  const narrowQuery = { matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+  vi.spyOn(window, 'matchMedia').mockReturnValue(narrowQuery as unknown as MediaQueryList);
+}
+
+/**
+ * Finds the real `<scion-terminal-pane>` for `agentId` and gives it real DOM
+ * focus — not just `dataset.focused = ''` directly, which a subsequent
+ * `setVisible(true)` (from any still-pending layout refresh microtask) would
+ * silently overwrite from real `document.activeElement` containment (see
+ * `ScionTerminalPane.setVisible`). Call this only after any pending layout
+ * refresh has settled (e.g. after a `place()`/`setLayout()` microtask) — a
+ * still-hidden/inert pane can't take real focus at all. Not order-sensitive
+ * relative to opening the palette or dispatching a selection:
+ * `lastFocusedPaneSessionKey` is tracked continuously via a real `focusin`
+ * listener (see that field's own doc comment in terminal-workspace-root.ts),
+ * not read reactively at either point, so this may be called before or
+ * after either.
+ */
+function markPaneFocused(root: TerminalWorkspaceRoot, agentId: string): void {
+  const pane = Array.from(root.element.querySelectorAll('scion-terminal-pane')).find(
+    (el) => (el as unknown as { agentId: string }).agentId === agentId
+  ) as (HTMLElement & { tabIndex: number }) | undefined;
+  if (!pane) throw new Error(`No pane found for agent ${agentId}`);
+  pane.tabIndex = 0;
+  pane.focus();
+}
+
+describe('"Jump to agent" palette: multi-pane placement via create()', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubFetchForPalette([{ id: AGENT_C }, { id: AGENT_NEW }]);
+    stubWebSocketAndEventSource();
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    // One registry per test, reused for every create() call — matching real
+    // usage, where exactly one TerminalSessionRegistry backs the whole
+    // workspace for its lifetime (see ensureTerminalCoordinator in
+    // main.ts). A fresh registry per create() call would desync: each
+    // registry's own subscribe() callback reports only *its* sessions, so
+    // binding to a second, still-empty registry would read as "every
+    // previously-created session just disappeared" and tear down their
+    // panes.
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r1' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function keyFor(agentId: string): string {
+    const key = root.findSessionKeyByAgentId(agentId);
+    if (!key) throw new Error(`No session for agent ${agentId}`);
+    return key;
+  }
+
+  /** Two-columns layout with `left` and `right` placed, refreshed, and `focused` (if any) holding real focus. */
+  async function fullTwoColumns(left: string, right: string, focused?: string): Promise<void> {
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, left);
+    root.create(reg, right);
+    root.layoutManager.place(keyFor(left), 'two-columns', 0);
+    root.layoutManager.place(keyFor(right), 'two-columns', 1);
+    await flush();
+    if (focused) markPaneFocused(root, focused);
+  }
+
+  it('without a pending placement, create() still overflows to single at capacity (unchanged default)', () => {
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_A), keyFor(AGENT_B)]);
+
+    root.create(reg, AGENT_C);
+
+    expect(root.layoutManager.getState().active).toBe('single');
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_A), keyFor(AGENT_B)]);
+  });
+
+  it('a picked new agent fills the next empty slot instead of overflowing', async () => {
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+
+    await pickFromPalette(root, AGENT_C);
+    root.create(reg, AGENT_C);
+
+    expect(root.layoutManager.getState().active).toBe('two-columns');
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_A), keyFor(AGENT_C)]);
+  });
+
+  it('a picked new agent replaces the focused slot instead of overflowing when full', async () => {
+    await fullTwoColumns(AGENT_A, AGENT_B, AGENT_B);
+
+    await pickFromPalette(root, AGENT_C);
+    root.create(reg, AGENT_C);
+
+    expect(root.layoutManager.getState().active).toBe('two-columns');
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_A), keyFor(AGENT_C)]);
+  });
+
+  it('the pending placement is consumed exactly once: the next create() uses the normal overflow default again', async () => {
+    await fullTwoColumns(AGENT_A, AGENT_B, AGENT_A);
+
+    await pickFromPalette(root, AGENT_C);
+    root.create(reg, AGENT_C);
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_C), keyFor(AGENT_B)]);
+
+    // A normal rail/URL open at capacity must still overflow to single, not
+    // keep using the palette's replace-focused behavior.
+    root.create(reg, AGENT_NEW);
+    expect(root.layoutManager.getState().active).toBe('single');
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_C), keyFor(AGENT_B)]);
+  });
+
+  it('cancelPalettePlacement clears a pending hint before it is ever consumed', async () => {
+    await fullTwoColumns(AGENT_A, AGENT_B, AGENT_A);
+
+    await pickFromPalette(root, AGENT_C);
+    root.cancelPalettePlacement(AGENT_C);
+    root.create(reg, AGENT_C);
+
+    // Falls back to the normal overflow default since the hint was cancelled.
+    expect(root.layoutManager.getState().active).toBe('single');
+  });
+
+  it('cancelPalettePlacement for a different agent leaves the hint in place', async () => {
+    await fullTwoColumns(AGENT_A, AGENT_B, AGENT_A);
+
+    await pickFromPalette(root, AGENT_C);
+    root.cancelPalettePlacement(AGENT_NEW);
+    root.create(reg, AGENT_C);
+
+    expect(root.layoutManager.getState().active).toBe('two-columns');
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_C), keyFor(AGENT_B)]);
+  });
+
+  it("a create() for another agent before the picked agent's own does not consume the hint", async () => {
+    await fullTwoColumns(AGENT_A, AGENT_B, AGENT_A);
+
+    await pickFromPalette(root, AGENT_C);
+    // An unrelated open (e.g. a restore) lands first: normal overflow.
+    root.create(reg, AGENT_NEW);
+    expect(root.layoutManager.getState().active).toBe('single');
+    root.layoutManager.setLayout('two-columns');
+
+    root.create(reg, AGENT_C);
+
+    expect(root.layoutManager.getState().active).toBe('two-columns');
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_C), keyFor(AGENT_B)]);
+  });
+
+  it('forgets the focused pane once its session closes', async () => {
+    // B left, A right, A focused. Closing A empties the right slot; reopening
+    // A refills it without focusing it. A later pick must then fall back to
+    // the left slot rather than replacing the reopened A through a stale key.
+    await fullTwoColumns(AGENT_B, AGENT_A, AGENT_A);
+    reg
+      .list()
+      .find((s) => s.state.agentId === AGENT_A)!
+      .close();
+    await flush();
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_B), null]);
+    root.create(reg, AGENT_A);
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_B), keyFor(AGENT_A)]);
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    await pickFromPalette(root, AGENT_C);
+    root.create(reg, AGENT_C);
+
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyFor(AGENT_C), keyFor(AGENT_A)]);
+  });
+});
+
+describe('"Jump to agent" footer in the Open terminals column', () => {
+  let root: TerminalWorkspaceRoot;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubWebSocketAndEventSource();
+    stubFetchForPalette([{ id: AGENT_A, name: 'Alice-bot' }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('pins the footer below the list, outside the scrolling list itself', () => {
+    const rail = root.element.querySelector('.terminal-rail')!;
+    const list = rail.querySelector('.terminal-rail-list')!;
+    const footer = rail.querySelector('.terminal-rail-footer')!;
+    expect(footer).not.toBeNull();
+    expect(rail.lastElementChild).toBe(footer);
+    expect(list.contains(footer)).toBe(false);
+    expect(footer.previousElementSibling).toBe(list);
+  });
+
+  it('renders a labelled "Jump to agent" button with the compass icon', () => {
+    const btn = jumpButton(root);
+    expect(btn.type).toBe('button');
+    expect(btn.querySelector('.terminal-jump-label')?.textContent).toBe('Jump to agent');
+    expect(btn.querySelector('sl-icon')?.getAttribute('name')).toBe('compass');
+    expect(btn.getAttribute('aria-haspopup')).toBe('dialog');
+    expect(btn.title).toMatch(/^Jump to agent \((⌘K|Ctrl\+K)\)$/);
+    expect(btn.querySelector('.terminal-jump-shortcut')?.textContent).toMatch(/^(⌘K|Ctrl\+K)$/);
+  });
+
+  /**
+   * Recreates the root with a matchMedia stub whose touch-primary query
+   * reports `touch`, and a platform of `platform`. Returns a function that
+   * flips the touch query and fires its `change` listeners.
+   */
+  function recreateWithModality(touch: boolean, platform: string): (next: boolean) => void {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform);
+    const listeners = new Set<() => void>();
+    const touchQuery = {
+      matches: touch,
+      addEventListener: (_type: string, cb: () => void): void => void listeners.add(cb),
+      removeEventListener: (_type: string, cb: () => void): void => void listeners.delete(cb),
+    };
+    const otherQuery = { matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        (query === TOUCH_PRIMARY_QUERY ? touchQuery : otherQuery) as unknown as MediaQueryList
+    );
+    root.dispose();
+    root.element.remove();
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    return (next: boolean): void => {
+      touchQuery.matches = next;
+      for (const cb of listeners) cb();
+    };
+  }
+
+  it('sets title and aria-keyshortcuts (Control+K) on a non-Mac pointer device', () => {
+    recreateWithModality(false, 'Linux x86_64');
+    const btn = jumpButton(root);
+    expect(btn.getAttribute('aria-keyshortcuts')).toBe('Control+K');
+    expect(btn.title).toBe('Jump to agent (Ctrl+K)');
+  });
+
+  it('sets title and aria-keyshortcuts (Meta+K) on a Mac pointer device', () => {
+    recreateWithModality(false, 'MacIntel');
+    const btn = jumpButton(root);
+    expect(btn.getAttribute('aria-keyshortcuts')).toBe('Meta+K');
+    expect(btn.title).toBe('Jump to agent (⌘K)');
+  });
+
+  it('omits title and aria-keyshortcuts on a touch-primary device', () => {
+    recreateWithModality(true, 'Linux x86_64');
+    const btn = jumpButton(root);
+    expect(btn.hasAttribute('aria-keyshortcuts')).toBe(false);
+    expect(btn.hasAttribute('title')).toBe(false);
+  });
+
+  it('follows touch-primary changes after construction', () => {
+    const setTouch = recreateWithModality(true, 'Linux x86_64');
+    const btn = jumpButton(root);
+    setTouch(false);
+    expect(btn.getAttribute('aria-keyshortcuts')).toBe('Control+K');
+    expect(btn.title).toBe('Jump to agent (Ctrl+K)');
+    setTouch(true);
+    expect(btn.hasAttribute('aria-keyshortcuts')).toBe(false);
+    expect(btn.hasAttribute('title')).toBe(false);
+  });
+
+  it('clicking it focuses the button, then opens the agents palette', async () => {
+    const btn = jumpButton(root);
+    const focusSpy = vi.spyOn(btn, 'focus');
+    btn.click();
+    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    expect(palette.label).toBe('Jump to agent');
+  });
+
+  it('the header renders no palette button on /terminals', async () => {
+    const header = root.element.querySelector('scion-header')!;
+    header.user = { id: 'u1', email: 'u@example.com', displayName: 'U' } as never;
+    await header.updateComplete;
+    expect(header.shadowRoot?.querySelector('.palette-button')).toBeNull();
+  });
+});
+
+describe('"Jump to agent" palette: open, select, and events', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubWebSocketAndEventSource();
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r2' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('creates no palette element until the first open', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'Alice-bot' }]);
+    // Load the component module up front, so an eager mount would finish
+    // within the wait below.
+    await import('../components/shared/palette/quick-palette.js');
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    await nextTask();
+
+    expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+  });
+
+  it('the footer button opens the palette and loads the Agents group', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'Alice-bot' }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+
+    const palette = await openLoadedPalette(root);
+
+    expect(palette.label).toBe('Jump to agent');
+    expect(palette.groups.agents?.candidates.map((c) => c.label)).toEqual(['Alice-bot']);
+  });
+
+  it('closing the palette aborts its in-flight Agents load', async () => {
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit) => {
+        if (init?.signal) signals.push(init.signal);
+        return new Promise<Response>(() => {});
+      })
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    expect(signals[0].aborted).toBe(false);
+
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+
+    expect(signals[0].aborted).toBe(true);
+    expect(palette.open).toBe(false);
+  });
+
+  it('hiding the workspace closes the open palette, aborts its load, and refocuses nothing', async () => {
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit) => {
+        if (init?.signal) signals.push(init.signal);
+        return new Promise<Response>(() => {});
+      })
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    const invoker = document.createElement('button');
+    document.body.appendChild(invoker);
+    invoker.focus();
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    invoker.blur();
+
+    root.show(false);
+    fireFromDialog(palette, 'sl-after-hide');
+
+    expect(palette.open).toBe(false);
+    expect(signals[0].aborted).toBe(true);
+    expect(document.activeElement).not.toBe(invoker);
+    invoker.remove();
+  });
+
+  it("a superseded load's late result never replaces the newer load's", async () => {
+    const pending: Array<(agents: Array<{ id: string; name: string }>) => void> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            pending.push((agents) =>
+              resolve(
+                new Response(
+                  JSON.stringify({
+                    agents: agents.map((a) => ({
+                      ...a,
+                      phase: 'running',
+                      _capabilities: { actions: ['attach'] },
+                    })),
+                  }),
+                  { status: 200 }
+                )
+              )
+            );
+          })
+      )
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+
+    palette.dispatchEvent(new CustomEvent('palette-retry', { detail: { group: 'agents' } }));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]([{ id: AGENT_B, name: 'Newer' }]);
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+    pending[0]([{ id: AGENT_A, name: 'Older' }]);
+    await nextTask();
+
+    expect(palette.groups.agents?.candidates.map((c) => c.label)).toEqual(['Newer']);
+  });
+
+  it('a dismiss without a selection returns focus to the element that opened the palette', async () => {
+    stubFetchForPalette([{ id: AGENT_A }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    // The footer button focuses itself on click, so it is the invoker.
+    const invoker = jumpButton(root);
+
+    const palette = await openLoadedPalette(root);
+    invoker.blur();
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-after-hide');
+
+    expect(document.activeElement).toBe(invoker);
+  });
+
+  it('selecting an already-open agent in a multi-pane layout places it directly (addOrReplaceFocused), with no new-agent event or navigation', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_B }, { id: AGENT_C, name: 'Already-open' }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true); // panes only become real-focusable once the workspace itself is shown
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    root.create(reg, AGENT_C);
+    const keyA = root.findSessionKeyByAgentId(AGENT_A)!;
+    const keyB = root.findSessionKeyByAgentId(AGENT_B)!;
+    const keyC = root.findSessionKeyByAgentId(AGENT_C)!;
+    // B at slot 0, A at slot 1 — deliberately not the slot-0 default, so a
+    // bug that silently fell back to "always replace slot 0" instead of
+    // genuinely reading the focused key would replace the wrong slot (B's,
+    // not A's) and this test would catch it.
+    root.layoutManager.setLayout('two-columns');
+    root.layoutManager.place(keyB, 'two-columns', 0);
+    root.layoutManager.place(keyA, 'two-columns', 1);
+    // Let the queued refresh (from the place() calls above) actually run —
+    // a still-hidden/inert pane (setVisible's own pre-refresh default)
+    // can't take real focus, so markPaneFocused below would silently no-op.
+    await flush();
+
+    const newAgentListener = vi.fn();
+    root.element.addEventListener(TERMINAL_PALETTE_NEW_AGENT_EVENT, newAgentListener);
+    const navigation = recordNavigation(root);
+
+    markPaneFocused(root, AGENT_A);
+    const palette = await pickFromPalette(root, AGENT_C);
+
+    // Replaced the focused slot (A, at index 1) rather than overflowing to
+    // single or falling back to slot 0 (B).
+    expect(root.layoutManager.getState().active).toBe('two-columns');
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyB, keyC]);
+    expect(newAgentListener).not.toHaveBeenCalled();
+    expect(navigation).toEqual([]);
+    expect(palette.open).toBe(false);
+  });
+
+  it('still replaces the pane focused before opening, even though the footer button itself steals real focus before the palette opens', async () => {
+    // The footer button's own click handler calls
+    // btn.focus({preventScroll: true}) BEFORE opening the palette (see
+    // handleJumpButtonClick) — a point-in-time focus read taken inside
+    // openPalette (rather than tracked continuously as focus actually
+    // moves) would already see the button, not the pane, by the time it
+    // runs.
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_B }, { id: AGENT_NEW }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    await flush();
+    markPaneFocused(root, AGENT_B);
+
+    // The real footer button: its click handler focuses it, then opens.
+    const btn = jumpButton(root);
+    btn.click();
+    expect(document.activeElement).toBe(btn);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => {
+      expect(palette.open).toBe(true);
+      expect(palette.groups.agents?.status).toBe('ready');
+    });
+    selectAgent(palette, AGENT_NEW);
+    root.create(reg, AGENT_NEW);
+
+    expect(root.layoutManager.getState().twoColumns).toEqual([
+      root.findSessionKeyByAgentId(AGENT_A),
+      root.findSessionKeyByAgentId(AGENT_NEW),
+    ]);
+  });
+
+  it('selecting a brand-new agent in a multi-pane layout dispatches TERMINAL_PALETTE_NEW_AGENT_EVENT and does not navigate', async () => {
+    stubFetchForPalette([{ id: AGENT_NEW, name: 'Brand-new' }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+    const navigation = recordNavigation(root);
+    const palette = await openLoadedPalette(root);
+
+    const detail = await new Promise<TerminalPaletteNewAgentDetail>((resolve) => {
+      root.element.addEventListener(
+        TERMINAL_PALETTE_NEW_AGENT_EVENT,
+        (e) => resolve((e as CustomEvent<TerminalPaletteNewAgentDetail>).detail),
+        { once: true }
+      );
+      selectAgent(palette, AGENT_NEW);
+    });
+
+    expect(detail).toEqual({ agentId: AGENT_NEW });
+    expect(navigation).toEqual([]);
+  });
+
+  it('in the single layout, a pick navigates to the agent like a rail click, for a new and an already-open agent', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_B }, { id: AGENT_NEW }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('single');
+    const newAgentListener = vi.fn();
+    root.element.addEventListener(TERMINAL_PALETTE_NEW_AGENT_EVENT, newAgentListener);
+    const navigation = recordNavigation(root);
+
+    await pickFromPalette(root, AGENT_NEW);
+    await pickFromPalette(root, AGENT_A);
+
+    expect(navigation).toEqual([`/terminals/${AGENT_NEW}`, `/terminals/${AGENT_A}`]);
+    expect(newAgentListener).not.toHaveBeenCalled();
+  });
+
+  it('on a narrow viewport, a pick in a multi-pane layout switches to single and navigates, for a new and an already-open agent', async () => {
+    mockNarrowViewport();
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_B }, { id: AGENT_NEW }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    await flush();
+    const keyA = root.findSessionKeyByAgentId(AGENT_A)!;
+    const keyB = root.findSessionKeyByAgentId(AGENT_B)!;
+    const navigation = recordNavigation(root);
+
+    await pickFromPalette(root, AGENT_NEW);
+    expect(root.layoutManager.getState().active).toBe('single');
+    root.layoutManager.setLayout('two-columns');
+    await pickFromPalette(root, AGENT_B);
+
+    expect(root.layoutManager.getState().active).toBe('single');
+    expect(navigation).toEqual([`/terminals/${AGENT_NEW}`, `/terminals/${AGENT_B}`]);
+    // The multi-pane assignments are kept for when the user switches back.
+    expect(root.layoutManager.getState().twoColumns).toEqual([keyA, keyB]);
+  });
+
+  it('focuses the picked pane once the close settles, not before', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_B }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    await flush();
+    const focusB = vi.spyOn(paneFor(root, AGENT_B), 'focusTerminal');
+
+    const palette = await pickFromPalette(root, AGENT_B);
+    await flush();
+    expect(focusB).not.toHaveBeenCalled();
+
+    fireFromDialog(palette, 'sl-after-hide');
+    expect(focusB).not.toHaveBeenCalled();
+    await nextTask();
+
+    expect(focusB).toHaveBeenCalledTimes(1);
+  });
+
+  it("focuses a picked new agent's pane once it is created after the close settles", async () => {
+    stubFetchForPalette([{ id: AGENT_NEW }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+
+    const palette = await pickFromPalette(root, AGENT_NEW);
+    fireFromDialog(palette, 'sl-after-hide');
+    await nextTask();
+    root.create(reg, AGENT_NEW);
+    const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
+    await flush();
+
+    expect(focusNew).toHaveBeenCalledTimes(1);
+  });
+
+  it('a stale selection (candidate no longer in the loaded group) is ignored — no event, nothing placed', async () => {
+    stubFetchForPalette([]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    const newAgentListener = vi.fn();
+    root.element.addEventListener(TERMINAL_PALETTE_NEW_AGENT_EVENT, newAgentListener);
+    const navigation = recordNavigation(root);
+
+    // The group loaded empty, but the select event fires anyway (a race
+    // between a stale render and a fresh refresh) — must not be trusted.
+    await pickFromPalette(root, AGENT_NEW);
+
+    expect(newAgentListener).not.toHaveBeenCalled();
+    expect(navigation).toEqual([]);
+  });
+});
+
+function agentCandidate(agentId: string, label = agentId): PaletteCandidate {
+  return {
+    id: JSON.stringify(['agent', agentId]),
+    group: 'agents',
+    label,
+    searchFields: [label],
+    secondaryLabel: '',
+    activityMs: 0,
+    target: { kind: 'agent', agentId, displayName: label },
+  };
+}
+
+/** Counts the palette's own agent-list fetches. */
+function agentListLoads(): number {
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length;
+}
+
+describe('"Jump to agent" palette: palette and focus lifecycle', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubWebSocketAndEventSource();
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r3' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    paletteLoad.override = null;
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Two-columns layout with A and B placed and shown. */
+  async function twoColumns(): Promise<void> {
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    await flush();
+  }
+
+  /** Picks `agentId` and waits until the palette's close has settled. */
+  async function pickAndSettle(agentId: string): Promise<ScionQuickPalette> {
+    const palette = await pickFromPalette(root, agentId);
+    fireFromDialog(palette, 'sl-after-hide');
+    await nextTask();
+    return palette;
+  }
+
+  /** Queues a workspace refresh, the way any session or layout change does. */
+  async function refresh(): Promise<void> {
+    root.layoutManager.setLayout('two-columns');
+    root.layoutManager.setLayout('two-rows');
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+  }
+
+  it('focuses the picked pane once: later refreshes leave focus alone', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_B }]);
+    await twoColumns();
+    const focusB = vi.spyOn(paneFor(root, AGENT_B), 'focusTerminal');
+
+    await pickAndSettle(AGENT_B);
+    expect(focusB).toHaveBeenCalledTimes(1);
+    await refresh();
+
+    expect(focusB).toHaveBeenCalledTimes(1);
+  });
+
+  it("a new open forgets the previous pick's focus target", async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+    await pickAndSettle(AGENT_NEW);
+
+    const palette = await openLoadedPalette(root);
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-after-hide');
+    root.create(reg, AGENT_NEW);
+    const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
+    await flush();
+
+    expect(focusNew).not.toHaveBeenCalled();
+  });
+
+  it("never focuses the picked agent's pane while it is hidden", async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+    await pickAndSettle(AGENT_NEW);
+
+    // A background restore creates the pane without showing it.
+    root.create(reg, AGENT_NEW, { deferConnect: true });
+    const pane = paneFor(root, AGENT_NEW);
+    const focusNew = vi.spyOn(pane, 'focusTerminal');
+    await flush();
+
+    expect(pane.hidden).toBe(true);
+    expect(focusNew).not.toHaveBeenCalled();
+  });
+
+  it('when the placement is cancelled before the pane exists, a pane that turns up later does not take focus', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+    await pickAndSettle(AGENT_NEW);
+
+    root.cancelPalettePlacement(AGENT_NEW);
+    root.create(reg, AGENT_NEW);
+    const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
+    await flush();
+
+    expect(focusNew).not.toHaveBeenCalled();
+  });
+
+  it('cancelling the placement after the pane was created keeps its pending focus', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+
+    const palette = await pickFromPalette(root, AGENT_NEW);
+    root.create(reg, AGENT_NEW);
+    root.cancelPalettePlacement(AGENT_NEW);
+    const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
+    fireFromDialog(palette, 'sl-after-hide');
+    await nextTask();
+
+    expect(focusNew).toHaveBeenCalledTimes(1);
+  });
+
+  it('once the user focuses another pane, a picked pane created later does not take focus', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+    await pickAndSettle(AGENT_NEW);
+
+    markPaneFocused(root, AGENT_A);
+    root.create(reg, AGENT_NEW);
+    const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
+    await flush();
+
+    expect(focusNew).not.toHaveBeenCalled();
+  });
+
+  it('focus returning to the pane the palette was opened from, before the close settles, keeps the pick', async () => {
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    root.show(true);
+    root.layoutManager.setLayout('two-columns');
+    root.create(reg, AGENT_A);
+    await flush();
+
+    const palette = await pickFromPalette(root, AGENT_NEW);
+    // Shoelace's focus restore lands back in the pane that opened the palette.
+    markPaneFocused(root, AGENT_A);
+    fireFromDialog(palette, 'sl-after-hide');
+    await nextTask();
+    root.create(reg, AGENT_NEW);
+    const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
+    await flush();
+
+    expect(focusNew).toHaveBeenCalledTimes(1);
+  });
+
+  it('after the palette component fails to load, the next open loads it again and opens', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'Alice-bot' }]);
+    const createElement = document.createElement.bind(document);
+    let failures = 0;
+    vi.spyOn(document, 'createElement').mockImplementation(
+      (tag: string, options?: ElementCreationOptions) => {
+        if (tag === 'scion-quick-palette' && failures === 0) {
+          failures++;
+          throw new Error('Failed to fetch dynamically imported module');
+        }
+        return createElement(tag, options);
+      }
+    );
+
+    requestPaletteOpen(root);
+    await vi.waitFor(() => expect(failures).toBe(1));
+    await nextTask();
+    expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+
+    const palette = await openLoadedPalette(root);
+
+    expect(palette.groups.agents?.candidates.map((c) => c.label)).toEqual(['Alice-bot']);
+  });
+
+  it('an open request while the palette is already open does not reload it', async () => {
+    stubFetchForPalette([{ id: AGENT_A }]);
+    const palette = await openLoadedPalette(root);
+    expect(agentListLoads()).toBe(1);
+
+    requestPaletteOpen(root);
+    await nextTask();
+
+    expect(agentListLoads()).toBe(1);
+    expect(palette.open).toBe(true);
+  });
+
+  it('closing the palette mid-load leaves no error behind', async () => {
+    stubFetchForPalette([]);
+    paletteLoad.override = ({ controller }): Promise<PaletteCandidate[]> =>
+      new Promise((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () =>
+          reject(new DOMException('load aborted or superseded', 'AbortError'))
+        );
+      });
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    await nextTask();
+
+    expect(palette.groups.agents?.status).toBe('loading');
+  });
+
+  it("a superseded load's failure does not replace the newer load's result", async () => {
+    stubFetchForPalette([]);
+    const loads: Array<{ resolve: (c: PaletteCandidate[]) => void; reject: (e: Error) => void }> =
+      [];
+    paletteLoad.override = (): Promise<PaletteCandidate[]> =>
+      new Promise((resolve, reject) => {
+        loads.push({ resolve, reject });
+      });
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(loads).toHaveLength(1));
+    palette.dispatchEvent(new CustomEvent('palette-retry', { detail: { group: 'agents' } }));
+    await vi.waitFor(() => expect(loads).toHaveLength(2));
+    loads[1].resolve([agentCandidate(AGENT_B, 'Newer')]);
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+
+    loads[0].reject(new Error('agents list failed'));
+    await nextTask();
+
+    expect(palette.groups.agents?.status).toBe('ready');
+    expect(palette.groups.agents?.candidates.map((c) => c.label)).toEqual(['Newer']);
+  });
+
+  it('a reload keeps the previous candidates while it loads and after it fails', async () => {
+    stubFetchForPalette([]);
+    const loads: Array<{ resolve: (c: PaletteCandidate[]) => void; reject: (e: Error) => void }> =
+      [];
+    paletteLoad.override = (): Promise<PaletteCandidate[]> =>
+      new Promise((resolve, reject) => {
+        loads.push({ resolve, reject });
+      });
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(loads).toHaveLength(1));
+    loads[0].resolve([agentCandidate(AGENT_A, 'Alice-bot')]);
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+
+    palette.dispatchEvent(new CustomEvent('palette-retry', { detail: { group: 'agents' } }));
+    await vi.waitFor(() => expect(loads).toHaveLength(2));
+
+    expect(palette.groups.agents?.status).toBe('loading');
+    expect(palette.groups.agents?.candidates.map((c) => c.label)).toEqual(['Alice-bot']);
+
+    loads[1].reject(new Error('agents list failed'));
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('error'));
+    expect(palette.groups.agents?.candidates.map((c) => c.label)).toEqual(['Alice-bot']);
+  });
+
+  it('a current load that fails shows the error', async () => {
+    stubFetchForPalette([]);
+    paletteLoad.override = (): Promise<PaletteCandidate[]> =>
+      Promise.reject(new Error('agents list failed'));
+
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('error'));
+    expect(palette.groups.agents?.error).toBe('agents list failed');
+  });
+});
+
+// ptone/scion#2612: a pane dialog that opens while the palette is open or
+// pending closes the palette, so two modals are never open together.
+describe('"Jump to agent" palette: a pane dialog opening under it', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  let invoker: HTMLButtonElement;
+
+  beforeEach(async () => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    stubWebSocketAndEventSource();
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r2612' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(reg, AGENT_A);
+    await flush();
+    invoker = document.createElement('button');
+    document.body.appendChild(invoker);
+  });
+
+  afterEach(() => {
+    invoker.remove();
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Dispatches the pane's dialog-open event, as the pane does when a dialog renders. */
+  function paneDialogOpens(pane: ScionTerminalPane): void {
+    pane.dispatchEvent(
+      new CustomEvent(TERMINAL_PANE_DIALOG_OPEN_EVENT, { bubbles: true, composed: true })
+    );
+  }
+
+  /** Opens the palette from `invoker`, then moves focus off it, so a refocus is observable. */
+  async function openFromInvoker(): Promise<ScionQuickPalette> {
+    invoker.focus();
+    root['openPalette']();
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    invoker.blur();
+    return palette;
+  }
+
+  it('closes the open palette and refocuses nothing', async () => {
+    const pane = paneFor(root, AGENT_A);
+    expect(pane.hidden).toBe(false);
+    const palette = await openFromInvoker();
+
+    paneDialogOpens(pane);
+    fireFromDialog(palette, 'sl-hide');
+    fireFromDialog(palette, 'sl-after-hide');
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(false);
+    expect(palette.open).toBe(false);
+    expect(document.activeElement).not.toBe(invoker);
+  });
+
+  it('cancels a pending open, so the palette never shows, and refocuses nothing', async () => {
+    const pane = paneFor(root, AGENT_A);
+    invoker.focus();
+    root['openPalette']();
+    expect(root['paletteHost'].isOpen).toBe(true);
+    // The palette module and element are still loading: the open is pending.
+    expect(root.element.querySelector('scion-quick-palette')?.open ?? false).toBe(false);
+    invoker.blur();
+
+    paneDialogOpens(pane);
+    const palette = await waitForPalette(root);
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(false);
+    expect(palette.open).toBe(false);
+    expect(document.activeElement).not.toBe(invoker);
+  });
+
+  it('a dialog in an off-screen pane leaves the palette open', async () => {
+    // A background restore creates the pane without showing it.
+    root.create(reg, AGENT_NEW, { deferConnect: true });
+    await flush();
+    const hiddenPane = paneFor(root, AGENT_NEW);
+    expect(hiddenPane.closest('[hidden]')).not.toBeNull();
+    const palette = await openFromInvoker();
+
+    paneDialogOpens(hiddenPane);
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(true);
+    expect(palette.open).toBe(true);
+  });
+
+  it('does nothing while the palette is closed: a later open still shows', async () => {
+    paneDialogOpens(paneFor(root, AGENT_A));
+    expect(root['paletteHost'].isOpen).toBe(false);
+
+    const palette = await openFromInvoker();
+
+    expect(root['paletteHost'].isOpen).toBe(true);
+    expect(palette.open).toBe(true);
+  });
+});
+
+describe('"Jump to agent" palette: the agent store\'s hub entry', () => {
+  let root: TerminalWorkspaceRoot;
+  let listRequests: string[];
+
+  /** Serves `agents` as the hub list; records every list request. */
+  function serveAgents(agents: Array<{ id: string; name: string; phase?: string }>): void {
+    listRequests = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const path = String(url).replace(/^https?:\/\/[^/]+/, '');
+        if (path.startsWith('/api/v1/agents?')) {
+          listRequests.push(path);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                agents: agents.map((a) => ({
+                  id: a.id,
+                  name: a.name,
+                  projectId: 'p1',
+                  phase: a.phase ?? 'running',
+                  _capabilities: { actions: ['attach'] },
+                })),
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      })
+    );
+  }
+
+  /** Opens the store feed's stream, so a loaded list answers from memory. */
+  async function connectFeed(): Promise<void> {
+    await vi.waitFor(() => FakeEventSource.latestOpen());
+    FakeEventSource.latestOpen().open();
+    await flush();
+  }
+
+  function labels(palette: ScionQuickPalette): string[] {
+    return (palette.groups.agents?.candidates ?? []).map((c) => c.label);
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    serveAgents([
+      { id: AGENT_A, name: 'Alice-bot' },
+      { id: AGENT_B, name: 'Bob-bot' },
+    ]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    // Reset here, not at the end of a test, so a test that fails partway
+    // cannot leave its override to the tests after it.
+    paletteLoad.override = null;
+    paletteLoad.retainOverride = null;
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('retains the hub entry once while shown, however often it is shown', async () => {
+    const retain = vi.spyOn(paletteStore(), 'retain');
+
+    root.show(true);
+    root.show(true);
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(retain).toHaveBeenCalledTimes(1);
+    expect(retain.mock.calls[0]?.[0]).toEqual({ scope: 'hub' });
+  });
+
+  it('releases the hub entry when hidden, and retains it again when shown again', async () => {
+    const releases: Array<ReturnType<typeof vi.fn>> = [];
+    const store = paletteStore();
+    const realRetain = store.retain.bind(store);
+    vi.spyOn(store, 'retain').mockImplementation((q, listener) => {
+      const release = vi.fn(realRetain(q, listener));
+      releases.push(release);
+      return release;
+    });
+
+    root.show(true);
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    root.show(false);
+    expect(releases[0]).toHaveBeenCalledTimes(1);
+
+    root.show(true);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    expect(releases[1]).not.toHaveBeenCalled();
+  });
+
+  it('releases the hub entry on dispose', async () => {
+    const release = vi.fn();
+    const retain = vi.spyOn(paletteStore(), 'retain').mockReturnValue(release);
+
+    root.show(true);
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+    root.dispose();
+
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('a hide before the store module loads retains nothing', async () => {
+    const retain = vi.spyOn(paletteStore(), 'retain');
+
+    root.show(true);
+    root.show(false);
+    // Once a later show has retained, the first show's import has settled too.
+    root.show(true);
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(retain).toHaveBeenCalledTimes(1);
+  });
+
+  it('showing the workspace issues no agent-list request', async () => {
+    root.show(true);
+    await connectFeed();
+
+    expect(listRequests).toEqual([]);
+  });
+
+  it('a reopen answers from the store with no request', async () => {
+    root.show(true);
+    await connectFeed();
+    const palette = await openLoadedPalette(root);
+    expect(labels(palette)).toEqual(['Alice-bot', 'Bob-bot']);
+    expect(listRequests).toHaveLength(1);
+
+    for (let i = 0; i < 3; i++) {
+      root['paletteHost'].close();
+      fireFromDialog(palette, 'sl-after-hide');
+      await openLoadedPalette(root);
+    }
+
+    expect(labels(palette)).toEqual(['Alice-bot', 'Bob-bot']);
+    expect(listRequests).toHaveLength(1);
+  });
+
+  it('an SSE status change updates the open palette with no request', async () => {
+    root.show(true);
+    await connectFeed();
+    const palette = await openLoadedPalette(root);
+
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+
+    await vi.waitFor(() => expect(labels(palette)).toEqual(['Alice-bot']));
+    expect(palette.groups.agents?.status).toBe('ready');
+    expect(listRequests).toHaveLength(1);
+  });
+
+  it('a change while the palette is closed is not published until the next open', async () => {
+    root.show(true);
+    await connectFeed();
+    const palette = await openLoadedPalette(root);
+    root['paletteHost'].close();
+    fireFromDialog(palette, 'sl-after-hide');
+    const setCandidates = vi.spyOn(root['paletteHost'], 'setCandidates');
+
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(setCandidates).not.toHaveBeenCalled();
+    await openLoadedPalette(root);
+    expect(labels(palette)).toEqual(['Alice-bot']);
+    expect(listRequests).toHaveLength(1);
+  });
+
+  it('a ready snapshot during an Agents load leaves the group to that load', async () => {
+    root.show(true);
+    await connectFeed();
+    let finish: (candidates: PaletteCandidate[]) => void = () => {};
+    paletteLoad.override = (): Promise<PaletteCandidate[]> =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    const setCandidates = vi.spyOn(root['paletteHost'], 'setCandidates');
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    // A load the root did not ask for fills the hub entry and publishes it.
+    await paletteStore().ensure({ scope: 'hub' });
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(setCandidates).not.toHaveBeenCalled();
+    expect(palette.groups.agents?.status).toBe('loading');
+
+    finish([]);
+    await vi.waitFor(() =>
+      expect(palette.groups.agents).toEqual({ status: 'ready', candidates: [] })
+    );
+    paletteLoad.override = null;
+  });
+
+  it('a failed retain lets the next show retain', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const retain = vi.spyOn(paletteStore(), 'retain');
+    paletteLoad.retainOverride = (): (() => void) => {
+      throw new Error('chunk failed to load');
+    };
+
+    root.show(true);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    root.show(true);
+
+    await vi.waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+  });
+
+  it("a superseded load's settling leaves the newer load to supersede a live update", async () => {
+    root.show(true);
+    await connectFeed();
+    const finishes: Array<(candidates: PaletteCandidate[]) => void> = [];
+    paletteLoad.override = (): Promise<PaletteCandidate[]> =>
+      new Promise((resolve) => {
+        finishes.push(resolve);
+      });
+    const host = root['paletteHost'];
+    requestPaletteOpen(root);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    host.close();
+    fireFromDialog(palette, 'sl-after-hide');
+    requestPaletteOpen(root);
+    await vi.waitFor(() => expect(finishes).toHaveLength(2));
+    await paletteStore().ensure({ scope: 'hub' });
+    const setCandidates = vi.spyOn(host, 'setCandidates');
+
+    finishes[0]?.([]);
+    await flush();
+    FakeEventSource.latestOpen().emit('project.p1.agent.status', {
+      agentId: AGENT_B,
+      projectId: 'p1',
+      phase: 'stopped',
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(setCandidates).not.toHaveBeenCalled();
+    expect(palette.groups.agents?.status).toBe('loading');
+    finishes[1]?.([]);
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+    paletteLoad.override = null;
+  });
+});
+
+describe('"Jump to agent" palette: keyboard shortcut', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubFetchForPalette([]);
+    stubWebSocketAndEventSource();
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Dispatches a keydown; returns true when nothing called preventDefault(). */
+  function press(init: KeyboardEventInit, target: EventTarget = document): boolean {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+    return target.dispatchEvent(event);
+  }
+
+  async function expectOpened(): Promise<ScionQuickPalette> {
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    return palette;
+  }
+
+  async function expectNotOpened(): Promise<void> {
+    await nextTask();
+    expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+  }
+
+  it('does nothing while the workspace is hidden (e.g. the user is on /chat)', async () => {
+    root.show(false);
+    expect(press({ key: 'k', metaKey: true })).toBe(true);
+    await expectNotOpened();
+  });
+
+  it('Meta+K opens the palette from outside any pane', async () => {
+    expect(press({ key: 'k', metaKey: true })).toBe(false);
+    await expectOpened();
+  });
+
+  it('Ctrl+K opens the palette from outside any pane', async () => {
+    expect(press({ key: 'k', ctrlKey: true })).toBe(false);
+    await expectOpened();
+  });
+
+  it('Meta+K opens the palette even when the keydown originates inside a terminal pane', async () => {
+    root.create(reg, AGENT_A);
+    const pane = root.element.querySelector('scion-terminal-pane')!;
+
+    expect(press({ key: 'k', metaKey: true }, pane)).toBe(false);
+
+    await expectOpened();
+  });
+
+  it('Ctrl+K does NOT open the palette when the keydown originates inside a terminal pane (it must keep reaching the PTY)', async () => {
+    root.create(reg, AGENT_A);
+    const pane = root.element.querySelector('scion-terminal-pane')!;
+
+    expect(press({ key: 'k', ctrlKey: true }, pane)).toBe(true);
+
+    await expectNotOpened();
+  });
+
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(true);
+    await expectNotOpened();
+
+    expect(press({ key: 'k', metaKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
+  it('neither Ctrl+K nor Meta+K fire with both modifiers, Alt, or Shift held', async () => {
+    expect(press({ key: 'k', ctrlKey: true, metaKey: true })).toBe(true);
+    expect(press({ key: 'k', ctrlKey: true, altKey: true })).toBe(true);
+    expect(press({ key: 'k', ctrlKey: true, shiftKey: true })).toBe(true);
+    await expectNotOpened();
+  });
+
+  function openModal(kind: 'sl-dialog' | 'sl-drawer' | 'dialog'): HTMLElement {
+    const el = document.createElement(kind) as HTMLElement & { open?: boolean };
+    if (kind === 'dialog') el.setAttribute('open', '');
+    else el.open = true;
+    return el;
+  }
+
+  it.each(['sl-dialog', 'sl-drawer', 'dialog'] as const)(
+    'an unrelated open %s blocks the shortcut',
+    async (kind) => {
+      const modal = openModal(kind);
+      document.body.appendChild(modal);
+      try {
+        expect(press({ key: 'k', metaKey: true })).toBe(true);
+
+        await expectNotOpened();
+      } finally {
+        modal.remove();
+      }
+    }
+  );
+
+  it("an open dialog inside a terminal pane's shadow root blocks Meta+K from the pane", async () => {
+    root.create(reg, AGENT_A);
+    const pane = root.element.querySelector('scion-terminal-pane')!;
+    await pane.updateComplete;
+    const modal = openModal('sl-dialog');
+    pane.shadowRoot!.appendChild(modal);
+
+    expect(press({ key: 'k', metaKey: true, composed: true }, modal)).toBe(true);
+
+    await expectNotOpened();
+  });
+
+  it('an open dialog inside a nested shadow root blocks the shortcut', async () => {
+    root.create(reg, AGENT_A);
+    const pane = root.element.querySelector('scion-terminal-pane')!;
+    await pane.updateComplete;
+    const inner = document.createElement('div');
+    inner.attachShadow({ mode: 'open' }).appendChild(openModal('dialog'));
+    pane.shadowRoot!.appendChild(inner);
+
+    expect(press({ key: 'k', metaKey: true })).toBe(true);
+
+    await expectNotOpened();
+  });
+
+  it("an open dialog inside a hidden retained pane's shadow root does not block the shortcut", async () => {
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    const hiddenPane = paneFor(root, AGENT_A);
+    const visiblePane = paneFor(root, AGENT_B);
+    await hiddenPane.updateComplete;
+    expect(hiddenPane.hidden).toBe(true);
+    expect(visiblePane.hidden).toBe(false);
+    hiddenPane.shadowRoot!.appendChild(openModal('sl-dialog'));
+
+    expect(press({ key: 'k', metaKey: true })).toBe(false);
+
+    await expectOpened();
+  });
+
+  it("an open dialog inside the visible pane's shadow root still blocks while another pane is hidden", async () => {
+    root.create(reg, AGENT_A);
+    root.create(reg, AGENT_B);
+    const visiblePane = paneFor(root, AGENT_B);
+    await visiblePane.updateComplete;
+    expect(paneFor(root, AGENT_A).hidden).toBe(true);
+    visiblePane.shadowRoot!.appendChild(openModal('sl-dialog'));
+
+    expect(press({ key: 'k', metaKey: true })).toBe(true);
+
+    await expectNotOpened();
+  });
+
+  it("the palette's own dialog does not block the shortcut", async () => {
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+    press({ key: 'k', metaKey: true });
+    await palette.updateComplete;
+    const ownDialog = palette.shadowRoot!.querySelector('sl-dialog') as HTMLElement & {
+      open?: boolean;
+    };
+    expect(ownDialog).not.toBeNull();
+    ownDialog.open = true; // as while its close is still settling
+
+    expect(press({ key: 'k', metaKey: true })).toBe(false);
+
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+  });
+
+  it('a closed sl-dialog or dialog does not block the shortcut', async () => {
+    const slDialog = document.createElement('sl-dialog') as HTMLElement & { open?: boolean };
+    slDialog.open = false;
+    const dialog = document.createElement('dialog');
+    document.body.append(slDialog, dialog);
+    try {
+      expect(press({ key: 'k', metaKey: true })).toBe(false);
+
+      await expectOpened();
+    } finally {
+      slDialog.remove();
+      dialog.remove();
+    }
+  });
+
+  it('does not activate while an IME composition is in progress', async () => {
+    expect(press({ key: 'k', metaKey: true, isComposing: true })).toBe(true);
+    await expectNotOpened();
+  });
+
+  it('does not activate when another handler already claimed the keydown', async () => {
+    const claim = (e: Event): void => e.preventDefault();
+    document.body.addEventListener('keydown', claim);
+
+    press({ key: 'k', metaKey: true }, document.body);
+
+    await expectNotOpened();
+    document.body.removeEventListener('keydown', claim);
+  });
+
+  it('opens with Caps Lock on (an upper-case K)', async () => {
+    expect(press({ key: 'K', metaKey: true })).toBe(false);
+    await expectOpened();
+  });
+
+  it('does not activate on a repeat keydown', async () => {
+    expect(press({ key: 'k', metaKey: true, repeat: true })).toBe(true);
+    await expectNotOpened();
+  });
+
+  it('pressing the shortcut again while the palette is open closes it without reloading', async () => {
+    const fetchMock = vi.mocked(fetch);
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+    const agentLoads = fetchMock.mock.calls.filter(([url]) =>
+      requestUrl(url).startsWith('/api/v1/agents?')
+    ).length;
+
+    expect(press({ key: 'k', ctrlKey: true })).toBe(false);
+
+    expect(palette.open).toBe(false);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length
+    ).toBe(agentLoads);
+  });
+
+  it('on a Mac, Ctrl+K in the open palette search field edits the query, and Cmd+K closes it', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+    const input = palette.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+
+    expect(press({ key: 'k', ctrlKey: true, composed: true }, input)).toBe(true);
+    expect(palette.open).toBe(true);
+
+    expect(press({ key: 'k', metaKey: true, composed: true }, input)).toBe(false);
+    expect(palette.open).toBe(false);
+  });
+
+  it('a second press while the palette is still loading cancels the open', async () => {
+    press({ key: 'k', metaKey: true });
+    press({ key: 'k', metaKey: true });
+
+    const palette = await waitForPalette(root);
+    await nextTask();
+
+    expect(palette.open).toBe(false);
+  });
+
+  it('dispose() closes an open palette and removes its element', async () => {
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+
+    root.dispose();
+
+    expect(palette.open).toBe(false);
+    expect(palette.isConnected).toBe(false);
+  });
+
+  it('dispose() removes the document-level shortcut listener', async () => {
+    root.dispose();
+
+    expect(press({ key: 'k', metaKey: true })).toBe(true);
+
+    await expectNotOpened();
+  });
+
+  it('dispose() removes the document-level focusin listener it installed', () => {
+    const add = vi.spyOn(document, 'addEventListener');
+    const remove = vi.spyOn(document, 'removeEventListener');
+    const other = new WorkspaceRoot();
+    const installed = add.mock.calls.filter(([type]) => type === 'focusin').map(([, l]) => l);
+    expect(installed).toHaveLength(1);
+
+    other.dispose();
+
+    expect(remove).toHaveBeenCalledWith('focusin', installed[0]);
+  });
+});
+
+describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  const sessions = new Map<string, ReturnType<TerminalWorkspaceRoot['create']>>();
+  /** While set, agent B's metadata fetch waits for it, so B's terminal does not mount yet. */
+  let holdB: Promise<void> | null = null;
+  const sockets: Array<{ url: string; onmessage: ((event: MessageEvent) => void) | null }> = [];
+
+  function agentResponse(id: string): Response {
+    return new Response(JSON.stringify({ id, name: id, phase: 'running' }), { status: 200 });
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    // Each agent's own metadata, so every session gets as far as mounting
+    // its terminal.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const id = [AGENT_A, AGENT_B].find((agent) => String(url).includes(agent)) ?? AGENT_A;
+        if (id === AGENT_B && holdB) return holdB.then(() => agentResponse(id));
+        return Promise.resolve(agentResponse(id));
+      })
+    );
+    holdB = null;
+    stubWebSocketAndEventSource();
+    sockets.length = 0;
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        onmessage: ((event: MessageEvent) => void) | null = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+        constructor(public url: string) {
+          sockets.push(this);
+        }
+      }
+    );
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    sessions.clear();
+    // Stands in for main.ts: a rail navigation to an open agent ends in
+    // select(), as the coordinator does once the route settles.
+    root.element.addEventListener('nav-click', (e) => {
+      const agentId = (e as CustomEvent<{ path: string }>).detail.path.split('/').pop()!;
+      const session = sessions.get(agentId);
+      if (session) queueMicrotask(() => root.select(session));
+    });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function open(agentId: string): void {
+    sessions.set(agentId, root.create(reg, agentId));
+  }
+
+  function railButton(agentId: string): HTMLButtonElement {
+    const key = root.findSessionKeyByAgentId(agentId);
+    const btn = [...root.element.querySelectorAll<HTMLButtonElement>('.terminal-rail-select')].find(
+      (el) => el.dataset.railFocusId === `${key}:select`
+    );
+    if (!btn) throw new Error(`No rail button for ${agentId}`);
+    return btn;
+  }
+
+  /** The agent's xterm input, once its terminal has mounted. */
+  async function terminalInput(agentId: string): Promise<HTMLTextAreaElement> {
+    return vi.waitFor(() => {
+      const input = paneFor(root, agentId).shadowRoot?.querySelector<HTMLTextAreaElement>(
+        '.xterm-helper-textarea'
+      );
+      if (!input) throw new Error('terminal not mounted yet');
+      return input;
+    });
+  }
+
+  function hasFocus(input: HTMLTextAreaElement): boolean {
+    const host = (input.getRootNode() as ShadowRoot).host;
+    return document.activeElement === host && host.shadowRoot?.activeElement === input;
+  }
+
+  /** A, then B open; B is in front (the single layout shows the last opened). */
+  async function twoOpen(): Promise<void> {
+    root.show(true);
+    open(AGENT_A);
+    open(AGENT_B);
+    await flush();
+    await terminalInput(AGENT_A);
+    await terminalInput(AGENT_B);
+  }
+
+  /** A mouse click: focus lands on the button, then the click fires. */
+  function clickRail(agentId: string): void {
+    const btn = railButton(agentId);
+    btn.focus();
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  }
+
+  /**
+   * Enter or Space on the focused rail button. The rail item is a native
+   * `<button>` and the workspace adds no Enter or Space handler of its own
+   * (the rail's keydown handler takes only arrows, Home and End), so the
+   * browser's activation behavior is what turns either key into a click
+   * with detail 0. jsdom has no activation behavior, so the click is
+   * dispatched here; the keydown is real and must pass through the
+   * workspace untouched. Browsers activate a button on Enter keypress and
+   * on Space keyup, and the terminal only gets focus during that click, so
+   * the key itself never reaches the terminal.
+   */
+  function activateRailByKey(agentId: string, key: 'Enter' | ' '): void {
+    const btn = railButton(agentId);
+    btn.focus();
+    const keydown = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    btn.dispatchEvent(keydown);
+    expect(keydown.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(btn);
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 }));
+  }
+
+  /** Stops the nav-click stand-in from calling select() for `agentId`. */
+  function navigationSelectsNothing(agentId: string): ReturnType<TerminalWorkspaceRoot['create']> {
+    const session = sessions.get(agentId)!;
+    sessions.delete(agentId);
+    return session;
+  }
+
+  /**
+   * Leaves a pending rail target for A whose pane stays hidden: the
+   * navigation does nothing, B stays in front, and focus stays on A's rail
+   * button.
+   */
+  async function pendingTargetForHiddenA(): Promise<{
+    inputA: HTMLTextAreaElement;
+    sessionA: ReturnType<TerminalWorkspaceRoot['create']>;
+  }> {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    const sessionA = navigationSelectsNothing(AGENT_A);
+    clickRail(AGENT_A);
+    await flush();
+    expect(paneFor(root, AGENT_A).hidden).toBe(true);
+    expect(document.activeElement).toBe(railButton(AGENT_A));
+    return { inputA, sessionA };
+  }
+
+  it('a click brings a hidden pane to the front and focuses its terminal input', async () => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    expect(paneFor(root, AGENT_A).hidden).toBe(true);
+
+    clickRail(AGENT_A);
+
+    await vi.waitFor(() => expect(paneFor(root, AGENT_A).hidden).toBe(false));
+    await vi.waitFor(() => expect(hasFocus(inputA)).toBe(true));
+  });
+
+  it('a click on the pane already in front focuses its terminal input', async () => {
+    await twoOpen();
+    const inputB = await terminalInput(AGENT_B);
+    expect(paneFor(root, AGENT_B).hidden).toBe(false);
+
+    clickRail(AGENT_B);
+
+    await vi.waitFor(() => expect(hasFocus(inputB)).toBe(true));
+  });
+
+  it('a click on a pane already visible in a two-pane layout focuses its terminal input, with no re-render', async () => {
+    root.layoutManager.setLayout('two-columns');
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(paneFor(root, AGENT_B).hidden).toBe(false);
+    // Navigating to a pane already on screen re-renders nothing here, so
+    // only the rail selection itself can move focus.
+    navigationSelectsNothing(AGENT_A);
+
+    clickRail(AGENT_A);
+
+    expect(hasFocus(inputA)).toBe(true);
+    await flush();
+    expect(hasFocus(inputA)).toBe(true);
+  });
+
+  it.each([
+    ['Enter', 'Enter'],
+    ['Space', ' '],
+  ] as const)('%s on a rail item focuses its terminal input', async (_name, key) => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+
+    activateRailByKey(AGENT_A, key);
+
+    await vi.waitFor(() => expect(hasFocus(inputA)).toBe(true));
+  });
+
+  it('selecting a pane whose terminal has not mounted yet focuses the pane, then its terminal input', async () => {
+    let releaseB!: () => void;
+    holdB = new Promise((resolve) => (releaseB = resolve));
+    root.show(true);
+    open(AGENT_B);
+    open(AGENT_A);
+    await flush();
+    await terminalInput(AGENT_A);
+    const paneB = paneFor(root, AGENT_B);
+    expect(paneB.hidden).toBe(true);
+
+    clickRail(AGENT_B);
+    await vi.waitFor(() => expect(paneB.hidden).toBe(false));
+    expect(paneB.shadowRoot?.querySelector('.xterm-helper-textarea')).toBeNull();
+    expect(document.activeElement).toBe(paneB);
+
+    // The pane's own connect path focuses the terminal once the first data
+    // frame arrives, if the pane still holds focus and can be measured.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
+    releaseB();
+    const inputB = await terminalInput(AGENT_B);
+    expect(hasFocus(inputB)).toBe(false);
+    const socket = await vi.waitFor(() => {
+      const found = sockets.find((ws) => ws.url.includes(AGENT_B));
+      if (!found) throw new Error('no socket for B yet');
+      return found;
+    });
+    socket.onmessage?.(
+      new MessageEvent('message', { data: JSON.stringify({ type: 'data', data: btoa('$ ') }) })
+    );
+    await vi.waitFor(() => expect(hasFocus(inputB)).toBe(true));
+  });
+
+  it('a pane brought to the front without a rail selection does not take focus', async () => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    const btn = railButton(AGENT_B);
+    btn.focus();
+
+    // A restore or another entry point selecting A, not the rail.
+    root.select(sessions.get(AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('focus moved elsewhere before the pane shows drops the pending rail focus', async () => {
+    await twoOpen();
+    const inputA = await terminalInput(AGENT_A);
+    const other = document.createElement('button');
+    document.body.append(other);
+    // No select() follows the navigation until the test asks for it.
+    sessions.delete(AGENT_A);
+
+    clickRail(AGENT_A);
+    other.focus();
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  });
+  it("focus landing in another agent's pane drops the pending rail focus", async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+    const inputB = await terminalInput(AGENT_B);
+
+    inputB.focus();
+    expect(hasFocus(inputB)).toBe(true);
+    root.select(sessionA);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('opening the palette drops the pending rail focus', async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+    const btn = railButton(AGENT_A);
+
+    // The shortcut from the rail button, so focus has not moved yet.
+    btn.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    expect(document.activeElement).toBe(btn);
+    root.select(sessionA);
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('hiding the workspace drops the pending rail focus', async () => {
+    const { inputA, sessionA } = await pendingTargetForHiddenA();
+
+    root.show(false);
+    root.show(true);
+    root.select(sessionA);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+  });
+
+  it('closing the agent from the rail drops the pending rail focus', async () => {
+    await pendingTargetForHiddenA();
+    const closeId = `${root.findSessionKeyByAgentId(AGENT_A)}:close`;
+    const close = [
+      ...root.element.querySelectorAll<HTMLButtonElement>('.terminal-icon-action'),
+    ].find((el) => el.dataset.railFocusId === closeId)!;
+
+    // A mouse click on the close button keeps focus inside the rail.
+    close.focus();
+    close.click();
+    await flush();
+    expect(root.findSessionKeyByAgentId(AGENT_A)).toBeFalsy();
+
+    // The agent is opened again later and brought to the front.
+    open(AGENT_A);
+    navigationSelectsNothing(AGENT_A);
+    await flush();
+    const inputA = await terminalInput(AGENT_A);
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    // Not even the pane itself, as it would be before its terminal mounts.
+    expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
+  });
+
+  it("removing the agent's entry elsewhere drops the pending rail focus", async () => {
+    const { sessionA } = await pendingTargetForHiddenA();
+
+    sessionA.close();
+    await flush();
+    open(AGENT_A);
+    navigationSelectsNothing(AGENT_A);
+    await flush();
+    const inputA = await terminalInput(AGENT_A);
+    root.select(reg.list().find((s) => s.state.agentId === AGENT_A)!);
+    await flush();
+
+    expect(paneFor(root, AGENT_A).hidden).toBe(false);
+    expect(hasFocus(inputA)).toBe(false);
+    // Not even the pane itself, as it would be before its terminal mounts.
+    expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
+  });
+});
+
+describe('open terminals rail: a click fills the next free slot (ptone/scion#4324)', () => {
+  const AGENT_D = AGENT_NEW;
+  const AGENT_E = '66666666-6666-4666-8666-666666666666';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  const sessions = new Map<string, TerminalSession>();
+  const sockets: Array<{
+    url: string;
+    readyState: number;
+    onopen: (() => void) | null;
+    onmessage: ((event: { data: unknown }) => void) | null;
+  }> = [];
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const id =
+          [AGENT_A, AGENT_B, AGENT_C, AGENT_D, AGENT_E].find((agent) =>
+            String(url).includes(agent)
+          ) ?? AGENT_A;
+        return Promise.resolve(
+          new Response(JSON.stringify({ id, name: id, phase: 'running' }), { status: 200 })
+        );
+      })
+    );
+    stubWebSocketAndEventSource();
+    sockets.length = 0;
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen: (() => void) | null = null;
+        onclose = null;
+        onmessage: ((event: { data: unknown }) => void) | null = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+        constructor(public url: string) {
+          sockets.push(this);
+        }
+      }
+    );
+    // jsdom does no layout: give a shown pane a measurable container.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4324' });
+    sessions.clear();
+    navigationSelects = true;
+    mountRoot();
+  });
+
+  /** While false, the nav-click stand-in selects nothing. */
+  let navigationSelects = true;
+
+  function mountRoot(): void {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    // Stands in for main.ts: a rail navigation to an open agent ends in
+    // select(), as the coordinator does once the route settles.
+    root.element.addEventListener('nav-click', (e) => {
+      const agentId = (e as CustomEvent<{ path: string }>).detail.path.split('/').pop()!;
+      const session = sessions.get(agentId);
+      if (session && navigationSelects) queueMicrotask(() => root.select(session));
+    });
+  }
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function key(agentId: string): string {
+    return sessions.get(agentId)!.state.key;
+  }
+
+  function railItem(agentId: string): HTMLElement {
+    const item = [...root.element.querySelectorAll<HTMLElement>('.terminal-rail-item')].find(
+      (el) =>
+        el.querySelector<HTMLElement>('.terminal-rail-select')?.dataset.railFocusId ===
+        `${key(agentId)}:select`
+    );
+    if (!item) throw new Error(`No rail item for ${agentId}`);
+    return item;
+  }
+
+  function clickRail(agentId: string): void {
+    railItem(agentId)
+      .querySelector<HTMLButtonElement>('.terminal-rail-select')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  }
+
+  /** Brings a session's stream live, so its rail dot turns green. */
+  async function goLive(agentId: string): Promise<void> {
+    const socket = await vi.waitFor(() => {
+      const found = sockets.filter((s) => s.url.includes(agentId)).at(-1);
+      if (!found) throw new Error('no socket yet');
+      return found;
+    });
+    socket.readyState = 1;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa('screen') }) });
+    await vi.waitFor(() => expect(sessions.get(agentId)!.state.connection).toBe('connected'));
+  }
+
+  /**
+   * 4-up with A and B in slots 1 and 2. C is connected (green) and D was
+   * never opened (its hollow dot: not connected); neither is in a slot.
+   */
+  async function fourUpWithTwoFilled(): Promise<void> {
+    // C connects in the single layout, then stays open in the rail only.
+    sessions.set(AGENT_C, root.create(reg, AGENT_C));
+    await goLive(AGENT_C);
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(AGENT_B, root.create(reg, AGENT_B));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_C).dataset.dot).toBe('green');
+    expect(['grey', 'neutral']).toContain(railItem(AGENT_D).dataset.dot);
+  }
+
+  it('a not-connected entry fills slot 3, then a connected one fills slot 4', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_D);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      null,
+    ]);
+    // Shown, so the deferred entry now connects.
+    await vi.waitFor(() => expect(paneFor(root, AGENT_D).hidden).toBe(false));
+    await vi.waitFor(() => expect(sockets.some((s) => s.url.includes(AGENT_D))).toBe(true));
+
+    clickRail(AGENT_C);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      key(AGENT_C),
+    ]);
+    expect(root.layoutManager.getState().active).toBe('four');
+  });
+
+  it('a click on an entry already in a slot leaves the slots as they are, with no duplicate', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_B);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_B).dataset.selected).toBe('true');
+  });
+
+  it('with no free slot, a click changes no slot', async () => {
+    await fourUpWithTwoFilled();
+    clickRail(AGENT_D);
+    clickRail(AGENT_C);
+    await flush();
+    const full = [...root.layoutManager.getVisibleSlots()];
+    sessions.set(
+      AGENT_E,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_E, { deferConnect: true }))
+    );
+    await flush();
+
+    clickRail(AGENT_E);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual(full);
+  });
+
+  it('on a narrow viewport, a click in 4-up with free slots changes no slot', async () => {
+    root.dispose();
+    root.element.remove();
+    mockNarrowViewport();
+    mountRoot();
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+  });
+
+  it('with a pane zoomed in 4-up with free slots, a click changes no slot and keeps the zoom', async () => {
+    await fourUpWithTwoFilled();
+    root.layoutManager.zoom(key(AGENT_A));
+    await flush();
+    // Only the placement is under test here: the route's own select()
+    // (which ends any zoom, as today) is left out.
+    navigationSelects = false;
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getZoomed()).toBe(key(AGENT_A));
+    expect(root.layoutManager.getState().four).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+  });
+
+  it('in the single layout, a click shows the entry in the one pane, as before', async () => {
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A)]);
+
+    clickRail(AGENT_D);
+    await vi.waitFor(() => expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_D)]));
+    const state = root.layoutManager.getState();
+    expect(state.active).toBe('single');
+    expect(state.four).toEqual([null, null, null, null]);
+  });
+});

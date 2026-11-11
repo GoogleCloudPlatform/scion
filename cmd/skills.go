@@ -16,8 +16,6 @@ package cmd
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,7 +25,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -43,8 +43,24 @@ var skillsListCmd = &cobra.Command{
 	RunE:  runSkillsList,
 }
 
+// skillsListTags returns every --tags value given to skills list, whether
+// the flag was repeated (--tags a --tags b) or comma-separated (--tags a,b),
+// trimmed and with empty entries dropped. Before ptone/scion#2863 the flag
+// was a single-value string, so a repeated --tags silently kept only the
+// last value.
+func skillsListTags(cmd *cobra.Command) []string {
+	raw, _ := cmd.Flags().GetStringSlice("tags")
+	var tags []string
+	for _, t := range raw {
+		if t = strings.TrimSpace(t); t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
+}
+
 func runSkillsList(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -54,34 +70,43 @@ func runSkillsList(cmd *cobra.Command, args []string) error {
 
 	scope, _ := cmd.Flags().GetString("scope")
 	search, _ := cmd.Flags().GetString("search")
-	tags, _ := cmd.Flags().GetString("tags")
 
 	opts := &hubclient.ListSkillsOptions{
 		Scope:  scope,
 		Search: search,
 		Status: "active",
-	}
-	if tags != "" {
-		opts.Tags = strings.Split(tags, ",")
+		Tags:   skillsListTags(cmd),
 	}
 
-	resp, err := hubCtx.Client.Skills().List(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("failed to list skills: %w", err)
+	// The list endpoint applies the caller's read-scope boundary before
+	// paginating (ptone/scion#1901 pagination follow-up), so a single page
+	// is no longer guaranteed to contain every skill the caller can see —
+	// follow nextCursor until the server reports no more pages.
+	var skills []hubclient.Skill
+	for {
+		resp, err := hubCtx.Client.Skills().List(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("failed to list skills: %w", err)
+		}
+		skills = append(skills, resp.Skills...)
+		if !resp.Page.HasMore() {
+			break
+		}
+		opts.Page.Cursor = resp.Page.NextCursor
 	}
 
 	if isJSONOutput() {
-		return json.NewEncoder(os.Stdout).Encode(resp.Skills)
+		return json.NewEncoder(os.Stdout).Encode(skills)
 	}
 
-	if len(resp.Skills) == 0 {
+	if len(skills) == 0 {
 		fmt.Println("No skills found.")
 		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "NAME\tSCOPE\tSTATUS\tTAGS\tDESCRIPTION")
-	for _, s := range resp.Skills {
+	for _, s := range skills {
 		desc := s.Description
 		if len(desc) > 50 {
 			desc = desc[:47] + "..."
@@ -103,7 +128,7 @@ var skillsShowCmd = &cobra.Command{
 }
 
 func runSkillsShow(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -142,8 +167,7 @@ func runSkillsShow(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Tags: %s\n", strings.Join(skill.Tags, ", "))
 	}
 	fmt.Printf("Status: %s\n", skill.Status)
-	fmt.Printf("Visibility: %s\n", skill.Visibility)
-	fmt.Printf("Created: %s\n", skill.Created.Format(time.RFC3339))
+	fmt.Printf("Created: %s\n", clitime.Format(skill.Created, clitime.Full))
 
 	// Show versions
 	versions, err := hubCtx.Client.Skills().ListVersions(ctx, skill.ID)
@@ -221,43 +245,20 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	skillID, _ := cmd.Flags().GetString("skill-id")
 
 	if version == "" {
-		return fmt.Errorf("--version is required")
-	}
-
-	// Verify SKILL.md exists
-	skillMDPath := filepath.Join(skillDir, "SKILL.md")
-	if _, err := os.Stat(skillMDPath); os.IsNotExist(err) {
-		return fmt.Errorf("SKILL.md not found in %s", skillDir)
+		return newUsageError("--version is required")
 	}
 
 	// Collect files
-	var files []publishFile
-	err := filepath.Walk(skillDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if base == ".git" || base == ".DS_Store" || base == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Base(path) == ".DS_Store" || filepath.Base(path) == ".gitignore" {
-			return nil
-		}
-		relPath, _ := filepath.Rel(skillDir, path)
-		relPath = filepath.ToSlash(relPath)
-		files = append(files, publishFile{
-			path:    relPath,
-			absPath: path,
-			size:    info.Size(),
-		})
-		return nil
-	})
+	rootDir, files, err := collectPublishFiles(skillDir, os.Stderr)
 	if err != nil {
-		return fmt.Errorf("failed to collect files: %w", err)
+		return err
 	}
+	// Uploads read through this root; see transfer.ReadCollectedFile.
+	skillRoot, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return fmt.Errorf("failed to open skill directory %s: %w", skillDir, err)
+	}
+	defer func() { _ = skillRoot.Close() }()
 
 	// Validate limits
 	if len(files) > 50 {
@@ -274,7 +275,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("total size exceeds 50MB limit (%d bytes)", totalSize)
 	}
 
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -296,9 +297,20 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 			if scope == "" {
 				scope = "global"
 			}
+			var projectID string
+			if scope == "project" {
+				projectID, err = GetProjectID(hubCtx)
+				if err != nil {
+					return err
+				}
+				if projectID == "" {
+					return fmt.Errorf("cannot create project-scoped skill %q: could not determine the project ID (run 'scion hub link' to link this project with the Hub)", name)
+				}
+			}
 			createResp, err := skillSvc.Create(ctx, &hubclient.CreateSkillRequest{
-				Name:  name,
-				Scope: scope,
+				Name:    name,
+				Scope:   scope,
+				ScopeID: projectID,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to create skill: %w", err)
@@ -323,45 +335,14 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// Upload files
-	for _, uploadInfo := range pubResp.UploadURLs {
-		// Find the matching local file
-		var localPath string
-		for _, f := range files {
-			if f.path == uploadInfo.Path {
-				localPath = f.absPath
-				break
-			}
-		}
-		if localPath == "" {
-			continue
-		}
-
-		file, err := os.Open(localPath)
-		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", localPath, err)
-		}
-		err = skillSvc.UploadFile(ctx, uploadInfo.URL, uploadInfo.Method, uploadInfo.Headers, file)
-		_ = file.Close()
-		if err != nil {
-			return fmt.Errorf("failed to upload %s: %w", uploadInfo.Path, err)
-		}
-		fmt.Printf("  Uploaded %s\n", uploadInfo.Path)
+	if err := uploadSkillFiles(ctx, skillSvc, skillRoot, files, pubResp.UploadURLs, os.Stdout); err != nil {
+		return err
 	}
 
-	// Build manifest with file hashes
-	manifest := &hubclient.SkillManifest{
-		Files: make([]hubclient.TemplateFile, len(files)),
-	}
-	for i, f := range files {
-		hash, err := hashFile(f.absPath)
-		if err != nil {
-			return fmt.Errorf("failed to hash %s: %w", f.path, err)
-		}
-		manifest.Files[i] = hubclient.TemplateFile{
-			Path: f.path,
-			Size: f.size,
-			Hash: hash,
-		}
+	// Build manifest with the hashes recorded at collection
+	manifest, err := buildSkillManifest(files)
+	if err != nil {
+		return err
 	}
 
 	// Finalize
@@ -381,10 +362,125 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// uploadSkillFiles uploads the collected skill files that have an upload
+// URL, printing "  Uploaded <path>" to out for each. Each file is read
+// through root (links that leave the skill directory are refused) and
+// verified against the collected size and hash, so the uploaded bytes are
+// the ones in the manifest. A mismatch fails before any byte of that file
+// is sent, and stops the upload.
+func uploadSkillFiles(ctx context.Context, up signedURLUploader, root *os.Root, files []publishFile, urls []hubclient.UploadURLInfo, out io.Writer) error {
+	byPath := make(map[string]transfer.FileInfo, len(files))
+	for _, f := range files {
+		byPath[f.path] = f.collected()
+	}
+	return uploadCollectedFiles(ctx, up, root, byPath, urls, nil, func(path string) {
+		_, _ = fmt.Fprintf(out, "  Uploaded %s\n", path)
+	})
+}
+
 type publishFile struct {
-	path    string
-	absPath string
-	size    int64
+	path string
+	size int64
+	// hash is the sha256 content hash recorded at collection ("sha256:<hex>").
+	hash string
+	// mode is the normalised mode recorded in the manifest: "0755" for an
+	// executable file, otherwise "0644" (ptone/scion#5657).
+	mode string
+}
+
+// collected returns f as the transfer.FileInfo it was collected from, for
+// transfer.ReadCollectedFile.
+func (f publishFile) collected() transfer.FileInfo {
+	return transfer.FileInfo{Path: f.path, Size: f.size, Hash: f.hash}
+}
+
+// skillPublishExcludes are skipped in addition to
+// transfer.DefaultExcludePatterns.
+var skillPublishExcludes = []string{"__pycache__", ".gitignore"}
+
+// collectPublishFiles returns the files `scion skills publish` uploads from
+// skillDir. It applies the same rules as template and harness-config uploads
+// (transfer.ManifestBuilder): only regular files inside the skill directory
+// are published, and VCS and editor clutter is excluded. Other entries, such
+// as symlinks, are skipped with a warning written to warn (if non-nil).
+//
+// SKILL.md must be a regular file. The skillDir argument itself may be a
+// symlink to a directory; it is resolved once before walking, and the
+// resolved directory is returned with the files.
+func collectPublishFiles(skillDir string, warn io.Writer) (string, []publishFile, error) {
+	root, err := filepath.EvalSymlinks(skillDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("SKILL.md not found in %s", skillDir)
+		}
+		return "", nil, fmt.Errorf("failed to resolve skill directory %s: %w", skillDir, err)
+	}
+
+	info, err := os.Lstat(filepath.Join(root, "SKILL.md"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("SKILL.md not found in %s", skillDir)
+		}
+		return "", nil, fmt.Errorf("failed to read SKILL.md in %s: %w", skillDir, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("SKILL.md in %s must be a regular file", skillDir)
+	}
+
+	builder := transfer.NewManifestBuilder(root).WithExcludePatterns(skillPublishExcludes)
+	builder.OnSkip = func(relPath string) {
+		if warn != nil {
+			_, _ = fmt.Fprintf(warn, "Warning: skipped non-regular file %q\n", relPath)
+		}
+	}
+	collected, err := builder.CollectFiles()
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to collect files: %w", err)
+	}
+
+	files := make([]publishFile, len(collected))
+	for i, f := range collected {
+		files[i] = publishFile{
+			path: f.Path,
+			size: f.Size,
+			hash: f.Hash,
+			mode: publishFileMode(transfer.NormalizeMode(f.Mode)),
+		}
+	}
+	return root, files, nil
+}
+
+// publishFileMode is the manifest mode for a local file with mode m. Only
+// the executable bit is carried. On Windows, whose file modes carry no
+// executable bit, every file is "0644".
+func publishFileMode(m os.FileMode) string {
+	if !localModesCarryExecBit() {
+		return transfer.FormatMode(transfer.ModeRegular)
+	}
+	return transfer.NormalizedModeString(transfer.FormatMode(m))
+}
+
+// buildSkillManifest returns the finalize manifest for files: each file's
+// path, size, sha256 hash (as recorded at collection, which is also what
+// the upload verifies) and mode. The Hub serves the mode back with the
+// download URLs, so the broker installs an executable skill script
+// executable (ptone/scion#5657).
+func buildSkillManifest(files []publishFile) (*hubclient.SkillManifest, error) {
+	manifest := &hubclient.SkillManifest{
+		Files: make([]hubclient.TemplateFile, len(files)),
+	}
+	for i, f := range files {
+		if f.hash == "" {
+			return nil, fmt.Errorf("no content hash recorded for %s", f.path)
+		}
+		manifest.Files[i] = hubclient.TemplateFile{
+			Path: f.path,
+			Size: f.size,
+			Hash: f.hash,
+			Mode: f.mode,
+		}
+	}
+	return manifest, nil
 }
 
 func skillDisplayName(slug string) string {
@@ -397,19 +493,6 @@ func skillDisplayName(slug string) string {
 	return strings.Join(words, " ")
 }
 
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
-}
-
 var skillsDeleteCmd = &cobra.Command{
 	Use:     "delete <name-or-id>",
 	Aliases: []string{"rm"},
@@ -419,7 +502,7 @@ var skillsDeleteCmd = &cobra.Command{
 }
 
 func runSkillsDelete(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -462,7 +545,7 @@ var skillsDeprecateCmd = &cobra.Command{
 }
 
 func runSkillsDeprecate(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -476,10 +559,10 @@ func runSkillsDeprecate(cmd *cobra.Command, args []string) error {
 	replacement, _ := cmd.Flags().GetString("replacement")
 
 	if version == "" {
-		return fmt.Errorf("--version is required")
+		return newUsageError("--version is required")
 	}
 	if message == "" {
-		return fmt.Errorf("--message is required")
+		return newUsageError("--message is required")
 	}
 
 	skillSvc := hubCtx.Client.Skills()
@@ -538,7 +621,7 @@ var skillsVersionsCmd = &cobra.Command{
 }
 
 func runSkillsVersions(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -581,7 +664,7 @@ func runSkillsVersions(cmd *cobra.Command, args []string) error {
 		if len(hash) > 20 {
 			hash = hash[:20] + "..."
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", v.Version, v.Status, v.Created.Format("2006-01-02"), hash)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", v.Version, v.Status, clitime.Format(v.Created, clitime.Date), hash)
 	}
 	return w.Flush()
 }
@@ -594,7 +677,7 @@ var skillsResolveCmd = &cobra.Command{
 }
 
 func runSkillsResolve(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -629,6 +712,9 @@ func runSkillsResolve(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Name: %s\n", result.Name)
 	fmt.Printf("Resolved Version: %s\n", result.ResolvedVersion)
 	fmt.Printf("Content Hash: %s\n", result.ContentHash)
+	if result.ContentHashV2 != "" {
+		fmt.Printf("Content Hash v2: %s\n", result.ContentHashV2)
+	}
 	if len(result.Files) > 0 {
 		fmt.Println("Files:")
 		for _, f := range result.Files {
@@ -653,7 +739,7 @@ func init() {
 	// Flags for list command
 	skillsListCmd.Flags().String("scope", "", "Filter by scope (core, global, project, user)")
 	skillsListCmd.Flags().String("search", "", "Search skills by name, description, or tags")
-	skillsListCmd.Flags().String("tags", "", "Filter by tags (comma-separated, AND semantics)")
+	skillsListCmd.Flags().StringSlice("tags", nil, "Filter by tags (repeatable or comma-separated, AND semantics; each value is parsed as CSV, so a tag containing a double quote must be CSV-quoted)")
 
 	// Flags for deprecate command
 	skillsDeprecateCmd.Flags().String("version", "", "Version to deprecate (required)")

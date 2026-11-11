@@ -28,9 +28,10 @@ import (
 // RuntimeBroker holds the schema definition for the RuntimeBroker entity,
 // mapping the legacy SQLite `runtime_brokers` table.
 //
-// JSON-bearing columns (capabilities, supported_harnesses, resources, runtimes,
-// labels, annotations) are kept as raw strings to stay dialect-neutral and match
-// the existing store's raw-marshaling behavior during the dual-write phase.
+// JSON-bearing columns (capabilities, supported_harnesses, resources, runtimes)
+// are kept as raw strings to stay dialect-neutral and match the existing store's
+// raw-marshaling behavior. Labels and annotations use native JSON (jsonb on
+// Postgres) to support the @> containment operator in broker-label queries.
 type RuntimeBroker struct {
 	ent.Schema
 }
@@ -72,9 +73,29 @@ func (RuntimeBroker) Fields() []ent.Field {
 			Optional(),
 		field.String("runtimes").
 			Optional(),
-		field.String("labels").
+		// default_profile records the broker's own active/default profile
+		// name at registration time (config.Settings.ActiveProfile on the
+		// broker side — see registerGlobalProjectAndBroker), so the hub can
+		// resolve an agent dispatch with no explicit profile against this
+		// registration data instead of guessing. See
+		// store.RuntimeBroker.DefaultProfile's doc comment: this is
+		// registration-time data, and can differ from what the broker
+		// itself resolves at dispatch time.
+		field.String("default_profile").
 			Optional(),
-		field.String("annotations").
+		// workspace_storage is the broker's JSON-encoded
+		// api.BrokerWorkspaceStorage descriptor, reported at registration
+		// and refreshed on every heartbeat. Empty means never reported.
+		field.String("workspace_storage").
+			Optional(),
+		// health is the broker's JSON-encoded api.BrokerHealthReport, its
+		// self-reported health from the heartbeat. Empty means never
+		// reported (an older broker). It never affects status.
+		field.String("health").
+			Optional(),
+		field.JSON("labels", map[string]string{}).
+			Optional(),
+		field.JSON("annotations", map[string]string{}).
 			Optional(),
 		field.String("endpoint").
 			Optional(),
@@ -88,6 +109,29 @@ func (RuntimeBroker) Fields() []ent.Field {
 		field.String("gcp_host_project_id").
 			Optional().
 			Nillable(),
+		// gcp_host_source records how the GCP host service account and
+		// project were last set: "registration", "detected" or "admin" (set
+		// through the update API). Empty means not recorded. The GCP host
+		// pair and this column are written only by CreateRuntimeBroker and
+		// the dedicated SetRuntimeBrokerGCPHost* store methods, never by
+		// UpdateRuntimeBroker.
+		field.String("gcp_host_source").
+			Optional().
+			Default(""),
+		// host_identity_* hold the last GCP identity a co-located server
+		// read from the metadata server for its own broker. They are written
+		// only by RecordRuntimeBrokerHostObservation, never by
+		// UpdateRuntimeBroker. The host identity state is derived from them
+		// at read time.
+		field.String("host_identity_observed_email").
+			Optional().
+			Nillable(),
+		field.String("host_identity_observation").
+			Optional().
+			Nillable(),
+		field.Time("host_identity_observed_at").
+			Optional().
+			Nillable(),
 		field.String("connected_hub_id").
 			Optional().
 			Nillable(),
@@ -95,6 +139,77 @@ func (RuntimeBroker) Fields() []ent.Field {
 			Optional().
 			Nillable(),
 		field.Time("connected_at").
+			Optional().
+			Nillable(),
+		// --- Flat Runtime Broker target (.design/flat-runtime-brokers-contract.md) ---
+		// runtime_target_id is the opaque, stable runtime target ID of a flat
+		// Runtime Broker; NULL means a legacy (profile-based) Runtime Broker.
+		// The three runtime_target_* columns are written only by
+		// CreateRuntimeBroker and SetRuntimeBrokerTarget, never by
+		// UpdateRuntimeBroker, so write-backs cannot roll them back. Unique
+		// through the named index below (multiple NULLs allowed).
+		field.String("runtime_target_id").
+			Optional().
+			Nillable(),
+		field.String("runtime_target_type").
+			Optional().
+			Default(""),
+		field.String("runtime_target_display_name").
+			Optional().
+			Default(""),
+		// --- Flat Runtime Broker presentation (store.RuntimeBroker.RuntimeTargetPresentation) ---
+		// The six presentation columns are written only by
+		// SetRuntimeBrokerPresentation (one conditional, epoch/seq-fenced
+		// update) and removed only by deleting the row. CreateRuntimeBroker,
+		// UpdateRuntimeBroker and every other full-row writer never write
+		// them, so a write-back of an older copy cannot roll them back.
+		//
+		// runtime_target_presentation is the JSON-encoded
+		// api.RuntimeTargetPresentation; empty means never reported.
+		field.String("runtime_target_presentation").
+			Optional(),
+		// runtime_target_presentation_hash is the Hub-computed hash of the
+		// stored presentation (never a hash sent by the Runtime Broker).
+		field.String("runtime_target_presentation_hash").
+			Optional(),
+		// presentation_epoch and presentation_seq are the fence of the last
+		// accepted write: the reporting process's start time (Unix
+		// nanoseconds) and its per-process heartbeat counter.
+		field.Int64("presentation_epoch").
+			Optional().
+			Nillable(),
+		field.Int64("presentation_seq").
+			Optional().
+			Nillable(),
+		// presentation_fenced_at is the Hub time of the last fence-advancing
+		// write (written or confirmed).
+		field.Time("presentation_fenced_at").
+			Optional().
+			Nillable(),
+		// presentation_observed_at is the Hub time the stored presentation
+		// was last written or confirmed, refreshed at most every
+		// store.PresentationObservedRefresh on an unchanged presentation.
+		field.Time("presentation_observed_at").
+			Optional().
+			Nillable(),
+		// --- Legacy Runtime Broker conversion plan (store.RuntimeBroker.ConversionPlanPresentation) ---
+		// The three conversion plan columns are written only by
+		// SetRuntimeBrokerConversionPlan (one conditional update bound to a
+		// legacy row) and removed only by deleting the row; no full-row
+		// writer writes them.
+		//
+		// conversion_plan_presentation is the JSON-encoded
+		// api.ConversionPlanPresentation; empty means never reported.
+		field.String("conversion_plan_presentation").
+			Optional(),
+		// conversion_plan_presentation_hash is the Hub-computed hash of the
+		// stored conversion plan.
+		field.String("conversion_plan_presentation_hash").
+			Optional(),
+		// conversion_plan_observed_at is the Hub time the stored conversion
+		// plan was last written or confirmed, refreshed at most every
+		// store.PresentationObservedRefresh on an unchanged plan.
+		field.Time("conversion_plan_observed_at").
 			Optional().
 			Nillable(),
 		field.Time("created").
@@ -111,6 +226,10 @@ func (RuntimeBroker) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("slug"),
 		index.Fields("status"),
+		// One runtime target ID never belongs to two Runtime Brokers.
+		index.Fields("runtime_target_id").
+			Unique().
+			StorageKey("runtimebroker_runtime_target_id"),
 	}
 }
 

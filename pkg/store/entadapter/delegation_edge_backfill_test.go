@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -265,7 +266,7 @@ func TestBackfillDelegationEdges_EmptyConfigGetsNoneRole(t *testing.T) {
 	cs := NewCompositeStore(client)
 
 	// Run schema migration only (not data backfills)
-	require.NoError(t, cs.client.Schema.Create(ctx))
+	require.NoError(t, entc.AutoMigrate(ctx, cs.client))
 
 	userID := uuid.NewString()
 	project := &store.Project{
@@ -336,7 +337,7 @@ func TestBackfillDelegationEdges_EveryAgentGetsBoundedEdge(t *testing.T) {
 	cs := NewCompositeStore(client)
 
 	// Schema-only migration (no data backfills)
-	require.NoError(t, cs.client.Schema.Create(ctx))
+	require.NoError(t, entc.AutoMigrate(ctx, cs.client))
 
 	userID := uuid.NewString()
 	project := &store.Project{

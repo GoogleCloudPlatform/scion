@@ -62,7 +62,7 @@ func TestBundleInstall_OpenCode(t *testing.T) {
 	}
 
 	// 2. Simulate install: CopyDir from bundle source to a temp target
-	// (mirrors cmd/harness_config_install.go installLocally).
+	// (as the former local harness-config install did).
 	installDir := filepath.Join(t.TempDir(), "opencode-test")
 	if err := util.CopyDir(src, installDir); err != nil {
 		t.Fatalf("CopyDir (install): %v", err)
@@ -80,7 +80,7 @@ func TestBundleInstall_OpenCode(t *testing.T) {
 	// 3. Assert the home/ file layout — these are the golden paths that must
 	// match the implicit mapEmbedFileToHomePath placement.
 	wantHomeFiles := []string{
-		"home/.config/opencode/.opencode.json",
+		"home/.config/opencode/opencode.json",
 	}
 	for _, rel := range wantHomeFiles {
 		full := filepath.Join(installDir, filepath.FromSlash(rel))

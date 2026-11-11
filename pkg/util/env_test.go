@@ -69,3 +69,182 @@ func TestExpandEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestParseBool(t *testing.T) {
+	tests := []struct {
+		in        string
+		wantValue bool
+		wantOK    bool
+	}{
+		{"", false, false},
+		{"   ", false, false},
+		{"true", true, true},
+		{"TRUE", true, true},
+		{"True", true, true},
+		{"t", true, true},
+		{"T", true, true},
+		{"1", true, true},
+		{"yes", true, true},
+		{"YES", true, true},
+		{"y", true, true},
+		{"on", true, true},
+		{"On", true, true},
+		{"true\n", true, true},
+		{"  yes  ", true, true},
+		{"false", false, true},
+		{"FALSE", false, true},
+		{"f", false, true},
+		{"0", false, true},
+		{"no", false, true},
+		{"n", false, true},
+		{"off", false, true},
+		{"OFF\n", false, true},
+		{"enabled", false, false},
+		{"2", false, false},
+		{"tru", false, false},
+		{"yess", false, false},
+	}
+	for _, tt := range tests {
+		gotValue, gotOK := ParseBool(tt.in)
+		if gotValue != tt.wantValue || gotOK != tt.wantOK {
+			t.Errorf("ParseBool(%q) = (%v, %v), want (%v, %v)", tt.in, gotValue, gotOK, tt.wantValue, tt.wantOK)
+		}
+	}
+}
+
+func TestParseBoolEnv(t *testing.T) {
+	const key = "SCION_TEST_PARSE_BOOL_ENV"
+	tests := []struct {
+		name       string
+		set        bool
+		value      string
+		defaultVal bool
+		want       bool
+	}{
+		{"unset default false", false, "", false, false},
+		{"unset default true", false, "", true, true},
+		{"empty default true", true, "", true, true},
+		{"whitespace default true", true, "  ", true, true},
+		{"true default false", true, "true", false, true},
+		{"yes default false", true, "Yes", false, true},
+		{"1 default false", true, "1", false, true},
+		{"false default true", true, "false", true, false},
+		{"off default true", true, "off", true, false},
+		{"0 default true", true, "0", true, false},
+		{"garbage default true", true, "enabled", true, true},
+		{"garbage default false", true, "enabled", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv(key, tt.value)
+			} else {
+				t.Setenv(key, "")
+				_ = os.Unsetenv(key)
+			}
+			if got := ParseBoolEnv(key, tt.defaultVal); got != tt.want {
+				t.Errorf("ParseBoolEnv(%q=%q, %v) = %v, want %v", key, tt.value, tt.defaultVal, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLookupBoolEnv(t *testing.T) {
+	const key = "SCION_TEST_LOOKUP_BOOL_ENV"
+	t.Setenv(key, "")
+	_ = os.Unsetenv(key)
+	if v, ok := LookupBoolEnv(key); v || ok {
+		t.Errorf("unset: got (%v, %v), want (false, false)", v, ok)
+	}
+	t.Setenv(key, "on")
+	if v, ok := LookupBoolEnv(key); !v || !ok {
+		t.Errorf("on: got (%v, %v), want (true, true)", v, ok)
+	}
+	t.Setenv(key, "nope")
+	if v, ok := LookupBoolEnv(key); v || ok {
+		t.Errorf("garbage: got (%v, %v), want (false, false)", v, ok)
+	}
+}
+
+func TestIsServerSecretEnvName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"SCION_SERVER_SESSION_SECRET":          true,
+		"SCION_SERVER_HUB_CONDUIT_PEERSECRET":  true,
+		"SCION_SERVER_HUB_CONDUIT_PEER_SECRET": true,
+		"SCION_SERVER_DATABASE_URL":            true,
+		"SESSION_SECRET":                       true,
+		"SCION_HUB_ENDPOINT":                   false,
+		"SCION_SERVER":                         false,
+		"session_secret":                       false,
+		"MY_SESSION_SECRET":                    false,
+		"HOME":                                 false,
+		"":                                     false,
+	} {
+		if got := IsServerSecretEnvName(name); got != want {
+			t.Errorf("IsServerSecretEnvName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestExpandEnvRefusing(t *testing.T) {
+	const sentinel = "sentinel-value-must-not-appear"
+	t.Setenv("SCION_SERVER_SESSION_SECRET", sentinel)
+	t.Setenv("SESSION_SECRET", sentinel)
+	t.Setenv("PLAIN_VAR", "plain")
+
+	tests := []struct {
+		input       string
+		want        string
+		wantRefused []string
+	}{
+		{"${SCION_SERVER_SESSION_SECRET}", "", []string{"SCION_SERVER_SESSION_SECRET"}},
+		{"$SCION_SERVER_SESSION_SECRET", "", []string{"SCION_SERVER_SESSION_SECRET"}},
+		{"${SESSION_SECRET}", "", []string{"SESSION_SECRET"}},
+		{"x-$SESSION_SECRET-${SESSION_SECRET}-${PLAIN_VAR}", "x---plain", []string{"SESSION_SECRET"}},
+		{"${PLAIN_VAR}", "plain", nil},
+	}
+	for _, tt := range tests {
+		got, warned, refused := ExpandEnvRefusing(tt.input, IsServerSecretEnvName)
+		if got != tt.want {
+			t.Errorf("ExpandEnvRefusing(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+		if strings.Contains(got, sentinel) {
+			t.Errorf("ExpandEnvRefusing(%q) returned a refused value", tt.input)
+		}
+		if warned {
+			t.Errorf("ExpandEnvRefusing(%q) warned for a set or refused variable", tt.input)
+		}
+		if strings.Join(refused, ",") != strings.Join(tt.wantRefused, ",") {
+			t.Errorf("ExpandEnvRefusing(%q) refused = %v, want %v", tt.input, refused, tt.wantRefused)
+		}
+	}
+
+	// A nil predicate behaves like ExpandEnv.
+	if got, _, refused := ExpandEnvRefusing("${SESSION_SECRET}", nil); got != sentinel || refused != nil {
+		t.Errorf("ExpandEnvRefusing with nil predicate = %q, %v; want the env value and no refusals", got, refused)
+	}
+}
+
+func TestIsAgentRefusedHostEnvName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"SCION_SERVER_SESSION_SECRET": true,
+		"SESSION_SECRET":              true,
+		"SCION_DEV_TOKEN":             true,
+		"SCION_AUTH_TOKEN":            true,
+		"SCION_DEV_TOKEN_FILE":        false,
+		"SCION_HUB_ENDPOINT":          false,
+		"HOME":                        false,
+	} {
+		if got := IsAgentRefusedHostEnvName(name); got != want {
+			t.Errorf("IsAgentRefusedHostEnvName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestEnvWithoutAgentRefusedNames(t *testing.T) {
+	in := []string{"HOME=/h", "SCION_SERVER_SESSION_SECRET=x", "SESSION_SECRET=x", "SCION_DEV_TOKEN=x", "SCION_AUTH_TOKEN=x", "PATH=/bin", "NOVALUE"}
+	got := EnvWithoutAgentRefusedNames(in)
+	if strings.Join(got, ",") != "HOME=/h,PATH=/bin,NOVALUE" {
+		t.Errorf("EnvWithoutAgentRefusedNames = %v", got)
+	}
+}

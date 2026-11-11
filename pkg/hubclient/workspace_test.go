@@ -211,8 +211,8 @@ func TestWorkspaceGetStatus(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(WorkspaceStatusResponse{
 			Slug:       "agent-status",
-			ProjectID:  "grove-xyz",
-			StorageURI: "gs://bucket/workspaces/grove-xyz/agent-status/",
+			ProjectID:  "project-xyz",
+			StorageURI: "gs://bucket/workspaces/project-xyz/agent-status/",
 			LastSync: &WorkspaceSyncInfo{
 				Direction:   "from",
 				Timestamp:   time.Now().Add(-1 * time.Hour),
@@ -232,8 +232,8 @@ func TestWorkspaceGetStatus(t *testing.T) {
 	if resp.Slug != "agent-status" {
 		t.Errorf("expected agent ID 'agent-status', got %q", resp.Slug)
 	}
-	if resp.ProjectID != "grove-xyz" {
-		t.Errorf("expected project ID 'grove-xyz', got %q", resp.ProjectID)
+	if resp.ProjectID != "project-xyz" {
+		t.Errorf("expected project ID 'project-xyz', got %q", resp.ProjectID)
 	}
 	if resp.StorageURI == "" {
 		t.Error("expected non-empty storage URI")
@@ -346,6 +346,26 @@ func TestWorkspaceSyncTo_BadRequest(t *testing.T) {
 	_, err := client.Workspace().SyncTo(context.Background(), "agent-123", []transfer.FileInfo{})
 	if err == nil {
 		t.Fatal("expected error for 400 response")
+	}
+}
+
+// TestWorkspaceSyncToFinalize_Warnings checks that hub warnings on the
+// finalize response (e.g. workspace files ignored for empty-per-agent) are
+// decoded from the raw wire JSON.
+func TestWorkspaceSyncToFinalize_Warnings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"applied":true,"filesApplied":0,"warnings":["files ignored","other"]}`))
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	resp, err := client.Workspace().FinalizeSyncTo(context.Background(), "agent-1", &transfer.Manifest{Version: "1.0"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Warnings) != 2 || resp.Warnings[0] != "files ignored" || resp.Warnings[1] != "other" {
+		t.Errorf("warnings = %q, want [files ignored other]", resp.Warnings)
 	}
 }
 

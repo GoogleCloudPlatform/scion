@@ -52,6 +52,8 @@ Each Scion agent lifecycle event maps to Cloud Run Instance API calls:
 ### 4.3 Workspace Mounting
 Per `.design/nfs-workspace.md` §5.4, Cloud Run Instances do not support `subPath`. Therefore, the Hub will generate `RunConfig` with the NFS volume specification, and the `Runtime` implementation will configure the instance's Volume mapping directly to the server-side path (e.g., `projects/<pid>/workspace`). `CreateAgentConfig` and `RunConfig` will carry `WorkspaceBackendName = "nfs"`, `NFSUID`, `NFSGID`, and the exact NFS server IP and remote share path.
 
+**NFS is required (ptone/scion#5264).** The runtime mounts the workspace, the agent home and the staged files only from the NFS share, and nothing else provides them. An instance started on another workspace backend has no writable workspace and no home (the hub token lives in the broker-local home), so `sciontool init` fails and the instance cycles to `CONDITION_FAILED`. `CloudRunRuntime.Run` therefore refuses any backend other than `nfs` up front, before provisioning, async checkpoints or Instances API calls, with `errCloudRunNeedsNFSWorkspace` (the same pattern as the empty-per-agent refusal). We chose to refuse rather than to support non-NFS backends because support would need in-memory volumes for the workspace and home plus a token delivery that does not depend on the broker-local home. That is a larger design, and such a workspace would not survive an instance restart or be visible to the Hub. It can be revisited if a non-NFS deployment is needed.
+
 ### 4.4 Home Dir & Secrets
 Unlike Kubernetes, where Scion uses `kubectl cp` to synchronize the home directory and secrets post-start, Cloud Run Instances lack an out-of-band file copy mechanism.
 **Alternatives:**

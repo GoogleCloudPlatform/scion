@@ -1,0 +1,20 @@
+# The profile's single backend (nfs) and the runtime entry's per-dir entry
+# for x are removed storage overrides: server.project_storage places every
+# shared dir. Neither is converted; each is reported as removed.
+schema_version: "1"
+server:
+  shared_dir_storage:
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: share-1
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+    shared_dir_storage_backends:
+      x: local
+profiles:
+  batch:
+    runtime: cluster
+    shared_dir_storage_backend: nfs

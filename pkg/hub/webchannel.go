@@ -22,7 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // webChannelBus is a real broker spoke for the "web" channel. It follows the
@@ -157,6 +157,10 @@ func (b *webChannelBus) Subscribe(_ string, _ eventbus.EventHandler) (eventbus.S
 	return webNoopSubscription{}, nil
 }
 
+// InProcessSpoke marks the web spoke as in-process: the fan-out always
+// waits for its state writes, so they never outlive the Publish call.
+func (b *webChannelBus) InProcessSpoke() {}
+
 // Close releases resources. The store handle is owned by the caller.
 func (b *webChannelBus) Close() error {
 	return nil
@@ -174,7 +178,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	if msg == nil {
 		return "", "", "", false
 	}
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		return "", "", "", false
 	}
@@ -182,7 +186,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	projectID = parsed.ProjectID
 
 	switch parsed.Kind {
-	case projectcompat.TopicKindUser:
+	case projectkeys.TopicKindUser:
 		// Agent → user message: topic has the user ID, sender is the agent.
 		userID = parsed.Actor
 		if strings.HasPrefix(msg.Sender, "agent:") {
@@ -191,7 +195,7 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 				agentID = strings.TrimPrefix(msg.Sender, "agent:")
 			}
 		}
-	case projectcompat.TopicKindAgent:
+	case projectkeys.TopicKindAgent:
 		// User → agent message: topic has the agent slug, recipient is the agent.
 		// Phase 6 fix (O1): prefer msg.RecipientID (UUID) over the slug from
 		// the topic so that both directions use the same identifier form
@@ -214,4 +218,54 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	}
 
 	return userID, projectID, agentID, true
+}
+
+// registerDMParticipants upserts one webchat_dm row per participant of a DM
+// conversation key (dm:<kind1>:<id1>:<kind2>:<id2>). It is a no-op for a nil
+// store or a malformed key.
+//
+// Registration must happen before any TouchDMActivity call: TouchDMActivity is
+// a plain UPDATE and silently affects zero rows when the registry rows do not
+// exist yet — which is the case when an agent is the first to speak in a DM.
+func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
+	if wcs == nil {
+		return
+	}
+
+	parts := strings.Split(key, ":")
+	if len(parts) < 5 {
+		return
+	}
+
+	kind1, id1 := parts[1], parts[2]
+	kind2, id2 := parts[3], parts[4]
+
+	// Upsert two rows — one per participant.
+	now := time.Now().UTC()
+
+	// Participant 1 → Peer 2.
+	peerKind2 := kind2
+	if peerKind2 != "agent" {
+		peerKind2 = "user"
+	}
+	_ = wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: key,
+		ParticipantID:   id1,
+		PeerID:          id2,
+		PeerKind:        peerKind2,
+		LastActivityAt:  now,
+	})
+
+	// Participant 2 → Peer 1.
+	peerKind1 := kind1
+	if peerKind1 != "agent" {
+		peerKind1 = "user"
+	}
+	_ = wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: key,
+		ParticipantID:   id2,
+		PeerID:          id1,
+		PeerKind:        peerKind1,
+		LastActivityAt:  now,
+	})
 }

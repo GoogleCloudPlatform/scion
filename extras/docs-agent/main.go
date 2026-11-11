@@ -179,6 +179,7 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost+", "+http.MethodOptions)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -247,6 +248,7 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -265,6 +267,7 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost+", "+http.MethodOptions)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -287,6 +290,7 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}

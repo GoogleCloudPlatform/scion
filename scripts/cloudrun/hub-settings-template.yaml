@@ -10,6 +10,10 @@ server:
     hub_id: "__HUB_ID__"
     public_url: "__SERVICE_URL__"
     gcp_project_id: "__PROJECT_ID__"
+    conduit:
+      # Cloud Run sends SIGTERM and kills the instance 10s later; the
+      # conduit relay fits its SIGTERM drain into that window.
+      shutdown_grace: 10s
   database:
     driver: postgres
     url: "__POSTGRES_DSN__"

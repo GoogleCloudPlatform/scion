@@ -25,11 +25,43 @@ type Config struct {
 	Plugin    PluginConfig    `yaml:"plugin"`
 	Auth      AuthConfig      `yaml:"auth"`
 	Projects  []ProjectConfig `yaml:"projects"`
-	Groves    []ProjectConfig `yaml:"groves,omitempty"` // Legacy field for backward compatibility
 	State     StateConfig     `yaml:"state"`
 	Timeouts  TimeoutConfig   `yaml:"timeouts"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	ReplyPoll ReplyPollConfig `yaml:"reply_poll"`
+}
+
+// defaultReplyPollConcurrency is the default cap on in-flight reply poll
+// reads per bridge process.
+const defaultReplyPollConcurrency = 64
+
+// ReplyPollConfig controls how the executor returns an agent's reply: by
+// reading it from the caller's own conversation with the agent, with the
+// caller's own credential.
+type ReplyPollConfig struct {
+	// Enabled turns reply polling on. Unset means on. When false, the
+	// executor waits on pushed broker messages only, as before reply
+	// polling existed: no same-caller check, no conversation preflight, no
+	// poller and no wait filter. The push path's user check and the admin
+	// topic subscription apply either way.
+	Enabled *bool `yaml:"enabled"`
+	// Concurrency caps the reply poll reads in flight per bridge process.
+	// Zero or less means the default (64).
+	Concurrency int `yaml:"concurrency"`
+}
+
+// IsEnabled reports whether reply polling is on (the default).
+func (c ReplyPollConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// MaxConcurrent returns the cap on in-flight reply poll reads.
+func (c ReplyPollConfig) MaxConcurrent() int {
+	if c.Concurrency <= 0 {
+		return defaultReplyPollConcurrency
+	}
+	return c.Concurrency
 }
 
 // BridgeConfig holds the A2A protocol server settings.
@@ -38,6 +70,21 @@ type BridgeConfig struct {
 	ExternalURL    string         `yaml:"external_url"`
 	MaxSubscribers int            `yaml:"max_subscribers"`
 	Provider       ProviderConfig `yaml:"provider"`
+	// AsyncCreate makes auto-provisioning opt in to an asynchronous agent
+	// create (default true when unset). The hub's async launch flag stays
+	// the real gate: a hub without it answers synchronously. False always
+	// uses the synchronous create. It does not affect waiting for an agent
+	// that is already launching (one launched elsewhere and adopted).
+	AsyncCreate *bool `yaml:"async_create"`
+}
+
+// asyncCreateEnabled reports whether auto-provisioning opts in to an
+// asynchronous create: bridge.async_create, true when unset.
+func (c *Config) asyncCreateEnabled() bool {
+	if c == nil || c.Bridge.AsyncCreate == nil {
+		return true
+	}
+	return *c.Bridge.AsyncCreate
 }
 
 // ProviderConfig describes the bridge operator.
@@ -65,20 +112,28 @@ type PluginConfig struct {
 type AuthConfig struct {
 	// Scheme selects the auth mode.
 	// Existing: "apiKey" | "bearer" | "none"
-	// New:      "hubUAT" | "hubJWT" | "geGoogle"
+	// New:      "hubUAT" | "hubBearer" | "hubJWT" | "geGoogle"
 	Scheme string `yaml:"scheme"`
 
 	// APIKey is the shared static key for "apiKey" and "bearer" schemes.
-	// Not used for hubUAT or hubJWT.
+	// Not used for hubUAT, hubBearer, or hubJWT.
 	APIKey string `yaml:"api_key"`
 
-	// UATCacheTTL is the UAT introspection cache TTL for hubUAT mode.
-	// Default: 60s. Maximum: 300s.
+	// UATCacheTTL is the Hub /auth/me introspection cache TTL for hubUAT and
+	// hubBearer modes. Default: 60s. Maximum: 300s.
 	UATCacheTTL time.Duration `yaml:"uat_cache_ttl"`
 
 	// GEExchange holds GE Google credential exchange configuration.
 	// Used when Scheme is "geGoogle".
 	GEExchange GEExchangeConfig `yaml:"ge_exchange"`
+
+	// YAMLScheme is the auth scheme as it appeared in the base YAML config
+	// file, captured once when the config is loaded, before any admin
+	// overlay or runtime config is applied. It is not itself configurable —
+	// it always mirrors Scheme at load time — and exists so that later
+	// pushed config can be checked against what YAML originally specified.
+	// See EffectiveAuthScheme.
+	YAMLScheme string `yaml:"-"`
 }
 
 // ProjectConfig configures a project exposed via the bridge.
@@ -88,9 +143,6 @@ type ProjectConfig struct {
 	AutoProvision   bool     `yaml:"auto_provision" json:"auto_provision"`
 	ExposedAgents   []string `yaml:"exposed_agents" json:"exposed_agents"`
 }
-
-// GroveConfig is a legacy alias for ProjectConfig.
-type GroveConfig = ProjectConfig
 
 // StateConfig holds local state database settings.
 type StateConfig struct {

@@ -32,6 +32,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatRelative } from '../../utils/time.js';
 
 @customElement('scion-env-var-list')
 export class ScionEnvVarList extends LitElement {
@@ -39,6 +40,8 @@ export class ScionEnvVarList extends LitElement {
   @property() scopeId = '';
   @property() apiBasePath = '/api/v1';
   @property({ type: Boolean }) compact = false;
+  /** Hides the add, edit and delete controls for viewers without write access. */
+  @property({ type: Boolean }) readonly = false;
 
   @state() private loading = true;
   @state() private envVars: EnvVar[] = [];
@@ -213,32 +216,6 @@ export class ScionEnvVarList extends LitElement {
     }
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   // ── Rendering ────────────────────────────────────────────────────────
 
   override render() {
@@ -274,13 +251,16 @@ export class ScionEnvVarList extends LitElement {
     }
 
     return html`
-      <div class="list-header">
-        <sl-button variant="primary" @click=${this.openCreateDialog}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Add Variable
-        </sl-button>
-      </div>
-      ${this.envVars.length === 0 ? this.renderEmpty() : this.renderTable()} ${this.renderDialog()}
+      ${this.readonly
+        ? nothing
+        : html`<div class="list-header">
+            <sl-button variant="primary" @click=${this.openCreateDialog}>
+              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+              Add Variable
+            </sl-button>
+          </div>`}
+      ${this.envVars.length === 0 ? this.renderEmpty() : this.renderTable()}
+      ${this.readonly ? nothing : this.renderDialog()}
     `;
   }
 
@@ -291,15 +271,17 @@ export class ScionEnvVarList extends LitElement {
           <div class="section-header-info">
             <h2>Environment Variables</h2>
             <p>
-              Manage environment variables injected into
-              ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'} at
+              ${this.readonly ? 'Environment variables' : 'Manage environment variables'} injected
+              into ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'} at
               runtime.
             </p>
           </div>
-          <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
-            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-            Add Variable
-          </sl-button>
+          ${this.readonly
+            ? nothing
+            : html`<sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                Add Variable
+              </sl-button>`}
         </div>
 
         ${this.loading
@@ -318,7 +300,7 @@ export class ScionEnvVarList extends LitElement {
               ? this.renderEmpty()
               : this.renderTable()}
       </div>
-      ${this.renderDialog()}
+      ${this.readonly ? nothing : this.renderDialog()}
     `;
   }
 
@@ -335,7 +317,7 @@ export class ScionEnvVarList extends LitElement {
               ${this.scope === 'user' ? html`<th>Progeny</th>` : nothing}
               <th>Flags</th>
               <th class="hide-mobile">Updated</th>
-              <th class="actions-cell"></th>
+              ${this.readonly ? nothing : html`<th class="actions-cell"></th>`}
             </tr>
           </thead>
           <tbody>
@@ -387,22 +369,24 @@ export class ScionEnvVarList extends LitElement {
           </div>
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(envVar.updated)}</span>
+          <span class="meta-text">${formatRelative(envVar.updated)}</span>
         </td>
-        <td class="actions-cell">
-          <sl-icon-button
-            name="pencil"
-            label="Edit"
-            ?disabled=${isDeleting}
-            @click=${() => this.openEditDialog(envVar)}
-          ></sl-icon-button>
-          <sl-icon-button
-            name="trash"
-            label="Delete"
-            ?disabled=${isDeleting}
-            @click=${(e: MouseEvent) => this.handleDelete(envVar, e)}
-          ></sl-icon-button>
-        </td>
+        ${this.readonly
+          ? nothing
+          : html`<td class="actions-cell">
+              <sl-icon-button
+                name="pencil"
+                label="Edit"
+                ?disabled=${isDeleting}
+                @click=${() => this.openEditDialog(envVar)}
+              ></sl-icon-button>
+              <sl-icon-button
+                name="trash"
+                label="Delete"
+                ?disabled=${isDeleting}
+                @click=${(e: MouseEvent) => this.handleDelete(envVar, e)}
+              ></sl-icon-button>
+            </td>`}
       </tr>
     `;
   }
@@ -412,19 +396,27 @@ export class ScionEnvVarList extends LitElement {
       <div class="empty-state">
         <sl-icon name="terminal"></sl-icon>
         <h3>No Environment Variables</h3>
-        <p>
-          Add environment variables that will be injected into
-          ${this.compact
-            ? this.scope === 'hub'
-              ? 'all agents on this hub'
-              : 'agents in this project'
-            : 'your agents'}.
-        </p>
-        <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Add Variable
-        </sl-button>
+        ${this.readonly
+          ? html`<p>No environment variables are set.</p>`
+          : this.renderEmptyAddPrompt()}
       </div>
+    `;
+  }
+
+  private renderEmptyAddPrompt() {
+    return html`
+      <p>
+        Add environment variables that will be injected into
+        ${this.compact
+          ? this.scope === 'hub'
+            ? 'all agents on this hub'
+            : 'agents in this project'
+          : 'your agents'}.
+      </p>
+      <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+        <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+        Add Variable
+      </sl-button>
     `;
   }
 

@@ -4,8 +4,9 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -27,14 +28,14 @@ func TestSetAgentSubscription_CrossProjectIsolation(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:      "grove-A",
+		ProjectID:      "project-A",
 		Activities:     "COMPLETED",
 	}
 	subB := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:      "grove-B",
+		ProjectID:      "project-B",
 		Activities:     "ERROR",
 	}
 
@@ -46,26 +47,26 @@ func TestSetAgentSubscription_CrossProjectIsolation(t *testing.T) {
 	}
 
 	// Both subscriptions must coexist.
-	gotA, err := s.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-A")
+	gotA, err := s.GetAgentSubscription("user-1", "googlechat", "deploy", "project-A")
 	if err != nil {
 		t.Fatalf("get subA: %v", err)
 	}
 	if gotA == nil {
-		t.Fatal("grove-A subscription was overwritten by grove-B insert")
+		t.Fatal("project-A subscription was overwritten by project-B insert")
 	}
 	if gotA.Activities != "COMPLETED" {
-		t.Errorf("grove-A activities = %q, want %q", gotA.Activities, "COMPLETED")
+		t.Errorf("project-A activities = %q, want %q", gotA.Activities, "COMPLETED")
 	}
 
-	gotB, err := s.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-B")
+	gotB, err := s.GetAgentSubscription("user-1", "googlechat", "deploy", "project-B")
 	if err != nil {
 		t.Fatalf("get subB: %v", err)
 	}
 	if gotB == nil {
-		t.Fatal("grove-B subscription missing")
+		t.Fatal("project-B subscription missing")
 	}
 	if gotB.Activities != "ERROR" {
-		t.Errorf("grove-B activities = %q, want %q", gotB.Activities, "ERROR")
+		t.Errorf("project-B activities = %q, want %q", gotB.Activities, "ERROR")
 	}
 }
 
@@ -77,14 +78,14 @@ func TestDeleteAgentSubscription_ProjectScoped(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:      "grove-A",
+		ProjectID:      "project-A",
 		Activities:     "COMPLETED",
 	}
 	subB := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:      "grove-B",
+		ProjectID:      "project-B",
 		Activities:     "ERROR",
 	}
 
@@ -95,39 +96,39 @@ func TestDeleteAgentSubscription_ProjectScoped(t *testing.T) {
 		t.Fatalf("set subB: %v", err)
 	}
 
-	// Delete grove-A subscription only.
-	if err := s.DeleteAgentSubscription("user-1", "googlechat", "deploy", "grove-A"); err != nil {
+	// Delete project-A subscription only.
+	if err := s.DeleteAgentSubscription("user-1", "googlechat", "deploy", "project-A"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
 	// Project-A subscription should be gone.
-	got, err := s.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-A")
+	got, err := s.GetAgentSubscription("user-1", "googlechat", "deploy", "project-A")
 	if err != nil {
 		t.Fatalf("get subA after delete: %v", err)
 	}
 	if got != nil {
-		t.Errorf("expected grove-A subscription to be deleted, got %+v", got)
+		t.Errorf("expected project-A subscription to be deleted, got %+v", got)
 	}
 
 	// Project-B subscription must be untouched.
-	got, err = s.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-B")
+	got, err = s.GetAgentSubscription("user-1", "googlechat", "deploy", "project-B")
 	if err != nil {
 		t.Fatalf("get subB after delete: %v", err)
 	}
 	if got == nil {
-		t.Fatal("grove-B subscription should still exist")
+		t.Fatal("project-B subscription should still exist")
 	}
 	if got.Activities != "ERROR" {
-		t.Errorf("grove-B activities = %q, want %q", got.Activities, "ERROR")
+		t.Errorf("project-B activities = %q, want %q", got.Activities, "ERROR")
 	}
 
 	// Deleting with wrong grove_id should not remove anything.
-	if err := s.DeleteAgentSubscription("user-1", "googlechat", "deploy", "grove-WRONG"); err != nil {
-		t.Fatalf("delete with wrong grove: %v", err)
+	if err := s.DeleteAgentSubscription("user-1", "googlechat", "deploy", "project-WRONG"); err != nil {
+		t.Fatalf("delete with wrong project: %v", err)
 	}
-	got, err = s.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-B")
+	got, err = s.GetAgentSubscription("user-1", "googlechat", "deploy", "project-B")
 	if err != nil {
-		t.Fatalf("get subB after wrong-grove delete: %v", err)
+		t.Fatalf("get subB after wrong-project delete: %v", err)
 	}
 	if got == nil {
 		t.Fatal("subscription should not have been deleted with wrong grove_id")
@@ -138,34 +139,34 @@ func TestListAgentSubscriptions_ProjectScoped(t *testing.T) {
 	s := newTestStore(t)
 
 	for _, sub := range []*AgentSubscription{
-		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", ProjectID: "grove-A"},
-		{PlatformUserID: "user-2", Platform: "googlechat", AgentID: "deploy", ProjectID: "grove-B"},
-		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", ProjectID: "grove-B"},
+		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", ProjectID: "project-A"},
+		{PlatformUserID: "user-2", Platform: "googlechat", AgentID: "deploy", ProjectID: "project-B"},
+		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", ProjectID: "project-B"},
 	} {
 		if err := s.SetAgentSubscription(sub); err != nil {
 			t.Fatalf("set subscription: %v", err)
 		}
 	}
 
-	// List for grove-A should only return user-1.
-	subs, err := s.ListAgentSubscriptions("deploy", "grove-A")
+	// List for project-A should only return user-1.
+	subs, err := s.ListAgentSubscriptions("deploy", "project-A")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(subs) != 1 {
-		t.Fatalf("expected 1 subscription for grove-A, got %d", len(subs))
+		t.Fatalf("expected 1 subscription for project-A, got %d", len(subs))
 	}
 	if subs[0].PlatformUserID != "user-1" {
 		t.Errorf("expected user-1, got %s", subs[0].PlatformUserID)
 	}
 
-	// List for grove-B should return both user-1 and user-2.
-	subs, err = s.ListAgentSubscriptions("deploy", "grove-B")
+	// List for project-B should return both user-1 and user-2.
+	subs, err = s.ListAgentSubscriptions("deploy", "project-B")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(subs) != 2 {
-		t.Fatalf("expected 2 subscriptions for grove-B, got %d", len(subs))
+		t.Fatalf("expected 2 subscriptions for project-B, got %d", len(subs))
 	}
 }
 
@@ -183,7 +184,7 @@ func TestMigrateAgentSubscriptionsPK_PreservesData(t *testing.T) {
 	_, err = s.db.Exec(
 		`INSERT INTO agent_subscriptions (platform_user_id, platform, agent_id, grove_id, activities)
 		 VALUES (?, ?, ?, ?, ?)`,
-		"user-1", "googlechat", "deploy", "grove-A", "COMPLETED",
+		"user-1", "googlechat", "deploy", "project-A", "COMPLETED",
 	)
 	if err != nil {
 		t.Fatalf("inserting old-schema row: %v", err)
@@ -198,7 +199,7 @@ func TestMigrateAgentSubscriptionsPK_PreservesData(t *testing.T) {
 	defer s2.Close()
 
 	// Verify data was preserved.
-	got, err := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-A")
+	got, err := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "project-A")
 	if err != nil {
 		t.Fatalf("get after migration: %v", err)
 	}
@@ -214,14 +215,14 @@ func TestMigrateAgentSubscriptionsPK_PreservesData(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:      "grove-B",
+		ProjectID:      "project-B",
 		Activities:     "ERROR",
 	}); err != nil {
 		t.Fatalf("set cross-project sub: %v", err)
 	}
 
-	gotA, _ := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-A")
-	gotB, _ := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-B")
+	gotA, _ := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "project-A")
+	gotB, _ := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "project-B")
 	if gotA == nil || gotB == nil {
 		t.Fatal("cross-project subscriptions should coexist after migration")
 	}
@@ -276,7 +277,7 @@ func newStoreWithOldSchema(dbPath string) (*Store, error) {
 
 // openDB opens a SQLite database without running migrations.
 func openDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -429,5 +430,80 @@ func TestDeleteThreadDefaultsForSpace(t *testing.T) {
 	got3, _ := s.GetThreadDefault("space-2", "thread-3", "google_chat")
 	if got3 != "agent-c" {
 		t.Errorf("space-2 thread-3 should be unaffected, got %q", got3)
+	}
+}
+
+// TestNew_ConnectionOptions verifies that the busy timeout in the data source
+// name takes effect. The driver silently ignores options it does not
+// recognize, so an option in another driver's syntax would leave the default
+// of no timeout.
+func TestNew_ConnectionOptions(t *testing.T) {
+	s := newTestStore(t)
+
+	var got int
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&got); err != nil {
+		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	}
+	if got != 5000 {
+		t.Errorf("PRAGMA busy_timeout = %d, want 5000", got)
+	}
+}
+
+// TestNew_TimeStorageFormat verifies that time.Time values are written in the
+// "2006-01-02 15:04:05.999999999-07:00" text form that earlier releases
+// stored, and that a time read back from the store is written again as the
+// same text.
+func TestNew_TimeStorageFormat(t *testing.T) {
+	s := newTestStore(t)
+
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 600000000, time.UTC)
+	m := &UserMapping{
+		PlatformUserID: "user-time-format",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "test@example.com",
+		RegisteredAt:   ts,
+		RegisteredBy:   "manual",
+	}
+	if err := s.SetUserMapping(m); err != nil {
+		t.Fatalf("SetUserMapping: %v", err)
+	}
+
+	rawRegisteredAt := func(platformUserID string) string {
+		t.Helper()
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT CAST(registered_at AS TEXT) FROM user_mappings WHERE platform_user_id = ? AND platform = ?`,
+			platformUserID, m.Platform,
+		).Scan(&raw); err != nil {
+			t.Fatalf("select raw registered_at: %v", err)
+		}
+		return raw
+	}
+	raw := rawRegisteredAt(m.PlatformUserID)
+	if want := "2026-01-02 03:04:05.6+00:00"; raw != want {
+		t.Errorf("stored registered_at = %q, want %q", raw, want)
+	}
+
+	got, err := s.GetUserMapping(m.PlatformUserID, m.Platform)
+	if err != nil {
+		t.Fatalf("GetUserMapping: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetUserMapping returned nil")
+	}
+	if !got.RegisteredAt.Equal(ts) {
+		t.Errorf("GetUserMapping RegisteredAt = %v, want %v", got.RegisteredAt, ts)
+	}
+
+	// The driver may return the value in time.Local or an unnamed zero-offset
+	// zone rather than time.UTC; writing it back must store the same text.
+	copied := *got
+	copied.PlatformUserID = "user-time-format-copy"
+	if err := s.SetUserMapping(&copied); err != nil {
+		t.Fatalf("SetUserMapping (copy): %v", err)
+	}
+	if rawCopy := rawRegisteredAt(copied.PlatformUserID); rawCopy != raw {
+		t.Errorf("re-written registered_at = %q, want %q", rawCopy, raw)
 	}
 }

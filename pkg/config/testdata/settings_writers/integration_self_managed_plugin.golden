@@ -1,0 +1,25 @@
+active_profile: local
+default_harness_config: claude
+hub_connections:
+    hub-prod:
+        endpoint: https://prod.example.com
+    hub-staging:
+        endpoint: https://staging.example.com
+schema_version: "1"
+server:
+    broker:
+        broker_id: b-1
+    hub:
+        port: 9810
+    message_broker:
+        enabled: true
+        types:
+            - a2a-bridge
+    plugins:
+        broker:
+            a2a-bridge:
+                address: localhost:9090
+                config_file: /cfg/a2a.yaml
+                mode: self-managed
+                self_managed: true
+zz_unknown_key: kept

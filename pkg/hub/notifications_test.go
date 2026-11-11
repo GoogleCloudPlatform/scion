@@ -20,238 +20,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// recordingDispatcher is a mock AgentDispatcher that records DispatchAgentMessage calls.
-type recordingDispatcher struct {
-	mu        sync.Mutex
-	calls     []dispatchCall
-	returnErr error
-}
-
-type dispatchCall struct {
-	Agent             *store.Agent
-	Message           string
-	Interrupt         bool
-	StructuredMessage *messages.StructuredMessage
-}
-
-func (d *recordingDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.calls = append(d.calls, dispatchCall{Agent: agent, Message: message, Interrupt: interrupt, StructuredMessage: structuredMsg})
-	return d.returnErr
-}
-
-func (d *recordingDispatcher) getCalls() []dispatchCall {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	result := make([]dispatchCall, len(d.calls))
-	copy(result, d.calls)
-	return result
-}
-
-// Implement remaining AgentDispatcher methods as no-ops.
-func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *recordingDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
-	return nil
-}
-func (d *recordingDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error { return nil }
-func (d *recordingDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *recordingDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *recordingDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
-	return nil
-}
-func (d *recordingDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	return nil, nil
-}
-func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
-}
-func (d *recordingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return "", 0, nil
-}
-func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
-}
-
-// recordingBroker is a mock MessageBroker that records Publish calls.
-type recordingBroker struct {
-	mu        sync.Mutex
-	publishes []brokerPublish
-}
-
-type brokerPublish struct {
-	topic string
-	msg   *messages.StructuredMessage
-}
-
-func (b *recordingBroker) Publish(_ context.Context, topic string, msg *messages.StructuredMessage) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.publishes = append(b.publishes, brokerPublish{topic: topic, msg: msg})
-	return nil
-}
-
-func (b *recordingBroker) Subscribe(_ string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
-	return &noopSubscription{}, nil
-}
-
-func (b *recordingBroker) Close() error { return nil }
-
-func (b *recordingBroker) getPublishes() []brokerPublish {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	result := make([]brokerPublish, len(b.publishes))
-	copy(result, b.publishes)
-	return result
-}
-
-type noopSubscription struct{}
-
-func (s *noopSubscription) Unsubscribe() error { return nil }
-
-// notificationTestEnv holds all components for a notification test.
-type notificationTestEnv struct {
-	store      store.Store
-	pub        *ChannelEventPublisher
-	dispatcher *recordingDispatcher
-	nd         *NotificationDispatcher
-	project    *store.Project
-	watched    *store.Agent // the agent being watched
-	subscriber *store.Agent // the agent receiving notifications
-	sub        *store.NotificationSubscription
-}
-
-// setupNotificationTest creates an in-memory SQLite store, event publisher,
-// recording dispatcher, project, watched agent, subscriber agent, and subscription.
-func setupNotificationTest(t *testing.T) *notificationTestEnv {
-	t.Helper()
-
-	s, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	require.NoError(t, s.Migrate(context.Background()))
-	t.Cleanup(func() { _ = s.Close() })
-
-	pub := NewChannelEventPublisher()
-	t.Cleanup(pub.Close)
-
-	dispatcher := &recordingDispatcher{}
-
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   api.NewUUID(),
-		Name: "Notification Test Project",
-		Slug: "notif-test-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-1"),
-		Name:   "Test Broker",
-		Slug:   "test-broker",
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	watched := &store.Agent{
-		ID:              api.NewUUID(),
-		Slug:            "watched-agent",
-		Name:            "Watched Agent",
-		Template:        "claude",
-		ProjectID:       project.ID,
-		Phase:           string(state.PhaseRunning),
-		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
-	}
-	require.NoError(t, s.CreateAgent(ctx, watched))
-
-	subscriber := &store.Agent{
-		ID:              api.NewUUID(),
-		Slug:            "subscriber-agent",
-		Name:            "Subscriber Agent",
-		Template:        "claude",
-		ProjectID:       project.ID,
-		Phase:           string(state.PhaseRunning),
-		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
-	}
-	require.NoError(t, s.CreateAgent(ctx, subscriber))
-
-	sub := &store.NotificationSubscription{
-		ID:                api.NewUUID(),
-		Scope:             store.SubscriptionScopeAgent,
-		AgentID:           watched.ID,
-		SubscriberType:    store.SubscriberTypeAgent,
-		SubscriberID:      subscriber.Slug,
-		ProjectID:         project.ID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
-		CreatedAt:         time.Now().Add(-time.Minute), // Predate agent creation so the stale event filter doesn't skip test events
-		CreatedBy:         "test",
-	}
-	require.NoError(t, s.CreateNotificationSubscription(ctx, sub))
-
-	nd := NewNotificationDispatcher(s, pub, func() AgentDispatcher { return dispatcher }, slog.Default())
-
-	return &notificationTestEnv{
-		store:      s,
-		pub:        pub,
-		dispatcher: dispatcher,
-		nd:         nd,
-		project:    project,
-		watched:    watched,
-		subscriber: subscriber,
-		sub:        sub,
-	}
-}
-
-// publishStatus publishes an agent status event via the event publisher.
-func (env *notificationTestEnv) publishStatus(activity string) {
-	env.pub.PublishAgentStatus(context.Background(), &store.Agent{
-		ID:        env.watched.ID,
-		Slug:      env.watched.Slug,
-		ProjectID: env.project.ID,
-		Phase:     string(state.PhaseRunning),
-		Activity:  activity,
-	})
-}
-
-// publishStatusWithPhase publishes an agent status event with a specific phase and activity.
-func (env *notificationTestEnv) publishStatusWithPhase(phase, activity string) {
-	env.pub.PublishAgentStatus(context.Background(), &store.Agent{
-		ID:        env.watched.ID,
-		Slug:      env.watched.Slug,
-		ProjectID: env.project.ID,
-		Phase:     phase,
-		Activity:  activity,
-	})
-}
 
 func TestNotificationDispatcher_HappyPath(t *testing.T) {
 	env := setupNotificationTest(t)
@@ -427,11 +205,43 @@ func TestNotificationDispatcher_DispatchFailure(t *testing.T) {
 		return len(env.dispatcher.getCalls()) == 1
 	}, 2*time.Second, 50*time.Millisecond)
 
-	// Even on dispatch failure, notification is stored and marked dispatched (best-effort)
+	// A failed delivery stores the notification but does NOT mark it
+	// dispatched, so the dispatch sweep retries it (ptone/scion#2743).
+	// The dispatch call is recorded before dispatchToAgent finishes. It runs
+	// synchronously in the dispatcher goroutine, and Stop waits for that
+	// goroutine, so the final state is settled after Stop (the deferred Stop
+	// is a no-op).
+	env.nd.Stop()
 	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
-	assert.Len(t, notifs, 1)
+	require.Len(t, notifs, 1)
+	assert.False(t, notifs[0].Dispatched, "a failed delivery must not be marked dispatched")
+	assert.Equal(t, 1, notifs[0].DispatchAttempts, "the failed attempt must be counted (ptone/scion#4800)")
+	assert.Empty(t, notifs[0].DispatchOutcome, "a failed attempt that will be retried has no outcome yet")
+}
+
+// A delivered primary dispatch stores the delivered outcome and its one
+// attempt (ptone/scion#4800).
+func TestNotificationDispatcher_DeliveredRecordsOutcomeAndAttempt(t *testing.T) {
+	env := setupNotificationTest(t)
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	env.publishStatus("completed")
+
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 50*time.Millisecond)
+	// Stop waits for the dispatcher goroutine, so the stored state is
+	// settled afterwards (the deferred Stop is a no-op).
+	env.nd.Stop()
+
+	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
 	assert.True(t, notifs[0].Dispatched)
+	assert.Equal(t, store.NotificationOutcomeDelivered, notifs[0].DispatchOutcome)
+	assert.Equal(t, 1, notifs[0].DispatchAttempts)
 }
 
 func TestNotificationDispatcher_UserSubscriber(t *testing.T) {
@@ -497,32 +307,24 @@ func TestNotificationDispatcher_UserSubscriberInboxWithBroker(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
-	// Set up a broker proxy — notifications are routed through the broker so
-	// external integrations (Telegram, Discord) can render state-change cards.
-	rb := &recordingBroker{}
-	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
-	env.nd.SetBrokerProxy(proxy)
+	// A real, started broker proxy: its deliverToUser subscriber persists the
+	// published notification, so the notifier must not write the row too
+	// (ptone/scion#1906). A non-recording mock here masked the duplicate.
+	bus := env.startRealBrokerProxy(t)
 
 	env.nd.Start()
 	defer env.nd.Stop()
 
 	env.publishStatus("completed")
 
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	// Exactly one inbox row, written by the broker path.
+	msgs := env.settledUserRows(t, "user-broker-inbox")
+	assert.Len(t, msgs, 1, "the notification must be persisted exactly once when a broker is present")
 
 	// Broker should receive the notification for external integrations.
-	publishes := rb.getPublishes()
+	publishes := bus.published()
 	require.Len(t, publishes, 1, "broker should receive notification publish")
-	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
-
-	// Inbox message should also be created directly for the web UI.
-	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
-		RecipientID: "user-broker-inbox",
-		ProjectID:   env.project.ID,
-	}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Len(t, msgs.Items, 1, "inbox message should be created directly even when broker is present")
+	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
 }
 
 func TestNotificationDispatcher_UserSubscriberInboxWaitingForInput(t *testing.T) {
@@ -758,8 +560,14 @@ func TestNotificationDispatcher_MultipleSubscribers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, agentNotifs, 1)
 
-	userNotifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeUser, "user-456", false)
-	require.NoError(t, err)
+	// The user subscriber is handled after the agent one, so its
+	// notification may be stored after the dispatch awaited above.
+	var userNotifs []store.Notification
+	require.Eventually(t, func() bool {
+		var err error
+		userNotifs, err = env.store.GetNotifications(context.Background(), store.SubscriberTypeUser, "user-456", false)
+		return err == nil && len(userNotifs) == 1
+	}, 2*time.Second, 50*time.Millisecond)
 	assert.Len(t, userNotifs, 1)
 }
 
@@ -963,44 +771,36 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
-	// Set up a recording broker and wire it as the broker proxy
-	rb := &recordingBroker{}
-	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
-	env.nd.SetBrokerProxy(proxy)
+	// A real, started broker proxy (see UserSubscriberInboxWithBroker).
+	bus := env.startRealBrokerProxy(t)
 
-	// Also set up a recording channel — should also receive the notification
-	// as a fallback for deployments without broker plugins.
+	// Also set up a recording channel. The registry is only a fallback for
+	// deployments without a broker, so it must not receive a second copy
+	// (ptone/scion#2752).
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
-	}
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
 
 	env.publishStatus("completed")
 
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	// Inbox message persisted exactly once, by the broker path.
+	msgs := env.settledUserRows(t, "user-broker")
+	assert.Len(t, msgs, 1, "the notification must be persisted exactly once")
 
 	// Broker should receive the notification for external integrations.
-	publishes := rb.getPublishes()
+	publishes := bus.published()
 	require.Len(t, publishes, 1, "broker should receive notification publish")
-	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
-	assert.Equal(t, "COMPLETED", publishes[0].msg.Status)
+	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
+	assert.Equal(t, "COMPLETED", publishes[0].Status)
 
-	// Inbox message should be created directly for the web UI.
-	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
-		RecipientID: "user-broker",
-		ProjectID:   env.project.ID,
-	}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Len(t, msgs.Items, 1, "inbox message should be created directly")
-
-	// Channel registry should also be called as a fallback.
-	assert.Len(t, ch.getDeliveries(), 1, "channel registry should receive the notification")
+	// settledUserRows stopped the dispatcher, so dispatch has finished: the
+	// broker delivered once and the channel registry was skipped.
+	assert.Empty(t, ch.getDeliveries(), "channel registry must not be called when a broker is set")
 }
 
 func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {
@@ -1022,11 +822,10 @@ func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {
 
 	// No broker proxy set — should fall back to channel registry
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
-	}
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
@@ -1062,11 +861,10 @@ func TestNotificationDispatcher_ChannelDispatchOnUserNotification(t *testing.T) 
 
 	// Set up a recording channel via the registry
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
-	}
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
@@ -1090,11 +888,10 @@ func TestNotificationDispatcher_NoChannelDispatchForAgentSubscriber(t *testing.T
 
 	// Set up a recording channel — should NOT receive anything for agent subscribers
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
-	}
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
@@ -1182,15 +979,24 @@ func TestNotificationDispatcher_DeletedTrigger(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(ctx, deletedSub))
 
-	env.nd.Start()
-	defer env.nd.Stop()
+	// The delete engine resolves DELETED subscribers from its snapshot
+	// before the row is removed, then persists and delivers them
+	// asynchronously after the delete committed (design ptone/scion#2483
+	// §2.3). There is no deleted-event subscriber any more.
+	pending := env.nd.ResolveDeletedNotifications(ctx, env.watched)
+	require.Len(t, pending, 1)
 
-	// Publish an agent deleted event
-	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
+	// Resolution is a read only: nothing is stored or sent yet, and the
+	// delivery works after the watched row is gone (hard delete).
+	assert.Empty(t, env.dispatcher.getCalls())
+	require.NoError(t, env.store.DeleteAgent(ctx, env.watched.ID))
 
-	require.Eventually(t, func() bool {
-		return len(env.dispatcher.getCalls()) == 1
-	}, 2*time.Second, 50*time.Millisecond)
+	select {
+	case <-env.nd.DeliverDeletedNotifications(ctx, pending):
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery did not finish")
+	}
+	require.Len(t, env.dispatcher.getCalls(), 1)
 
 	calls := env.dispatcher.getCalls()
 	assert.Contains(t, calls[0].Message, "watched-agent has been DELETED")
@@ -1204,17 +1010,20 @@ func TestNotificationDispatcher_DeletedTrigger(t *testing.T) {
 func TestNotificationDispatcher_DeletedNotMatchedWithoutSubscription(t *testing.T) {
 	env := setupNotificationTest(t)
 
-	// Default subscription does not include DELETED
+	// Default subscription does not include DELETED: nothing resolves.
+	ctx := context.Background()
+	pending := env.nd.ResolveDeletedNotifications(ctx, env.watched)
+	assert.Empty(t, pending)
+	<-env.nd.DeliverDeletedNotifications(ctx, pending)
+	assert.Empty(t, env.dispatcher.getCalls())
+
+	// A deleted event on the bus no longer triggers anything either: the
+	// dispatcher does not subscribe to it.
 	env.nd.Start()
 	defer env.nd.Stop()
-
-	env.pub.PublishAgentDeleted(context.Background(), env.watched.ID, env.project.ID)
-
-	// Give time for event to be processed
-	time.Sleep(200 * time.Millisecond)
-
-	// Should not trigger since default sub only has COMPLETED and WAITING_FOR_INPUT
-	assert.Empty(t, env.dispatcher.getCalls())
+	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
+	assert.Never(t, func() bool { return len(env.dispatcher.getCalls()) > 0 },
+		200*time.Millisecond, 10*time.Millisecond, "no dispatch for a bus deleted event")
 }
 
 func TestFormatNotificationMessage_Deleted(t *testing.T) {
@@ -1358,4 +1167,9 @@ func TestNotificationDispatcher_DeduplicateAcrossScopes(t *testing.T) {
 	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
 	assert.Len(t, notifs, 1)
+}
+
+// staticChannelRegistry returns a channelRegistryFn that always returns r.
+func staticChannelRegistry(r *ChannelRegistry) func() *ChannelRegistry {
+	return func() *ChannelRegistry { return r }
 }

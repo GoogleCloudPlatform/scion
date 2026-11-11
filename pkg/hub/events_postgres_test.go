@@ -22,13 +22,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
@@ -53,49 +54,6 @@ func mkMessage(agentID, msg string) *store.Message {
 
 // --- test doubles ---
 
-// recExec records Exec calls so publish-path tests can assert the SQL and
-// arguments without a real database.
-type recExec struct {
-	mu    sync.Mutex
-	calls []recCall
-}
-
-type recCall struct {
-	sql  string
-	args []any
-}
-
-func (e *recExec) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.calls = append(e.calls, recCall{sql: sql, args: args})
-	return pgconn.CommandTag{}, nil
-}
-
-func (e *recExec) notifyCalls() []recCall {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	var out []recCall
-	for _, c := range e.calls {
-		if strings.Contains(c.sql, "pg_notify") {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-func (e *recExec) inserts() []recCall {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	var out []recCall
-	for _, c := range e.calls {
-		if strings.Contains(c.sql, "INSERT INTO scion_event_payloads") {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
 // countingRecorder is a dbmetrics.Recorder that tallies calls for assertions.
 type countingRecorder struct {
 	mu             sync.Mutex
@@ -103,9 +61,12 @@ type countingRecorder struct {
 	delivered      int64
 	dropped        int64
 	reconnects     int64
+	lags           []int64
+	lagScopes      []string
 	payloadSizes   []int64
 	latencies      []float64
 	poolObserved   int
+	pools          []string
 	enabledReturns bool
 }
 
@@ -129,7 +90,17 @@ func (r *countingRecorder) IncDropped(_ context.Context, n int64, _ ...attribute
 	defer r.mu.Unlock()
 	r.dropped += n
 }
-func (r *countingRecorder) ObserveSubscriberLag(_ context.Context, _ int64, _ ...attribute.KeyValue) {
+func (r *countingRecorder) ObserveSubscriberLag(_ context.Context, lag int64, attrs ...attribute.KeyValue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lags = append(r.lags, lag)
+	scope := ""
+	for _, kv := range attrs {
+		if kv.Key == "scope" {
+			scope = kv.Value.AsString()
+		}
+	}
+	r.lagScopes = append(r.lagScopes, scope)
 }
 func (r *countingRecorder) IncListenerReconnects(_ context.Context, n int64, _ ...attribute.KeyValue) {
 	r.mu.Lock()
@@ -141,10 +112,11 @@ func (r *countingRecorder) RecordPayloadSize(_ context.Context, bytes int64, _ .
 	defer r.mu.Unlock()
 	r.payloadSizes = append(r.payloadSizes, bytes)
 }
-func (r *countingRecorder) ObservePoolStats(_ context.Context, _ dbmetrics.PoolStats, _ ...attribute.KeyValue) {
+func (r *countingRecorder) ObservePoolStats(_ context.Context, pool string, _ dbmetrics.PoolStats, _ ...attribute.KeyValue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.poolObserved++
+	r.pools = append(r.pools, pool)
 }
 func (r *countingRecorder) Enabled() bool { return r.enabledReturns }
 
@@ -178,8 +150,7 @@ func TestChannelsForSubject(t *testing.T) {
 		subject string
 		want    []string
 	}{
-		{"project.G1.agent.status", []string{groveChannel("G1"), pgGlobalChannel}},
-		{"grove.G2.notification", []string{groveChannel("G2"), pgGlobalChannel}},
+		{"project.G1.agent.status", []string{projectChannel("G1"), pgGlobalChannel}},
 		{"agent.A1.status", []string{pgGlobalChannel}},
 		{"user.U1.message", []string{pgGlobalChannel}},
 		{"broker.B1.status", []string{pgGlobalChannel}},
@@ -199,10 +170,9 @@ func TestChannelsForPattern(t *testing.T) {
 		pattern string
 		want    []string
 	}{
-		{"project.G1.>", []string{groveChannel("G1")}},
-		{"grove.G2.agent.status", []string{groveChannel("G2")}},
+		{"project.G1.>", []string{projectChannel("G1")}},
 		{"project.>.agent.status", []string{pgGlobalChannel}}, // spanning wildcard
-		{"project.*.agent.status", []string{pgGlobalChannel}}, // single-token wildcard grove
+		{"project.*.agent.status", []string{pgGlobalChannel}}, // single-token wildcard project
 		{"agent.A1.message", []string{pgGlobalChannel}},
 		{"notification.created", []string{pgGlobalChannel}},
 	}
@@ -214,20 +184,46 @@ func TestChannelsForPattern(t *testing.T) {
 	}
 }
 
-func TestGroveChannel_BoundedLength(t *testing.T) {
+func TestProjectChannel_BoundedLength(t *testing.T) {
 	long := strings.Repeat("x", 200)
-	got := groveChannel(long)
+	got := projectChannel(long)
 	if len(got) > maxPGIdentifier {
-		t.Errorf("groveChannel(long) length = %d, want <= %d", len(got), maxPGIdentifier)
+		t.Errorf("projectChannel(long) length = %d, want <= %d", len(got), maxPGIdentifier)
 	}
 	// Deterministic.
-	if got != groveChannel(long) {
-		t.Errorf("groveChannel not deterministic")
+	if got != projectChannel(long) {
+		t.Errorf("projectChannel not deterministic")
 	}
 	// A normal UUID-length id is passed through unhashed.
 	uuidLike := "11111111-2222-3333-4444-555555555555"
-	if groveChannel(uuidLike) != pgChannelPrefix+"g_"+uuidLike {
-		t.Errorf("groveChannel(uuid) = %q, want passthrough", groveChannel(uuidLike))
+	if projectChannel(uuidLike) != pgChannelPrefix+"g_"+uuidLike {
+		t.Errorf("projectChannel(uuid) = %q, want passthrough", projectChannel(uuidLike))
+	}
+}
+
+// TestProjectChannel_WirePrefixPinned pins the Postgres NOTIFY channel prefix
+// ("scion_ev_g_<id>") byte-for-byte: it is an internal key shared by hub
+// replicas, so changing it would drop cross-replica events during a rolling
+// deploy.
+func TestProjectChannel_WirePrefixPinned(t *testing.T) {
+	if got, want := projectChannel("abc123"), "scion_ev_g_abc123"; got != want {
+		t.Errorf("projectChannel(%q) = %q, want %q", "abc123", got, want)
+	}
+}
+
+func TestChannelScope(t *testing.T) {
+	tests := []struct {
+		subject string
+		want    string
+	}{
+		{"project.G1.agent.status", "project"},
+		{"agent.A1.status", "global"},
+		{"notification.created", "global"},
+	}
+	for _, tt := range tests {
+		if got := channelScope(tt.subject); got != tt.want {
+			t.Errorf("channelScope(%q) = %q, want %q", tt.subject, got, tt.want)
+		}
 	}
 }
 
@@ -239,9 +235,10 @@ func TestEventTypeName(t *testing.T) {
 
 // --- registry / fan-out tests (no database required) ---
 
-// TestPostgresFanout_ScopedSubscriberNoDoubleDelivery verifies a grove-scoped
-// subscriber receives grove events on the grove channel exactly once and is not
-// also matched on the global channel (which carries a mirror of grove events).
+// TestPostgresFanout_ScopedSubscriberNoDoubleDelivery verifies a project-scoped
+// subscriber receives project events on the project channel exactly once and is
+// not also matched on the global channel (which carries a mirror of project
+// events).
 func TestPostgresFanout_ScopedSubscriberNoDoubleDelivery(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.G1.>")
@@ -249,15 +246,15 @@ func TestPostgresFanout_ScopedSubscriberNoDoubleDelivery(t *testing.T) {
 
 	evt := Event{Subject: "project.G1.agent.status", Data: []byte(`{}`)}
 
-	// Delivered on the grove channel.
-	p.fanout(groveChannel("G1"), evt)
+	// Delivered on the project channel.
+	p.fanout(projectChannel("G1"), evt)
 	select {
 	case got := <-ch:
 		if got.Subject != evt.Subject {
 			t.Fatalf("got subject %q", got.Subject)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("expected delivery on grove channel")
+		t.Fatal("expected delivery on project channel")
 	}
 
 	// NOT delivered again on the global channel: the subscriber's patterns do
@@ -270,9 +267,9 @@ func TestPostgresFanout_ScopedSubscriberNoDoubleDelivery(t *testing.T) {
 	}
 }
 
-// TestPostgresFanout_SpanningSubscriber verifies a grove-spanning subscriber
-// (e.g. the notification dispatcher) receives grove events via the global
-// channel and not via the per-grove channel.
+// TestPostgresFanout_SpanningSubscriber verifies a project-spanning subscriber
+// (e.g. the notification dispatcher) receives project events via the global
+// channel and not via the per-project channel.
 func TestPostgresFanout_SpanningSubscriber(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.>.agent.status")
@@ -290,18 +287,18 @@ func TestPostgresFanout_SpanningSubscriber(t *testing.T) {
 		t.Fatal("expected delivery on global channel for spanning subscriber")
 	}
 
-	// The per-grove channel must not deliver to a spanning subscriber.
-	p.fanout(groveChannel("G9"), evt)
+	// The per-project channel must not deliver to a spanning subscriber.
+	p.fanout(projectChannel("G9"), evt)
 	select {
 	case got := <-ch:
-		t.Fatalf("unexpected delivery on grove channel: %q", got.Subject)
+		t.Fatalf("unexpected delivery on project channel: %q", got.Subject)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
 
 // TestPostgresFanout_MixedPatternsNoDuplicate verifies that a single Subscribe
-// call mixing a grove-scoped and a non-grove pattern never double-delivers an
-// event that happens to be mirrored onto both channels.
+// call mixing a project-scoped and a non-project pattern never double-delivers
+// an event that happens to be mirrored onto both channels.
 func TestPostgresFanout_MixedPatternsNoDuplicate(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.G1.agent.status", "agent.A1.message")
@@ -312,8 +309,8 @@ func TestPostgresFanout_MixedPatternsNoDuplicate(t *testing.T) {
 	// On the global channel, only the agent.A1.message pattern is active, which
 	// does not match the project subject -> no delivery here.
 	p.fanout(pgGlobalChannel, evt)
-	// On the grove channel, the project pattern matches -> exactly one delivery.
-	p.fanout(groveChannel("G1"), evt)
+	// On the project channel, the project pattern matches -> exactly one delivery.
+	p.fanout(projectChannel("G1"), evt)
 
 	received := 0
 	for {
@@ -333,7 +330,7 @@ func TestPostgresSubscribe_Unsubscribe(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.G1.>")
 
-	gc := groveChannel("G1")
+	gc := projectChannel("G1")
 	if p.desired[gc] != 1 {
 		t.Fatalf("desired[%s] = %d, want 1", gc, p.desired[gc])
 	}
@@ -361,7 +358,7 @@ func TestBuildAndNotify_SmallPayload(t *testing.T) {
 		t.Fatalf("buildAndNotify: %v", err)
 	}
 
-	// Grove subject -> NOTIFY on grove channel and global channel.
+	// Project subject -> NOTIFY on project channel and global channel.
 	notifies := exec.notifyCalls()
 	if len(notifies) != 2 {
 		t.Fatalf("expected 2 pg_notify calls, got %d", len(notifies))
@@ -384,7 +381,7 @@ func TestBuildAndNotify_SmallPayload(t *testing.T) {
 			t.Fatal("envelope data should be inline")
 		}
 	}
-	if !gotChannels[groveChannel("G1")] || !gotChannels[pgGlobalChannel] {
+	if !gotChannels[projectChannel("G1")] || !gotChannels[pgGlobalChannel] {
 		t.Fatalf("notify channels = %v", gotChannels)
 	}
 	if len(exec.inserts()) != 0 {
@@ -410,7 +407,7 @@ func TestBuildAndNotify_OversizedPayloadOffloaded(t *testing.T) {
 		t.Fatalf("oversized payload should INSERT once, got %d", got)
 	}
 	notifies := exec.notifyCalls()
-	if len(notifies) != 1 { // non-grove subject -> global only
+	if len(notifies) != 1 { // non-project subject -> global only
 		t.Fatalf("expected 1 pg_notify, got %d", len(notifies))
 	}
 	var env pgEnvelope
@@ -435,7 +432,7 @@ func TestPublishTx_UsesProvidedExecutor(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	tx := &recExec{}
 
-	if err := p.PublishTx(context.Background(), tx, "grove.G1.created", ProjectCreatedEvent{ProjectID: "G1"}); err != nil {
+	if err := p.PublishTx(context.Background(), tx, "project.G1.created", ProjectCreatedEvent{ProjectID: "G1"}); err != nil {
 		t.Fatalf("PublishTx: %v", err)
 	}
 	if len(tx.notifyCalls()) == 0 {
@@ -492,16 +489,108 @@ func TestHandleNotification_FullBufferDropsAndCounts(t *testing.T) {
 	}
 }
 
-// --- integration tests (require a live Postgres via SCION_TEST_POSTGRES_DSN) ---
+// TestFanout_RecordsSubscriberLag checks the lag is the depth an event queues
+// behind, read before the send: a subscriber that keeps up reports 0, and a
+// full buffer reports its capacity (ptone/scion#3617). It also checks the
+// scope attribute matches the subject.
+func TestFanout_RecordsSubscriberLag(t *testing.T) {
+	rec := &countingRecorder{}
+	p := newTestPostgresPublisher(rec)
+	slow := &pgSubscription{ch: make(chan Event, 2)}
+	fast := &pgSubscription{ch: make(chan Event, 8)}
+	proj := &pgSubscription{ch: make(chan Event, 8)}
+	p.subs[pgGlobalChannel] = map[*pgSubscription][]string{slow: {"agent.>"}, fast: {"agent.>"}}
+	p.subs[projectChannel("G1")] = map[*pgSubscription][]string{proj: {"project.G1.>"}}
 
-func requirePostgres(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("set SCION_TEST_POSTGRES_DSN to run Postgres LISTEN/NOTIFY integration tests")
+	evt := Event{Subject: "agent.A1.status", Data: []byte(`{}`)}
+	p.fanout(pgGlobalChannel, evt)                                       // both buffers empty: lag 0
+	<-fast.ch                                                            // the fast subscriber keeps up
+	p.fanout(pgGlobalChannel, evt)                                       // slow holds 1
+	p.fanout(pgGlobalChannel, evt)                                       // slow is full: dropped, lag = capacity
+	p.fanout(pgGlobalChannel, Event{Subject: "project.G1.created"})      // no match on the global channel
+	p.fanout(projectChannel("G1"), Event{Subject: "project.G1.created"}) // project scope, empty buffer
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	want := []int64{0, 1, 2, 0}
+	wantScopes := []string{"global", "global", "global", "project"}
+	if !slices.Equal(rec.lags, want) {
+		t.Fatalf("lags = %v, want %v", rec.lags, want)
 	}
-	return dsn
+	if !slices.Equal(rec.lagScopes, wantScopes) {
+		t.Fatalf("lag scopes = %v, want %v", rec.lagScopes, wantScopes)
+	}
 }
+
+// TestObserveSubscriberLag_DecaysWhenIdle checks the maintenance sample
+// reports the current buffer depth per scope, so the gauge returns to 0 once
+// subscribers drain instead of holding the last burst (ptone/scion#3617).
+func TestObserveSubscriberLag_DecaysWhenIdle(t *testing.T) {
+	rec := &countingRecorder{enabledReturns: true}
+	p := newTestPostgresPublisher(rec)
+	global := &pgSubscription{ch: make(chan Event, 4)}
+	wild := &pgSubscription{ch: make(chan Event, 4)}
+	p.subs[pgGlobalChannel] = map[*pgSubscription][]string{global: {"agent.>"}, wild: {"project.*.agent.>"}}
+
+	global.ch <- Event{}
+	global.ch <- Event{}
+	wild.ch <- Event{}
+	p.observeSubscriberLag() // backlog: global 2, project 1
+	<-global.ch
+	<-global.ch
+	<-wild.ch
+	p.observeSubscriberLag() // drained: both 0
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	want := []int64{2, 1, 0, 0}
+	wantScopes := []string{"global", "project", "global", "project"}
+	if !slices.Equal(rec.lags, want) || !slices.Equal(rec.lagScopes, wantScopes) {
+		t.Fatalf("lags = %v scopes = %v, want %v %v", rec.lags, rec.lagScopes, want, wantScopes)
+	}
+}
+
+func TestPatternScopes(t *testing.T) {
+	for _, tc := range []struct {
+		pattern         string
+		global, project bool
+	}{
+		{"agent.>", true, false},
+		{"project.G1.>", false, true},
+		{"project.*.agent.>", false, true},
+		{">", true, true},
+		{"*.x", true, true},
+	} {
+		g, pr := patternScopes(tc.pattern)
+		if g != tc.global || pr != tc.project {
+			t.Errorf("patternScopes(%q) = %v, %v; want %v, %v", tc.pattern, g, pr, tc.global, tc.project)
+		}
+	}
+}
+
+// TestObservePoolStats_NamesEventsPool checks the event publisher reports its
+// pgx pool under its own pool name, apart from the store pool
+// (ptone/scion#3618). The pool is created lazily and never connects.
+func TestObservePoolStats_NamesEventsPool(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), "postgres://test@127.0.0.1:1/test")
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	rec := &countingRecorder{enabledReturns: true}
+	p := newTestPostgresPublisher(rec)
+	p.pool = pool
+
+	p.observePoolStats()
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.pools) != 1 || rec.pools[0] != dbmetrics.PoolEvents {
+		t.Fatalf("pools = %v, want [%s]", rec.pools, dbmetrics.PoolEvents)
+	}
+}
+
+// --- integration tests (require a live Postgres via SCION_TEST_POSTGRES_DSN) ---
 
 // TestPostgresIntegration_CrossReplicaDelivery starts two independent publishers
 // against the same database (simulating two hub replicas) and asserts an event
@@ -525,7 +614,7 @@ func TestPostgresIntegration_CrossReplicaDelivery(t *testing.T) {
 	ch, unsub := b.Subscribe("project." + pid + ".>")
 	defer unsub()
 
-	// Give B's listener time to LISTEN on the grove channel.
+	// Give B's listener time to LISTEN on the project channel.
 	time.Sleep(2 * listenPollInterval)
 
 	a.PublishProjectCreated(ctx, mkProject(pid))
@@ -558,7 +647,7 @@ func TestPostgresIntegration_OversizedRoundTrip(t *testing.T) {
 	time.Sleep(2 * listenPollInterval)
 
 	big := strings.Repeat("Q", pgNotifyMaxPayload+2048)
-	pub.PublishUserMessage(ctx, mkMessage(aid, big), nil)
+	pub.PublishUserMessage(ctx, mkMessage(aid, big), nil, nil)
 
 	select {
 	case got := <-ch:
@@ -735,5 +824,101 @@ func TestPostgresIntegration_ReconnectResubscribe(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("delivery did not resume after reconnect")
+	}
+}
+
+// TestPostgresEventPublisher_CloseDuringUnsubscribe: Close and an
+// unsubscribe of the same subscription running at the same time both
+// complete (ptone/scion#5190). The unsubscribe is held inside its
+// subscription's once until Close has reached the point where it closes the
+// subscriber channels, the order in which closing them under mu deadlocked
+// with the unsubscribe waiting for mu.
+func TestPostgresEventPublisher_CloseDuringUnsubscribe(t *testing.T) {
+	p := newTestPostgresPublisher(nil)
+	ch, unsub := p.Subscribe("project.G1.>")
+
+	inOnce, release := make(chan struct{}), make(chan struct{})
+	p.testHookInUnsubscribe = func() {
+		close(inOnce)
+		<-release
+	}
+	closing := make(chan struct{})
+	p.testHookBeforeCloseSubs = func() { close(closing) }
+
+	unsubDone := make(chan struct{})
+	go func() {
+		unsub()
+		close(unsubDone)
+	}()
+	waitClosed := func(c <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-c:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+	waitClosed(inOnce, "the unsubscribe to hold its once")
+
+	closeDone := make(chan struct{})
+	go func() {
+		p.Close()
+		close(closeDone)
+	}()
+	waitClosed(closing, "Close to reach the subscriber channels")
+	close(release)
+
+	waitClosed(unsubDone, "the unsubscribe to complete (deadlock with Close)")
+	waitClosed(closeDone, "Close to complete (deadlock with the unsubscribe)")
+	if _, open := <-ch; open {
+		t.Fatal("the subscriber channel is still open")
+	}
+}
+
+// TestPostgresEventPublisher_CloseIsIdempotent: a second Close returns
+// without doing anything, and the subscriber channel stays closed.
+func TestPostgresEventPublisher_CloseIsIdempotent(t *testing.T) {
+	p := newTestPostgresPublisher(nil)
+	ch, _ := p.Subscribe("project.G1.>")
+	p.Close()
+	done := make(chan struct{})
+	go func() {
+		p.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a second Close did not return")
+	}
+	if _, open := <-ch; open {
+		t.Fatal("the subscriber channel is open after Close")
+	}
+}
+
+// TestPostgresEventPublisher_SubscribeDuringCloseIsClosed: a Subscribe that
+// runs while Close is closing the subscriber channels (after Close collected
+// them) gets a closed channel and a no-op unsubscribe, so no subscription is
+// left open after Close.
+func TestPostgresEventPublisher_SubscribeDuringCloseIsClosed(t *testing.T) {
+	p := newTestPostgresPublisher(nil)
+	var late <-chan Event
+	var lateUnsub func()
+	p.testHookBeforeCloseSubs = func() { late, lateUnsub = p.Subscribe("project.G1.>") }
+	p.Close()
+	if late == nil {
+		t.Fatal("the hook did not subscribe")
+	}
+	if _, open := <-late; open {
+		t.Fatal("a Subscribe during Close returned an open channel")
+	}
+	lateUnsub()
+	if _, open := <-late; open {
+		t.Fatal("the channel reopened after unsubscribe")
+	}
+	if late2, _ := p.Subscribe("project.G1.>"); late2 != nil {
+		if _, open := <-late2; open {
+			t.Fatal("a Subscribe after Close returned an open channel")
+		}
 	}
 }

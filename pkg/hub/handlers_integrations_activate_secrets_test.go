@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -78,6 +79,32 @@ func (m *migrationSecretBackend) Resolve(context.Context, string, string, string
 }
 
 func (m *migrationSecretBackend) HubID() string { return "test-hub" }
+
+// HoldPending, ReadPending and DropPending satisfy secret.PendingHolder; the
+// fake holds no pending values.
+func (m *migrationSecretBackend) HoldPending(context.Context, string, []byte) (string, error) {
+	return "", errors.New("pending secrets are not supported by this test backend")
+}
+
+func (m *migrationSecretBackend) ReadPending(context.Context, string) ([]byte, error) {
+	return nil, errors.New("pending secrets are not supported by this test backend")
+}
+
+func (m *migrationSecretBackend) DropPending(context.Context, string) error { return nil }
+func (m *migrationSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
+
+// FetchValues is not exercised by the activation tests in this file; this
+// stub only satisfies secret.SecretBackend and reports every item not found,
+// the same as the other minimal fakes in this codebase.
+func (m *migrationSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
 
 // newActivationServer returns a Server wired with a mock plugin manager and
 // the given secret backend, plus a temporary HOME so plugin dir resolution

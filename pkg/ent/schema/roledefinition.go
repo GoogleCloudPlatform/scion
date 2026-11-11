@@ -47,18 +47,38 @@ func (RoleDefinition) Fields() []ent.Field {
 			Optional(),
 		field.Bool("system").
 			Default(false),
+		// confers_membership reports whether a binding of this role makes
+		// its principal a member of the bound project. Every rule that
+		// means "member" (membership evidence, member lists, owner and
+		// admin counts, membership-loss reconciliation) ignores bindings
+		// of roles where it is false. Existing and custom roles default
+		// to true; the seeded project-visitor role sets it to false.
+		field.Bool("confers_membership").
+			Default(true),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
 		field.Time("updated").
 			Default(time.Now).
 			UpdateDefault(time.Now),
+		// issuance_id is the issuance ID of the admin-kind test identity
+		// whose request created this row (ptone/scion#4240, admin tier A3),
+		// set only by the store's grant shaping (entadapter
+		// grantShapingFor and issuanceStamp), at create. NULL for every other row. The
+		// purge of that identity removes the rows carrying it.
+		field.String("issuance_id").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("Issuance ID of the admin-kind test identity that created this row (grant shaping)"),
 	}
 }
 
 // Indexes of the RoleDefinition.
 func (RoleDefinition) Indexes() []ent.Index {
 	return []ent.Index{
+		// The admin-kind test identity purge selects rows by issuance_id.
+		index.Fields("issuance_id"),
 		index.Fields("name", "scope_type").Unique(),
 	}
 }

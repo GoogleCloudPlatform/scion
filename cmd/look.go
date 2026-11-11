@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -63,25 +63,12 @@ var lookCmd = &cobra.Command{
 
 		execCmd := buildLookCmd(lookPlain, lookFull, lookNumLines)
 
-		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 
-		if hubCtx != nil {
-			return lookViaHub(hubCtx, agentName, execCmd)
-		}
-
-		rt := runtime.GetRuntime(projectPath, profile)
-
-		output, err := rt.Exec(context.Background(), agentName, execCmd)
-		if err != nil {
-			return fmt.Errorf("failed to capture terminal output for agent '%s': %w", agentName, err)
-		}
-
-		printLookOutput(output)
-		return nil
+		return lookViaHub(hubCtx, agentName, execCmd)
 	},
 }
 
@@ -120,16 +107,82 @@ func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 		return wrapHubError(err)
 	}
 
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
+
+	// Fetch the identity header alongside Exec rather than after it, so the
+	// header's round trips do not delay the terminal output. The channel is
+	// buffered so the fetch never blocks when Exec fails and nobody reads it.
+	headerCtx, cancelHeader := context.WithTimeout(context.Background(), lookIdentityTimeout)
+	defer cancelHeader()
+	headerCh := make(chan string, 1)
+	showAuthority := cliShowsAgentAuthority(resolveMode())
+	go func() {
+		headerCh <- fetchLookIdentityHeader(headerCtx, hubCtx.Client, agentSvc, projectID, agentName, showAuthority)
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := hubCtx.Client.ProjectAgents(projectID).Exec(ctx, agentName, execCmd, 10)
+	resp, err := agentSvc.Exec(ctx, agentName, execCmd, 10)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to capture terminal output for agent '%s': %w", agentName, err))
 	}
 
+	// The header goes to stderr, so stdout keeps only the captured terminal
+	// output that scripts parse. It is skipped silently once its timeout
+	// passes.
+	select {
+	case header := <-headerCh:
+		if header != "" {
+			fmt.Fprintln(os.Stderr, header)
+		}
+	case <-headerCtx.Done():
+	}
 	printLookOutput(resp.Output)
 	return nil
+}
+
+// lookIdentityTimeout bounds the identity header fetch. It runs alongside
+// Exec, so it delays the terminal output only when it outlasts Exec. A var
+// so tests can shorten it.
+var lookIdentityTimeout = 3 * time.Second
+
+// fetchLookIdentityHeader returns the header lines for scion look: the
+// agent's GCP identity and, with showAuthority, the cause line of an
+// orphaned or revoked agent (authorityCauseLine). It is best effort: when
+// the agent cannot be read, or there is nothing to show, it returns "".
+func fetchLookIdentityHeader(ctx context.Context, client hubclient.Client, agentSvc hubclient.AgentService, projectID, agentName string, showAuthority bool) string {
+	agent, err := agentSvc.Get(ctx, agentName)
+	if err != nil || agent == nil {
+		return ""
+	}
+	var authorityLine string
+	if showAuthority {
+		authorityLine = authorityCauseLine(agent.Authority)
+	}
+	id := agentGCPIdentity(*agent)
+	if id == nil {
+		return authorityLine
+	}
+	if id.ServiceAccountID != "" {
+		pid := agent.ProjectID
+		if pid == "" {
+			pid = projectID
+		}
+		id.DisplayName = serviceAccountDisplayNames(ctx, client, []string{pid})[id.ServiceAccountID]
+	}
+	profile := ""
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	header := lookIdentityHeader(id, profile)
+	switch {
+	case authorityLine == "":
+		return header
+	case header == "":
+		return authorityLine
+	}
+	return header + "\n" + authorityLine
 }
 
 func init() {

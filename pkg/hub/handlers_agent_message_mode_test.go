@@ -97,7 +97,7 @@ func smmSetup(t *testing.T) (*Server, store.Store, *store.User, *store.User, *st
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Owner gets owner role binding.
 	msgAuthzAddProjectMember(t, s, owner.ID, projectID, "smm-project", store.GroupMemberRoleOwner)
@@ -205,6 +205,44 @@ func TestSetMessageMode_ProjectAdminDenied(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for project admin, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 1b: Non-member denied with 403, not a runtime error
+// ---------------------------------------------------------------------------
+
+// TestSetMessageMode_NonMemberDenied guards against a non-member's
+// GetProjectMembership lookup (which returns store.ErrNotFound, since a
+// non-member has no membership row at all) being mistaken for an
+// unexpected lookup failure. The correct outcome for "no membership row"
+// is the same 403 every other unauthorized caller gets, not a 500-class
+// error.
+func TestSetMessageMode_NonMemberDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+	ctx := context.Background()
+
+	nonMember := &store.User{
+		ID:          tid("smm-non-member"),
+		Email:       "smm-non-member@test.com",
+		DisplayName: "SMM Non-Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, s.CreateUser(ctx, nonMember))
+	ensureHubMembership(ctx, s, nonMember.ID)
+	// Deliberately not added to the project's members group or given any
+	// project-scoped role binding.
+
+	agent := smmAgent(t, s, "smm-non-member-denied", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	nonMemberIdent := msgAuthzUserIdentity(nonMember.ID)
+	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "none"}, nonMemberIdent)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a non-member, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -361,10 +399,10 @@ func TestSetMessageMode_AgentCallersDenied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: UATs always denied (no scope exists) (D7)
+// Test 5: a token without agent:set_message_mode is refused (D7)
 // ---------------------------------------------------------------------------
 
-func TestSetMessageMode_UATsDenied(t *testing.T) {
+func TestSetMessageModeToken_RequiresSetMessageModeSelector(t *testing.T) {
 	srv, s, owner, _, _, projectID := smmSetup(t)
 
 	agent := smmAgent(t, s, "smm-uat-target", projectID, store.MessageModeProject,
@@ -615,44 +653,34 @@ func TestSetMessageMode_InvalidModeRejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 12: MessageMode validation in template
+// Test 12: a template's message mode is not set through the template API
 // ---------------------------------------------------------------------------
 
-func TestSetMessageMode_TemplateValidation(t *testing.T) {
+// TestSetMessageMode_TemplateConfigRefused: message_mode is a
+// scion-agent.yaml key validated by LoadConfig; the template API refuses a
+// config body whatever its mode (ptone/scion#4223).
+func TestSetMessageMode_TemplateConfigRefused(t *testing.T) {
 	srv, _, _, _, _, _ := smmSetup(t)
 
-	t.Run("valid mode accepted", func(t *testing.T) {
-		body := map[string]interface{}{
-			"name": "valid-template",
-			"config": map[string]interface{}{
-				"messageMode": "branch",
-			},
-		}
-		rr := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
-		// Should not be a 400 validation error about message mode.
-		if rr.Code == http.StatusBadRequest {
-			var errResp map[string]interface{}
-			json.Unmarshal(rr.Body.Bytes(), &errResp)
-			if msg, ok := errResp["message"].(string); ok {
-				if msg == "invalid template message mode: branch" {
-					t.Fatalf("valid mode 'branch' should be accepted")
-				}
+	for _, mode := range []string{"branch", "invalid_mode"} {
+		t.Run(mode, func(t *testing.T) {
+			body := map[string]interface{}{
+				"name":   "mode-template-" + mode,
+				"config": map[string]interface{}{"messageMode": mode},
 			}
-		}
-	})
-
-	t.Run("invalid mode rejected", func(t *testing.T) {
-		body := map[string]interface{}{
-			"name": "invalid-template",
-			"config": map[string]interface{}{
-				"messageMode": "invalid_mode",
-			},
-		}
-		rr := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 for invalid template mode, got %d: %s", rr.Code, rr.Body.String())
-		}
-	})
+			rr := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			var errResp ErrorResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("decode: %v: %s", err, rr.Body.String())
+			}
+			if errResp.Error.Code != ErrCodeTemplateConfigInFile {
+				t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeTemplateConfigInFile)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

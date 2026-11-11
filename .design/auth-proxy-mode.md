@@ -198,7 +198,7 @@ existing `DevAuthToken`/`UserAccessMode` wiring at `:868`, `:1132`):
 
 ```yaml
 auth:
-  mode: proxy              # oauth | proxy | dev  — exclusive human auth mode
+  mode: proxy              # only "proxy" is checked; any other value (unset, oauth, dev) = hub-handled auth. Dev auth is dev_mode / --dev-auth.
   proxy:
     # consulted only when mode == proxy
     provider: iap            # iap | header

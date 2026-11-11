@@ -18,12 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s/api/v1alpha1"
+	"golang.org/x/oauth2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -33,6 +37,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func TestClient_ListSandboxClaims(t *testing.T) {
@@ -285,8 +290,8 @@ func TestNewClientWithContext_FallsBackToInClusterConfig(t *testing.T) {
 	client, err := newClientWithContext(
 		"",
 		"",
-		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
-			return nil, "", errKubeconfigLoad
+		func(kubeconfigPath, contextName string) (*rest.Config, loadedSource, error) {
+			return nil, loadedSource{}, errKubeconfigLoad
 		},
 		func() (*rest.Config, error) {
 			return &rest.Config{Host: "https://10.43.0.1:443"}, nil
@@ -316,8 +321,8 @@ func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
 	_, err := newClientWithContext(
 		"",
 		"explicit-context",
-		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
-			return nil, "", errKubeconfigLoad
+		func(kubeconfigPath, contextName string) (*rest.Config, loadedSource, error) {
+			return nil, loadedSource{}, errKubeconfigLoad
 		},
 		func() (*rest.Config, error) {
 			inClusterCalled = true
@@ -339,12 +344,80 @@ func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
 	}
 }
 
+// TestFallbackToGCEAuth_RequestsExpectedScopesAndAuth exercises the real
+// fallbackToGCEAuth call path (not just the gceFallbackAuthScopes literal):
+// it stubs defaultTokenSource to record the scopes it was called with, then
+// drives an actual request through the resulting client to confirm the
+// token is presented as a bearer credential and the exec plugin is cleared.
+func TestFallbackToGCEAuth_RequestsExpectedScopesAndAuth(t *testing.T) {
+	var gotScopes []string
+	var gotAuthHeader string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	origTokenSource := defaultTokenSource
+	t.Cleanup(func() { defaultTokenSource = origTokenSource })
+	defaultTokenSource = func(_ context.Context, scope ...string) (oauth2.TokenSource, error) {
+		gotScopes = scope
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
+	}
+
+	cfg := &rest.Config{Host: srv.URL}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		t.Fatalf("failed to build clientset: %v", err)
+	}
+	// Set ExecProvider after building the clientset: kubernetes.NewForConfig
+	// validates it eagerly (apiVersion/command), and the only thing this test
+	// needs from it is a non-nil value that fallbackToGCEAuth must clear.
+	cfg.ExecProvider = &clientcmdapi.ExecConfig{
+		APIVersion: "client.authentication.k8s.io/v1beta1",
+		Command:    "gke-gcloud-auth-plugin",
+	}
+
+	client := &Client{Config: cfg, Clientset: clientset}
+
+	if err := client.fallbackToGCEAuth(); err != nil {
+		t.Fatalf("fallbackToGCEAuth failed: %v", err)
+	}
+
+	wantScopes := map[string]bool{
+		"https://www.googleapis.com/auth/cloud-platform": true,
+		"https://www.googleapis.com/auth/userinfo.email": true,
+	}
+	if len(gotScopes) != len(wantScopes) {
+		t.Fatalf("expected %d scopes passed to defaultTokenSource, got %d: %v", len(wantScopes), len(gotScopes), gotScopes)
+	}
+	for _, scope := range gotScopes {
+		if !wantScopes[scope] {
+			t.Errorf("unexpected scope passed to defaultTokenSource: %q", scope)
+		}
+		delete(wantScopes, scope)
+	}
+	for missing := range wantScopes {
+		t.Errorf("missing expected scope passed to defaultTokenSource: %q", missing)
+	}
+
+	if gotAuthHeader != "Bearer test-token" {
+		t.Errorf("expected server to see 'Bearer test-token', got %q", gotAuthHeader)
+	}
+
+	if client.Config.ExecProvider != nil {
+		t.Error("expected ExecProvider to be cleared after falling back to token-source auth")
+	}
+}
+
 func TestNewClientWithContext_ReportsBothKubeconfigAndInClusterErrors(t *testing.T) {
 	_, err := newClientWithContext(
 		"",
 		"",
-		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
-			return nil, "", errKubeconfigLoad
+		func(kubeconfigPath, contextName string) (*rest.Config, loadedSource, error) {
+			return nil, loadedSource{}, errKubeconfigLoad
 		},
 		func() (*rest.Config, error) {
 			return nil, errMissingServiceAccountToken
@@ -363,4 +436,249 @@ func TestNewClientWithContext_ReportsBothKubeconfigAndInClusterErrors(t *testing
 	if !errors.Is(err, errMissingServiceAccountToken) {
 		t.Fatalf("expected in-cluster error in chain, got: %v", err)
 	}
+}
+
+func testKubeconfigFor(server string) string {
+	return `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: ` + server + `
+  name: test-cluster
+contexts:
+- context:
+    cluster: test-cluster
+    user: test-user
+  name: test-context
+current-context: test-context
+users:
+- name: test-user
+  user:
+    token: fake-token
+`
+}
+
+// NewClientWithContextTimeout bounds every request, Verify included.
+func TestNewClientWithContextTimeout(t *testing.T) {
+	var versionCalls int
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/version" {
+			versionCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"major":"1","minor":"30","gitVersion":"v1.30.0"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ok.Close()
+	c, err := NewClientWithContextTimeout(writeTestKubeconfig(t, testKubeconfigFor(ok.URL)), "test-context", 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Config.Timeout != 3*time.Second {
+		t.Errorf("Config.Timeout = %v, want 3s", c.Config.Timeout)
+	}
+	if c.CurrentContext != "test-context" {
+		t.Errorf("CurrentContext = %q", c.CurrentContext)
+	}
+	if err := c.Verify(); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if versionCalls != 1 {
+		t.Errorf("version calls = %d, want 1", versionCalls)
+	}
+
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer hang.Close()
+	defer close(release)
+	c, err = NewClientWithContextTimeout(writeTestKubeconfig(t, testKubeconfigFor(hang.URL)), "", 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := c.Verify(); err == nil {
+		t.Fatal("Verify against a hung API server succeeded")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("Verify took %v, want it bounded by the timeout", d)
+	}
+}
+
+// cm1TwoContextKubeconfig has two contexts with context-a current.
+const cm1TwoContextKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: cluster-a
+- cluster:
+    server: https://127.0.0.1:7443
+  name: cluster-b
+contexts:
+- context:
+    cluster: cluster-a
+    user: user-a
+  name: context-a
+- context:
+    cluster: cluster-b
+    user: user-b
+  name: context-b
+current-context: context-a
+users:
+- name: user-a
+  user:
+    token: fake-token-a
+- name: user-b
+  user:
+    token: fake-token-b
+`
+
+// CM1: Client.Connection and Client.RawCurrentContext are set at
+// construction from what the client actually used.
+func TestClientConnection_CM1(t *testing.T) {
+	t.Run("sentinel in-cluster branch is InCluster", func(t *testing.T) {
+		client, err := newClientWithContext("", "",
+			func(string, string) (*rest.Config, loadedSource, error) {
+				return nil, loadedSource{}, errKubeconfigLoad
+			},
+			func() (*rest.Config, error) { return &rest.Config{Host: "https://10.43.0.1:443"}, nil },
+			func(config *rest.Config) (dynamic.Interface, error) { return dynamic.NewForConfig(config) },
+			func(config *rest.Config) (kubernetes.Interface, error) { return kubernetes.NewForConfig(config) },
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.Connection != ConnInCluster {
+			t.Errorf("Connection = %v, want %v", client.Connection, ConnInCluster)
+		}
+		if client.CurrentContext != "in-cluster" || client.RawCurrentContext != "" {
+			t.Errorf("CurrentContext = %q, RawCurrentContext = %q; want \"in-cluster\", \"\"", client.CurrentContext, client.RawCurrentContext)
+		}
+	})
+
+	t.Run("deferred fallback with no context and an empty raw config is InCluster", func(t *testing.T) {
+		if got := connectionModeFor("", clientcmdapi.Config{}, nil); got != ConnInCluster {
+			t.Errorf("connectionModeFor(empty) = %v, want %v", got, ConnInCluster)
+		}
+	})
+
+	t.Run("requested context is Kubeconfig, raw current context kept separately", func(t *testing.T) {
+		client, err := NewClientWithContext(writeTestKubeconfig(t, cm1TwoContextKubeconfig), "context-b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.Connection != ConnKubeconfig {
+			t.Errorf("Connection = %v, want %v", client.Connection, ConnKubeconfig)
+		}
+		if client.CurrentContext != "context-b" {
+			t.Errorf("CurrentContext = %q, want context-b", client.CurrentContext)
+		}
+		if client.RawCurrentContext != "context-a" {
+			t.Errorf("RawCurrentContext = %q, want context-a", client.RawCurrentContext)
+		}
+	})
+
+	t.Run("kubeconfig current context is Kubeconfig", func(t *testing.T) {
+		client, err := NewClientWithContext(writeTestKubeconfig(t, cm1TwoContextKubeconfig), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.Connection != ConnKubeconfig {
+			t.Errorf("Connection = %v, want %v", client.Connection, ConnKubeconfig)
+		}
+		if client.CurrentContext != "context-a" || client.RawCurrentContext != "context-a" {
+			t.Errorf("CurrentContext = %q, RawCurrentContext = %q; want context-a for both", client.CurrentContext, client.RawCurrentContext)
+		}
+	})
+
+	t.Run("otherwise Unknown", func(t *testing.T) {
+		withContexts := clientcmdapi.Config{
+			Clusters: map[string]*clientcmdapi.Cluster{"c": {Server: "https://127.0.0.1:6443"}},
+			Contexts: map[string]*clientcmdapi.Context{"ctx": {Cluster: "c"}},
+		}
+		if got := connectionModeFor("", withContexts, nil); got != ConnUnknown {
+			t.Errorf("contexts but no current context: %v, want %v", got, ConnUnknown)
+		}
+		clustersOnly := clientcmdapi.Config{Clusters: withContexts.Clusters}
+		if got := connectionModeFor("", clustersOnly, nil); got != ConnUnknown {
+			t.Errorf("clusters but no contexts: %v, want %v", got, ConnUnknown)
+		}
+		if got := connectionModeFor("", clientcmdapi.Config{}, errors.New("raw config unreadable")); got != ConnUnknown {
+			t.Errorf("unreadable raw config: %v, want %v", got, ConnUnknown)
+		}
+		// The selected cluster cannot be checked, so not Kubeconfig.
+		if got := connectionModeFor("ctx", clientcmdapi.Config{}, errors.New("raw config unreadable")); got != ConnUnknown {
+			t.Errorf("requested context with unreadable raw config: %v, want %v", got, ConnUnknown)
+		}
+	})
+
+	t.Run("Kubeconfig only when the raw config fully describes the selected cluster", func(t *testing.T) {
+		full := clientcmdapi.Config{
+			CurrentContext: "ctx-a",
+			Clusters: map[string]*clientcmdapi.Cluster{
+				"c-a":       {Server: "https://127.0.0.1:6443"},
+				"c-noserve": {},
+				"c-nil":     nil,
+			},
+			Contexts: map[string]*clientcmdapi.Context{
+				"ctx-a":            {Cluster: "c-a"},
+				"ctx-nocluster":    {Cluster: "c-missing"},
+				"ctx-noserver":     {Cluster: "c-noserve"},
+				"ctx-nil":          nil,
+				"ctx-nilcluster":   {Cluster: "c-nil"},
+				"ctx-emptycluster": {Cluster: ""},
+			},
+		}
+		rows := []struct {
+			name      string
+			requested string
+			current   string
+			want      ConnectionMode
+		}{
+			{name: "current context fully described", current: "ctx-a", want: ConnKubeconfig},
+			{name: "requested context fully described", requested: "ctx-a", current: "ctx-noserver", want: ConnKubeconfig},
+			{name: "current context's cluster entry missing", current: "ctx-nocluster", want: ConnUnknown},
+			{name: "current context's cluster has an empty server", current: "ctx-noserver", want: ConnUnknown},
+			{name: "requested context's cluster entry missing", requested: "ctx-nocluster", current: "ctx-a", want: ConnUnknown},
+			{name: "requested context's cluster has an empty server", requested: "ctx-noserver", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context not defined", requested: "ctx-undefined", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context entry is nil", requested: "ctx-nil", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context's cluster entry is nil", requested: "ctx-nilcluster", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context names no cluster", requested: "ctx-emptycluster", current: "ctx-a", want: ConnUnknown},
+			{name: "current context not defined", current: "ctx-undefined", want: ConnUnknown},
+		}
+		for _, r := range rows {
+			raw := full
+			raw.CurrentContext = r.current
+			if got := connectionModeFor(r.requested, raw, nil); got != r.want {
+				t.Errorf("%s: %v, want %v", r.name, got, r.want)
+			}
+		}
+	})
+
+	t.Run("NewClientFromKubeconfigFile is Kubeconfig", func(t *testing.T) {
+		client, err := NewClientFromKubeconfigFile(writeTestKubeconfig(t, cm1TwoContextKubeconfig), "context-b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.Connection != ConnKubeconfig {
+			t.Errorf("Connection = %v, want %v", client.Connection, ConnKubeconfig)
+		}
+		if client.CurrentContext != "context-b" || client.RawCurrentContext != "context-a" {
+			t.Errorf("CurrentContext = %q, RawCurrentContext = %q; want context-b, context-a", client.CurrentContext, client.RawCurrentContext)
+		}
+	})
+
+	t.Run("NewClientWithContextNoInCluster is Kubeconfig with a context", func(t *testing.T) {
+		client, err := NewClientWithContextNoInCluster(writeTestKubeconfig(t, cm1TwoContextKubeconfig), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.Connection != ConnKubeconfig || client.RawCurrentContext != "context-a" {
+			t.Errorf("Connection = %v, RawCurrentContext = %q; want kubeconfig, context-a", client.Connection, client.RawCurrentContext)
+		}
+	})
 }

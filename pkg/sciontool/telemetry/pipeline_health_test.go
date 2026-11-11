@@ -25,6 +25,9 @@ func TestPipeline_HealthGauge_Registers(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	defer clearTelemetryEnv()
 
 	cfg := &Config{
@@ -63,6 +66,9 @@ func TestPipeline_HealthGauge_StopsOnStop(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	defer clearTelemetryEnv()
 
 	cfg := &Config{

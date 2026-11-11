@@ -9,7 +9,7 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -32,6 +32,12 @@ var nativeEventNameAliases = map[string]string{
 	"gemini_cli.user_prompt": "agent.user.prompt",
 }
 
+// reservedIdentityAttributes are resource attribute keys the telemetry
+// receiver treats as identity: user-supplied values are always dropped
+// before the trusted replacement is added. This includes the retired
+// grove-named identity keys (scion.grove, scion.grove.id, scion.grove_id),
+// which are kept here on a denylist so they are still stripped even though
+// the receiver no longer treats them as valid identity sources.
 var reservedIdentityAttributes = map[string]struct{}{
 	"scion.agent":       {},
 	"scion.agent.id":    {},
@@ -39,6 +45,9 @@ var reservedIdentityAttributes = map[string]struct{}{
 	"scion.project":     {},
 	"scion.project.id":  {},
 	"scion.project_id":  {},
+	"scion.grove":       {},
+	"scion.grove.id":    {},
+	"scion.grove_id":    {},
 	"scion.harness":     {},
 	"scion.model":       {},
 	"scion.broker":      {},
@@ -79,7 +88,7 @@ func authoritativeIdentity() []*commonpb.KeyValue {
 	}
 	add("scion.agent.id", os.Getenv("SCION_AGENT_ID"))
 	add("scion.agent.slug", os.Getenv("SCION_AGENT_SLUG"))
-	add("scion.project.id", projectcompat.ProjectIDFromEnv(os.Getenv))
+	add("scion.project.id", projectkeys.ProjectIDFromEnv(os.Getenv))
 	add("scion.harness", os.Getenv("SCION_HARNESS"))
 	add("scion.model", os.Getenv("SCION_MODEL"))
 	add("scion.broker.id", os.Getenv("SCION_BROKER_ID"))
@@ -345,14 +354,31 @@ func (p *receiverPolicy) processMetric(metric *metricpb.Metric) {
 	}
 }
 
+// tracingAppenderCallsiteEventNamePattern matches
+// opentelemetry-appender-tracing's default LogRecord.EventName for a Rust
+// tracing::event! invocation with no explicit name: field: the tracing
+// callsite string tracing-core's event! macro expands to, for example
+// "event otel/src/events/session_telemetry.rs:1103" (a "event " prefix and
+// a ":<digits>" suffix, matched narrowly on that shape alone). codex-rs's
+// OTel log bridge (OpenTelemetryTracingBridge::new,
+// codex-rs/otel/src/provider.rs's logger_export_layer) sets this
+// unconditionally on every record it exports
+// (opentelemetry-appender-tracing's layer.rs:
+// log_record.set_event_name(metadata.name())), in addition to carrying the
+// real event name as a separate string attribute (codex-rs's
+// log_event!/log_and_trace_event! macros set event.name explicitly). The
+// two are not a real conflict; see normalizedLogEventName.
+var tracingAppenderCallsiteEventNamePattern = regexp.MustCompile(`^event .*:[0-9]+$`)
+
+func isTracingAppenderCallsiteEventName(name string) bool {
+	return tracingAppenderCallsiteEventNamePattern.MatchString(name)
+}
+
 func normalizedLogEventName(record *logspb.LogRecord, scopeName string) (string, error) {
 	if record == nil {
 		return "", nil
 	}
-	values := make([]string, 0, 4)
-	if record.EventName != "" {
-		values = append(values, normalizeNativeEventName(record.EventName, scopeName))
-	}
+	var attrValues []string
 	for _, attr := range record.Attributes {
 		if attr == nil || !isEventNameAttribute(attr.Key) {
 			continue
@@ -365,9 +391,25 @@ func normalizedLogEventName(record *logspb.LogRecord, scopeName string) (string,
 			return "", fmt.Errorf("event name attribute must be a string")
 		}
 		if text.StringValue != "" {
-			values = append(values, normalizeNativeEventName(text.StringValue, scopeName))
+			attrValues = append(attrValues, normalizeNativeEventName(text.StringValue, scopeName))
 		}
 	}
+
+	values := make([]string, 0, 1+len(attrValues))
+	if record.EventName != "" {
+		// Treat a tracing-appender callsite default as absent only when an
+		// event-name attribute is also present to take precedence from: a
+		// native SDK that carries the real name only in EventName (no
+		// attribute at all) still needs it below, unchanged from before
+		// this case existed. Every other EventName value -- matching or
+		// conflicting -- still participates, so a genuine conflict is still
+		// rejected.
+		if len(attrValues) == 0 || !isTracingAppenderCallsiteEventName(record.EventName) {
+			values = append(values, normalizeNativeEventName(record.EventName, scopeName))
+		}
+	}
+	values = append(values, attrValues...)
+
 	if len(values) == 0 {
 		return "", nil
 	}
@@ -412,9 +454,6 @@ func removeReservedIdentityAttributes(attrs []*commonpb.KeyValue) []*commonpb.Ke
 			continue
 		}
 		if _, reserved := reservedIdentityAttributes[attr.Key]; !reserved {
-			if projectcompat.IsLegacyTelemetryIdentityKey(attr.Key) {
-				continue
-			}
 			result = append(result, attr)
 		}
 	}

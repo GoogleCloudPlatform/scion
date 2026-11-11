@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -38,6 +39,14 @@ type CreateScheduledEventRequest struct {
 	Interrupt bool   `json:"interrupt,omitempty"`
 	Plain     bool   `json:"plain,omitempty"`
 
+	// There is no top-level raw convenience field. This request surface
+	// never accepted one: a "raw" key here is an unknown field that JSON
+	// decoding ignores, and the "message" auto-construct path below reads
+	// only AgentID/AgentName/Message/Interrupt/Plain. The caller-supplied
+	// Payload is different: callers write that JSON directly, so a "raw"
+	// key inside it is rejected with raw_input_removed
+	// (validateAndRejectScheduledPayload).
+
 	// Convenience fields for "dispatch_agent" events — used to auto-construct Payload
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
@@ -57,45 +66,129 @@ type ListScheduledEventsResponse struct {
 	ServerTime time.Time              `json:"serverTime"`
 }
 
-// authorizeScheduledEventAccess gates access to scheduled-event and recurring-
-// schedule operations for every caller kind. Exhaustive and fail-closed.
-//
-// Agent identities are authorized by the caller: the existing checkAgentReadScope
-// and project isolation checks in the dispatcher are sufficient for agents.
-// User identities are authorized via s.authzService.Decide (with a canonical
-// permission ID for role-binding resolution) against a project-scoped
-// scheduled_event resource.
+// authorizeScheduledEventAccess is the project-level gate the scheduled-event
+// and schedule routers run before any row lookup. It fails closed for every
+// caller kind. See scheduledEventAccessDecision for the rule.
 func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Request, projectID string, action Action) bool {
-	ctx := r.Context()
-	identity := GetIdentityFromContext(ctx)
+	return s.authorizeScheduledEventRow(w, r, projectID, action, nil)
+}
+
+// authorizeScheduledEventRow decides action on one scheduled row (nil for
+// the project-level gate) and writes the 403 for a denial. Per-ID handlers
+// call it with the row they loaded, after their project check and before
+// any other work.
+func (s *Server) authorizeScheduledEventRow(w http.ResponseWriter, r *http.Request, projectID string, action Action, row *scheduledEventRow) bool {
+	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
 		return false
 	}
+	if row != nil && identity.Type() != "agent" {
+		// Only an agent caller's decision depends on the row. For every
+		// other caller the router gate already decided this action for
+		// this request, so it is not decided (or audited) a second time.
+		return true
+	}
+	d := s.scheduledEventAccessDecision(r.Context(), projectID, action, row)
+	if d.allowed {
+		return true
+	}
+	logAuthzDenial(r, identity, scheduledEventResource(projectID), action, d.reason)
+	if d.byPolicy {
+		writeForbidden(w, "You don't have permission to access scheduled events in this project")
+	} else {
+		writeForbidden(w, "")
+	}
+	return false
+}
 
-	resource := Resource{
+// scheduledEventAccess is the outcome of scheduledEventAccessDecision.
+type scheduledEventAccess struct {
+	allowed bool
+	// reason is logged for a denial.
+	reason string
+	// byPolicy is true when the authorization service denied the request,
+	// the one denial authorizeScheduledEventRow explains to the caller.
+	byPolicy bool
+}
+
+// scheduledEventRow is the row a scheduled-event decision is about: a
+// schedule or a scheduled event, by its current initiator attribution.
+type scheduledEventRow struct {
+	attribution store.InitiatorAttribution
+	// edit marks a PATCH of a schedule definition. Pause and resume share
+	// ActionUpdate with it, so agentScheduleEditAllowed keys on this flag.
+	edit bool
+}
+
+func scheduleRow(sc *store.Schedule) *scheduledEventRow {
+	return &scheduledEventRow{attribution: sc.InitiatorAttribution}
+}
+
+func scheduleEditRow(sc *store.Schedule) *scheduledEventRow {
+	return &scheduledEventRow{attribution: sc.InitiatorAttribution, edit: true}
+}
+
+func scheduledEventRowOf(evt *store.ScheduledEvent) *scheduledEventRow {
+	return &scheduledEventRow{attribution: evt.InitiatorAttribution}
+}
+
+// agentScheduleEditAllowed is the single switch for whether an agent caller
+// may PATCH a schedule definition it holds. Agent callers do not edit
+// schedule definitions; a user edits them.
+const agentScheduleEditAllowed = false
+
+// scheduledEventResource is the resource a scheduled event decision is
+// about: scheduled events under projectID.
+func scheduledEventResource(projectID string) Resource {
+	return Resource{
 		Type:       "scheduled_event",
 		ParentType: "project",
 		ParentID:   projectID,
 	}
+}
 
+// scheduledEventAccessDecision decides whether the identity in ctx may
+// perform action on the scheduled events and schedules of projectID,
+// without writing a response. It fails closed. Every router, list filter
+// and the health summary decide through it.
+//
+// A user caller is decided by the authorization service on
+// scheduled_event.<action>; row is not consulted.
+//
+// An agent caller manages only the rows it holds authority for: the row's
+// current initiator principal (scheduledInitiator, never CreatedBy) must
+// be that agent. A LegacyUnknown row is held by no agent. With row nil
+// (the project-level gate the routers run before a lookup) an agent is let
+// through: create keeps its own checks, and every other agent request is
+// decided again with its row before a row is returned or changed. Agent
+// project isolation and read scope are enforced on the request path (see
+// handleSchedules and healthSummaryCanReadSchedules).
+func (s *Server) scheduledEventAccessDecision(ctx context.Context, projectID string, action Action, row *scheduledEventRow) scheduledEventAccess {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return scheduledEventAccess{reason: "no identity"}
+	}
 	switch identity.Type() {
 	case "agent":
-		// Agent authorization is handled by checkAgentReadScope and project
-		// isolation in the dispatcher. If we reach here, those passed.
-		return true
+		if row == nil || action == ActionCreate {
+			return scheduledEventAccess{allowed: true}
+		}
+		if row.edit && !agentScheduleEditAllowed {
+			return scheduledEventAccess{reason: "agent callers do not edit schedule definitions"}
+		}
+		if !s.agentHoldsScheduledRow(identity, row.attribution) {
+			return scheduledEventAccess{reason: "agent does not hold authority for this scheduled row"}
+		}
+		return scheduledEventAccess{allowed: true}
 
 	case "user", "dev", "federated_user":
 		userIdent, ok := identity.(UserIdentity)
 		if !ok {
-			logAuthzDenial(r, identity, resource, action, "invalid user identity")
-			writeForbidden(w, "")
-			return false
+			return scheduledEventAccess{reason: "invalid user identity"}
 		}
 		if s.authzService == nil {
-			logAuthzDenial(r, identity, resource, action, "authorization service is uninitialized")
-			writeForbidden(w, "")
-			return false
+			return scheduledEventAccess{reason: "authorization service is uninitialized"}
 		}
 		// Pass the canonical permission ID so the kernel evaluates
 		// scheduled_event permissions through system-scoped role bindings.
@@ -103,23 +196,34 @@ func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Re
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(userIdent),
 			Credential: credentialContextForIdentity(userIdent),
-			Resource:   resource,
+			Resource:   scheduledEventResource(projectID),
 			Action:     action,
 			Permission: permissionID,
 		})
 		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, action, decision.Reason)
-			writeForbidden(w, "You don't have permission to access scheduled events in this project")
-			return false
+			return scheduledEventAccess{reason: decision.Reason, byPolicy: true}
 		}
-		return true
+		return scheduledEventAccess{allowed: true}
 
 	default:
-		logAuthzDenial(r, identity, resource, action,
-			"identity type may not access scheduled events")
-		writeForbidden(w, "")
-		return false
+		return scheduledEventAccess{reason: "identity type may not access scheduled events"}
 	}
+}
+
+// agentHoldsScheduledRow reports whether agent is the current initiator
+// principal of a scheduled row. A LegacyUnknown row is held by no agent.
+func (s *Server) agentHoldsScheduledRow(agent Identity, attr store.InitiatorAttribution) bool {
+	initiator := s.scheduledInitiator(attr)
+	return !initiator.LegacyUnknown &&
+		initiator.PrincipalKind == "agent" &&
+		initiator.PrincipalID != "" &&
+		initiator.PrincipalID == agent.ID()
+}
+
+// isAgentCaller reports whether the identity in ctx is an agent.
+func isAgentCaller(ctx context.Context) bool {
+	id := GetIdentityFromContext(ctx)
+	return id != nil && id.Type() == "agent"
 }
 
 // handleScheduledEvents routes requests under /api/v1/projects/{projectId}/scheduled-events[/{id}]
@@ -152,7 +256,7 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		case http.MethodPost:
 			action = ActionCreate
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
 		}
 	} else {
@@ -162,9 +266,15 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		case http.MethodDelete:
 			action = ActionDelete
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 			return
 		}
+	}
+
+	// Creating a scheduled event authors future work: the credential gate
+	// runs before the permission check and before the body is read.
+	if action == ActionCreate && !authorizeScheduleAuthoringCredential(w, r) {
+		return
 	}
 
 	// Authorize access — fail closed for all identity types.
@@ -211,8 +321,23 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
-	if req.EventType == "dispatch_agent" && !s.authorizeAgentCreate(w, r, projectID) {
+	// The payload "raw" tombstone applies to both supported event types:
+	// the advanced Payload field is accepted verbatim for "dispatch_agent"
+	// too, and neither payload type has a raw field. A "raw" key (any case,
+	// any value including false/null) is rejected with 422
+	// raw_input_removed before storage and before either event type's own
+	// authorization runs. A malformed or non-object payload is rejected
+	// first, with a sanitized 400; see validateAndRejectScheduledPayload.
+	if !s.validateAndRejectScheduledPayload(w, r, req.EventType, req.Payload) {
 		return
+	}
+	if req.EventType == "dispatch_agent" {
+		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
+			return
+		}
+		if !s.authorizeAgentCreate(w, r, projectID) {
+			return
+		}
 	}
 	// C1 containment: for message events, validate the target agent belongs to
 	// this project and the caller is authorized to message it. Scheduled messages
@@ -266,6 +391,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 			ValidationError(w, "agentName is required for dispatch_agent events", nil)
 			return
 		}
+		if !templateRefAllowed(req.Template) {
+			ValidationError(w, templateRefRefusal, nil)
+			return
+		}
 		p := DispatchAgentEventPayload{
 			AgentName: req.AgentName,
 			Template:  req.Template,
@@ -304,6 +433,12 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		payload = string(payloadBytes)
 	}
 
+	// The revision's frozen ceiling is computed before any write.
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionCreate)
+	if !ok {
+		return
+	}
+
 	// Determine creator identity
 	createdBy := ""
 	if identity := GetIdentityFromContext(r.Context()); identity != nil {
@@ -318,6 +453,12 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		Payload:   payload,
 		Status:    store.ScheduledEventPending,
 		CreatedBy: createdBy,
+		// Record the authoring request's initiator attribution in the same
+		// write as the event row (atomic by construction, since
+		// ScheduleEvent below issues a single insert), together with the
+		// credential's frozen ceiling.
+		InitiatorAttribution: newInitiatorAttribution(r.Context()),
+		AuthorityCeiling:     ceiling,
 	}
 
 	if err := s.scheduler.ScheduleEvent(r.Context(), evt); err != nil {
@@ -340,10 +481,17 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
 
+	// An agent caller lists only the events it holds.
+	agentID, ok := agentListFilter(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusOK, ListScheduledEventsResponse{Events: []store.ScheduledEvent{}, ServerTime: time.Now().UTC()})
+		return
+	}
 	filter := store.ScheduledEventFilter{
-		ProjectID: projectID,
-		EventType: query.Get("eventType"),
-		Status:    query.Get("status"),
+		ProjectID:        projectID,
+		EventType:        query.Get("eventType"),
+		Status:           query.Get("status"),
+		InitiatorAgentID: agentID,
 	}
 
 	result, err := s.store.ListScheduledEvents(r.Context(), filter, listOptionsFromQuery(query))
@@ -352,12 +500,47 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
+	events, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduledEventRowOf)
 	writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
-		Events:     result.Items,
+		Events:     events,
 		NextCursor: result.NextCursor,
-		TotalCount: result.TotalCount,
+		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
 	})
+}
+
+// visibleScheduledRows keeps the rows of one list page that the caller may
+// see, each decided by scheduledEventAccessDecision for ActionList. A user
+// caller's decision does not depend on the row, so its page and count are
+// returned as listed. An agent caller's list is already narrowed in the
+// store to the rows it holds (agentListFilter); the decision is still made
+// per row, and if it drops any row the store's count is omitted.
+func visibleScheduledRows[T any](ctx context.Context, s *Server, projectID string, items []T, totalCount int, rowOf func(*T) *scheduledEventRow) ([]T, int) {
+	if !isAgentCaller(ctx) {
+		return items, totalCount
+	}
+	visible := make([]T, 0, len(items))
+	for i := range items {
+		if s.scheduledEventAccessDecision(ctx, projectID, ActionList, rowOf(&items[i])).allowed {
+			visible = append(visible, items[i])
+		}
+	}
+	if len(visible) != len(items) {
+		totalCount = 0
+	}
+	return visible, totalCount
+}
+
+// agentListFilter returns the agent ID an agent caller's list is narrowed
+// to in the store, so its pages fill with the rows it holds ("" for any
+// other caller). ok is false for an agent caller with an empty ID, which
+// holds no rows: its list is empty and the store is not read.
+func agentListFilter(ctx context.Context) (agentID string, ok bool) {
+	if !isAgentCaller(ctx) {
+		return "", true
+	}
+	agentID = GetIdentityFromContext(ctx).ID()
+	return agentID, agentID != ""
 }
 
 // getScheduledEvent handles GET /api/v1/projects/{projectId}/scheduled-events/{id}
@@ -371,6 +554,9 @@ func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, proje
 	// Verify the event belongs to the requested project
 	if evt.ProjectID != projectID {
 		NotFound(w, "Scheduled event")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduledEventRowOf(evt)) {
 		return
 	}
 
@@ -389,10 +575,27 @@ func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		NotFound(w, "Scheduled event")
 		return
 	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionDelete, scheduledEventRowOf(evt)) {
+		return
+	}
 
-	if err := s.scheduler.CancelEvent(r.Context(), eventID); err != nil {
+	// No future dispatch remains after a cancel, so there is no
+	// re-attribution — just a record of who cancelled it, written in the
+	// same transaction as the cancel. The in-memory timer is stopped only
+	// once the cancel commits, so a failed cancel leaves the event pending
+	// and armed.
+	audit := newScheduledEventAudit(r.Context(), mutationTypeScheduledEventCancel, eventID)
+	if err := s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := tx.CancelScheduledEvent(r.Context(), eventID); err != nil {
+			return err
+		}
+		return tx.CreateMutationAudit(r.Context(), audit)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	if s.scheduler != nil {
+		s.scheduler.StopEventTimer(eventID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

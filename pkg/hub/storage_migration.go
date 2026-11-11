@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -96,6 +97,10 @@ type migratableResource struct {
 	slug          string
 	files         []store.TemplateFile
 	kind          storage.ResourceKind
+	// layout is the storage layout of a template or harness-config;
+	// blob-layout rows are never migrated (their path is already row-unique
+	// and hub-namespaced).
+	layout string
 }
 
 func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceKind, hubID string, dryRun, cleanupLegacy bool) MigrateStorageReport {
@@ -132,6 +137,7 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 					slug:          t.Slug,
 					files:         t.Files,
 					kind:          kind,
+					layout:        t.Layout,
 				})
 			}
 			if result.NextCursor == "" {
@@ -164,6 +170,7 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 					slug:          hc.Slug,
 					files:         hc.Files,
 					kind:          kind,
+					layout:        hc.Layout,
 				})
 			}
 			if result.NextCursor == "" {
@@ -213,6 +220,10 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 			report.Skipped++
 			continue
 		}
+		if res.layout == store.TemplateLayoutBlobs {
+			report.Skipped++
+			continue
+		}
 
 		namespacedPath := storage.ResourceStoragePath(hubID, res.kind, res.scope, res.scopeID, res.slug)
 		namespacedURI := storage.ResourceStorageURI(hubID, stor.Bucket(), res.kind, res.scope, res.scopeID, res.slug)
@@ -238,7 +249,14 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 			continue
 		}
 
-		if err := s.updateResourceStoragePath(ctx, res, namespacedPath, namespacedURI); err != nil {
+		if err := s.updateResourceStoragePath(ctx, res, namespacedPath, namespacedURI); errors.Is(err, errStorageMigrationConflict) {
+			// A commit changed the row since it was listed; it keeps what
+			// that commit wrote and its legacy objects are not cleaned up.
+			s.resourceLog.Warn(label+" migration: resource changed during migration; leaving it as committed",
+				"resource", res.name)
+			report.Skipped++
+			continue
+		} else if err != nil {
 			s.resourceLog.Error(label+" migration: DB update failed",
 				"resource", res.name,
 				"error", err)
@@ -252,7 +270,7 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 			"to", namespacedPath)
 
 		if cleanupLegacy {
-			if err := stor.DeletePrefix(ctx, res.storagePath+"/"); err != nil {
+			if err := stor.DeletePrefix(ctx, storage.DirPrefix(res.storagePath)); err != nil {
 				s.resourceLog.Error(label+" migration: legacy cleanup failed",
 					"resource", res.name,
 					"path", res.storagePath,
@@ -307,6 +325,11 @@ func (s *Server) countStorageObjects(ctx context.Context, stor storage.Storage, 
 	return len(objects.Objects)
 }
 
+// errStorageMigrationConflict reports a template or harness-config that a
+// commit changed (or moved to the blob layout) between the migration's list
+// and its update.
+var errStorageMigrationConflict = errors.New("resource changed during storage migration")
+
 // updateResourceStoragePath updates the DB record for a resource with the new namespaced path.
 func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableResource, newPath, newURI string) error {
 	switch res.kind {
@@ -318,9 +341,20 @@ func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableRe
 		if tmpl == nil {
 			return nil
 		}
+		if isBlobLayout(tmpl) {
+			return errStorageMigrationConflict
+		}
+		// The storage path is content state (ptone/scion#4221): it is
+		// written through the compare-and-swap, so a concurrent commit
+		// that migrated the row to blobs is not pointed back at a legacy
+		// path. A lost race leaves the row as the commit wrote it.
 		tmpl.StoragePath = newPath
 		tmpl.StorageURI = newURI
-		return s.store.UpdateTemplate(ctx, tmpl)
+		err = s.store.UpdateTemplateContent(ctx, tmpl, store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash, Layout: tmpl.Layout})
+		if errors.Is(err, store.ErrTemplateConflict) {
+			return errStorageMigrationConflict
+		}
+		return err
 
 	case storage.ResourceKindHarnessConfig:
 		hc, err := s.store.GetHarnessConfig(ctx, res.id)
@@ -330,9 +364,22 @@ func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableRe
 		if hc == nil {
 			return nil
 		}
+		if isHarnessConfigBlobLayout(hc) {
+			return errStorageMigrationConflict
+		}
+		// The storage path is content state (ptone/scion#4219): it is
+		// written through the compare-and-swap with the row as read
+		// (content hash, layout and storage path), so a concurrent commit
+		// that migrated the row to blobs is not pointed back at a legacy
+		// path. A lost race leaves the row as the commit wrote it.
+		expected := harnessConfigCommitPrecondition(hc)
 		hc.StoragePath = newPath
 		hc.StorageURI = newURI
-		return s.store.UpdateHarnessConfig(ctx, hc)
+		err = s.store.UpdateHarnessConfigContent(ctx, hc, expected)
+		if errors.Is(err, store.ErrHarnessConfigConflict) {
+			return errStorageMigrationConflict
+		}
+		return err
 
 	case storage.ResourceKindSkill:
 		sk, err := s.store.GetSkill(ctx, res.id)

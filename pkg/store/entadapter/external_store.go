@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -331,6 +333,9 @@ func gcpFilterPredicates(filter store.GCPServiceAccountFilter) []predicate.GCPSe
 	if filter.Email != "" {
 		preds = append(preds, gcpserviceaccount.EmailEQ(filter.Email))
 	}
+	if filter.EmailFold != "" {
+		preds = append(preds, gcpserviceaccount.EmailEqualFold(filter.EmailFold))
+	}
 	if filter.Managed != nil {
 		preds = append(preds, gcpserviceaccount.ManagedEQ(*filter.Managed))
 	}
@@ -397,17 +402,6 @@ func entGitHubToStore(e *ent.GithubInstallation) *store.GitHubInstallation {
 // "INSERT OR IGNORE" behavior, creating an installation that already exists is a
 // no-op (idempotent) rather than an error.
 func (s *ExternalStore) CreateGitHubInstallation(ctx context.Context, installation *store.GitHubInstallation) error {
-	// Idempotency guard: if the natural key already exists, do nothing.
-	exists, err := s.client.GithubInstallation.Query().
-		Where(githubinstallation.IDEQ(installation.InstallationID)).
-		Exist(ctx)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-
 	if installation.CreatedAt.IsZero() {
 		installation.CreatedAt = time.Now()
 	}
@@ -422,21 +416,29 @@ func (s *ExternalStore) CreateGitHubInstallation(ctx context.Context, installati
 		accountType = "Organization"
 	}
 
-	err = s.client.GithubInstallation.Create().
-		SetID(installation.InstallationID).
-		SetAccountLogin(installation.AccountLogin).
-		SetAccountType(accountType).
-		SetAppID(installation.AppID).
-		SetRepositories(marshalRepos(installation.Repositories)).
-		SetStatus(installation.Status).
-		SetCreated(installation.CreatedAt).
-		SetUpdated(installation.UpdatedAt).
+	// Idempotent on the natural key: an existing row with this installation
+	// ID (including one a concurrent writer just inserted) is left untouched
+	// via ON CONFLICT DO NOTHING. Any other constraint failure still surfaces.
+	//
+	// CreateBulk, not Create: ent's single-row Create+OnConflict reads the row
+	// back via RETURNING and fails with sql.ErrNoRows when DO NOTHING skips
+	// the insert; the bulk path tolerates zero returned rows. Must stay Exec,
+	// never Save, for the same reason (see SeedMaintenanceOperations).
+	err := s.client.GithubInstallation.CreateBulk(
+		s.client.GithubInstallation.Create().
+			SetID(installation.InstallationID).
+			SetAccountLogin(installation.AccountLogin).
+			SetAccountType(accountType).
+			SetAppID(installation.AppID).
+			SetRepositories(marshalRepos(installation.Repositories)).
+			SetStatus(installation.Status).
+			SetCreated(installation.CreatedAt).
+			SetUpdated(installation.UpdatedAt),
+	).
+		OnConflictColumns(githubinstallation.FieldID).
+		DoNothing().
 		Exec(ctx)
 	if err != nil {
-		// Another writer may have created it concurrently — stay idempotent.
-		if ent.IsConstraintError(err) {
-			return nil
-		}
 		return mapError(err)
 	}
 	return nil
@@ -538,17 +540,61 @@ func marshalScopes(scopes []string) string {
 	return string(b)
 }
 
+// marshalCeilingPermissionIDs serializes a FrozenPermissionCeiling's
+// PermissionIDs for the nillable ceiling_permission_ids column. A nil slice
+// (never backfilled / not yet resolved) serializes to a nil *string (SQL
+// NULL); an explicit, possibly-empty slice serializes to a JSON array
+// string, preserving the "NULL means not backfilled, [] means explicitly
+// denies" distinction end to end (see store.UserAccessToken.NormalizedCeiling).
+func marshalCeilingPermissionIDs(ids []string) *string {
+	if ids == nil {
+		return nil
+	}
+	b, _ := json.Marshal(ids)
+	s := string(b)
+	return &s
+}
+
+// unmarshalCeilingPermissionIDs is the inverse of
+// marshalCeilingPermissionIDs. A NULL column (raw == nil) returns nil —
+// "never backfilled." Malformed JSON in a non-NULL column returns a non-nil
+// empty slice rather than nil, so a corrupted value denies (via
+// FrozenPermissionCeiling.Allows on an explicit empty list) instead of being
+// mistaken for "never backfilled" and silently re-normalized from Scopes.
+func unmarshalCeilingPermissionIDs(raw *string) []string {
+	if raw == nil {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(*raw), &ids); err != nil {
+		return []string{}
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids
+}
+
 // entUATToStore converts an Ent UserAccessToken to the store model.
 func entUATToStore(e *ent.UserAccessToken) *store.UserAccessToken {
 	t := &store.UserAccessToken{
-		ID:        e.ID.String(),
-		UserID:    e.UserID.String(),
-		Name:      e.Name,
-		Prefix:    e.Prefix,
-		KeyHash:   e.KeyHash,
-		ProjectID: e.ProjectID.String(),
-		Revoked:   e.Revoked,
-		Created:   e.Created,
+		ID:                   e.ID.String(),
+		UserID:               e.UserID.String(),
+		Name:                 e.Name,
+		Prefix:               e.Prefix,
+		KeyHash:              e.KeyHash,
+		BoundaryKind:         e.BoundaryKind,
+		Revoked:              e.Revoked,
+		Created:              e.Created,
+		CeilingVersion:       permissions.CeilingVersion(e.CeilingVersion),
+		CeilingPermissionIDs: unmarshalCeilingPermissionIDs(e.CeilingPermissionIds),
+	}
+	// ProjectID is set iff the row is a "project" boundary; a hub-boundary
+	// row has a NULL project_id column, which maps to the empty string —
+	// never interpreted as hub by anything reading this struct without
+	// also checking BoundaryKind (see store.UserAccessToken.ValidateBoundary).
+	if e.ProjectID != nil {
+		t.ProjectID = e.ProjectID.String()
 	}
 	if e.Scopes != "" {
 		_ = json.Unmarshal([]byte(e.Scopes), &t.Scopes)
@@ -558,6 +604,16 @@ func entUATToStore(e *ent.UserAccessToken) *store.UserAccessToken {
 	}
 	if e.LastUsed != nil {
 		t.LastUsed = e.LastUsed
+	}
+	// E.1 descriptive credential metadata.
+	if e.Purpose != nil {
+		t.Purpose = e.Purpose
+	}
+	if e.Labels != nil && *e.Labels != "" {
+		var labels map[string]string
+		if err := json.Unmarshal([]byte(*e.Labels), &labels); err == nil {
+			t.Labels = labels
+		}
 	}
 	return t
 }
@@ -572,9 +628,28 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 	if err != nil {
 		return err
 	}
-	projectUID, err := parseUUID(token.ProjectID)
+
+	// A caller that sets only ProjectID and leaves BoundaryKind empty
+	// defaults to "project" here, so ValidateBoundary sees a
+	// fully-specified row rather than rejecting an under-specified one. A
+	// caller that explicitly sets BoundaryKind (including to an invalid
+	// value) is validated as given — this default never overrides an
+	// explicit value, and never turns an explicit, invalid value into a
+	// silently-accepted one.
+	if token.BoundaryKind == "" {
+		token.BoundaryKind = string(permissions.BoundaryKindProject)
+	}
+	if err := token.ValidateBoundary(); err != nil {
+		return err
+	}
+
+	// A federated account holds no user access credential.
+	federated, err := isFederatedUser(ctx, s.client, userUID)
 	if err != nil {
 		return err
+	}
+	if federated {
+		return store.ErrFederatedAccountRefused
 	}
 
 	if token.Created.IsZero() {
@@ -587,16 +662,40 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 		SetName(token.Name).
 		SetPrefix(token.Prefix).
 		SetKeyHash(token.KeyHash).
-		SetProjectID(projectUID).
+		SetBoundaryKind(token.BoundaryKind).
 		SetScopes(marshalScopes(token.Scopes)).
+		SetCeilingVersion(int32(token.CeilingVersion)).
 		SetRevoked(token.Revoked).
 		SetCreated(token.Created)
 
+	// ProjectID is parsed and set only for a "project" boundary; ValidateBoundary
+	// above already guarantees a "hub" boundary has an empty ProjectID, so
+	// the create mutation leaves the column NULL for hub tokens.
+	if token.ProjectID != "" {
+		projectUID, err := parseUUID(token.ProjectID)
+		if err != nil {
+			return err
+		}
+		create.SetProjectID(projectUID)
+	}
+
+	if ceilingIDs := marshalCeilingPermissionIDs(token.CeilingPermissionIDs); ceilingIDs != nil {
+		create.SetCeilingPermissionIds(*ceilingIDs)
+	}
 	if token.ExpiresAt != nil {
 		create.SetExpiresAt(*token.ExpiresAt)
 	}
 	if token.LastUsed != nil {
 		create.SetLastUsed(*token.LastUsed)
+	}
+	// E.1 descriptive credential metadata.
+	if token.Purpose != nil {
+		create.SetPurpose(*token.Purpose)
+	}
+	if len(token.Labels) > 0 {
+		if labelsJSON, err := json.Marshal(token.Labels); err == nil {
+			create.SetLabels(string(labelsJSON))
+		}
 	}
 
 	if _, err := create.Save(ctx); err != nil {
@@ -701,14 +800,84 @@ func (s *ExternalStore) CountUserAccessTokens(ctx context.Context, userID string
 		Count(ctx)
 }
 
-// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+// RevokeUserAccessTokensForUser revokes every unrevoked token of a user and returns how many it revoked (ptone/scion#2143).
+func (s *ExternalStore) RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.UserAccessToken.Update().
+		Where(
+			useraccesstoken.UserIDEQ(uid),
+			useraccesstoken.RevokedEQ(false),
+		).
+		SetRevoked(true).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// RevokeUserAccessTokensForUserProject revokes every unrevoked
+// "project"-boundary token of a user scoped to projectID and returns the
+// IDs it revoked (ptone/scion#7494). The boundary_kind predicate states the
+// rule explicitly: a hub-boundary token is never revoked here. The IDs are
+// read and then revoked by ID with the same predicates, so a token revoked
+// concurrently is not reported twice; inside the caller's transaction the
+// two statements see the same rows.
+func (s *ExternalStore) RevokeUserAccessTokensForUserProject(ctx context.Context, userID, projectID string) ([]string, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	match := []predicate.UserAccessToken{
+		useraccesstoken.UserIDEQ(uid),
+		useraccesstoken.ProjectIDEQ(pid),
+		useraccesstoken.BoundaryKindEQ(string(permissions.BoundaryKindProject)),
+		useraccesstoken.RevokedEQ(false),
+	}
+	ids, err := s.client.UserAccessToken.Query().Where(match...).IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(ids) == 0 {
+		return []string{}, nil
+	}
+	if _, err := s.client.UserAccessToken.Update().
+		Where(append(match, useraccesstoken.IDIn(ids...))...).
+		SetRevoked(true).
+		Save(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, id.String())
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
+// tokens scoped to a project. Hub-boundary tokens have a NULL project_id and
+// so would never match ProjectIDEQ anyway, but the explicit boundary_kind
+// predicate states that rule rather than relying on the incidental NULL
+// non-match, per project_deletion_service.go's use of this method: deleting
+// a project must never delete hub-boundary tokens belonging to its members.
 func (s *ExternalStore) DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error) {
 	uid, err := parseUUID(projectID)
 	if err != nil {
 		return 0, err
 	}
 	n, err := s.client.UserAccessToken.Delete().
-		Where(useraccesstoken.ProjectIDEQ(uid)).
+		Where(
+			useraccesstoken.ProjectIDEQ(uid),
+			useraccesstoken.BoundaryKindEQ(string(permissions.BoundaryKindProject)),
+		).
 		Exec(ctx)
 	if err != nil {
 		return 0, mapError(err)

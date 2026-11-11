@@ -19,12 +19,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 const (
@@ -90,19 +93,29 @@ func SetRefresher(fn TokenRefresher) {
 	refresher = fn
 }
 
-// Store saves credentials for a hub.
+// Store saves credentials for a hub, keyed by its normalised endpoint
+// (config.NormalizeEndpoint).
 func Store(hubURL string, token *TokenResponse) error {
 	mu.Lock()
 	defer mu.Unlock()
 
 	path := credentialsPath()
 
-	creds, _ := loadFile(path)
+	creds, err := loadFile(path)
+	warnReplacingRefused(path, err)
 	if creds == nil {
 		creds = &Credentials{Version: 1, Hubs: make(map[string]*HubCredentials)}
 	}
 
-	creds.Hubs[hubURL] = &HubCredentials{
+	// One login per hub: store under the normalised endpoint and drop
+	// other spellings of the same hub.
+	key := config.NormalizeEndpoint(hubURL)
+	for k := range creds.Hubs {
+		if k != key && config.NormalizeEndpoint(k) == key {
+			delete(creds.Hubs, k)
+		}
+	}
+	creds.Hubs[key] = &HubCredentials{
 		AccessToken:  token.AccessToken,
 		RefreshToken: token.RefreshToken,
 		ExpiresAt:    time.Now().Add(token.ExpiresIn),
@@ -112,7 +125,9 @@ func Store(hubURL string, token *TokenResponse) error {
 	return saveFile(path, creds)
 }
 
-// Load retrieves credentials for a hub, refreshing if necessary.
+// Load retrieves credentials for a hub, refreshing if necessary. The URL is
+// matched after normalisation, so a login stored under another spelling of
+// the same hub URL is found.
 func Load(hubURL string) (*HubCredentials, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -120,11 +135,12 @@ func Load(hubURL string) (*HubCredentials, error) {
 	path := credentialsPath()
 	creds, err := loadFile(path)
 	if err != nil {
+		reportRefusal(err)
 		return nil, err
 	}
 
-	hubCreds, ok := creds.Hubs[hubURL]
-	if !ok {
+	hubCreds := lookupHub(creds, hubURL)
+	if hubCreds == nil {
 		return nil, ErrNotAuthenticated
 	}
 
@@ -163,7 +179,7 @@ func Load(hubURL string) (*HubCredentials, error) {
 	return hubCreds, nil
 }
 
-// Remove deletes credentials for a hub.
+// Remove deletes credentials for a hub, under every spelling of its URL.
 func Remove(hubURL string) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -177,7 +193,12 @@ func Remove(hubURL string) error {
 		return err
 	}
 
-	delete(creds.Hubs, hubURL)
+	key := config.NormalizeEndpoint(hubURL)
+	for k := range creds.Hubs {
+		if k == hubURL || config.NormalizeEndpoint(k) == key {
+			delete(creds.Hubs, k)
+		}
+	}
 
 	// If no more hubs, remove the file
 	if len(creds.Hubs) == 0 {
@@ -185,6 +206,31 @@ func Remove(hubURL string) error {
 	}
 
 	return saveFile(path, creds)
+}
+
+// lookupHub returns the credentials stored for hubURL: under the exact key,
+// else under its normalised form, else under any key that normalises to the
+// same endpoint (a login stored by an older version under another spelling
+// of the URL). It returns nil when there is none.
+func lookupHub(creds *Credentials, hubURL string) *HubCredentials {
+	if c, ok := creds.Hubs[hubURL]; ok {
+		return c
+	}
+	key := config.NormalizeEndpoint(hubURL)
+	if c, ok := creds.Hubs[key]; ok {
+		return c
+	}
+	keys := make([]string, 0, len(creds.Hubs))
+	for k := range creds.Hubs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if config.NormalizeEndpoint(k) == key {
+			return creds.Hubs[k]
+		}
+	}
+	return nil
 }
 
 // GetAccessToken returns just the access token for a hub, or empty string if not authenticated.
@@ -214,11 +260,13 @@ var credentialsPath = func() string {
 	return filepath.Join(scionDir, CredentialsFile)
 }
 
-// loadFile reads and parses the credentials file.
+// loadFile reads and parses the credentials file. On Windows the file is
+// read through privatefs and refused unless only the current user (and
+// SYSTEM and Administrators) can access it; see readCredentialsFile.
 func loadFile(path string) (*Credentials, error) {
-	data, err := os.ReadFile(path)
+	data, err := readCredentialsFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, ErrNotAuthenticated
 		}
 		return nil, fmt.Errorf("failed to read credentials file: %w", err)
@@ -236,20 +284,25 @@ func loadFile(path string) (*Credentials, error) {
 	return &creds, nil
 }
 
-// saveFile writes credentials to the file with proper permissions.
+// saveFile writes credentials to the file as a private file: on unix mode
+// 0600 in a directory created 0700 if missing (as before); on Windows an
+// owner-only ACL set when the file is created, written by atomic replace,
+// so an existing too-open file is replaced by a private one.
 func saveFile(path string, creds *Credentials) error {
-	// Ensure directory exists
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	// The directory (normally ~/.scion) is the tree's anchor; missing
+	// components are created private.
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		return fmt.Errorf("failed to create credentials directory: %w", err)
 	}
+	defer func() { _ = tree.Close() }()
 
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, FileMode); err != nil {
+	if err := tree.WriteFile(filepath.Base(path), data, privatefs.ForMode(FileMode)); err != nil {
 		return fmt.Errorf("failed to write credentials file: %w", err)
 	}
 

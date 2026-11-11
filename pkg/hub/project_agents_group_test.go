@@ -47,7 +47,7 @@ func TestCreateProjectGroup_NewGroupGetsAnnotation(t *testing.T) {
 	require.NoError(t, err, "agents group should have been created")
 	assert.Equal(t, project.ID, group.ProjectID)
 	assert.Equal(t, store.GroupTypeProjectAgents, group.GroupType)
-	assert.Equal(t, "true", group.Annotations[systemProjectAgentsGroupAnnotation],
+	assert.Equal(t, "true", group.Annotations[store.AnnotationProjectAgentsGroup],
 		"new agents group must carry the system annotation")
 }
 
@@ -105,7 +105,7 @@ func TestCreateProjectGroup_AdoptionSucceedsWithAnnotation(t *testing.T) {
 		ProjectID: projectID,
 		CreatedBy: DevUserID,
 		Annotations: map[string]string{
-			systemProjectAgentsGroupAnnotation: "true",
+			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
 	require.NoError(t, s.CreateGroup(ctx, legitimateGroup))
@@ -146,7 +146,7 @@ func TestCreateProjectGroup_WrongGroupTypeRefused(t *testing.T) {
 		ProjectID: projectID,
 		CreatedBy: DevUserID,
 		Annotations: map[string]string{
-			systemProjectAgentsGroupAnnotation: "true",
+			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
 	require.NoError(t, s.CreateGroup(ctx, wrongTypeGroup))
@@ -190,7 +190,7 @@ func TestIsSystemProjectAgentsGroup(t *testing.T) {
 			name: "matching ProjectID and annotation",
 			group: &store.Group{
 				ProjectID:   projectID,
-				Annotations: map[string]string{systemProjectAgentsGroupAnnotation: "true"},
+				Annotations: map[string]string{store.AnnotationProjectAgentsGroup: "true"},
 			},
 			expect: true,
 		},
@@ -198,7 +198,7 @@ func TestIsSystemProjectAgentsGroup(t *testing.T) {
 			name: "wrong ProjectID",
 			group: &store.Group{
 				ProjectID:   "other-project",
-				Annotations: map[string]string{systemProjectAgentsGroupAnnotation: "true"},
+				Annotations: map[string]string{store.AnnotationProjectAgentsGroup: "true"},
 			},
 			expect: false,
 		},
@@ -221,7 +221,7 @@ func TestIsSystemProjectAgentsGroup(t *testing.T) {
 			name: "annotation value not true",
 			group: &store.Group{
 				ProjectID:   projectID,
-				Annotations: map[string]string{systemProjectAgentsGroupAnnotation: "false"},
+				Annotations: map[string]string{store.AnnotationProjectAgentsGroup: "false"},
 			},
 			expect: false,
 		},

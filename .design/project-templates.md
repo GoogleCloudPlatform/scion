@@ -121,20 +121,25 @@ constants at the top of `pkg/hub/project_settings_handlers.go`:
 | --- | --- |
 | `scion.io/default-template` | `defaultTemplate` |
 | `scion.io/default-harness-config` | `defaultHarnessConfig` |
+| `scion.io/default-harness-auth` | `defaultHarnessAuth` |
 | `scion.io/default-model` | `defaultModel` |
 | `scion.io/default-thinking-level` | `defaultThinkingLevel` |
 | `scion.io/telemetry-enabled` | `telemetryEnabled` |
+| `scion.io/auto-expose-ports-enabled` | `autoExposePortsEnabled` |
 | `scion.io/active-profile` | `activeProfile` |
 | `scion.io/default-max-turns` | `defaultMaxTurns` |
 | `scion.io/default-max-model-calls` | `defaultMaxModelCalls` |
 | `scion.io/default-max-duration` | `defaultMaxDuration` |
-| `scion.io/default-gcp-identity-mode` | `defaultGcpIdentityMode` |
-| `scion.io/default-gcp-identity-service-account-id` | `defaultGcpIdentityServiceAccountId` |
+| `scion.io/default-gcp-identity-mode` | `defaultGCPIdentityMode` |
+| `scion.io/default-gcp-identity-service-account-id` | `defaultGCPIdentityServiceAccountID` |
+| `scion.io/default-gcp-identity-service-account-id-by-profile` | `defaultGCPIdentityServiceAccountIDByProfile` (JSON object, profile name to SA ID; kept on PUT when absent, cleared by `{}`) |
 | `scion.io/default-resources-cpu-request` | `defaultResources.cpuRequest` |
 | `scion.io/default-resources-memory-request` | `defaultResources.memoryRequest` |
 | `scion.io/default-resources-cpu-limit` | `defaultResources.cpuLimit` |
 | `scion.io/default-resources-memory-limit` | `defaultResources.memoryLimit` |
 | `scion.io/default-resources-disk` | `defaultResources.disk` |
+| `scion.io/max-agent-role` | `maxAgentRole` |
+| `scion.io/default-agent-role` | `defaultAgentRole` |
 
 `setOrDelete` / `setOrDeleteInt` mean an empty or zero value *removes* the
 annotation rather than storing a zero. Unset is genuinely absent, which is what
@@ -328,8 +333,8 @@ Only the fields for which a hub-level fallback actually exists in
 `telemetryEnabled`.
 
 Fields with **no** hub-level counterpart — `defaultModel`,
-`defaultThinkingLevel`, `activeProfile`, `defaultGcpIdentityMode`,
-`defaultGcpIdentityServiceAccountId` — are still emitted, with
+`defaultThinkingLevel`, `activeProfile`, `defaultGCPIdentityMode`,
+`defaultGCPIdentityServiceAccountID` — are still emitted, with
 `hubValue: null` and `source: "project"` or `"unset"`. Emitting them uniformly
 lets the UI iterate one map instead of maintaining a parallel allowlist, and
 makes it a one-line server change if a hub-level default is added later.
@@ -643,14 +648,65 @@ may not have intended to share.
 | **Env vars** (scope=project, `Secret == false`) | `EnvVar` | Non-secret configuration. |
 | **Injected skills** | `SkillInjection` (scope=project) | Configuration list; `SetSkillInjections` makes this a single atomic call. |
 | **Project-scoped harness configs & templates** | `HarnessConfig`, `Template` | See §5.4 — deep-copied. |
+| **GCP service accounts** (scope=project) and the **default SA** | `GCPServiceAccount`, `scion.io/default-gcp-identity-service-account-id` annotation | Re-created on the clone with fresh IDs, preserving email, GCP project, display name, scopes, managed state and verified state. The default-SA annotation is remapped to the cloned SA's ID. See below. |
 
 **Workspace-mode label.** `scion.dev/workspace-mode` (`shared` /
 `per-agent` / `worktree-per-agent`) is copied from the source but treated as
 input to the standard `createProject` workspace-initialisation branch, not as an
 inert label. The clone therefore ends up in the same workspace mode as its
-source, provisioned fresh. The related `scion.dev/clone-url` and
-`scion.dev/default-branch` labels are copied as-is since they describe the git
-remote, which is also copied.
+source, provisioned fresh. The related `scion.dev/clone-url`,
+`scion.dev/source-url` and `scion.dev/default-branch` labels are copied as-is
+because they describe the git remote, which is also copied. The exception is a
+request whose `gitRemote` override names a *different* repository: those three
+labels are then dropped and re-derived from the override (default branch
+`main`). Otherwise `resolveCloneURL`, which prefers the label, would still clone
+the template's repository. The override must be a remote git URL: `https://`,
+`http://`, `ssh://` or `git://` URLs that `net/url` parses to a valid host;
+SCP style `user@host:org/repo` with any login and any host, including a
+single-label one such as `git@gitserver:org/repo`; or the scheme-less
+`host[:port]/org/repo` form (dotted host) that `GitRemote` is stored in.
+Anything else, such as a local path, gets a 400 with `details.field =
+"gitRemote"`. SCP style without a login (`github.com:org/repo`) is not
+supported, because it cannot be told apart from `host:port/…`; use
+`git@github.com:org/repo` or the https URL. Only ASCII whitespace is trimmed
+from the ends; after that the remote must be printable ASCII (0x21-0x7E) in
+every form. This rejects whitespace, control and format characters such as an
+RTL override, non-ASCII homoglyphs and Unicode spaces (U+0085, U+FEFF), so an
+IDN host must be given in punycode (`xn--…`). A `@` in the path, raw or as
+`%40`, is rejected too, because it is ambiguous with userinfo:
+`https://github.com/org/repo@github.com/x` must not become `github.com/x`. So
+are `.` and `..` path segments, raw or percent-encoded (git's https transport
+removes them, so `github.com/org/../evil/repo` would clone `github.com/evil/repo`
+while `GitRemote` names something else), empty segments (`org//repo`; one
+trailing `/` is allowed), malformed `%` escapes, escaped control
+characters such as `%0A`, and `%2F` inside a segment (some servers decode it
+to `/`). Path characters are limited to the RFC 3986 set: unreserved,
+sub-delims, `:` and percent-escapes, so `\`, quotes, `|`, `^`, brackets and
+braces are rejected (a server that treats `\` as `/` would otherwise resolve
+`..` again). Ports must be 1-65535 without leading zeros (no bare `:`), and
+DNS labels may not start or end with `-`. A scheme URL is also rejected when
+removing its credentials would change anything but the userinfo (host, port or
+path), which catches a password with an unencoded `/` (`https://u:p/w@host/…`,
+which `net/url` cannot parse), so an ambiguous userinfo can never reach
+`GitRemote` or the labels. An explicit default port (`:443` for https, `:80`
+for http) is dropped, so `https://github.com:443/org/repo` names the same
+repository as the template's `github.com/org/repo`. `ssh://` URLs with a port (for example Gerrit's `:29418`) are
+rejected for now with a message pointing to the https URL, because
+`NormalizeGitRemote`/`ToHTTPSCloneURL` would turn the port into a path segment.
+For the same reason, `git://` URLs with any port and `http://` URLs with a
+port other than 80 are rejected with a message pointing to the https URL:
+`ToHTTPSCloneURL` keeps the port, so `clone-url` would speak TLS to a
+plain-text port. The scheme-less `host:port/org/repo` form keeps its port in an
+https `clone-url`, so the port must serve https (`host:22/…` does not work;
+use `git@host:org/repo` for ssh). In that form `:80` is rejected with the same
+message, and `:443` is dropped as the https default.
+Before anything is compared or stored, the query string and fragment are
+dropped and embedded credentials (`https://user:TOKEN@host/…`) are stripped
+(`util.StripGitURLCredentials`), because `GitRemote` and the labels are
+readable by project members. The ssh/SCP login name (`ssh://alice@…`,
+`alice@host:…`) is kept in `source-url`, because it selects the SSH account and
+is not a secret; only a password is removed. A non-`git` SCP login is rewritten
+to `git@` only when deriving `GitRemote` and `clone-url`; `source-url` keeps it.
 
 **Pre-start hook.** Only the **active** hook is copied
 (`GetActiveProjectPreStartHook`). Archived revisions are history, not
@@ -681,6 +737,16 @@ no conflict is possible; `CreateEnvVar` is used rather than `UpsertEnvVar`, so
 that an unexpected conflict surfaces as an error rather than silently
 overwriting.
 
+**GCP service accounts.** `cloneProjectGCPServiceAccounts` lists the source's
+project-scoped `GCPServiceAccount` rows and creates one per row on the clone
+(new UUID, `CreatedBy` = caller), keeping `Verified`. This copies an association
+the source owner already set up and verified; it grants no new IAM permission,
+because what the SA itself may do stays governed by GCP. If the source's
+`scion.io/default-gcp-identity-service-account-id` annotation points at one of those SAs, the
+clone's annotation is rewritten to the cloned SA's ID and the project row is
+re-persisted. Created rows are registered for rollback before the loop, so a
+failure partway through leaves nothing behind.
+
 #### Not copied
 
 | Item | Why |
@@ -693,7 +759,6 @@ overwriting.
 | **Secret-backed env vars** (`Secret == true`) | See above. |
 | **Scheduled events / schedules** | `ScheduledEvent` carries a `ProjectID`, but its payload references agents *by name*, and no agents are cloned. Copying them would produce schedules that fire into the void. Out of scope; revisit if requested. |
 | **Project providers / contributors** | Access control, not configuration. The clone's membership is established by the standard group/policy creation for its new slug. |
-| **GCP service accounts** | Bound to external IAM state; a copied binding would be wrong or a privilege leak. |
 | **Notification subscriptions & subscription templates** | Per-user runtime preferences. |
 | **Project sync state, user access tokens** | Runtime/credential state. |
 | **Project-scoped skill bank entries** | Skill *versions* with storage payloads; deep-copying a skill bank is a materially larger feature. The injected-skills *list* is copied; if it references a project-scoped skill URI, that reference will need the source project to remain readable. Flagged as a known limitation. |

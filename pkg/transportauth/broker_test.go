@@ -230,6 +230,26 @@ func TestResolveBrokerTransport_ADCFallbackWhenMetadataBlocked(t *testing.T) {
 	assert.True(t, ok, "should fall back to ADC when SCION_METADATA_MODE is set")
 }
 
+// TestResolveBrokerTransport_MetadataModePassthrough is the broker-side twin
+// of the FromEnv/FromSettings/configureOIDCTransport passthrough tests: even
+// though SCION_METADATA_MODE is not normally present in the broker's own host
+// environment, this function uses the same IsMetadataRedirected check as
+// those agent-facing paths, so passthrough must behave like unset here too.
+func TestResolveBrokerTransport_MetadataModePassthrough(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	t.Setenv(EnvMetadataMode, "passthrough")
+	t.Setenv(EnvTransportAudience, "https://audience.example.com")
+	t.Setenv(EnvTransportMode, "")
+
+	src, _, err := ResolveBrokerTransport("", "", mockADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src)
+	_, ok := src.(*MetadataSource)
+	assert.True(t, ok, "should use MetadataSource under passthrough, same as unset")
+}
+
 func TestResolveBrokerTransport_NilADCConstructor(t *testing.T) {
 	cleanup := overrideGCPDetection(false)
 	defer cleanup()

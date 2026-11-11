@@ -101,6 +101,9 @@ func setupUserSkillsProject(t *testing.T, endpoint string) (tmpHome, projectDir 
 	data, err := json.Marshal(settings)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
 	return tmpHome, projectDir
 }
 
@@ -512,16 +515,20 @@ func TestRunUserSkillsFromDirectory_TTY_Abort(t *testing.T) {
 	defer func() { autoConfirm = origAutoConfirm }()
 	autoConfirm = false
 
-	var buf bytes.Buffer
+	var buf, errBuf bytes.Buffer
 	userSkillsAddCmd.SetOut(&buf)
 	defer userSkillsAddCmd.SetOut(nil)
+	userSkillsAddCmd.SetErr(&errBuf)
+	defer userSkillsAddCmd.SetErr(nil)
 	userSkillsAddCmd.SetIn(strings.NewReader("n\n"))
 	defer userSkillsAddCmd.SetIn(nil)
 
 	err := runUserSkillsFromDirectory(userSkillsAddCmd, "https://github.com/org/repo/tree/main/skills")
 	assert.NoError(t, err)
 	assert.Equal(t, int32(0), addCalls.Load())
-	assert.Contains(t, buf.String(), "Aborted")
+	// The prompt and its answer go to stderr so stdout stays machine-readable.
+	assert.Contains(t, errBuf.String(), "Aborted")
+	assert.NotContains(t, buf.String(), "Aborted")
 }
 
 func TestRunUserSkillsFromDirectory_NoSkills(t *testing.T) {

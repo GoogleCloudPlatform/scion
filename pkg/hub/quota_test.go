@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -37,100 +36,10 @@ import (
 // making advisory locks effective on SQLite (where they are normally no-ops).
 // ---------------------------------------------------------------------------
 
-type lockingStoreWrapper struct {
-	store.Store
-	mu    sync.Mutex
-	locks map[lockKey]*sync.Mutex
-}
-
-type lockKey struct {
-	classID store.AdvisoryLockKey
-	objID   int32
-}
-
-func newLockingStoreWrapper(s store.Store) *lockingStoreWrapper {
-	return &lockingStoreWrapper{
-		Store: s,
-		locks: make(map[lockKey]*sync.Mutex),
-	}
-}
-
-func (w *lockingStoreWrapper) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
-	return w.TryAdvisoryLockObject(ctx, key, 0)
-}
-
-func (w *lockingStoreWrapper) TryAdvisoryLockObject(_ context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
-	k := lockKey{classID, objID}
-
-	w.mu.Lock()
-	m, ok := w.locks[k]
-	if !ok {
-		m = &sync.Mutex{}
-		w.locks[k] = m
-	}
-	w.mu.Unlock()
-
-	if !m.TryLock() {
-		return false, func() error { return nil }, nil
-	}
-
-	return true, func() error {
-		m.Unlock()
-		return nil
-	}, nil
-}
-
 // ---------------------------------------------------------------------------
 // Helper to create a QuotaService backed by a real (migrated) test store
 // wrapped with effective advisory locking.
 // ---------------------------------------------------------------------------
-
-func newTestQuotaService(t *testing.T) (*QuotaService, store.Store) {
-	t.Helper()
-	baseStore, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("newTestStore: %v", err)
-	}
-	t.Cleanup(func() { _ = baseStore.Close() })
-
-	wrapped := newLockingStoreWrapper(baseStore)
-
-	qs := &QuotaService{
-		store:  wrapped,
-		logger: slog.Default().With("component", "quota-test"),
-	}
-	return qs, wrapped
-}
-
-// seedLimit creates a LimitDefinition in the store and returns it.
-func seedLimit(t *testing.T, s store.Store, name string, defaultValue int64) *store.LimitDefinition {
-	t.Helper()
-	def, err := s.CreateLimitDefinition(context.Background(), &store.LimitDefinition{
-		Name:         name,
-		ResourceType: "test",
-		Unit:         "count",
-		Description:  "test limit: " + name,
-		DefaultValue: defaultValue,
-		System:       true,
-	})
-	require.NoError(t, err)
-	return def
-}
-
-// seedBinding creates an EntitlementBinding in the store.
-func seedBinding(t *testing.T, s store.Store, limitDefID, subjectType, subjectID, scopeType, scopeID string, value int64) {
-	t.Helper()
-	_, err := s.CreateEntitlementBinding(context.Background(), &store.EntitlementBinding{
-		LimitDefinitionID: limitDefID,
-		SubjectType:       subjectType,
-		SubjectID:         subjectID,
-		ScopeType:         scopeType,
-		ScopeID:           scopeID,
-		Value:             value,
-		CreatedBy:         "test",
-	})
-	require.NoError(t, err)
-}
 
 // ===========================================================================
 // CRITICAL ACCEPTANCE TEST: 100 parallel creates against a limit of 10
@@ -372,6 +281,44 @@ func TestRelease_Idempotent(t *testing.T) {
 	qs.Release(ctx, "max_test", "nonexistent-resource")
 }
 
+// nilLimitDefStoreWrapper wraps a real store.Store and makes
+// GetLimitDefinitionByName return (nil, nil) instead of delegating. No
+// shipped store.Store implementation does this today, but the interface
+// does not rule it out, and Reserve/Release both used the returned pointer
+// immediately after the error check without confirming it was non-nil.
+type nilLimitDefStoreWrapper struct {
+	store.Store
+}
+
+func (nilLimitDefStoreWrapper) GetLimitDefinitionByName(context.Context, string) (*store.LimitDefinition, error) {
+	return nil, nil
+}
+
+// TestReserve_NilLimitDefinitionNoEnforcement is a defensive-nil-check
+// regression test: if GetLimitDefinitionByName returns a nil
+// *LimitDefinition with a nil error, Reserve must treat it the same as "no
+// limit defined" (no enforcement) instead of dereferencing the nil pointer.
+func TestReserve_NilLimitDefinitionNoEnforcement(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	qs.store = nilLimitDefStoreWrapper{Store: s}
+	ctx := context.Background()
+
+	created, err := qs.Reserve(ctx, "max_test", "user-1", "project", "p1", "r-1")
+	require.NoError(t, err)
+	assert.False(t, created)
+}
+
+// TestRelease_NilLimitDefinitionNoOp is the Release-side twin of
+// TestReserve_NilLimitDefinitionNoEnforcement: a nil *LimitDefinition with a
+// nil error must be treated as "nothing to release", not dereferenced.
+func TestRelease_NilLimitDefinitionNoOp(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	qs.store = nilLimitDefStoreWrapper{Store: s}
+	ctx := context.Background()
+
+	qs.Release(ctx, "max_test", "r-1")
+}
+
 // ===========================================================================
 // Unlimited merge rule tests
 // ===========================================================================
@@ -497,4 +444,31 @@ func TestCheckAndReserve_ScopesAreIndependent(t *testing.T) {
 
 	// project-2 should still have quota available.
 	require.NoError(t, qs.CheckAndReserve(ctx, "max_agents_per_project", "user-1", "project", "project-2", "a4"))
+}
+
+// ptone/scion#1978: Release touches only the named limit. A resource that
+// holds reservations under two limits keeps the other one.
+func TestRelease_OnlyNamedLimit(t *testing.T) {
+	qs, s := newTestQuotaService(t)
+	ctx := context.Background()
+
+	a := seedLimit(t, s, "max_test_a", 5)
+	b := seedLimit(t, s, "max_test_b", 5)
+	require.NoError(t, qs.CheckAndReserve(ctx, "max_test_a", "user-1", "project", "p1", "shared-resource"))
+	require.NoError(t, qs.CheckAndReserve(ctx, "max_test_b", "user-1", "project", "p1", "shared-resource"))
+
+	qs.Release(ctx, "max_test_a", "shared-resource")
+
+	heldA, err := s.HasActiveReservation(ctx, a.ID, "shared-resource")
+	require.NoError(t, err)
+	heldB, err := s.HasActiveReservation(ctx, b.ID, "shared-resource")
+	require.NoError(t, err)
+	assert.False(t, heldA, "the named limit's reservation is released")
+	assert.True(t, heldB, "another limit's reservation for the same resource is kept")
+
+	// Unknown limit names are a no-op.
+	qs.Release(ctx, "no-such-limit", "shared-resource")
+	heldB, err = s.HasActiveReservation(ctx, b.ID, "shared-resource")
+	require.NoError(t, err)
+	assert.True(t, heldB)
 }

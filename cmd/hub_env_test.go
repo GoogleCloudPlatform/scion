@@ -65,7 +65,7 @@ func setupEnvProject(t *testing.T, home, endpoint string) string {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
-		"grove_id": "test-grove",
+		"project_id": "test-project",
 		"hub": map[string]interface{}{
 			"enabled":  true,
 			"endpoint": endpoint,
@@ -121,7 +121,7 @@ func TestHubEnvListCmd_Exists(t *testing.T) {
 
 func TestHubEnvListCmd_Flags(t *testing.T) {
 	// Verify required flags are present on the list command.
-	assert.NotNil(t, hubEnvListCmd.Flags().Lookup("grove"), "list command should have --grove flag")
+	assert.NotNil(t, hubEnvListCmd.Flags().Lookup("project"), "list command should have --project flag")
 	assert.NotNil(t, hubEnvListCmd.Flags().Lookup("broker"), "list command should have --broker flag")
 	assert.NotNil(t, hubEnvListCmd.Flags().Lookup("json"), "list command should have --json flag")
 }
@@ -206,11 +206,11 @@ func TestRunEnvList_JSON(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestHubEnvListCmd_GroveFlagNoOptDefVal(t *testing.T) {
-	// Verify the --grove flag has NoOptDefVal set so bare --grove works.
-	f := hubEnvListCmd.Flags().Lookup("grove")
-	require.NotNil(t, f, "list command should have --grove flag")
-	assert.Equal(t, scopeInferSentinel, f.NoOptDefVal, "--grove should have NoOptDefVal set to sentinel")
+func TestHubEnvListCmd_ProjectFlagNoOptDefVal(t *testing.T) {
+	// Verify the --project flag has NoOptDefVal set so bare --project works.
+	f := hubEnvListCmd.Flags().Lookup("project")
+	require.NotNil(t, f, "list command should have --project flag")
+	assert.Equal(t, scopeInferSentinel, f.NoOptDefVal, "--project should have NoOptDefVal set to sentinel")
 }
 
 // setupEnvProjectWithHubProjectID creates a project directory with settings that include
@@ -221,7 +221,7 @@ func setupEnvProjectWithHubProjectID(t *testing.T, home, endpoint, projectID str
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
-		"grove_id": "test-grove",
+		"project_id": "test-project",
 		"hub": map[string]interface{}{
 			"enabled":   true,
 			"endpoint":  endpoint,
@@ -290,48 +290,59 @@ func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projec
 	return server
 }
 
-func TestRunEnvList_BareGroveFlag(t *testing.T) {
-	// Test that bare --grove (sentinel value) infers grove ID from settings.
+func TestRunEnvList_BareProjectFlag(t *testing.T) {
+	// Test that bare --project (sentinel value) infers the linked directory
+	// project's hub project ID.
 	orig := saveEnvTestState()
 	defer orig.restore()
 
-	groveUUID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	projectUUID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	envVars := []map[string]interface{}{
-		{"key": "GROVE_VAR", "value": "grove-value", "scope": "grove"},
+		{"key": "PROJECT_VAR", "value": "project-value", "scope": "project"},
 	}
 
-	server := newEnvProjectResolveMockServer(t, groveUUID, "My Project", "my-grove", envVars)
+	server := newEnvProjectResolveMockServer(t, projectUUID, "My Project", "my-project", envVars)
 	defer server.Close()
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, server.URL, groveUUID)
-	projectPath = projectDir
+	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, server.URL, projectUUID)
+	projectPath = ""
+	t.Chdir(filepath.Dir(projectDir))
 
 	envOutputJSON = false
 	envBrokerScope = ""
-	// Simulate bare --grove: set sentinel value and mark flag as changed
 	envProjectScope = scopeInferSentinel
-	_ = hubEnvListCmd.Flags().Set("grove", scopeInferSentinel)
-	defer func() { _ = hubEnvListCmd.Flags().Set("grove", "") }()
 
-	err := runEnvList(hubEnvListCmd, nil)
+	// Use a temporary command instead of the shared hubEnvListCmd: pflag's
+	// Set always leaves Changed permanently true, even after a later
+	// Set("project", "") resets the value, so mutating hubEnvListCmd's real
+	// flags here would leak Changed=true into any later test that inspects
+	// them (TestRunEnvList_WithResults/_Empty/_JSON call
+	// runEnvList(hubEnvListCmd) and read Changed("project")).
+	testCmd := &cobra.Command{Use: "test"}
+	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
+	// Simulate bare --project: set sentinel value and mark flag as changed.
+	_ = testCmd.Flags().Set("project", scopeInferSentinel)
+
+	err := runEnvList(testCmd, nil)
 	assert.NoError(t, err)
 }
 
-func TestRunEnvList_GroveByName(t *testing.T) {
-	// Test that --grove=<name> resolves the grove name to a UUID.
+func TestRunEnvList_ProjectByName(t *testing.T) {
+	// Test that --project=<name> resolves the project name to a UUID.
 	orig := saveEnvTestState()
 	defer orig.restore()
 
-	groveUUID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	projectUUID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	envVars := []map[string]interface{}{
-		{"key": "GROVE_VAR", "value": "grove-value", "scope": "grove"},
+		{"key": "PROJECT_VAR", "value": "project-value", "scope": "project"},
 	}
 
-	server := newEnvProjectResolveMockServer(t, groveUUID, "Hub Local", "hub-local", envVars)
+	server := newEnvProjectResolveMockServer(t, projectUUID, "Hub Local", "hub-local", envVars)
 	defer server.Close()
 
 	tmpHome := t.TempDir()
@@ -343,59 +354,68 @@ func TestRunEnvList_GroveByName(t *testing.T) {
 
 	envOutputJSON = false
 	envBrokerScope = ""
-	// Simulate --grove=hub-local
 	envProjectScope = "hub-local"
-	_ = hubEnvListCmd.Flags().Set("grove", "hub-local")
-	defer func() { _ = hubEnvListCmd.Flags().Set("grove", "") }()
 
-	err := runEnvList(hubEnvListCmd, nil)
+	// Use a temporary command instead of the shared hubEnvListCmd: see the
+	// comment in TestRunEnvList_BareProjectFlag above.
+	testCmd := &cobra.Command{Use: "test"}
+	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
+	// Simulate --project=hub-local.
+	_ = testCmd.Flags().Set("project", "hub-local")
+
+	err := runEnvList(testCmd, nil)
 	assert.NoError(t, err)
 }
 
 func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
-	// Test that resolveEnvScope treats sentinel as "infer from settings".
+	// Test that resolveEnvScope treats sentinel as "infer the project": in
+	// a linked directory project, its hub.projectId.
 	orig := saveEnvTestState()
 	defer orig.restore()
 
-	groveUUID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	projectUUID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 	// Create a temporary command to isolate flag state
 	testCmd := &cobra.Command{Use: "test"}
-	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
-	// Set bare --grove (sentinel)
-	_ = testCmd.Flags().Set("grove", scopeInferSentinel)
+	// Set bare --project (sentinel)
+	_ = testCmd.Flags().Set("project", scopeInferSentinel)
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
-	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, "http://localhost:9999", groveUUID)
-	projectPath = projectDir
+	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, "http://localhost:9999", projectUUID)
+	// The directory project is the walked one: hub env's own --project
+	// flag shadows the root's, so projectPath stays empty.
+	projectPath = ""
+	t.Chdir(filepath.Dir(projectDir))
 
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveEnvScope(testCmd, settings)
+	target, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "project", scope)
-	assert.Equal(t, groveUUID, scopeID, "should infer grove ID from settings when bare --grove is used")
+	assert.Equal(t, "project", target.scope)
+	assert.Equal(t, projectUUID, target.id, "should infer project ID from settings when bare --project is used")
 }
 
-func TestResolveEnvScope_ExplicitGroveValue(t *testing.T) {
-	// Test that resolveEnvScope passes through an explicit grove name.
+func TestResolveEnvScope_ExplicitProjectValue(t *testing.T) {
+	// Test that resolveEnvScope passes through an explicit project name.
 	orig := saveEnvTestState()
 	defer orig.restore()
 
 	testCmd := &cobra.Command{Use: "test"}
-	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
-	// Set --grove=hub-local
-	_ = testCmd.Flags().Set("grove", "hub-local")
+	// Set --project=hub-local
+	_ = testCmd.Flags().Set("project", "hub-local")
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
@@ -405,10 +425,10 @@ func TestResolveEnvScope_ExplicitGroveValue(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveEnvScope(testCmd, settings)
+	target, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "project", scope)
-	assert.Equal(t, "hub-local", scopeID, "should pass through the explicit grove name for later resolution")
+	assert.Equal(t, "project", target.scope)
+	assert.Equal(t, "hub-local", target.id, "should pass through the explicit project name for later resolution")
 }
 
 func TestResolveEnvScope_ScopeHub(t *testing.T) {
@@ -417,8 +437,8 @@ func TestResolveEnvScope_ScopeHub(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&envScope, "scope", "", "")
-	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
@@ -433,10 +453,10 @@ func TestResolveEnvScope_ScopeHub(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveEnvScope(testCmd, settings)
+	target, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "hub", scope)
-	assert.Equal(t, "", scopeID, "hub scope should return empty scopeID (server resolves it)")
+	assert.Equal(t, "hub", target.scope)
+	assert.Equal(t, "", target.id, "hub scope should return empty scopeID (server resolves it)")
 }
 
 func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
@@ -445,14 +465,14 @@ func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&envScope, "scope", "", "")
-	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
-	// Set both --scope and --grove
+	// Set both --scope and --project
 	_ = testCmd.Flags().Set("scope", "hub")
-	_ = testCmd.Flags().Set("grove", "some-grove")
+	_ = testCmd.Flags().Set("project", "some-project")
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
@@ -462,7 +482,7 @@ func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveEnvScope(testCmd, settings)
+	_, err = resolveEnvScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }
@@ -473,8 +493,8 @@ func TestResolveEnvScope_ScopeConflictsWithBroker(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&envScope, "scope", "", "")
-	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
-	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+	testCmd.Flags().StringVar(&envProjectScope, "project", "", "")
+	testCmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
@@ -490,7 +510,7 @@ func TestResolveEnvScope_ScopeConflictsWithBroker(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveEnvScope(testCmd, settings)
+	_, err = resolveEnvScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }

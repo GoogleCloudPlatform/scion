@@ -18,16 +18,25 @@
  * Unified log viewer component for the diagnostics dashboard.
  *
  * Streams and displays log entries from all Scion system components
- * (hub, broker, agent, messages) via a single SSE connection. Features
+ * (hub, broker, agent, messages, artifacts) via a single SSE connection. Features
  * source color-coding, severity filtering (server-side), source and
  * text filtering (client-side), auto-scroll with pause-on-scroll-up,
  * entry detail expansion, and reconnection with gap-fill.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch } from '../../client/api.js';
+import { FrameBatcher, SortedLogBuffer } from '../../client/sorted-log-buffer.js';
 import './json-browser.js';
+import {
+  effectiveTimeZone,
+  formatInstant,
+  formatInstantWithZone,
+  zoneLabel,
+} from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface DiagnosticLogEntry {
   timestamp: string;
@@ -39,8 +48,23 @@ interface DiagnosticLogEntry {
   insertId: string;
   sourceLocation?: { file?: string; line?: string; function?: string };
   logName?: string;
-  source: string; // "hub", "broker", "agent", "messages", "server"
-  _ts?: number; // cached numeric timestamp for sort performance
+  source: string; // "hub", "broker", "agent", "messages", "artifacts", "server"
+}
+
+/**
+ * A buffered entry plus what its row needs, computed once at ingest: the
+ * numeric timestamp (sort key) and the formatted strings. `zone` records the
+ * display zone the strings were formatted in; a zone change re-formats them
+ * once on the next render.
+ */
+interface LogRow {
+  entry: DiagnosticLogEntry;
+  timestamp: string;
+  ts: number;
+  zone: string;
+  time: string;
+  timeTitle: string;
+  subsystem: string;
 }
 
 interface DiagnosticsLogResponse {
@@ -51,6 +75,30 @@ interface DiagnosticsLogResponse {
 
 const MAX_BUFFER = 2000;
 
+function toLogRow(entry: DiagnosticLogEntry, zone: string): LogRow {
+  const row: LogRow = {
+    entry,
+    timestamp: entry.timestamp,
+    ts: new Date(entry.timestamp).getTime(),
+    zone: '',
+    time: '',
+    timeTitle: '',
+    subsystem: (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '',
+  };
+  formatLogRow(row, zone);
+  return row;
+}
+
+/** (Re-)formats a row's strings unless they are already in `zone`. */
+function formatLogRow(row: LogRow, zone: string): void {
+  if (row.zone === zone) return;
+  row.zone = zone;
+  // Row time in the effective display zone (24-hour); the tooltip adds the
+  // date and names the zone.
+  row.time = formatInstant(row.entry.timestamp, 'time-millis');
+  row.timeTitle = formatInstantWithZone(row.entry.timestamp, 'datetime-full');
+}
+
 const SEVERITY_LEVELS = ['DEFAULT', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const;
 
 const SOURCE_CONFIG: Record<string, { badge: string; color: string; bg: string }> = {
@@ -58,24 +106,45 @@ const SOURCE_CONFIG: Record<string, { badge: string; color: string; bg: string }
   broker: { badge: 'BRK', color: '#059669', bg: '#ecfdf5' },
   agent: { badge: 'AGT', color: '#d97706', bg: '#fffbeb' },
   messages: { badge: 'MSG', color: '#7c3aed', bg: '#f5f3ff' },
+  artifacts: { badge: 'ART', color: '#db2777', bg: '#fdf2f8' },
   server: { badge: 'SRV', color: '#4b5563', bg: '#f9fafb' },
 };
 
-const ALL_SOURCES = ['hub', 'broker', 'agent', 'messages', 'server'];
+const ALL_SOURCES = ['hub', 'broker', 'agent', 'messages', 'artifacts', 'server'];
 
 const SEARCH_DEBOUNCE_MS = 300;
 const AUTO_SCROLL_THRESHOLD = 50; // px from bottom
 
 @customElement('scion-unified-log-viewer')
 export class ScionUnifiedLogViewer extends LitElement {
+  /** Re-renders timestamps and date dividers when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: String })
   gcpProjectId = '';
 
   @property({ type: String })
   initialSeverity = 'INFO';
 
-  @state() private entries: DiagnosticLogEntry[] = [];
-  private entryMap = new Map<string, DiagnosticLogEntry>();
+  /** Entries in ascending timestamp order (oldest first, as rendered). */
+  private readonly buffer = new SortedLogBuffer<LogRow>({
+    cap: MAX_BUFFER,
+    keyOf: (row) => row.entry.insertId,
+  });
+  /** Buffered rows, oldest first (read by the reconnect gap-fill). */
+  private get entries(): readonly LogRow[] {
+    return this.buffer.items;
+  }
+  /**
+   * Streamed lines render at most once per animation frame; auto-scroll
+   * follows that render.
+   */
+  private readonly renderBatch = new FrameBatcher(() => {
+    this.requestUpdate();
+    if (this.autoScroll) {
+      void this.updateComplete.then(() => this.scrollToBottom());
+    }
+  });
   @state() private streaming = false;
   @state() private loading = false;
   @state() private error: string | null = null;
@@ -83,7 +152,21 @@ export class ScionUnifiedLogViewer extends LitElement {
   @state() private enabledSources = new Set<string>(ALL_SOURCES);
   @state() private searchText = '';
   @state() private autoScroll = true;
-  @state() private newEntriesBelowCount = 0;
+  /**
+   * Count for the "new entries below" banner. Not a reactive property: the
+   * stream bumps it per line, so it renders with the next frame's batch
+   * instead of once per line. The setter schedules that batch, which lets the
+   * stream listener (unchanged, still assigning `newEntriesBelowCount`)
+   * drive it; keep it a setter rather than turning it back into `@state`.
+   */
+  private newEntriesBelow = 0;
+  private get newEntriesBelowCount(): number {
+    return this.newEntriesBelow;
+  }
+  private set newEntriesBelowCount(value: number) {
+    this.newEntriesBelow = value;
+    this.renderBatch.schedule();
+  }
   @state() private expandedIds = new Set<string>();
   @state() private reconnecting = false;
   @state() private reconnectAttempt = 0;
@@ -195,7 +278,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     }
 
     .log-scroller {
-      max-height: calc(100vh - 22rem);
+      max-height: calc(var(--scion-app-height, 100dvh) - 22rem);
       min-height: 400px;
       overflow-y: auto;
       font-family: var(--scion-font-mono, monospace);
@@ -379,13 +462,20 @@ export class ScionUnifiedLogViewer extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Lit does not re-render on reconnect; show lines whose frame was
+    // cancelled by disconnectedCallback.
+    if (this.buffer.size > 0) this.requestUpdate();
     this.severity = this.initialSeverity || 'INFO';
-    this.loadInitialData();
+    void this.loadInitialData();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
+    // A frame left pending would keep this detached element (and its buffer)
+    // alive until a hidden tab becomes visible; connectedCallback renders
+    // anything it skipped.
+    this.renderBatch.cancel();
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
@@ -444,7 +534,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     this.eventSource.addEventListener('log', (event: Event) => {
       try {
-        const entry = JSON.parse((event as MessageEvent).data) as DiagnosticLogEntry;
+        const entry = JSON.parse((event as MessageEvent<string>).data) as DiagnosticLogEntry;
         this.mergeEntries([entry]);
 
         // Only count entries that pass current filters for the "new entries" banner
@@ -495,25 +585,27 @@ export class ScionUnifiedLogViewer extends LitElement {
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
     this.reconnectAttempt++;
 
-    this.reconnectTimer = setTimeout(async () => {
-      this.reconnectTimer = null;
-      // Gap-fill: fetch entries since our last entry
-      if (this.entries.length > 0) {
-        try {
-          const params = new URLSearchParams({ tail: '200' });
-          if (this.severity) params.set('severity', this.severity);
-          // Entries are sorted oldest-first (ascending), so last element is the latest
-          params.set('since', this.entries[this.entries.length - 1].timestamp);
-          const res = await apiFetch(`/api/v1/admin/diagnostics/logs?${params}`);
-          if (res.ok) {
-            const data = (await res.json()) as DiagnosticsLogResponse;
-            this.mergeEntries(data.entries);
+    this.reconnectTimer = setTimeout(() => {
+      void (async () => {
+        this.reconnectTimer = null;
+        // Gap-fill: fetch entries since our last entry
+        if (this.entries.length > 0) {
+          try {
+            const params = new URLSearchParams({ tail: '200' });
+            if (this.severity) params.set('severity', this.severity);
+            // Entries are sorted oldest-first (ascending), so last element is the latest
+            params.set('since', this.entries[this.entries.length - 1].timestamp);
+            const res = await apiFetch(`/api/v1/admin/diagnostics/logs?${params}`);
+            if (res.ok) {
+              const data = (await res.json()) as DiagnosticsLogResponse;
+              this.mergeEntries(data.entries);
+            }
+          } catch {
+            // Gap-fill failed, but we'll still try to reconnect the stream
           }
-        } catch {
-          // Gap-fill failed, but we'll still try to reconnect the stream
         }
-      }
-      this.startStream();
+        this.startStream();
+      })();
     }, delay);
   }
 
@@ -521,58 +613,24 @@ export class ScionUnifiedLogViewer extends LitElement {
   // Buffer Management
   // ---------------------------------------------------------------------------
 
-  /** Cache numeric timestamp on an entry for sort performance. */
-  private ensureTimestamp(entry: DiagnosticLogEntry): number {
-    if (entry._ts === undefined) {
-      entry._ts = new Date(entry.timestamp).getTime();
+  /**
+   * Adds entries to the sorted buffer (formatting each new one once) and
+   * schedules one render for the next animation frame.
+   */
+  private mergeEntries(newEntries: DiagnosticLogEntry[]): void {
+    const zone = effectiveTimeZone();
+    let added = false;
+    for (const entry of newEntries) {
+      if (!this.buffer.has(entry.insertId)) {
+        added = this.buffer.insert(toLogRow(entry, zone)) || added;
+      }
     }
-    return entry._ts;
+    if (added) this.renderBatch.schedule();
   }
 
-  private mergeEntries(newEntries: DiagnosticLogEntry[]): void {
-    // Collect genuinely new entries (not already in the dedup map)
-    const toInsert: DiagnosticLogEntry[] = [];
-    for (const entry of newEntries) {
-      if (!this.entryMap.has(entry.insertId)) {
-        this.ensureTimestamp(entry);
-        this.entryMap.set(entry.insertId, entry);
-        toInsert.push(entry);
-      }
-    }
-
-    if (toInsert.length === 0) return;
-
-    if (this.entries.length === 0) {
-      // First load: sort the full batch once
-      toInsert.sort((a, b) => a._ts! - b._ts!);
-      this.entries = toInsert;
-    } else if (
-      toInsert.length === 1 &&
-      toInsert[0]._ts! >= this.entries[this.entries.length - 1]._ts!
-    ) {
-      // Common case: single stream entry newer than latest — append directly
-      this.entries = [...this.entries, toInsert[0]];
-    } else {
-      // Multiple entries or out-of-order: merge and sort
-      const merged = [...this.entries, ...toInsert];
-      merged.sort((a, b) => a._ts! - b._ts!);
-      this.entries = merged;
-    }
-
-    // Cap buffer — evict oldest entries
-    if (this.entries.length > MAX_BUFFER) {
-      const overflow = this.entries.length - MAX_BUFFER;
-      const evicted = this.entries.slice(0, overflow);
-      for (const e of evicted) {
-        this.entryMap.delete(e.insertId);
-      }
-      this.entries = this.entries.slice(overflow);
-    }
-
-    // Auto-scroll after render
-    if (this.autoScroll) {
-      this.updateComplete.then(() => this.scrollToBottom());
-    }
+  private clearEntries(): void {
+    this.buffer.clear();
+    this.requestUpdate();
   }
 
   /** Check if a single entry passes current client-side filters. */
@@ -585,8 +643,8 @@ export class ScionUnifiedLogViewer extends LitElement {
     return true;
   }
 
-  private getFilteredEntries(): DiagnosticLogEntry[] {
-    return this.entries.filter((entry) => this.entryPassesFilters(entry));
+  private getFilteredRows(): LogRow[] {
+    return this.buffer.items.filter((row) => this.entryPassesFilters(row.entry));
   }
 
   // ---------------------------------------------------------------------------
@@ -604,11 +662,10 @@ export class ScionUnifiedLogViewer extends LitElement {
       })
     );
     this.stopStream();
-    this.entryMap.clear();
-    this.entries = [];
+    this.clearEntries();
     this.expandedIds.clear();
     this.newEntriesBelowCount = 0;
-    this.loadInitialData();
+    void this.loadInitialData();
   }
 
   private handleSourceToggle(source: string): void {
@@ -632,8 +689,7 @@ export class ScionUnifiedLogViewer extends LitElement {
   }
 
   private handleClear(): void {
-    this.entryMap.clear();
-    this.entries = [];
+    this.clearEntries();
     this.expandedIds.clear();
     this.newEntriesBelowCount = 0;
   }
@@ -687,7 +743,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
   override render() {
     // Compute filtered entries once and pass to both sub-renders to avoid double-filtering.
-    const filteredEntries = this.getFilteredEntries();
+    const filteredEntries = this.getFilteredRows();
     return html`
       ${this.renderFilterBar()} ${this.renderLogContainer(filteredEntries)}
       ${this.renderStatusBar(filteredEntries)}
@@ -757,12 +813,12 @@ export class ScionUnifiedLogViewer extends LitElement {
     `;
   }
 
-  private renderLogContainer(filteredEntries: DiagnosticLogEntry[]) {
+  private renderLogContainer(filteredEntries: LogRow[]) {
     return html`
       <div class="log-container">
-        ${this.loading && this.entries.length === 0
+        ${this.loading && this.buffer.size === 0
           ? html`<div class="state-msg"><sl-spinner></sl-spinner><span>Loading logs...</span></div>`
-          : this.error && this.entries.length === 0
+          : this.error && this.buffer.size === 0
             ? html`
                 <div class="state-msg">
                   <sl-icon name="exclamation-triangle"></sl-icon>
@@ -786,8 +842,8 @@ export class ScionUnifiedLogViewer extends LitElement {
     `;
   }
 
-  private renderEntries(filtered: DiagnosticLogEntry[]) {
-    if (filtered.length === 0 && this.entries.length > 0) {
+  private renderEntries(filtered: LogRow[]) {
+    if (filtered.length === 0 && this.buffer.size > 0) {
       return html`
         <div class="state-msg">
           <sl-icon name="funnel"></sl-icon>
@@ -805,48 +861,47 @@ export class ScionUnifiedLogViewer extends LitElement {
       `;
     }
 
-    const rows: unknown[] = [];
-    for (const entry of filtered) {
-      const config = SOURCE_CONFIG[entry.source] || SOURCE_CONFIG.server;
-      const d = new Date(entry.timestamp);
-      const timeStr = d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        fractionalSecondDigits: 3,
-      } as Intl.DateTimeFormatOptions);
-      const subsystem =
-        (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '';
-      const isExpanded = this.expandedIds.has(entry.insertId);
+    // Formatting happened at ingest; formatLogRow only redoes it after a
+    // display zone change.
+    const zone = effectiveTimeZone();
+    for (const row of filtered) formatLogRow(row, zone);
+    return repeat(
+      filtered,
+      (row) => row.entry.insertId,
+      (row) => this.renderRow(row)
+    );
+  }
 
-      rows.push(html`
-        <div
-          class="log-row"
-          style="border-left-color: ${config.color}"
-          @click=${() => this.toggleExpand(entry.insertId)}
+  private renderRow(row: LogRow): TemplateResult {
+    const entry = row.entry;
+    const config = SOURCE_CONFIG[entry.source] || SOURCE_CONFIG.server;
+    const isExpanded = this.expandedIds.has(entry.insertId);
+    return html`
+      <div
+        class="log-row"
+        style="border-left-color: ${config.color}"
+        @click=${() => this.toggleExpand(entry.insertId)}
+      >
+        <span class="ts" title=${row.timeTitle}>${row.time}</span>
+        <span class="source-badge" style="background: ${config.bg}; color: ${config.color};"
+          >${config.badge}</span
         >
-          <span class="ts">${timeStr}</span>
-          <span class="source-badge" style="background: ${config.bg}; color: ${config.color};"
-            >${config.badge}</span
-          >
-          <span class="sev sev-${entry.severity}">${entry.severity}</span>
-          <span class="sub" title=${subsystem}>${subsystem}</span>
-          <span class="msg" title=${entry.message}>${entry.message}</span>
-        </div>
-      `);
-
-      if (isExpanded) {
-        rows.push(this.renderDetailPanel(entry));
-      }
-    }
-
-    return rows;
+        <span class="sev sev-${entry.severity}">${entry.severity}</span>
+        <span class="sub" title=${row.subsystem}>${row.subsystem}</span>
+        <span class="msg" title=${entry.message}>${entry.message}</span>
+      </div>
+      ${isExpanded ? this.renderDetailPanel(entry) : nothing}
+    `;
   }
 
   private renderDetailPanel(entry: DiagnosticLogEntry) {
-    const d = new Date(entry.timestamp);
-    const fullTimestamp = d.toISOString();
+    // The instant in the display zone (with milliseconds and the zone named),
+    // then the raw UTC ISO value for correlating with Cloud Logging. An
+    // unparsable timestamp is shown as given.
+    const date = formatInstant(entry.timestamp, 'date');
+    const fullTimestamp = date
+      ? `${date}, ${formatInstant(entry.timestamp, 'time-millis')} (${zoneLabel()}) · ${new Date(entry.timestamp).toISOString()} UTC`
+      : entry.timestamp;
 
     return html`
       <div class="detail-row">
@@ -922,7 +977,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     return obj;
   }
 
-  private renderStatusBar(filtered: DiagnosticLogEntry[]) {
+  private renderStatusBar(filtered: LogRow[]) {
     const streamState = this.streaming
       ? 'Streaming'
       : this.reconnecting
@@ -933,8 +988,8 @@ export class ScionUnifiedLogViewer extends LitElement {
     return html`
       <div class="status-bar">
         <span
-          >${streamState} · ${filtered.length} entries (${this.entries.length} total) · Buffer:
-          ${this.entries.length}/${MAX_BUFFER}</span
+          >${streamState} · ${filtered.length} entries (${this.buffer.size} total) · Buffer:
+          ${this.buffer.size}/${MAX_BUFFER}</span
         >
         <span>${scrollState}</span>
       </div>

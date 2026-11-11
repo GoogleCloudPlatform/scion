@@ -18,7 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
+	"io"
 	"strings"
 	"time"
 
@@ -88,7 +88,7 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 
 	email := strings.TrimSpace(strings.ToLower(adminPromoteEmail))
 	if email == "" {
-		return fmt.Errorf("--email is required")
+		return newUsageError("--email is required")
 	}
 
 	// Load config to find database
@@ -111,14 +111,7 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("no database URL configured; provide --db flag or ensure server config exists")
 	}
 
-	printURL := cfg.Database.URL
-	if u, err := url.Parse(printURL); err == nil && u.User != nil {
-		if _, has := u.User.Password(); has {
-			u.User = url.UserPassword(u.User.Username(), "xxxxx")
-			printURL = u.String()
-		}
-	}
-	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, printURL)
+	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
 
 	// Open the database
 	s, err := openRecoveryStore(ctx, cfg)
@@ -127,6 +120,13 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = s.Close() }()
 
+	return promoteUserToAdmin(ctx, s, email, out)
+}
+
+// promoteUserToAdmin promotes the existing user with email to admin: it sets
+// the role and creates the system super-admin role binding in one
+// transaction. A hub test identity is refused.
+func promoteUserToAdmin(ctx context.Context, s store.Store, email string, out io.Writer) error {
 	// Look up the user by email
 	user, err := s.GetUserByEmail(ctx, email)
 	if err != nil {
@@ -134,6 +134,11 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("user with email %q not found in the database; the user must already exist", email)
 		}
 		return fmt.Errorf("failed to look up user: %w", err)
+	}
+
+	// A hub test identity is never promoted: its role is fixed at issuance.
+	if !user.IsHumanKind() || store.IsReservedTestIdentityEmail(user.Email) {
+		return fmt.Errorf("user %q is a hub test identity; test identities cannot be promoted to admin", email)
 	}
 
 	// Check if already admin

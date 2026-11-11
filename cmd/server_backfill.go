@@ -16,12 +16,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -43,8 +45,9 @@ var serverBackfillCmd = &cobra.Command{
 	Long: `Scan messages that predate the conversation model and assign them
 to conversations based on their thread, sender, and recipient metadata.
 
-By default runs in DRY-RUN mode — scans and reports what would change
-without modifying the database. Pass --execute to apply changes.
+By default runs in DRY-RUN mode — scans and reports what would change;
+it removes or rewrites no rows but still applies the schema migration.
+Pass --execute to apply changes.
 
 The backfill is idempotent: messages already attributed to a conversation
 are skipped, so re-running is safe. It supports resume via --checkpoint.
@@ -85,6 +88,8 @@ func backfillConfigFromFlags() messaging.BackfillConfig {
 }
 
 func runServerBackfill(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -168,15 +173,7 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 	}
 
 	// --db flag overrides config.
-	if backfillDB != "" {
-		cfg.Database.URL = backfillDB
-		// Auto-detect driver from DSN.
-		if strings.HasPrefix(backfillDB, "postgres://") || strings.HasPrefix(backfillDB, "postgresql://") {
-			cfg.Database.Driver = "postgres"
-		} else {
-			cfg.Database.Driver = "sqlite"
-		}
-	}
+	maintenanceDBOverride(cfg, backfillDB)
 
 	if cfg.Database.URL == "" {
 		return nil, fmt.Errorf("no database configured: set --db, SCION_SERVER_DATABASE_URL env, or database.url in server config")
@@ -200,9 +197,9 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
 		if !skipMigrations {
-			if err := entc.AutoMigrate(ctx, client); err != nil {
+			if err := migrateMaintenanceDB(ctx, client, backfillExecute, cfg.Database.AllowShadowedSchema); err != nil {
 				_ = client.Close()
-				return nil, fmt.Errorf("running migrations: %w", err)
+				return nil, err
 			}
 		}
 		s = entadapter.NewCompositeStore(client)
@@ -213,9 +210,9 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
 		if !skipMigrations {
-			if err := entc.AutoMigrate(ctx, client); err != nil {
+			if err := migrateMaintenanceDB(ctx, client, backfillExecute, cfg.Database.AllowShadowedSchema); err != nil {
 				_ = client.Close()
-				return nil, fmt.Errorf("running migrations: %w", err)
+				return nil, err
 			}
 		}
 		s = entadapter.NewCompositeStore(client)
@@ -225,6 +222,44 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 	}
 
 	return s, nil
+}
+
+// maintenanceDBOverride applies a maintenance command's --db flag to cfg:
+// a non-empty dsn replaces the configured URL, and the driver is detected
+// from its prefix (postgres:// or postgresql:// is Postgres, anything else
+// a SQLite path). An empty dsn leaves cfg as it is.
+func maintenanceDBOverride(cfg *config.GlobalConfig, dsn string) {
+	if dsn == "" {
+		return
+	}
+	cfg.Database.URL = dsn
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		cfg.Database.Driver = "postgres"
+	} else {
+		cfg.Database.Driver = "sqlite"
+	}
+}
+
+// migrateMaintenanceDB runs the schema migration for the maintenance
+// commands that open the hub database directly (server backfill and server
+// migrate-dm-keys). The pre-migration steps delete duplicate rows, so they run
+// only when execute is set: a dry run must not modify the database. A dry run
+// on a database holding such rows therefore fails at the unique index
+// creation, and the error says how to proceed.
+//
+// Like server start, it first runs the PostgreSQL search_path shadow guard;
+// allowShadowed is server.database.allow_shadowed_schema (ptone/scion#4432).
+func migrateMaintenanceDB(ctx context.Context, client *ent.Client, execute, allowShadowed bool) error {
+	err := migrateHubSchema(ctx, client, allowShadowed, execute)
+	if err == nil {
+		return nil
+	}
+	var shadow *entadapter.SchemaShadowError
+	if !execute && !errors.As(err, &shadow) {
+		return fmt.Errorf("running migrations (a dry run skips the pre-migration steps that remove duplicate rows; "+
+			"on a unique-constraint error, rerun with --execute or start the Hub once on this version): %w", err)
+	}
+	return fmt.Errorf("running migrations: %w", err)
 }
 
 // mergeBackfillResult adds the counts from src into dst.

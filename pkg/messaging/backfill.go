@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -154,10 +155,14 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 	groups := make(map[string]*conversationGroup)
 	cursor := cfg.Checkpoint // empty string = start from beginning; cursor string = resume
 
+	// Nothing reads the page TotalCount, so skip it: the store would
+	// otherwise COUNT every matching message on each page. The keyset
+	// cursor alone decides when the scan ends.
 	for {
 		page, err := s.msgStore.ListMessages(ctx, filter, store.ListOptions{
-			Limit:  cfg.BatchSize,
-			Cursor: cursor,
+			Limit:          cfg.BatchSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("listing messages: %w", err)
@@ -414,6 +419,15 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 	}
 
 	upserted, err := s.convStore.UpsertConversationByExternalRef(ctx, conv)
+	if errors.Is(err, store.ErrConversationProjectMismatch) {
+		// A conversation keeps the project it was created with. The key
+		// already names a conversation of another project, so these
+		// messages are left unstamped and counted as skipped.
+		slog.InfoContext(ctx, "backfill: conversation key belongs to another project; group skipped",
+			"external_ref", g.key, "project_id", g.projectID, "messages", len(g.messageIDs))
+		result.Skipped += len(g.messageIDs)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("upserting conversation: %w", err)
 	}

@@ -698,23 +698,23 @@ test_cli_commands() {
 
     local template_dir
     template_dir=$(create_test_template)
-    local grove_dir="$TEST_DIR/test-grove"
+    local project_dir="$TEST_DIR/test-project"
     local template_name="cli-test-template"
-    local grove_template_dir="$grove_dir/.scion/templates/$template_name"
+    local project_template_dir="$project_dir/.scion/templates/$template_name"
     local hub_url="http://localhost:$HUB_PORT"
 
-    # Create a test grove and copy template into its templates directory
-    # (CLI resolves templates by name from grove or global template dirs)
-    mkdir -p "$grove_dir/.scion/templates"
-    cp -r "$template_dir" "$grove_template_dir"
-    cd "$grove_dir"
+    # Create a test project and copy template into its templates directory
+    # (CLI resolves templates by name from project or global template dirs)
+    mkdir -p "$project_dir/.scion/templates"
+    cp -r "$template_dir" "$project_template_dir"
+    cd "$project_dir"
 
-    log_info "Setting up test grove at $grove_dir..."
+    log_info "Setting up test project at $project_dir..."
 
-    # Enable Hub for the test grove
-    log_info "Enabling Hub integration for test grove..."
+    # Enable Hub for the test project
+    log_info "Enabling Hub integration for test project..."
     if $TEST_DIR/scion hub enable --hub "$hub_url" 2>&1; then
-        log_success "Hub enabled for test grove"
+        log_success "Hub enabled for test project"
     else
         log_warning "Hub enable may have issues - CLI tests may fail"
     fi
@@ -742,7 +742,7 @@ test_cli_commands() {
         echo ""
         echo "## Updated"
         echo "- Added by integration test push verification"
-    } >> "$grove_template_dir/agents.md"
+    } >> "$project_template_dir/agents.md"
 
     if $TEST_DIR/scion template push "$template_name" \
         --hub "$hub_url" 2>&1; then
@@ -769,11 +769,11 @@ test_cli_commands() {
     if [[ -d "$pull_dir" ]]; then
         local compare_success=true
 
-        # Compare against the grove template dir (which has the pushed modifications)
+        # Compare against the project template dir (which has the pushed modifications)
 
         # Verify scion-agent.yaml
         if [[ -f "$pull_dir/scion-agent.yaml" ]]; then
-            if diff "$grove_template_dir/scion-agent.yaml" "$pull_dir/scion-agent.yaml" > /dev/null 2>&1; then
+            if diff "$project_template_dir/scion-agent.yaml" "$pull_dir/scion-agent.yaml" > /dev/null 2>&1; then
                 log_success "  scion-agent.yaml matches"
             else
                 log_error "  scion-agent.yaml MISMATCH"
@@ -786,7 +786,7 @@ test_cli_commands() {
 
         # Verify agents.md (should include the pushed modifications)
         if [[ -f "$pull_dir/agents.md" ]]; then
-            if diff "$grove_template_dir/agents.md" "$pull_dir/agents.md" > /dev/null 2>&1; then
+            if diff "$project_template_dir/agents.md" "$pull_dir/agents.md" > /dev/null 2>&1; then
                 log_success "  agents.md matches (includes pushed changes)"
             else
                 log_error "  agents.md MISMATCH"
@@ -799,7 +799,7 @@ test_cli_commands() {
 
         # Verify system-prompt.md
         if [[ -f "$pull_dir/system-prompt.md" ]]; then
-            if diff "$grove_template_dir/system-prompt.md" "$pull_dir/system-prompt.md" > /dev/null 2>&1; then
+            if diff "$project_template_dir/system-prompt.md" "$pull_dir/system-prompt.md" > /dev/null 2>&1; then
                 log_success "  system-prompt.md matches"
             else
                 log_error "  system-prompt.md MISMATCH"
@@ -812,7 +812,7 @@ test_cli_commands() {
 
         # Verify home/.bashrc
         if [[ -f "$pull_dir/home/.bashrc" ]]; then
-            if diff "$grove_template_dir/home/.bashrc" "$pull_dir/home/.bashrc" > /dev/null 2>&1; then
+            if diff "$project_template_dir/home/.bashrc" "$pull_dir/home/.bashrc" > /dev/null 2>&1; then
                 log_success "  home/.bashrc matches"
             else
                 log_error "  home/.bashrc MISMATCH"
@@ -825,7 +825,7 @@ test_cli_commands() {
 
         # Verify harness-configs override
         if [[ -f "$pull_dir/harness-configs/claude/config.yaml" ]]; then
-            if diff "$grove_template_dir/harness-configs/claude/config.yaml" "$pull_dir/harness-configs/claude/config.yaml" > /dev/null 2>&1; then
+            if diff "$project_template_dir/harness-configs/claude/config.yaml" "$pull_dir/harness-configs/claude/config.yaml" > /dev/null 2>&1; then
                 log_success "  harness-configs/claude/config.yaml matches"
             else
                 log_error "  harness-configs/claude/config.yaml MISMATCH"

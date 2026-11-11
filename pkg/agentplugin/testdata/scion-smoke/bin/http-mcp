@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Minimal streamable-http MCP server for the scion-smoke fixture.
+
+Listens on 127.0.0.1:8765 (override with --port) and answers JSON-RPC POSTs
+on /mcp with application/json responses. Tool `ping` returns "pong".
+Stdlib only.
+"""
+import json
+import sys
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PROTOCOL = "2025-06-18"
+SESSION = uuid.uuid4().hex
+
+
+def handle(req):
+    method = req.get("method")
+    if method == "initialize":
+        return {
+            "protocolVersion": req.get("params", {}).get("protocolVersion", PROTOCOL),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "scion-smoke-http", "version": "0.1.0"},
+        }
+    if method == "tools/list":
+        return {"tools": [{
+            "name": "ping",
+            "description": "Return pong.",
+            "inputSchema": {"type": "object", "properties": {}},
+        }]}
+    if method == "tools/call":
+        if req.get("params", {}).get("name") != "ping":
+            raise KeyError(req.get("params", {}).get("name"))
+        return {"content": [{"type": "text", "text": "pong"}]}
+    if method == "ping":
+        return {}
+    raise KeyError(method)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        sys.stderr.write("http-mcp: " + (fmt % args) + "\n")
+
+    def do_GET(self):
+        self.send_response(405)
+        self.send_header("Allow", "POST")
+        self.end_headers()
+
+    def do_DELETE(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/mcp":
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            msg = json.loads(self.rfile.read(length) or b"null")
+        except json.JSONDecodeError:
+            self.send_response(400)
+            self.end_headers()
+            return
+        batch = msg if isinstance(msg, list) else [msg]
+        out = []
+        for req in batch:
+            if not isinstance(req, dict) or "id" not in req:
+                continue
+            try:
+                out.append({"jsonrpc": "2.0", "id": req["id"], "result": handle(req)})
+            except KeyError as exc:
+                out.append({"jsonrpc": "2.0", "id": req["id"],
+                            "error": {"code": -32601, "message": f"unknown: {exc}"}})
+        if not out:
+            self.send_response(202)
+            self.send_header("Mcp-Session-Id", SESSION)
+            self.end_headers()
+            return
+        body = json.dumps(out if isinstance(msg, list) else out[0]).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Mcp-Session-Id", SESSION)
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def main():
+    port = 8765
+    if len(sys.argv) == 3 and sys.argv[1] == "--port":
+        port = int(sys.argv[2])
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

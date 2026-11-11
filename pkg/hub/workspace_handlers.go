@@ -17,12 +17,15 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -80,6 +83,11 @@ type SyncToFinalizeResponse struct {
 	FilesApplied int `json:"filesApplied"`
 	// BytesTransferred is the total bytes transferred.
 	BytesTransferred int64 `json:"bytesTransferred"`
+	// Warnings lists non-fatal notices, for example that the agent was
+	// already launching and the workspace was not applied, or that files were
+	// ignored because the project gives each agent an empty workspace
+	// directory.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // WorkspaceStatusResponse is the response for getting workspace sync status.
@@ -117,28 +125,28 @@ func (s *Server) handleWorkspaceRoutes(w http.ResponseWriter, r *http.Request, a
 		if r.Method == http.MethodGet {
 			s.handleWorkspaceStatus(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 		}
 	case "sync-from":
 		// POST /api/v1/agents/{id}/workspace/sync-from - Initiate sync from agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncFrom(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	case "sync-to":
 		// POST /api/v1/agents/{id}/workspace/sync-to - Initiate sync to agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncTo(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	case "sync-to/finalize":
 		// POST /api/v1/agents/{id}/workspace/sync-to/finalize - Finalize sync to agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncToFinalize(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	default:
 		NotFound(w, "Workspace action")
@@ -249,15 +257,32 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 		ExcludePatterns: req.ExcludePatterns,
 	}
 
+	// The response waits on the upload tunneled to the broker, bounded by
+	// syncDispatchTimeout, the hub-to-broker request limit, and this
+	// request's write deadline is extended to cover it (ptone/scion#4212).
+	workCtx, cancelWork := context.WithTimeout(ctx, syncDispatchTimeout)
+	defer cancelWork()
+	extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
+
 	// Send tunneled request to Runtime Broker
 	var uploadResp RuntimeBrokerWorkspaceUploadResponse
-	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+	if err := tunnelAgentWorkspaceRequest(workCtx, s.store, cc, agent, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		// Check if it's a timeout or connection issue
-		if strings.Contains(err.Error(), "timeout") {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(brokerErrorMatchText(err), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
 			return
 		}
 		RuntimeError(w, "Failed to sync workspace: "+err.Error())
+		return
+	}
+	// A broker reply with a 2xx status but no manifest is a broker fault:
+	// answer 502, as for other broker failures, rather than dereference
+	// the missing manifest (ptone/scion#4245).
+	if uploadResp.Manifest == nil {
+		RuntimeError(w, "Failed to sync workspace: runtime broker returned no workspace manifest")
 		return
 	}
 
@@ -272,7 +297,8 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 			Expires: SignedURLExpiry,
 		})
 		if err != nil {
-			RuntimeError(w, "Failed to generate download URL: "+err.Error())
+			slog.ErrorContext(ctx, "workspace download URL failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
+			RuntimeError(w, "Failed to generate download URL")
 			return
 		}
 
@@ -283,10 +309,6 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 			Hash: file.Hash,
 		})
 	}
-
-	// For hub-managed projects on remote brokers, also sync workspace back
-	// to the Hub filesystem so the local copy stays up-to-date.
-	s.syncHubManagedWorkspaceBack(ctx, agent, storagePath)
 
 	writeJSON(w, http.StatusOK, SyncFromResponse{
 		Manifest:     uploadResp.Manifest,
@@ -360,7 +382,8 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 			ContentType: "application/octet-stream",
 		})
 		if err != nil {
-			RuntimeError(w, "Failed to generate upload URL: "+err.Error())
+			slog.ErrorContext(ctx, "workspace upload URL failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
+			RuntimeError(w, "Failed to generate upload URL")
 			return
 		}
 
@@ -408,6 +431,16 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A launch is already in flight (for example a duplicate finalize): do
+	// not dispatch again.
+	if agent.IsInFlight() {
+		writeJSON(w, http.StatusOK, SyncToFinalizeResponse{
+			Applied:  false,
+			Warnings: []string{launchInFlightInputsWarning},
+		})
+		return
+	}
+
 	// Check agent is in a valid state for finalize
 	if agent.Phase != string(state.PhaseRunning) && agent.Phase != string(state.PhaseProvisioning) {
 		Conflict(w, "Agent must be running or provisioning")
@@ -429,7 +462,8 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		objectPath := storagePath + "/files/" + file.Path
 		exists, err := stor.Exists(ctx, objectPath)
 		if err != nil {
-			RuntimeError(w, "Failed to verify file: "+err.Error())
+			slog.ErrorContext(ctx, "workspace file verify failed", "agent_id", agent.ID, "error", upstreamText(err.Error()))
+			RuntimeError(w, "Failed to verify file")
 			return
 		}
 		if !exists {
@@ -438,8 +472,13 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Compute content hash from file hashes
-	contentHash := transfer.ComputeContentHash(req.Manifest.Files)
+	// Compute content hash from file hashes, in the version template and
+	// harness-config commits record (the hub.content_hash_v2 experiment).
+	// It is reported to the client only.
+	contentHash := transfer.ComputeContentHashV1(req.Manifest.Files)
+	if s.experimentEnabled(experiments.ContentHashV2) {
+		contentHash = transfer.ComputeContentHashV2(req.Manifest.Files)
+	}
 
 	// Calculate total bytes transferred
 	var totalBytes int64
@@ -449,11 +488,30 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 
 	// Bootstrap mode: agent is provisioning, dispatch to broker now
 	if agent.Phase == string(state.PhaseProvisioning) {
-		// Store workspace storage path on agent record for broker download
+		project, err := s.store.GetProject(ctx, agent.ProjectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// Empty-per-agent agents start in an empty private directory
+		// (design #2703): the uploaded files are ignored, as on create, so
+		// the broker never pre-seeds the directory from GCS.
+		emptyPerAgent := project.IsEmptyPerAgent()
 		if agent.AppliedConfig == nil {
 			agent.AppliedConfig = &store.AgentAppliedConfig{}
 		}
-		agent.AppliedConfig.WorkspaceStoragePath = storagePath
+		if emptyPerAgent {
+			if len(req.Manifest.Files) > 0 {
+				s.workspaceLog.Warn("Ignoring workspace files for empty-per-agent project",
+					"agent_id", agent.ID, "project_id", project.ID, "files", len(req.Manifest.Files))
+			}
+			agent.AppliedConfig.WorkspaceStoragePath = ""
+			agent.AppliedConfig.WorkspaceStorageBucket = ""
+		} else {
+			// Store workspace storage path on agent record for broker download
+			agent.AppliedConfig.WorkspaceStoragePath = storagePath
+			agent.AppliedConfig.WorkspaceStorageBucket = workspaceDownloadBucket(stor)
+		}
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			RuntimeError(w, "Failed to update agent config: "+err.Error())
 			return
@@ -465,14 +523,96 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		// From here the launch no longer follows the client
+		// (ptone/scion#1961). The create-and-start runs under a start claim,
+		// which records run intent running; its dispatch is bounded by
+		// syncDispatch, derived from the claim's context.
+		ctx = detachLaunchFromClient(ctx)
+		// The response waits on that dispatch for up to
+		// syncDispatchTimeout: extend this request's write deadline to
+		// cover it (ptone/scion#3890, as ptone/scion#3850 did for create).
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
+		// The collector carries the outcome of the compensating delete of
+		// a run that landed after a delete won (compensateLandedRun).
+		ctx, dispatchWarns := withDispatchWarnings(ctx)
+		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+			err = syncDispatch(ctx, func(dctx context.Context) error {
+				out, err = dispatcher.DispatchAgentCreate(dctx, agent)
+				return err
+			})
+			return out, err
+		})
+		if errors.Is(err, ErrLaunchInvalidPhase) {
+			writeLaunchInvalidPhase(w, err, agent.ID)
+			return
+		}
+		if writeAgentTokenRecordError(w, err) {
+			return
+		}
+		if s.writeStartClaimError(ctx, w, err, agent.ID) {
+			return
+		}
+		if err != nil {
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				ref.write(w)
+				return
+			}
+			if writeAgentTokenIssueError(w, err) {
+				return
+			}
+			if writeSecretResolutionError(w, err) {
+				return
+			}
+			if writeEmptyPerAgentCapabilityError(w, err) {
+				return
+			}
+			if relayDispatchRefusal(w, err) {
+				return
+			}
+			if relayWorkspaceStorageUnconfigured(w, err) {
+				return
+			}
+			if relayIdentityMappingError(w, err) {
+				return
+			}
+			if relayBrokerRefusal(w, err) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
 			return
 		}
 
-		// Update agent status from broker response
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+		if created.AcceptedLaunch() != nil {
+			// Accepted for asynchronous launch: the row is already
+			// provisioning; merge only the non-status fields.
+			if _, err := s.persistAcceptedLaunch(ctx, agent); err != nil {
+				s.workspaceLog.Warn("Failed to update agent after accepted launch", "error", err)
+			}
+		} else if s.deleteWonAfterLanding(ctx, agent.ID) {
+			// A delete that won after the broker run landed answers 409,
+			// as the synchronous create does (ptone/scion#3099,
+			// ptone/scion#3518), with the outcome of the compensating
+			// delete the dispatch ran. An accepted launch is settled by
+			// its launch report instead.
+			s.workspaceLog.Info("Agent was deleted while its workspace finalize launched it; answering 409",
+				"agent_id", agent.ID)
+			writeDeletedDuringCreate(w, agent.ID, dispatchWarns.Warnings())
+			return
+		} else if err := s.store.UpdateAgent(ctx, agent); err != nil {
+			// Update agent status from broker response
 			s.workspaceLog.Warn("Failed to update agent status after dispatch", "error", err)
+		}
+
+		// The dispatch's warnings (for example a failed delete-won check
+		// in compensateLandedRun) are returned, as env submit does.
+		if emptyPerAgent {
+			resp := SyncToFinalizeResponse{ContentHash: contentHash}
+			if len(req.Manifest.Files) > 0 {
+				resp.Warnings = []string{api.WarningEmptyPerAgentWorkspaceFilesIgnored}
+			}
+			resp.Warnings = append(resp.Warnings, dispatchWarns.Warnings()...)
+			writeJSON(w, http.StatusOK, resp)
+			return
 		}
 
 		writeJSON(w, http.StatusOK, SyncToFinalizeResponse{
@@ -480,6 +620,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			ContentHash:      contentHash,
 			FilesApplied:     len(req.Manifest.Files),
 			BytesTransferred: totalBytes,
+			Warnings:         dispatchWarns.Warnings(),
 		})
 		return
 	}
@@ -497,9 +638,16 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		Manifest:    req.Manifest,
 	}
 
+	// The response waits on the broker's apply, bounded by the hub-to-broker
+	// request limit (syncDispatchTimeout): extend this request's write
+	// deadline to cover it (ptone/scion#4178).
+	extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 	var applyResp RuntimeBrokerWorkspaceApplyResponse
-	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/apply", applyReq, &applyResp); err != nil {
-		if strings.Contains(err.Error(), "timeout") {
+	if err := tunnelAgentWorkspaceRequest(ctx, s.store, cc, agent, "POST", "/api/v1/workspace/apply", applyReq, &applyResp); err != nil {
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
+		if strings.Contains(brokerErrorMatchText(err), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
 			return
 		}
@@ -587,6 +735,19 @@ type RuntimeBrokerWorkspaceApplyResponse struct {
 	BytesApplied int64 `json:"bytesApplied"`
 }
 
+// tunnelAgentWorkspaceRequest is tunnelWorkspaceRequest for a request
+// about agent, sent to the agent's own Runtime Broker. The saved-placement
+// check (requirePinnedPlacement) runs first: a pinned agent whose placement
+// is inconsistent gets a *PlacementConflictError and nothing is sent. An
+// unpinned agent with no Runtime Broker keeps tunnelWorkspaceRequest's own
+// answer.
+func tunnelAgentWorkspaceRequest(ctx context.Context, st store.Store, cc *ControlChannelManager, agent *store.Agent, method, path string, reqBody interface{}, respBody interface{}) error {
+	if _, err := checkAgentPinnedPlacement(ctx, st, agent); err != nil {
+		return err
+	}
+	return tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, method, path, reqBody, respBody)
+}
+
 // tunnelWorkspaceRequest tunnels a workspace request to a Runtime Broker via the control channel.
 func tunnelWorkspaceRequest(ctx context.Context, cc *ControlChannelManager, brokerID, method, path string, reqBody interface{}, respBody interface{}) error {
 	// Check broker is connected
@@ -616,9 +777,10 @@ func tunnelWorkspaceRequest(ctx context.Context, cc *ControlChannelManager, brok
 		return err
 	}
 
-	// Check for error status codes
+	// Check for error status codes. The broker's body goes to the hub log
+	// only (newBrokerStatusError); the error text names the status and code.
 	if respEnv.StatusCode >= 400 {
-		return errRuntimeBrokerError(respEnv.StatusCode, string(respEnv.Body))
+		return newBrokerStatusError(brokerID, respEnv.StatusCode, respEnv.Body, respEnv.Headers["Retry-After"])
 	}
 
 	// Unmarshal response body
@@ -636,16 +798,12 @@ func errBrokerNotConnected(brokerID string) error {
 	return &brokerError{brokerID: brokerID, msg: "broker not connected via control channel"}
 }
 
-// errRuntimeBrokerError returns an error from the runtime broker.
-func errRuntimeBrokerError(statusCode int, body string) error {
-	return &brokerError{statusCode: statusCode, msg: body}
-}
-
-// brokerError represents an error from communication with a runtime broker.
+// brokerError represents an error from communication with a runtime broker
+// before any answer arrives (an answer with an error status is a
+// *brokerStatusError).
 type brokerError struct {
-	brokerID   string
-	statusCode int
-	msg        string
+	brokerID string
+	msg      string
 }
 
 func (e *brokerError) Error() string {
@@ -655,55 +813,14 @@ func (e *brokerError) Error() string {
 	return e.msg
 }
 
-// syncHubManagedWorkspaceBack downloads workspace files from GCS to the Hub's local
-// filesystem for hub-managed projects on remote brokers. This keeps the Hub's copy
-// (~/.scion/projects/<slug>/) in sync after workspace changes on a remote broker.
-// This is a best-effort operation: errors are logged but do not fail the caller.
-func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
-	if agent.ProjectID == "" {
-		return
+// workspaceDownloadBucket returns the bucket a broker should download a
+// workspace upload in stor from, or "" when stor is not GCS: a broker
+// cannot read the hub's local storage, so it is then left to the broker's
+// own bucket setting and its explicit refusal when it has none
+// (ptone/scion#3422).
+func workspaceDownloadBucket(stor storage.Storage) string {
+	if stor == nil || stor.Provider() != storage.ProviderGCS {
+		return ""
 	}
-
-	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil {
-		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: failed to get project", "agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
-		return
-	}
-
-	// Only applies to hub-managed and shared-workspace projects
-	if project.GitRemote != "" && !project.IsSharedWorkspace() {
-		return
-	}
-
-	// Only needed for remote brokers (no local path and not embedded)
-	if agent.RuntimeBrokerID != "" {
-		if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
-			return // Embedded broker, no sync needed
-		}
-		provider, err := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
-		if err == nil && provider.LocalPath != "" {
-			return // Colocated broker, no sync needed
-		}
-	}
-
-	stor := s.GetStorage()
-	if stor == nil {
-		return
-	}
-
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
-	if err != nil {
-		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: failed to get project path", "error", err)
-		return
-	}
-
-	// Use the project-level storage path for hub-managed projects
-	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
-		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
-			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
-	} else {
-		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
-			"project_id", project.ID, "path", workspacePath)
-	}
+	return stor.Bucket()
 }

@@ -2,100 +2,225 @@ package hub
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
 const (
-	authorizedListBatchSize     = 50
-	authorizedListMaxCandidates = 1000
+	authorizedListBatchSize = 50
+	// authorizedListMaxCandidates bounds the per-request scan cost of both
+	// passes below (the count pass and the page-fill pass), not
+	// correctness: crossing it never fails the request or leaks an
+	// out-of-scope row. It only means the response degrades — an
+	// approximate (lower-bound) total instead of an exact one, and/or a
+	// short page plus a resume cursor instead of a full one — rather than
+	// scanning an unbounded number of candidates in a single request.
+	//
+	// ptone/scion#1916 follow-up (C3): removing hasCatalogWideListAccess's
+	// agent branch moved template/harness_config list traffic that used to
+	// skip this scan onto it. The original design here treated crossing this
+	// cap as a hard failure (a 503 for the whole request); that turned "the
+	// hub-wide candidate pool is larger than the cap" into an outage for
+	// every non-privileged caller, not just a slower response for the one
+	// who caused it. Bumped modestly as part of the same fix — this is a
+	// cost bound, not a correctness threshold, so the exact value is a
+	// judgment call, not a contract. The real fix is pushing the scope
+	// predicate into the store query (the pattern
+	// skillAccessScopePredicate/ResolveListScopes already established for
+	// skills, pkg/store/entadapter/skill_store.go) so COUNT/LIMIT run on the
+	// already-scoped set instead of a bounded in-memory scan at any size.
+	authorizedListMaxCandidates = 2000
 	authorizedListMaxPageSize   = 100
 )
-
-var ErrAuthorizedListIncomplete = errors.New("authorized list exceeds candidate limit")
-
-func writeAuthorizedListError(w http.ResponseWriter, err error) {
-	if errors.Is(err, ErrAuthorizedListIncomplete) {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, "authorized list is temporarily unavailable", nil)
-		return
-	}
-	writeErrorFromErr(w, err, "")
-}
 
 type authorizedCandidatePage[T any] struct {
 	Items      []T
 	NextCursor string
 }
 
+// authorizedListResult is authorizedList's outcome. TotalCount is exact
+// unless TotalCountApproximate is set, in which case it is a lower bound —
+// the count pass stopped at authorizedListMaxCandidates before exhausting
+// the candidate pool. Items and NextCursor are always correct for the
+// caller's authorized scope regardless of TotalCountApproximate: an
+// approximate total never implies an incomplete or unscoped page.
 type authorizedListResult[T any] struct {
-	Items      []T
-	NextCursor string
-	TotalCount int
+	Items                 []T
+	NextCursor            string
+	TotalCount            int
+	TotalCountApproximate bool
 }
 
 // hasCatalogWideListAccess reports whether template and harness-config lists
 // can use a direct store query instead of per-resource authorization checks.
+//
+// User principals only: an AgentIdentity always goes through the bounded
+// per-resource scan (authorizeEach in the callers below), never this
+// shortcut. Agents hold only a project-scoped grant (see
+// buildAgentSyntheticBindings), so "wide" access for an agent would mean
+// every project's and every user's private catalog entries, not just the
+// hub-wide (global) ones the wide-access comment here originally intended —
+// that was a ptone/scion#1916 follow-up finding. An agent still sees the
+// hub-wide catalog and its own project's entries through the per-resource
+// scan: CheckAccess (Decide step 5b) promotes the agent's synthetic binding
+// to system scope specifically for a global-scope template/harness_config
+// check, and scopeApplies' ordinary project-scope containment covers the
+// agent's own project — the same two cases getTemplateV2/getHarnessConfig's
+// per-ID authorizeRead already grant, so list and detail agree.
+//
+// The decision is a hub-level collection request for permissionID (the
+// list permission, template.list or harness_config.list), declared through
+// hubCollectionEvidence. A user access token takes the shortcut only on a
+// hub boundary, with permissionID in its ceiling and live hub-wide list
+// authority; any other token gets the per-row read scan.
 func (s *Server) hasCatalogWideListAccess(ctx context.Context, identity Identity, resourceType, permissionID string) bool {
-	if user, ok := identity.(UserIdentity); ok {
-		if s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: resourceType, ID: "hub"},
-			Action:     ActionList,
-			Permission: permissionID,
-		}).Allowed {
-			return true
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		return false
+	}
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:      principalContextForIdentity(user),
+		Credential:     credentialContextForIdentity(user),
+		Resource:       Resource{Type: resourceType},
+		Action:         ActionList,
+		Permission:     permissionID,
+		TargetEvidence: hubCollectionEvidence(permissionID),
+	}).Allowed
+}
+
+// catalogListReadBatch returns the per-resource read-batch function a
+// template/harness-config list handler should pass to listAuthorizedOrAll.
+//
+// The authorization kernel has no notion of a "broker" principal — brokers
+// authenticate over HMAC, not through the role-binding pipeline — so
+// s.authzService.AuthorizeReadBatch denies every resource for one. That is
+// merely the safe default, not the correct answer: a broker must see the
+// hub-wide catalog and its own served projects' entries in list results
+// exactly as its per-ID reads already allow (authorizeTemplateReadRoute /
+// authorizeHarnessConfigRoute, both via brokerMayReadCatalogResource), or
+// list and detail disagree. When identity is a broker, this returns a
+// closure that answers each candidate with brokerMayReadCatalogResource
+// instead of going through the kernel.
+//
+// An agent identity is a narrower case: its synthetic binding (Decide step
+// 5b) is project-scoped, so the kernel correctly grants its own project's
+// entries but — by design, not omission — never a parentless (global)
+// entry; a shared-kernel carve-out would leak into every other parentless
+// resource type the kernel evaluates for agents (broker, group, user,
+// github_app — see TestAuthz_AgentProjectReadBaseline_NoProjectDenied). So
+// the hub-wide-catalog exception for agents is applied here instead, one
+// resource type at a time, the same way authorizeTemplateReadRoute /
+// authorizeHarnessConfigRoute apply it to the per-ID GET: a global-scope
+// candidate is allowed outright, and everything else still goes through the
+// kernel so an agent's own-project visibility is unaffected.
+//
+// Every other identity kind uses the ordinary AuthorizeReadBatch path
+// unchanged.
+func (s *Server) catalogListReadBatch(identity Identity) func(context.Context, Identity, []Resource) ([]bool, error) {
+	// An agent delegated credential's admitted lists (agents, skills,
+	// templates) run their own item filter (delegatedListItemRead) and never
+	// call this batch. Any other catalog list (harness configs, which are not
+	// admitted) denies every row (.design/agent-delegation.md §11.8).
+	if isDelegatedAgentIdentity(identity) {
+		return func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+			return make([]bool, len(resources)), nil
 		}
 	}
-
-	// Agents with project:read can discover all catalog entries. Global entries
-	// are parentless and cannot match project-scoped bindings in the batch
-	// authorization path; checkAgentReadScope validates this scope first.
-	agent, ok := identity.(AgentIdentity)
-	return ok && agent.HasScope(ScopeProjectRead)
+	if broker, ok := identity.(BrokerIdentity); ok {
+		return func(ctx context.Context, _ Identity, resources []Resource) ([]bool, error) {
+			allowed := make([]bool, len(resources))
+			for i, res := range resources {
+				allowed[i] = s.brokerMayReadCatalogResource(ctx, broker, res.ScopeKind, res.ParentID)
+			}
+			return allowed, nil
+		}
+	}
+	if _, ok := identity.(AgentIdentity); ok {
+		return func(ctx context.Context, agentIdentity Identity, resources []Resource) ([]bool, error) {
+			kernelAllowed, err := s.authzService.AuthorizeReadBatch(ctx, agentIdentity, resources)
+			if err != nil {
+				return nil, err
+			}
+			allowed := make([]bool, len(resources))
+			for i, res := range resources {
+				allowed[i] = kernelAllowed[i] || res.ScopeKind == store.TemplateScopeGlobal
+			}
+			return allowed, nil
+		}
+	}
+	return s.authzService.AuthorizeReadBatch
 }
 
 // listAuthorizedOrAll runs either the bounded per-resource authorization scan
 // or the direct store query selected by the caller's visibility decision.
+//
+// requestCursor is the raw, opaque cursor a client sent (or "" for a first
+// page); the returned NextCursor is opaque the same way. sealer opens
+// requestCursor and seals the result on BOTH paths below, so a list
+// endpoint's cursor format never depends on which path the caller's
+// authority happened to select that request -- an identity that gains or
+// loses wide access between page 1 and page 2 still gets a cursor the other
+// path accepts. See listCursorSealer's doc comment; a resumed cursor is
+// still only a position, never an access grant, on either path.
 func listAuthorizedOrAll[T any](
 	ctx context.Context,
 	identity Identity,
 	requestCursor string,
 	pageLimit int,
 	cursorBinding string,
+	sealer *listCursorSealer,
 	authorizeEach bool,
 	list func(context.Context, store.ListOptions) (*store.ListResult[T], error),
 	resource func(*T) Resource,
 	cursorFor func(*T) string,
 	read func(context.Context, Identity, []Resource) ([]bool, error),
 ) (authorizedListResult[T], error) {
+	cursor, err := openAndValidateListCursor(sealer, requestCursor, cursorBinding)
+	if err != nil {
+		return authorizedListResult[T]{}, err
+	}
+
 	if !authorizeEach {
 		result, err := list(ctx, store.ListOptions{
 			Limit:         pageLimit,
-			Cursor:        requestCursor,
+			Cursor:        cursor,
 			CursorBinding: cursorBinding,
 		})
 		if err != nil {
 			return authorizedListResult[T]{}, err
 		}
+		nextCursor := result.NextCursor
+		if nextCursor != "" {
+			sealed, err := sealer.Seal(nextCursor, cursorBinding)
+			if err != nil {
+				return authorizedListResult[T]{}, err
+			}
+			nextCursor = sealed
+		}
 		return authorizedListResult[T]{
 			Items:      result.Items,
-			NextCursor: result.NextCursor,
+			NextCursor: nextCursor,
 			TotalCount: result.TotalCount,
 		}, nil
 	}
 
-	return authorizedList(ctx, identity, requestCursor, pageLimit,
+	result, err := authorizedList(ctx, identity, cursor, pageLimit,
 		func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[T], error) {
 			page, err := list(ctx, store.ListOptions{
 				Limit:          limit,
@@ -108,6 +233,17 @@ func listAuthorizedOrAll[T any](
 			}
 			return authorizedCandidatePage[T]{Items: page.Items, NextCursor: page.NextCursor}, nil
 		}, resource, cursorFor, read)
+	if err != nil {
+		return authorizedListResult[T]{}, err
+	}
+	if result.NextCursor != "" {
+		sealed, err := sealer.Seal(result.NextCursor, cursorBinding)
+		if err != nil {
+			return authorizedListResult[T]{}, err
+		}
+		result.NextCursor = sealed
+	}
+	return result, nil
 }
 
 func parseAuthorizedListLimit(raw string) (int, error) {
@@ -121,9 +257,18 @@ func parseAuthorizedListLimit(raw string) (int, error) {
 	return limit, nil
 }
 
-// authorizedList returns an exact authorized total and a page of authorized
-// candidates. It deliberately rescans from the start for totals, retaining
-// only response items, so denied candidates cannot affect either result.
+// authorizedList returns an authorized total (exact, unless the candidate
+// pool is large enough to mark it approximate — see authorizedListResult)
+// and a page of authorized candidates. It rescans from the start for the
+// total, retaining only response items, so denied candidates cannot affect
+// either result.
+//
+// Neither pass ever fails, or returns an out-of-scope item, purely because
+// the underlying (unscoped) candidate pool is large: crossing
+// authorizedListMaxCandidates degrades the response (an approximate total;
+// a short page plus a resume cursor) rather than erroring the request. See
+// the cap's own doc comment for why a hard failure here was worse than a
+// bounded scan cost.
 func authorizedList[T any](
 	ctx context.Context,
 	identity Identity,
@@ -137,8 +282,14 @@ func authorizedList[T any](
 	if err := ctx.Err(); err != nil {
 		return authorizedListResult[T]{}, err
 	}
+
+	// Pass 1: count. Scans candidates in batches up to
+	// authorizedListMaxCandidates. Reaching the cap before the pool is
+	// exhausted marks the total approximate (a lower bound) rather than
+	// scanning further or failing — see authorizedListResult.
 	total := 0
 	candidateCount := 0
+	totalApproximate := false
 	for cursor := ""; ; {
 		if err := ctx.Err(); err != nil {
 			return authorizedListResult[T]{}, err
@@ -148,10 +299,6 @@ func authorizedList[T any](
 			return authorizedListResult[T]{}, err
 		}
 		candidateCount += len(page.Items)
-		if candidateCount > authorizedListMaxCandidates ||
-			(candidateCount == authorizedListMaxCandidates && page.NextCursor != "") {
-			return authorizedListResult[T]{}, ErrAuthorizedListIncomplete
-		}
 		allowed, err := authorizeCandidatePage(ctx, identity, page.Items, resource, read)
 		if err != nil {
 			return authorizedListResult[T]{}, err
@@ -164,10 +311,21 @@ func authorizedList[T any](
 		if page.NextCursor == "" {
 			break
 		}
+		if candidateCount >= authorizedListMaxCandidates {
+			totalApproximate = true
+			break
+		}
 		cursor = page.NextCursor
 	}
 
-	result := authorizedListResult[T]{TotalCount: total}
+	// Pass 2: fill the requested page, starting from the caller's cursor.
+	// Bounded by the same candidate cap so a caller cannot force an
+	// unbounded per-request scan by holding a large denied (or merely
+	// unauthorized) candidate pool ahead of their own visible items: if the
+	// budget runs out before the page fills, return the short page found so
+	// far plus a resume cursor rather than continuing the scan.
+	result := authorizedListResult[T]{TotalCount: total, TotalCountApproximate: totalApproximate}
+	scanned := 0
 	for cursor := requestCursor; ; {
 		if err := ctx.Err(); err != nil {
 			return authorizedListResult[T]{}, err
@@ -185,14 +343,44 @@ func authorizedList[T any](
 				continue
 			}
 			if len(result.Items) == pageLimit {
+				// Page filled. NextCursor already holds the cursor of the
+				// last included item, set below when that item was
+				// appended; store cursors are exclusive, so resuming from
+				// it starts immediately after that item. Do not advance it
+				// to this (not-yet-included) item, or that item is skipped
+				// on the next page.
+				//
+				// Items examined earlier in this same batch but not
+				// included (denied, or simply skipped) sit between the
+				// last included item and this one. Advance the cursor past
+				// them too, to the item just before this one, so the next
+				// request resumes at this item directly instead of
+				// re-examining ones already resolved here. i is always > 0
+				// when this happens mid-batch (the append that reached
+				// pageLimit occurred earlier in this same loop); when the
+				// page instead fills exactly at a batch boundary, i is 0
+				// here and NextCursor is left as already set above.
+				if i > 0 {
+					result.NextCursor = cursorFor(&page.Items[i-1])
+				}
 				return result, nil
 			}
 			item := page.Items[i]
 			result.Items = append(result.Items, item)
 			result.NextCursor = cursorFor(&item)
 		}
+		scanned += len(page.Items)
 		if page.NextCursor == "" {
 			result.NextCursor = ""
+			return result, nil
+		}
+		if scanned >= authorizedListMaxCandidates {
+			// Budget exhausted before the page filled (or before the scan
+			// could confirm no candidates remain). Resume from the last
+			// candidate this request examined; the page returned so far,
+			// though possibly short of pageLimit, contains only items this
+			// caller is authorized to see.
+			result.NextCursor = cursorFor(&page.Items[len(page.Items)-1])
 			return result, nil
 		}
 		cursor = page.NextCursor
@@ -218,13 +406,7 @@ func authorizeCandidatePage[T any](ctx context.Context, identity Identity, items
 }
 
 func authorizedListCursor(created time.Time, id, binding string) string {
-	return base64.URLEncoding.EncodeToString([]byte(created.Format(time.RFC3339Nano) + "," + id + "," + binding))
-}
-
-func authorizedListCursorBinding(endpoint string, filter any) string {
-	encoded, _ := json.Marshal(filter)
-	digest := sha256.Sum256(append([]byte(endpoint+":"), encoded...))
-	return base64.RawURLEncoding.EncodeToString(digest[:])
+	return base64.URLEncoding.EncodeToString([]byte(created.UTC().Format(time.RFC3339Nano) + "," + id + "," + binding))
 }
 
 // scopedCursorBinding creates a cursor binding that includes the endpoint,
@@ -241,15 +423,28 @@ func scopedCursorBinding(endpoint string, filter any, identity Identity) string 
 	// Build the binding input: endpoint + filter + principal context.
 	// The principal context includes the identity type and unique identifier
 	// so that cursors are not transferable between principals or credential types.
+	// A nil identity, or a non-nil interface holding a nil pointer, carries
+	// no principal; both bind with an empty identity component, matching
+	// principalContextForIdentity, and no method is called on a nil receiver.
 	var identityKey string
-	if identity != nil {
+	if !isNilIdentity(identity) {
 		// Include the concrete credential type to distinguish session JWT
 		// from scoped UAT (same user ID, different authority ceiling).
 		switch id := identity.(type) {
 		case *ScopedUserIdentity:
-			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s", id.ID(), id.ScopedProjectID(), id.CredentialID())
+			// Keyed on the boundary kind as well as its project, so a cursor
+			// minted under a hub-boundary token never matches one minted
+			// under a project-boundary token, or the reverse.
+			boundary := id.Boundary()
+			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s:%s", id.ID(), boundary.Kind, boundary.ProjectID, id.CredentialID())
 		case AgentIdentity:
 			identityKey = fmt.Sprintf("agent_jwt:%s:%s:%s", id.ID(), id.ProjectID(), id.TokenID())
+		case *DelegatedAgentIdentity:
+			// Bound to the agent, grant, credential and boundary, so a
+			// cursor never carries over to another grant, credential or
+			// boundary (.design/agent-delegation.md §11.8).
+			boundary := id.Boundary()
+			identityKey = fmt.Sprintf("delegated_agent:%s:%s:%s:%s:%s", id.ID(), id.GrantID(), id.CredentialID(), boundary.Kind, boundary.ProjectID)
 		default:
 			identityKey = fmt.Sprintf("%s:%s", identity.Type(), identity.ID())
 		}
@@ -275,5 +470,383 @@ func validateAuthorizedListCursor(cursor, binding string) error {
 	if _, err := uuid.Parse(parts[1]); err != nil {
 		return fmt.Errorf("invalid cursor: %w", err)
 	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Opaque cursor sealing (ptone/scion#2124, ptone/scion#2151)
+//
+// authorizedList's cursors are opaque: a page reveals only items the caller
+// may see, and the cursor that resumes a walk is a sealed, authenticated
+// token rather than a readable encoding of the position it carries. Seal
+// wraps the existing "created,id,binding" cursor payload with AES-256-GCM
+// before it ever reaches a client; Open recovers that same payload on the
+// way in, or fails closed. The payload format, the binding computation
+// (scopedCursorBinding) and every pagination semantic (ordering,
+// over-fetch, scan budget, live per-item authorization on resume) are
+// unchanged -- sealing only makes the wire representation opaque and
+// tamper-evident, and binds it to the exact endpoint, filter and caller it
+// was issued for.
+//
+// Coverage: every authorizedList and listAuthorizedOrAll caller seals and
+// opens through this helper -- templates, harness configs and groups, on
+// both the per-item-scan path and the direct-query (wide-access/admin)
+// path listAuthorizedOrAll and listGroups also provide. Hub list handlers
+// that never run authorizedList's per-item scan because their store query
+// is already fully scoped (listAgents, listProjects) are out of scope here,
+// and are tracked as a follow-up instead of changed by this work
+// (ptone/scion#2124). listSkills (skill_handlers.go) and listProjectAgents
+// (handlers_projects_core.go) also drop items after the store query as
+// defense in depth over an already-scoped query, then return the store's
+// own (unsealed) NextCursor; they are the same kind of follow-up, tracked
+// alongside listAgents/listProjects rather than changed here.
+// ---------------------------------------------------------------------------
+
+// SecretKeyListCursorKey is the secret key name for the dedicated
+// authorizedList cursor-sealing key. It is separate from the agent, user,
+// OIDC and download-signing keys (see download_signing.go): it never signs
+// or verifies a credential, only seals a resume position, so its blast
+// radius on rotation or compromise is limited to pagination cursors.
+const SecretKeyListCursorKey = "list_cursor_key"
+
+// listCursorSealDomain domain-separates the AEAD's associated data from any
+// other AES-GCM use of the same key and binds it to this scheme; changing it
+// invalidates every previously issued cursor the same way rotating the key
+// does (see listCursorSealer.Open). The wire version marker is
+// listCursorPrefix.
+const listCursorSealDomain = "scion-list-cursor-v1:"
+
+// listCursorPrefix is the literal, cheap-to-check version marker every
+// sealed cursor starts with. It lets a server reject a cursor from an
+// unknown or future version (or one that is not a sealed cursor at all)
+// before spending an AEAD open on it, and gives a future key-rotation or
+// scheme change (a "c2." prefix) a dispatch point that does not require
+// trial-decrypting under every version's key and AAD.
+const listCursorPrefix = "c1."
+
+// listCursorSealDomainV2 and listCursorPrefixV2 are the versioned
+// (key-ID-carrying) cursor's AAD domain and wire marker: the AAD is
+// listCursorSealDomainV2 + kid + ":" + binding and the cursor is
+// listCursorPrefixV2 + kid + "." + base64url(nonce+ciphertext).
+const (
+	listCursorSealDomainV2 = "scion-list-cursor-v2:"
+	listCursorPrefixV2     = "c2."
+)
+
+// errInvalidCursor is returned for every cursor failure a caller can hit --
+// malformed input, truncation, a tampered byte, a cursor sealed under a key
+// this sealer does not currently hold, or a binding (endpoint, filter or
+// caller) that does not match the one the cursor was sealed under -- so all
+// cursor failures get one uniform response. invalidCursorError has a
+// single (empty) value, so errors.Is matches it as it would a sentinel.
+var errInvalidCursor error = invalidCursorError{}
+
+// invalidCursorError is the type of errInvalidCursor.
+type invalidCursorError struct{}
+
+func (invalidCursorError) Error() string { return "invalid cursor" }
+
+// HTTPStatus implements httpStatusError: a 400 invalid_cursor.
+func (invalidCursorError) HTTPStatus() (int, string, string) {
+	return http.StatusBadRequest, ErrCodeInvalidCursor, invalidCursorMessage
+}
+
+// errListCursorSealerUnavailable is returned by Seal when called on a nil
+// sealer -- a state New() never produces in production (it always either
+// provisions a sealer or fails startup outright), but one a test
+// constructing a bare Server{} can reach. Failing closed here (no cursor is
+// emitted; the caller turns this into a 500) is the same choice Open makes
+// for a nil sealer via openAndValidateListCursor, just surfaced as a
+// distinct error since an unsealable next page is a server-side problem,
+// not a bad cursor the client sent.
+var errListCursorSealerUnavailable = errors.New("list cursor sealer unavailable")
+
+// listCursorSealer seals authorizedList's client-facing cursors with
+// AES-256-GCM so a cursor carries no readable item ID or created time.
+// Seal's output is opaque; Open only recovers the sealed plaintext when
+// given the exact binding it was sealed under, so a cursor opened under a
+// different query or caller fails the same way a tampered one does.
+//
+// The sealing keys are one purpose of a signing ring (capability_keys.go;
+// ptone/scion#1530 Phase 4). The active generation seals; the ring's emit
+// setting picks the wire form:
+//
+//	c1.<base64url(nonce+ciphertext)>        AAD "scion-list-cursor-v1:" + binding
+//	c2.<kid>.<base64url(nonce+ciphertext)>  AAD "scion-list-cursor-v2:" + kid + ":" + binding
+//
+// Open reads both: a c2 cursor with generation kid only (never another
+// key), a c1 cursor with the ring's legacy readers. A cursor has no
+// lifetime of its own, so it opens only while its generation is before
+// verify_until: once a generation is retired its outstanding cursors fail
+// as invalid_cursor and the client restarts from the first page. No cursor
+// is promised to survive retirement.
+//
+// A sealed cursor never confers access by itself: it only carries a
+// position. Every page authorizedList returns -- including the first page
+// of a resumed walk -- still runs live per-item authorization; see
+// authorizedList's own doc comment.
+type listCursorSealer struct {
+	keys capabilityKeys
+}
+
+// listCursorAEAD builds the AES-256-GCM AEAD of one 32-byte sealing key.
+func listCursorAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("list cursor sealer: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("list cursor sealer: %w", err)
+	}
+	return aead, nil
+}
+
+// newListCursorSealer builds a sealer from one fixed 32-byte AES-256 key
+// (legacy mode): it seals the c1 form and opens c1 and the c2 form whose
+// key ID is "legacy" (see fixedCapabilityKeys).
+func newListCursorSealer(key []byte) (*listCursorSealer, error) {
+	if _, err := listCursorAEAD(key); err != nil {
+		return nil, err
+	}
+	return &listCursorSealer{keys: fixedCapabilityKeys(key)}, nil
+}
+
+// newRingListCursorSealer builds a sealer over ring-mode keys. Every
+// generation's purpose key is a 32-byte SHA-256 derivation, so each builds
+// an AES-256 AEAD.
+func newRingListCursorSealer(keys capabilityKeys) *listCursorSealer {
+	return &listCursorSealer{keys: keys}
+}
+
+// Seal encodes inner -- the existing plaintext authorizedListCursor
+// encoding -- into an opaque, authenticated cursor bound to binding
+// (scopedCursorBinding's output: the endpoint, normalized filter and
+// caller identity context), in the form the ring selects (see
+// listCursorSealer). It never logs inner or the key. Called on a nil
+// sealer, it fails closed with errListCursorSealerUnavailable instead of
+// panicking; see that error's doc comment. When no key may seal now (the
+// active generation reached its sign_until) it returns
+// errCapabilityIssuanceClosed and no cursor.
+func (l *listCursorSealer) Seal(inner, binding string) (string, error) {
+	return l.seal(listCursorScheme, inner, binding)
+}
+
+// Open recovers the plaintext inner cursor Seal produced under binding, and
+// additionally re-validates it with validateAuthorizedListCursor as a
+// structural sanity check on the decrypted plaintext. It returns
+// errInvalidCursor -- never a partially authenticated value, and never a
+// logged one -- for anything else: a missing or unrecognized version
+// prefix, a malformed or unknown key ID, malformed base64, truncation, a
+// flipped byte, a binding that does not match the query or caller the
+// cursor was sealed under, a legacy (pre-sealing) plaintext cursor, or a
+// cursor sealed under a key this sealer does not currently hold or that
+// has been retired (for example after key rotation). Called on a nil
+// sealer, it also returns errInvalidCursor rather than panicking, matching
+// Seal's fail-closed behavior; openAndValidateListCursor also rejects a
+// non-empty cursor when the sealer is nil.
+func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
+	return l.open(listCursorScheme, sealed, binding, func(inner string) bool {
+		return validateAuthorizedListCursor(inner, binding) == nil
+	})
+}
+
+// listPositionSealDomain/listPositionPrefix and their V2 pair are
+// SealPosition's AAD domains and wire markers, in the same two forms as the
+// list cursor's (listCursorSealer):
+//
+//	p1.<base64url(nonce+ciphertext)>        AAD "scion-list-position-v1:" + binding
+//	p2.<kid>.<base64url(nonce+ciphertext)>  AAD "scion-list-position-v2:" + kid + ":" + binding
+//
+// Every domain and marker differs from the list cursor's, so a position
+// cursor never opens as a list cursor and a list cursor never opens as a
+// position cursor, although both use the same keys.
+const (
+	listPositionSealDomain   = "scion-list-position-v1:"
+	listPositionPrefix       = "p1."
+	listPositionSealDomainV2 = "scion-list-position-v2:"
+	listPositionPrefixV2     = "p2."
+)
+
+// listSealScheme is one sealed-cursor scheme's wire markers and AAD
+// domains, legacy (key-ID-less) and versioned. Seal/Open and
+// SealPosition/OpenPosition share seal and open and differ only in their
+// scheme, and in that Open checks the plaintext's shape.
+type listSealScheme struct {
+	prefixV1, domainV1, prefixV2, domainV2 string
+}
+
+var (
+	listCursorScheme   = listSealScheme{listCursorPrefix, listCursorSealDomain, listCursorPrefixV2, listCursorSealDomainV2}
+	listPositionScheme = listSealScheme{listPositionPrefix, listPositionSealDomain, listPositionPrefixV2, listPositionSealDomainV2}
+)
+
+// SealPosition seals an opaque resume position for a list whose position
+// does not fit authorizedList's "created,id" form (for example a sort
+// value and a conversation key). It seals exactly as Seal does (the ring's
+// active generation, the form the ring's emit setting selects, the same
+// binding and failures) under its own scheme (listPositionScheme). The
+// caller validates the position OpenPosition returns: unlike Open, it does
+// not check the plaintext's shape.
+func (l *listCursorSealer) SealPosition(position, binding string) (string, error) {
+	return l.seal(listPositionScheme, position, binding)
+}
+
+// OpenPosition recovers the position SealPosition sealed under binding, as
+// Open does for a list cursor (a p2 cursor with generation kid only, while
+// it is before verify_until; a p1 cursor with the ring's legacy readers).
+// Any failure (an empty or unrecognized cursor, a malformed or unknown key
+// ID, malformed base64, truncation, a flipped byte, another binding, a
+// list cursor, a retired generation, or a nil sealer) is errInvalidCursor.
+func (l *listCursorSealer) OpenPosition(sealed, binding string) (string, error) {
+	return l.open(listPositionScheme, sealed, binding, nil)
+}
+
+// seal seals plaintext under binding in scheme: with the ring's active key,
+// in the versioned form when the ring emits it. A nil sealer fails closed
+// with errListCursorSealerUnavailable; a ring that may not issue now
+// returns errCapabilityIssuanceClosed.
+func (l *listCursorSealer) seal(scheme listSealScheme, plaintext, binding string) (string, error) {
+	if l == nil {
+		return "", errListCursorSealerUnavailable
+	}
+	key, versioned, err := l.keys.issue()
+	if err != nil {
+		return "", err
+	}
+	aead, err := listCursorAEAD(key.Bytes())
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		// crypto/rand failing is unrecoverable for this process: there is no
+		// safe cursor left to hand back, sealed or otherwise.
+		panic("list cursor sealer: generating nonce: " + err.Error())
+	}
+	prefix, aad := scheme.prefixV1, scheme.domainV1+binding
+	if versioned {
+		prefix, aad = scheme.prefixV2+key.ID+".", scheme.domainV2+key.ID+":"+binding
+	}
+	ciphertext := aead.Seal(nil, nonce, []byte(plaintext), []byte(aad))
+	return prefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...)), nil
+}
+
+// open recovers what seal sealed under binding in scheme, trying the keys
+// that may have sealed it (the cursor's generation only, or the legacy
+// readers for the key-ID-less form). check, when set, must accept the
+// plaintext. Every failure is errInvalidCursor.
+func (l *listCursorSealer) open(scheme listSealScheme, sealed, binding string, check func(string) bool) (string, error) {
+	if l == nil {
+		return "", errInvalidCursor
+	}
+	kid, body := "", ""
+	if rest, ok := strings.CutPrefix(sealed, scheme.prefixV2); ok {
+		var found bool
+		kid, body, found = strings.Cut(rest, ".")
+		if !found || !capabilityKeyIDPattern.MatchString(kid) {
+			return "", errInvalidCursor
+		}
+	} else if rest, ok := strings.CutPrefix(sealed, scheme.prefixV1); ok {
+		body = rest
+	} else {
+		return "", errInvalidCursor
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	aad := scheme.domainV1 + binding
+	if kid != "" {
+		aad = scheme.domainV2 + kid + ":" + binding
+	}
+	for _, k := range l.keys.candidates(kid) {
+		aead, err := listCursorAEAD(k.Bytes())
+		if err != nil {
+			continue
+		}
+		nonceSize := aead.NonceSize()
+		if len(raw) < nonceSize {
+			return "", errInvalidCursor
+		}
+		plaintext, err := aead.Open(nil, raw[:nonceSize], raw[nonceSize:], []byte(aad))
+		if err != nil {
+			continue
+		}
+		out := string(plaintext)
+		if check != nil && !check(out) {
+			return "", errInvalidCursor
+		}
+		return out, nil
+	}
+	return "", errInvalidCursor
+}
+
+// openAndValidateListCursor turns a raw, client-supplied query-string cursor
+// into the plaintext cursor the existing store/authorizedList plumbing
+// expects. An empty cursor (a first-page request) is always valid and
+// returns "" unconditionally, without touching sealer -- so a fresh first
+// page always works even when sealer is nil, a key rotated, or a cursor
+// from a previous key is being rejected elsewhere in the same request.
+func openAndValidateListCursor(sealer *listCursorSealer, sealed, binding string) (string, error) {
+	if sealed == "" {
+		return "", nil
+	}
+	if sealer == nil {
+		return "", errInvalidCursor
+	}
+	return sealer.Open(sealed, binding)
+}
+
+// initListCursorSealer loads or creates the list-cursor sealing key through
+// the same persistence path as the Hub's other signing keys (see
+// initDownloadSigningKey), and follows the same stable-key failure policy:
+// a GCP secret backend or RequireStableSigningKey makes a missing,
+// unloadable, or wrong-length key (AES-256 requires exactly 32 bytes) a
+// startup failure. Replicas that disagree on this key would otherwise fail
+// every cross-replica cursor resume -- confusing, since it surfaces as an
+// intermittent ErrCodeInvalidCursor 400, but never unsafe: a cursor sealed
+// under a key this hub does not hold only ever fails closed (see
+// listCursorSealer.Open), and a fresh first-page request (no cursor) is
+// unaffected either way.
+//
+// Otherwise (local development, single-node hubs) it falls back to an
+// ephemeral in-memory key: a restart just invalidates outstanding cursors,
+// the same fallback the download-signing key uses.
+//
+// In keyring mode the keys come from the signing ring instead (see
+// capability_keys.go) and nothing is read from the secret backend.
+func (s *Server) initListCursorSealer(ctx context.Context) error {
+	if s.keyringManaged() {
+		keys, err := s.managedCapabilityKeys(SecretKeyListCursorKey)
+		if err != nil {
+			return err
+		}
+		s.listCursorSealer = newRingListCursorSealer(keys)
+		return nil
+	}
+	key, err := s.ensureSigningKey(ctx, SecretKeyListCursorKey, nil)
+	if err == nil && len(key) != 32 {
+		err = fmt.Errorf("list cursor key must be 32 bytes for AES-256, got %d", len(key))
+	}
+	if err != nil {
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if isGCPBackend || s.config.RequireStableSigningKey {
+			return fmt.Errorf("list cursor key: %w", err)
+		}
+		slog.Warn("List cursor key could not be loaded or persisted; using an ephemeral in-memory key "+
+			"(outstanding pagination cursors will not validate on other replicas or after restart)",
+			"error", err)
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return fmt.Errorf("generate ephemeral list cursor key: %w", rerr)
+		}
+		s.recordSigningKeySource(SecretKeyListCursorKey, signingKeySourceEphemeral)
+	}
+	sealer, err := newListCursorSealer(key)
+	if err != nil {
+		return fmt.Errorf("list cursor key: %w", err)
+	}
+	s.listCursorSealer = sealer
 	return nil
 }

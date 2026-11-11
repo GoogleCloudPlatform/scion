@@ -1,0 +1,971 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// chatSendInput is the request-independent content of one chat v2 send.
+// The HTTP handler (handleConversationSend) decodes it from the request
+// body; other callers build it from stored data.
+type chatSendInput struct {
+	Content     string
+	Attachments []string
+	ReplyToID   string
+	// Metadata is client-supplied metadata; only allowlisted keys reach
+	// the agent (see allowedClientMetadataKeys).
+	Metadata  map[string]string
+	Interrupt bool
+	Wake      bool
+	OfferWake bool
+	// OnPersisted, when set, is called for an agent-routed send right
+	// after the row is stored and before dispatch. See
+	// chatSendOptions.OnPersisted.
+	OnPersisted func(messageID string)
+	// BeforeWake, when set, is called right before a suspended primary is
+	// woken, with the number of agent recipients. The HTTP handler uses it
+	// to extend the connection's write deadline.
+	BeforeWake func(recipients int)
+}
+
+// chatSendError is a send failure as a value. It carries exactly what the
+// HTTP handler writes (status, code, message, details) so that a caller
+// without a request can classify the failure instead.
+type chatSendError struct {
+	Status     int
+	Code       string
+	Message    string
+	Details    map[string]interface{}
+	RetryAfter time.Duration
+	// accessRefused marks a refusal of the sender's access to the
+	// conversation that is answered as not found. It is never written to
+	// the response; callers without a request (scheduled sends) use it to
+	// tell a refusal from a missing or unreadable row.
+	accessRefused bool
+}
+
+func (e *chatSendError) Error() string {
+	return fmt.Sprintf("chat send: %d %s: %s", e.Status, e.Code, e.Message)
+}
+
+// write writes the error as the HTTP response the send handler returns.
+func (e *chatSendError) write(w http.ResponseWriter) {
+	if e.RetryAfter > 0 {
+		WriteAgentDMError(w, &AgentDMError{
+			Code: e.Code, Message: e.Message, Details: e.Details,
+			HTTPStatus: e.Status, RetryAfter: e.RetryAfter,
+		})
+		return
+	}
+	writeError(w, e.Status, e.Code, e.Message, e.Details)
+}
+
+func newChatSendError(status int, code, message string, details map[string]interface{}) *chatSendError {
+	return &chatSendError{Status: status, Code: code, Message: message, Details: details}
+}
+
+// The constructors below mirror the HTTP helpers of the same name in
+// errors.go, so the handler's responses are unchanged.
+
+func chatSendBadRequest(message string) *chatSendError {
+	return newChatSendError(http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
+}
+
+func chatSendValidationError(message string) *chatSendError {
+	return newChatSendError(http.StatusBadRequest, ErrCodeValidationError, message, nil)
+}
+
+func chatSendForbidden() *chatSendError {
+	return newChatSendError(http.StatusForbidden, ErrCodeForbidden, "Insufficient permissions", nil)
+}
+
+func chatSendNotFound(resource string) *chatSendError {
+	return newChatSendError(http.StatusNotFound, ErrCodeNotFound, resource+" not found", nil)
+}
+
+// chatSendRefusedAsNotFound is a refusal of the sender's access, answered
+// exactly as chatSendNotFound.
+func chatSendRefusedAsNotFound(resource string) *chatSendError {
+	e := chatSendNotFound(resource)
+	e.accessRefused = true
+	return e
+}
+
+func chatSendFromAgentDMError(e *AgentDMError) *chatSendError {
+	return &chatSendError{Status: e.HTTPStatus, Code: e.Code, Message: e.Message, Details: e.Details, RetryAfter: e.RetryAfter}
+}
+
+// chatSendTarget is a conversation the sender has been authorized to post
+// to by authorizeChatSend.
+type chatSendTarget struct {
+	Key  string
+	IsDM bool
+	// ProjectID is the topic's current project; empty for DMs (resolved
+	// later from the key for agent DMs).
+	ProjectID string
+	// Topic is the topic loaded for authorization (nil for DMs); routing
+	// reuses it rather than reading it again.
+	Topic *WebChatTopic
+	wcs   WebChatStore
+}
+
+// chatSendPath is the request path of a live send, used to label
+// authorization denial logs for callers that have no request.
+func chatSendPath(key string) string {
+	return "/api/v1/chat/conversations/" + key + "/messages"
+}
+
+// chatSendPostDenied is the refusal for a sender who may read a thread
+// but may not post in it (chatThreadAccess). It is a 403, not "Thread not
+// found": the sender can already see the thread. details.reason is the
+// resolver's reason: read_only (the account lacks project.chat_post) or
+// token_scope (the access token may not write chat in the project).
+func chatSendPostDenied(reason string) *chatSendError {
+	details := map[string]interface{}{
+		"resource_type": "project",
+		"denied_action": string(ActionChatPost),
+	}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied,
+		"You can read this thread but not post in it", details)
+}
+
+// chatActionDenied is the refusal for a caller who may read a thread (or a
+// chat space) but may not take action in it (chatThreadAccess,
+// chatSpaceAccess): 403 chat_post_denied, the
+// shape of chatSendPostDenied, with the refused action in
+// details.chat_action and the resolver's reason. Every thread write needs
+// project.chat_post, so on the routes that use it the reason is read_only:
+// each of them refuses a user access token without inbox:write for the
+// project with its own token check (plain 403) before the resolver runs,
+// so token_scope does not reach this refusal in Phase 1.
+func chatActionDenied(action, reason string) *chatSendError {
+	details := map[string]interface{}{
+		"resource_type": "project",
+		"denied_action": string(ActionChatPost),
+		"chat_action":   action,
+	}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	message := "You can read this thread but not change it"
+	if action == ChatActionCreateThread || action == ChatActionCreateGroup {
+		message = "You can read this project's chat but not create threads or groups in it"
+	}
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied, message, details)
+}
+
+// requireChatThreadAction decides with chatThreadAccess whether user may
+// take every one of actions in thread, and writes the refusal when not: a
+// caller who may not read the thread gets 404 notFound (the reason is
+// logged), one who may read it but not take an action 403
+// chat_post_denied (chatActionDenied). A resolver error fails closed.
+// Callers run it before any mutation or event, so a refused request
+// changes nothing.
+func (s *Server) requireChatThreadAction(w http.ResponseWriter, r *http.Request, user UserIdentity, thread chatThreadRef, notFound string, actions ...string) bool {
+	access, err := s.chatThreadAccess(r.Context(), user, thread)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !access.Can(ChatActionRead) {
+		if thread.Project != nil {
+			logAuthzDenial(r, user, projectResource(thread.Project), ActionRead, access.readDenial.Reason)
+		}
+		NotFound(w, notFound)
+		return false
+	}
+	for _, action := range actions {
+		if !access.Can(action) {
+			logAuthzDenial(r, user, projectResource(thread.Project), ActionChatPost, access.postDenial.Reason)
+			chatActionDenied(action, access.Reason).write(w)
+			return false
+		}
+	}
+	return true
+}
+
+// requireChatSpaceAction decides with chatSpaceAccess whether user may
+// take every one of actions in project's chat space (create_thread,
+// create_group), and writes the refusal when not: a caller who may not read
+// the project gets 404 notFound (the reason is logged), one who may read it
+// but not take an action 403 chat_post_denied naming the action. Callers run
+// it before any write or event. The routes that use it refuse a user access
+// token without inbox:write for the project with their own token check
+// first, so the reason here is read_only.
+func (s *Server) requireChatSpaceAction(w http.ResponseWriter, r *http.Request, user UserIdentity, project *store.Project, notFound string, actions ...string) bool {
+	access := s.chatSpaceAccess(r.Context(), user, project)
+	if !access.Can(ChatActionRead) {
+		logAuthzDenial(r, user, projectResource(project), ActionRead, access.readDenial.Reason)
+		NotFound(w, notFound)
+		return false
+	}
+	for _, action := range actions {
+		if !access.Can(action) {
+			logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+			chatActionDenied(action, access.Reason).write(w)
+			return false
+		}
+	}
+	return true
+}
+
+// requireChatMessageAction applies requireChatThreadAction to a message of
+// the conversation key: a topic message needs action in the topic. It runs
+// after the route's token re-check (authorizeChatTokenMessageTarget), which
+// refuses a user access token with a plain 403 when the topic is missing
+// or deleted, or when the token lacks project read or inbox:write for the
+// topic's project. So the missing-thread answer here (404, nothing
+// changed) reaches sessions: a session sender who can no longer read the
+// topic's project, or whose message is in a deleted topic or under a key
+// that is no topic. A DM message passes: a DM is not decided by the chat
+// resolvers (its sender and key participation decide it).
+func (s *Server) requireChatMessageAction(w http.ResponseWriter, r *http.Request, user UserIdentity, wcs WebChatStore, key, action string) bool {
+	if strings.HasPrefix(key, "dm:") {
+		return true
+	}
+	ctx := r.Context()
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if err != nil {
+		// A missing project answers as a missing thread does, so the
+		// status and text do not tell the two apart.
+		writeStoreErr(w, err, "Thread")
+		return false
+	}
+	return s.requireChatThreadAction(w, r, user, chatThreadRef{Key: key, Project: project}, "Thread", action)
+}
+
+// requireChatConversationAction applies requireChatThreadAction to a user
+// caller on a project conversation (a topic's row or a project group).
+// Agents and legacy groups with no project are not decided by the chat
+// resolvers in Phase 1 and pass unchanged (ptone/scion#5519 Phase 2).
+func (s *Server) requireChatConversationAction(w http.ResponseWriter, r *http.Request, conv *store.Conversation, action string) bool {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || conv.ProjectID == nil || *conv.ProjectID == "" {
+		return true
+	}
+	project, err := s.store.GetProject(r.Context(), *conv.ProjectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	return s.requireChatThreadAction(w, r, user, chatThreadRef{Project: project, ConversationID: conv.ID}, "Conversation", action)
+}
+
+// chatPostIdentity is the identity whose account decides project.chat_post:
+// the holder of a user access token, the caller otherwise. A token keeps
+// needing only inbox:write for a send; the post permission is a property
+// of the account the token acts for, so it is checked on that account and
+// never widens what the token may do. The project:chat_post selector does
+// not change this: it only keeps project.chat_post in the token's ceiling,
+// so the token can delegate roles that include it.
+func chatPostIdentity(user UserIdentity) UserIdentity {
+	if scoped, ok := user.(*ScopedUserIdentity); ok && scoped != nil && scoped.UserIdentity != nil {
+		return scoped.UserIdentity
+	}
+	return user
+}
+
+// authorizeChatSend runs the conversation access checks of a chat send:
+// for a DM, a well-formed key naming the sender as a participant; for a
+// topic, an existing topic whose current project exists and on which
+// chatThreadAccess allows the sender to post. It needs no request, so
+// every caller of sendChatMessage runs the same checks.
+//
+// A sender who may not read the topic gets the same answer as for a
+// conversation that does not exist ("Thread not found"); the reason is
+// written to the server log only. A sender who may read a topic but not
+// post in it gets 403 chat_post_denied with the resolver's reason
+// (read_only, or token_scope for an access token without inbox:write for
+// the topic's project).
+func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
+	return s.authorizeChatConversation(ctx, user, key, true)
+}
+
+// authorizeChatSendRead runs the checks of authorizeChatSend but needs only
+// chatThreadAccess's read action, for routes that act only on the sender's own rows of a
+// conversation it can read (listing its scheduled messages).
+func (s *Server) authorizeChatSendRead(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
+	return s.authorizeChatConversation(ctx, user, key, false)
+}
+
+func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentity, key string, requirePost bool) (*chatSendTarget, *chatSendError) {
+	if user == nil {
+		return nil, chatSendForbidden()
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return nil, newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+	}
+
+	target := &chatSendTarget{Key: key, wcs: wcs}
+	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
+	if err != nil {
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic lookup failed", key, err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+	}
+	if audience == chatAudienceParticipants {
+		target.IsDM = true
+		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
+			return nil, serr
+		}
+		// The other participant must be a principal the caller may message.
+		if serr := s.authorizeDMPeer(ctx, user, key); serr != nil {
+			return nil, serr
+		}
+		// DMs are not project-scoped; the project is derived from the
+		// agent for an agent DM, and user-user DMs have none.
+		return target, nil
+	}
+
+	// Topic key: the topic gives its project, whose read access decides.
+	if audience != chatAudienceProject {
+		return nil, chatSendNotFound("Thread")
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if err != nil {
+		// A missing project is answered as a missing thread, so the answer
+		// reveals nothing; any other store error is the generic 500, with
+		// the error in the server log only.
+		if errors.Is(err, store.ErrNotFound) {
+			logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
+			return nil, chatSendNotFound("Thread")
+		}
+		logChatStoreFault(ctx, slog.Default(), "chat send: topic project lookup failed", key, err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+	}
+	resource := projectResource(project)
+	// The single chat decision point for a topic (chatThreadAccess). A user
+	// caller is never refused with an error.
+	access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project})
+	if err != nil {
+		// An internal caller error (errChatThreadUnresolved) or a store
+		// fault: the common error path's 500, as writeErrorFromErr answers.
+		slog.WarnContext(ctx, "chat send: thread access check failed", "key", key, "error", err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+	}
+	if !access.Can(ChatActionRead) {
+		decision := access.readDenial
+		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
+		logAuthzDenial(logReq, user, resource, ActionRead, decision.Reason)
+		// The details a 403 used to carry stay in the log only.
+		logAttrs := []any{"route", chatSendPath(key), "resource_type", resource.Type, "denied_action", string(ActionRead)}
+		if decision.DeniedBy == DeniedByDelegationCeiling {
+			logAttrs = append(logAttrs, "denied_by", string(DeniedByDelegationCeiling))
+		}
+		if cause := decision.adoptionDetailsCause(); cause != "" {
+			logAttrs = append(logAttrs, "ceiling_cause", cause)
+		}
+		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
+		return nil, chatSendRefusedAsNotFound("Thread")
+	}
+	if requirePost && !access.Can(ChatActionPost) {
+		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
+		logAuthzDenial(logReq, user, resource, ActionChatPost, access.postDenial.Reason)
+		return nil, chatSendPostDenied(access.Reason)
+	}
+	target.ProjectID = topic.ProjectID
+	target.Topic = topic
+	return target, nil
+}
+
+// chatKeyAudience is how reading a chat conversation key is authorized.
+type chatKeyAudience int
+
+const (
+	// chatAudienceNone: no such conversation, or a key that cannot name a
+	// topic (see validChatTopicKey).
+	chatAudienceNone chatKeyAudience = iota
+	// chatAudienceParticipants: a DM key, read by its participants only.
+	chatAudienceParticipants
+	// chatAudienceProject: a topic, read by anyone with read access to its
+	// project.
+	chatAudienceProject
+)
+
+// chatKeyReadAudience classifies key by how reading it is authorized: a
+// "dm:" key by its participant list, any other key as a topic, read by
+// read access to its project (the topic is returned). It is the
+// read-authorization classifier shared by the send authorization
+// (authorizeChatSend), the conversation access check
+// (authorizeConversationAccess) and the attachment projection decision
+// (projectionAudienceIsProject), so those three cannot disagree. Other
+// handlers still test the "dm:" prefix for their own key-shape handling.
+// A topic that does not exist is chatAudienceNone with a nil error, and so
+// is a key that cannot name one (validChatTopicKey), which is never sent to
+// the store. Any other failure to load the topic is returned as the error
+// (with chatAudienceNone), so callers answer a store fault as a fault rather
+// than as a missing conversation.
+func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic, error) {
+	if strings.HasPrefix(key, "dm:") {
+		return chatAudienceParticipants, nil, nil
+	}
+	if wcs == nil || !validChatTopicKey(key) {
+		return chatAudienceNone, nil, nil
+	}
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return chatAudienceNone, nil, nil
+		}
+		return chatAudienceNone, nil, err
+	}
+	if topic == nil {
+		return chatAudienceNone, nil, nil
+	}
+	return chatAudienceProject, topic, nil
+}
+
+// validChatTopicKey reports whether key can name a topic: non-empty, valid
+// UTF-8 and free of NUL. Topic IDs are generated strings, so a key that fails
+// this names no topic; it is answered as a missing one instead of being sent
+// to the store, which may reject it with an error (Postgres refuses NUL and
+// invalid UTF-8 in text) that would otherwise become a 500.
+func validChatTopicKey(key string) bool {
+	return key != "" && utf8.ValidString(key) && !strings.ContainsRune(key, 0)
+}
+
+// logChatStoreFault logs a store fault on a chat lookup keyed by the
+// caller-supplied key with l: at Debug when ctx is already done (the client
+// went away, so the fault is expected), at Warn otherwise. The key is logged
+// bounded (chatKeyLogArgs). The caller still answers the fault (a 500).
+func logChatStoreFault(ctx context.Context, l *slog.Logger, msg, key string, err error) {
+	args := append(chatKeyLogArgs(key), "error", err)
+	if ctx.Err() != nil {
+		l.DebugContext(ctx, msg, args...)
+		return
+	}
+	l.WarnContext(ctx, msg, args...)
+}
+
+// maxLoggedChatKeyBytes bounds the caller-supplied chat key in a log line.
+const maxLoggedChatKeyBytes = 128
+
+// chatKeyLogArgs returns the log attributes of a caller-supplied chat key:
+// "key", at most its first maxLoggedChatKeyBytes bytes cut on a rune
+// boundary (truncateUTF8), and "key_len", its full length in bytes. The
+// route accepts a key of any length, so the key's length must not decide the
+// size of this store-fault log line.
+func chatKeyLogArgs(key string) []any {
+	return []any{"key", truncateUTF8(key, maxLoggedChatKeyBytes), "key_len", len(key)}
+}
+
+// authorizeDMKeyParticipant runs the first two DM steps of
+// authorizeChatSend: the key is well formed, and user is one of its two
+// participants. Callers that need only these steps use it so their
+// responses are the same as authorizeChatSend's. A caller who is not a
+// participant gets the same answer as for a missing thread; the reason is
+// logged against route, the path of the request being answered.
+func authorizeDMKeyParticipant(ctx context.Context, user UserIdentity, key, route string) *chatSendError {
+	// No caller: the same refusal authorizeChatSend gives a request with no
+	// user.
+	if isNilIdentity(user) {
+		return chatSendForbidden()
+	}
+	// Validate DM key format before any further processing.
+	if !validDMKey(key) {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	// DM key: verify the caller is one of the two participants.
+	if !isDMParticipant(key, user.ID()) {
+		logReferenceRefused(ctx, route, "sender is not a participant of this DM", user)
+		return chatSendRefusedAsNotFound("Thread")
+	}
+	return nil
+}
+
+// chatSendMessageDenied is the refusal for a sender the messaging rules do
+// not allow to message agent. authorizeDMPeer and sendAgentRouted both use
+// it, so the two refusals are the same.
+func chatSendMessageDenied(reason string, agent *store.Agent) *chatSendError {
+	return newChatSendError(http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
+		"reason":        mapReasonToCode(reason),
+		"senderMode":    "user",
+		"recipientMode": agent.MessageMode,
+	})
+}
+
+// authorizeDMPeer checks the participant of a DM key that is not the
+// caller (the peer). The caller has already been matched to a user slot
+// by isDMParticipant.
+//
+//   - The key must be canonical (messages.DMConversationKey). Anything else
+//     is the same 400 as a malformed key, decided from the key text alone.
+//   - A user peer must exist, not be suspended, and be readable by the
+//     caller (the user directory the chat palette offers).
+//   - An agent peer must exist and authorizeAgentMessage must allow the
+//     caller to message it. A refusal for an agent the caller can read is
+//     the usual MESSAGE_DENIED response.
+//
+// Every other outcome is "Thread not found", the same response as for a
+// caller who is not a participant or a DM that does not exist, so the
+// response does not depend on which check failed; the reason is logged. A
+// store error other than not found fails closed with 503.
+func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key string) *chatSendError {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
+	if err != nil {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	if canonical, cerr := messages.DMConversationKey(kindA, idA, kindB, idB); cerr != nil || canonical != key {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	peerKind, peerID := kindA, idA
+	if kindA == "user" && idA == user.ID() {
+		peerKind, peerID = kindB, idB
+	}
+
+	switch peerKind {
+	case "user":
+		peer, err := s.store.GetUser(ctx, peerID)
+		if err != nil || peer == nil {
+			return s.dmPeerLookupFailure(ctx, user, key, err)
+		}
+		if peer.Status == store.UserStatusSuspended {
+			return dmPeerRefused(ctx, user, key, "DM peer user is suspended")
+		}
+		if !s.authzService.CheckAccess(ctx, user, userResource(peer), ActionRead).Allowed {
+			return dmPeerRefused(ctx, user, key, "sender may not read the DM peer user")
+		}
+		return nil
+	case "agent":
+		agent, err := s.store.GetAgent(ctx, peerID)
+		if err != nil || agent == nil {
+			return s.dmPeerLookupFailure(ctx, user, key, err)
+		}
+		allowed, reason, _ := s.authorizeAgentMessage(ctx, user, agent, false)
+		if allowed {
+			return nil
+		}
+		if s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionRead).Allowed {
+			slog.Warn("chat v2 message authorization denied",
+				"user", user.ID(),
+				"target_agent", agent.ID,
+				"reason", reason,
+			)
+			return chatSendMessageDenied(reason, agent)
+		}
+		return dmPeerRefused(ctx, user, key, "sender may not read or message the DM peer agent: "+reason)
+	default:
+		return dmPeerRefused(ctx, user, key, "unknown DM peer kind")
+	}
+}
+
+// dmPeerRefused is the uniform DM peer refusal: answered as a missing
+// thread, with the reason in the server log.
+func dmPeerRefused(ctx context.Context, user UserIdentity, key, reason string) *chatSendError {
+	logReferenceRefused(ctx, chatSendPath(key), reason, user)
+	return chatSendRefusedAsNotFound("Thread")
+}
+
+// dmPeerLookupFailure maps a failed DM peer lookup: not found is the
+// uniform refusal, any other store error fails closed.
+func (s *Server) dmPeerLookupFailure(ctx context.Context, user UserIdentity, key string, err error) *chatSendError {
+	if err == nil || errors.Is(err, store.ErrNotFound) {
+		return dmPeerRefused(ctx, user, key, "DM peer does not exist")
+	}
+	slog.Warn("chat v2 DM peer lookup failed", "error", err)
+	return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+}
+
+// validateChatSendInput checks the content, reply target and attachments of
+// a send by user and returns the trimmed content, with agent-prefixed
+// mentions rewritten (rewriteIncomingAgentMentions), and the attachment
+// references. It writes nothing, so a refused send leaves no trace.
+func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
+	return s.validateChatSendInputMode(ctx, user, target, in, false)
+}
+
+// prevalidateChatSendInput is validateChatSendInput for the HTTP handler's
+// check before its idempotency lookup. It differs in one case: an
+// attachment stored as an artifact that this sender already sent passes,
+// because a retry of the send that bound it carries the same id and must
+// reach the idempotency lookup (and get the replay, or 409 while the first
+// send is still running) instead of a 400. The send itself always runs
+// validateChatSendInput, which refuses it. The references it returns are
+// incomplete and must not be used.
+func (s *Server) prevalidateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, *chatSendError) {
+	content, _, serr := s.validateChatSendInputMode(ctx, user, target, in, true)
+	return content, serr
+}
+
+// validateChatSendInputMode is validateChatSendInput; with replay set, an
+// artifact attachment already sent by user passes (prevalidateChatSendInput).
+func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput, replay bool) (string, []AttachmentRef, *chatSendError) {
+	content := rewriteIncomingAgentMentions(strings.TrimSpace(in.Content))
+	if content == "" && len(in.Attachments) == 0 {
+		return "", nil, chatSendValidationError("content or attachments required")
+	}
+	if utf8.RuneCountInString(content) > messages.MaxMessageLength {
+		return "", nil, chatSendValidationError(fmt.Sprintf("message exceeds %d character limit", messages.MaxMessageLength))
+	}
+	if len(in.Attachments) > MaxAttachmentsPerMessage {
+		return "", nil, chatSendValidationError(fmt.Sprintf("too many attachments: %d (max %d)", len(in.Attachments), MaxAttachmentsPerMessage))
+	}
+
+	// A reply must target a message of this conversation. A missing message
+	// and a message of another conversation get the same answer.
+	if in.ReplyToID != "" && target.wcs != nil {
+		ok, err := s.messageInChatConversation(ctx, target.wcs, target.Key, in.ReplyToID)
+		if err != nil {
+			slog.Warn("chat v2 reply target lookup failed", "key", target.Key, "error", err)
+			return "", nil, newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		}
+		if !ok {
+			logReferenceRefused(ctx, chatSendPath(target.Key), "reply target is not a message of this conversation", user)
+			return "", nil, chatSendValidationError("reply_to_id does not refer to a message in this conversation")
+		}
+	}
+
+	// W7: Validate attachment IDs and collect metadata. An attachment must
+	// be usable in this conversation (attachmentUsableIn); a missing one and
+	// one that is not usable here get the same answer, and the reason is
+	// logged.
+	var attachmentRefs []AttachmentRef
+	if len(in.Attachments) > 0 && target.wcs != nil {
+		// Only a caller attachmentWriterKind admits may name one; any other
+		// caller's id is looked up in the AttachmentStore only, so an
+		// artifact id gets the answer of an unknown one.
+		var svc *artifacts.Service
+		if s.attachmentArtifactsReady() && s.attachmentWriterKind(ctx) != "" {
+			svc = s.attachmentService()
+		}
+		// A user access token names its uploads only where it may post
+		// (chatTokenMaySend, ptone/scion#4596 section 9); otherwise its ids
+		// get the answer of an unknown one.
+		if token := chatToken(ctx); svc != nil && token != nil {
+			if allowed, err := s.chatTokenMaySend(ctx, token, target.Key, target.ProjectID); err != nil || !allowed {
+				svc = nil
+			}
+		}
+		for _, aid := range in.Attachments {
+			// An attachment stored as an artifact (ptone/scion#4595) is
+			// usable only as an unsent upload of the sender, in any
+			// conversation the sender may post to; sending binds it to the
+			// message. Any other attachment of the artifact service is
+			// refused like a missing one, and never looked up below. A
+			// failed lookup falls through to the AttachmentStore, which
+			// never holds an artifact id, so a legacy send does not depend
+			// on the artifact store being healthy.
+			if svc != nil {
+				info, state, err := svc.UsableAttachment(ctx, aid, artifacts.PrincipalKindUser, user.ID())
+				if err != nil {
+					slog.WarnContext(ctx, "chat v2 artifact attachment lookup failed; trying the attachment store",
+						"attachment", aid, "error", err)
+					state = artifacts.AttachmentAbsent
+				}
+				if replay && state == artifacts.AttachmentSentBySender {
+					continue
+				}
+				if state == artifacts.AttachmentUnusable || state == artifacts.AttachmentSentBySender {
+					logReferenceRefused(ctx, chatSendPath(target.Key), "attachment is not an unsent upload of the sender", user)
+					return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
+				}
+				if state == artifacts.AttachmentUsable {
+					attachmentRefs = append(attachmentRefs, newArtifactAttachmentRef(info))
+					continue
+				}
+			}
+			meta, err := target.wcs.GetAttachment(ctx, aid)
+			reason := ""
+			switch {
+			case err != nil || meta == nil:
+				reason = "attachment lookup found no attachment"
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					reason = "attachment lookup failed: " + err.Error()
+				}
+			case !attachmentUsableIn(meta, target.IsDM, target.ProjectID, user.ID()):
+				reason = "attachment is not usable in this conversation"
+			}
+			if reason != "" {
+				logReferenceRefused(ctx, chatSendPath(target.Key), reason, user)
+				return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
+			}
+			attachmentRefs = append(attachmentRefs, AttachmentRef{
+				ID:       meta.ID,
+				Name:     meta.Filename,
+				MimeType: meta.MimeType,
+				Size:     meta.Size,
+			})
+		}
+	}
+	// Delivery writes the attachments of one message into one directory
+	// under their names, so two attachments may not share a name, artifact
+	// and AttachmentStore ones alike (ptone/scion#4596).
+	if msg := duplicateAttachmentRefusal(attachmentRefs); msg != "" {
+		return "", nil, chatSendValidationError(msg)
+	}
+	return content, attachmentRefs, nil
+}
+
+// chatSendValidationEnvelope returns the message that a chat v2 send to
+// agents passes to messaging.ValidateLegacyMessage. The attachment files are
+// staged into msg.Attachments only after the message is stored
+// (stageChatAttachments), so an attachment-only send, whose body is empty
+// (ptone/scion#6146), is validated on a copy that names its attachment ids
+// in their place. msg itself is never changed.
+func chatSendValidationEnvelope(msg *messages.StructuredMessage, refs []AttachmentRef) *messages.StructuredMessage {
+	if msg == nil || msg.Msg != "" || len(msg.Attachments) > 0 || len(refs) == 0 {
+		return msg
+	}
+	v := *msg
+	v.Attachments = make([]string, 0, len(refs))
+	for _, ref := range refs {
+		v.Attachments = append(v.Attachments, ref.ID)
+	}
+	return &v
+}
+
+// sendChatMessage is the single chat v2 send path: conversation access
+// check, validation, routing, persistence, publish and dispatch, for a
+// message sent by user to the conversation key. It is used by the HTTP
+// send handler and by any caller that sends on a user's behalf without a
+// request, so they cannot drift apart. Authentication, rate limiting,
+// body decoding and the idempotency cache stay with the HTTP handler.
+//
+// On success it returns the response body of the created message; the
+// message is persisted. On failure nothing was persisted unless the
+// error says so.
+func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key string, in chatSendInput) (*chatMessageResponse, *chatSendError) {
+	// --- Authorize ---
+	target, serr := s.authorizeChatSend(ctx, user, key)
+	if serr != nil {
+		return nil, serr
+	}
+	// A DM may only be sent by one of its two participants.
+	// authorizeChatSend has checked this; it is checked again here so the
+	// check sits in the function that sends user-to-user messages
+	// (sendHumanToHuman), as hack/checksecuritymarkergates requires.
+	if target.IsDM && !isDMParticipant(key, user.ID()) {
+		return nil, chatSendRefusedAsNotFound("Thread")
+	}
+
+	// --- Validate ---
+	content, attachmentRefs, serr := s.validateChatSendInput(ctx, user, target, in)
+	if serr != nil {
+		return nil, serr
+	}
+
+	isDM := target.IsDM
+	projectID := target.ProjectID
+	threadTopic := target.Topic
+
+	// --- Resolve routing per design §3 ---
+	senderEmail := user.Email()
+	senderLabel := senderEmail
+	if senderLabel == "" {
+		senderLabel = user.ID()
+	}
+
+	// Resolve which project we're working in for agent resolution.
+	if projectID == "" && isDM {
+		projectID = resolveProjectFromDMKey(ctx, s, key)
+	}
+
+	// --- Resolve default agent (DM key or topic default) ---
+	var defaultAgent *store.Agent
+	// unresolvedDefaultAgent is set when the topic names a DefaultAgent that
+	// does not resolve to a live agent (soft-deleted, or otherwise missing).
+	// It is used below to report "Agent unreachable" instead of silently
+	// falling through to a human-to-human message (nc-delivery-unreachable)
+	// when no leading @mention overrides it.
+	var unresolvedDefaultAgent *store.Agent
+	// routingLookupFailed records a transient store error while resolving
+	// recipients. The message then cannot be proven agentless, so it is
+	// never marked no_recipient.
+	routingLookupFailed := false
+	if isDM {
+		if agentID := parseAgentDMKey(key); agentID != "" {
+			dmAgent, err := s.store.GetAgent(ctx, agentID)
+			switch {
+			case err == nil && dmAgent != nil:
+				defaultAgent = dmAgent
+			case errors.Is(err, store.ErrNotFound):
+				// The agent record is gone: report the DM undelivered
+				// exactly like a soft-deleted agent, instead of
+				// recording it as a delivered human-to-human DM.
+				unresolvedDefaultAgent = &store.Agent{ID: agentID, Slug: agentID}
+			}
+		}
+	} else if projectID != "" {
+		topic := threadTopic
+		if topic != nil && topic.DefaultAgent != "" {
+			da, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
+			// foreignProjectDefault stays out of scope here (DEF-31): a
+			// default naming a real agent from a different project keeps the
+			// existing human-to-human fallthrough rather than "Agent
+			// unreachable" — nc-delivery-unreachable is about a default that
+			// no longer resolves at all (deleted, or missing), not about
+			// cross-project routing.
+			foreignProjectDefault := false
+			// transientLookupErr (review round 2, nit 1): a store error that
+			// is not "not found" — a DB hiccup, not "this agent doesn't
+			// exist" — must not be classified the same as a deleted or
+			// missing default. Before nc-delivery-unreachable, that hiccup
+			// degraded to an ordinary human-to-human message; keep that
+			// fallthrough (leave defaultAgent and unresolvedDefaultAgent
+			// nil) instead of permanently persisting "Agent unreachable"
+			// rows for a transient failure.
+			transientLookupErr := false
+			if daErr != nil && !errors.Is(daErr, store.ErrNotFound) {
+				transientLookupErr = true
+			} else if daErr != nil || da == nil {
+				// Not found by slug — fall back to lookup by ID in case the
+				// value is a UUID.
+				da, daErr = s.store.GetAgent(ctx, topic.DefaultAgent)
+				if daErr != nil && !errors.Is(daErr, store.ErrNotFound) {
+					transientLookupErr = true
+				} else if daErr == nil && da != nil && (da.ProjectID != projectID || !da.DeletedAt.IsZero()) {
+					// Scope the fallback: reject agents from other projects or
+					// soft-deleted agents — DEF-31.
+					if da.ProjectID == projectID {
+						// Same project, soft-deleted: keep the row around so
+						// the caller can report "Agent unreachable" with the
+						// real slug/ID instead of a generic one.
+						unresolvedDefaultAgent = da
+					} else {
+						foreignProjectDefault = true
+					}
+					da = nil
+				}
+			}
+			routingLookupFailed = routingLookupFailed || transientLookupErr
+			if !transientLookupErr {
+				if daErr == nil && da != nil {
+					defaultAgent = da
+				} else if unresolvedDefaultAgent == nil && !foreignProjectDefault {
+					// The named default doesn't resolve at all (bad data, or a
+					// slug that no longer exists — most commonly because the
+					// agent behind it was soft-deleted, which GetAgentBySlug
+					// already excludes). Treat the same as deleted for reporting
+					// purposes.
+					unresolvedDefaultAgent = &store.Agent{Slug: topic.DefaultAgent}
+				}
+			}
+		}
+	}
+
+	// --- Reply-to agent override (nc-reply-recipient); see resolveReplyTarget's
+	// doc comment for the full rationale. unresolvedDefaultAgent is reused
+	// here (see its declaration above) so the existing "Agent unreachable"
+	// reporting path below also covers a deleted reply-to sender.
+	if replyAgent, replyUnresolved, ok := s.resolveReplyTarget(ctx, key, projectID, in.ReplyToID); ok {
+		defaultAgent = replyAgent
+		unresolvedDefaultAgent = replyUnresolved
+	}
+
+	// --- Resolve routing via shared planner ---
+	var plan RoutingPlan
+	// planErr, when non-nil, means resolveRoutingAgents itself failed rather
+	// than resolving to zero agents. It gates the unresolvedDefaultAgent
+	// override below (review round 2, Consider 2): plan.Agents being empty
+	// because of a planning error is not evidence the default agent is
+	// unreachable, so that case must keep the pre-existing human-to-human
+	// fallthrough instead of mislabelling the send "Agent unreachable".
+	var planErr error
+	if projectID != "" {
+		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
+		if planErr != nil {
+			routingLookupFailed = true
+			slog.Error("agent routing resolution failed", "error", planErr)
+			// Fall through: plan.Agents will be empty, triggering human-to-human.
+		}
+	} else if defaultAgent != nil {
+		// No project context but DM default resolved: single-recipient plan.
+		plan.Agents = []*store.Agent{defaultAgent}
+		plan.MentionNames = messages.ExtractMentions(content)
+	}
+
+	now := time.Now().UTC()
+
+	// --- Agent routing ---
+	if len(plan.Agents) > 0 {
+		// The send reaches agents: its attachments stored as artifacts must
+		// fit the delivery budget (ptone/scion#4596).
+		if msg := s.checkAttachmentDeliveryBudget(attachmentRefs); msg != "" {
+			return nil, chatSendValidationError(msg)
+		}
+		// DM registration happens inside sendAgentRouted, before its
+		// watermark update — see the comment there.
+		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,
+			chatSendOptions{Interrupt: in.Interrupt, Wake: in.Wake, OfferWake: in.OfferWake,
+				OnPersisted: in.OnPersisted, BeforeWake: in.BeforeWake})
+	}
+
+	// --- Unresolvable topic default agent (nc-delivery-unreachable) ---
+	// The topic names a default agent that no longer resolves (soft-deleted,
+	// or missing) and no leading @mention overrode it (plan.Agents is empty,
+	// or resolveRoutingAgents wouldn't have fallen through here). Report
+	// "Agent unreachable" rather than silently sending a human-to-human
+	// message to the thread. Only do so when resolveRoutingAgents actually
+	// succeeded (review round 2, Consider 2): if planErr != nil, the empty
+	// plan reflects a routing-plan failure, not the deleted default, so keep
+	// the pre-existing human-to-human error handling below instead.
+	if unresolvedDefaultAgent != nil && planErr == nil {
+		return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, isDM, false, plan.MentionNames, attachmentRefs, now, in.ReplyToID,
+			&unreachableAgentOverride{
+				AgentSlug: unresolvedDefaultAgent.Slug,
+				AgentID:   unresolvedDefaultAgent.ID,
+				Reason:    agentGoneReason,
+				Code:      dispatchFailureCodeAgentUnreachable,
+			})
+	}
+
+	// --- Human-to-human message ---
+	// No agent recipient was resolved. A thread message is no_recipient
+	// unless a lookup failed or it is addressed to a person.
+	members := s.projectMembersOnce(ctx, projectID)
+	noRecipient := !isDM && !routingLookupFailed &&
+		s.threadMessageUnaddressed(ctx, members, plan.MentionNames, in.ReplyToID, user.ID())
+	mentionNames := plan.MentionNames
+	if noRecipient {
+		// When an agent has posted in the thread, address the reply to the
+		// most recent other human poster (or the thread creator) with a
+		// note instead of leaving it unseen; no agent is invoked.
+		// Otherwise it stays no_recipient.
+		creatorID := ""
+		if threadTopic != nil {
+			creatorID = threadTopic.CreatedBy
+		}
+		if noted, token, ok := s.unmentionedHumanNote(ctx, members, projectID, key, creatorID, user.ID(), content); ok {
+			content = noted
+			mentionNames = append(slices.Clone(mentionNames), token)
+			noRecipient = false
+		}
+	}
+	return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, isDM, noRecipient, mentionNames, attachmentRefs, now, in.ReplyToID, nil)
+}

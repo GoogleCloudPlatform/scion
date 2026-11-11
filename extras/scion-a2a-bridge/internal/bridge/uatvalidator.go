@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,9 +31,13 @@ const (
 	maxUATCacheTTL     = 300 * time.Second
 )
 
-// UATValidator validates Scion user access tokens (scion_pat_*) by calling
-// the Hub's GET /api/v1/auth/me endpoint. Results are cached by SHA-256(token)
-// with a configurable TTL to avoid a round-trip on every request.
+// UATValidator validates bearer credentials by calling the Hub's
+// GET /api/v1/auth/me endpoint: Scion user access tokens (scion_pat_*), as
+// well as — under the hubBearer scheme — any other bearer token the Hub's
+// auth middleware accepts (Hub JWTs, tokens from trusted external issuers
+// such as a forwarded Google credential). Results are cached by
+// SHA-256(token) with a configurable TTL to avoid a round-trip on every
+// request.
 type UATValidator struct {
 	hubEndpoint string
 	httpClient  *http.Client
@@ -119,12 +124,23 @@ func (v *UATValidator) Validate(ctx context.Context, token string) (*CallerIdent
 		return nil, fmt.Errorf("auth/me returned incomplete identity (id=%q, email=%q)", user.ID, user.Email)
 	}
 
+	// scion_pat_* tokens are Hub user access tokens; anything else the Hub
+	// accepted (reachable only under the hubBearer scheme, which has no
+	// prefix check) is an external bearer credential — a Hub JWT or a token
+	// from a trusted external issuer such as a forwarded Google credential.
+	// Both are forwarded to the Hub verbatim (bridge.go callerHubClient), but
+	// the label keeps logs and task bookkeeping honest about the credential
+	// kind.
+	tokenType := "bearer"
+	if strings.HasPrefix(token, "scion_pat_") {
+		tokenType = "uat"
+	}
 	identity := &CallerIdentity{
 		UserID:    user.ID,
 		Email:     user.Email,
 		Role:      user.Role,
 		RawToken:  token,
-		TokenType: "uat",
+		TokenType: tokenType,
 	}
 
 	v.mu.Lock()

@@ -16,6 +16,8 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -24,11 +26,101 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // GetRuntime returns the appropriate Runtime implementation based on environment,
 // agent configuration (if available via GetAgentSettings), and project/global settings.
 func GetRuntime(projectPath string, profileName string) Runtime {
+	return selectRuntime(projectPath, profileName).build()
+}
+
+// GetRuntimeWithRecord is GetRuntime that also returns the runtime's build
+// record (Kubernetes placement defaults, ptone/scion#5085), taken from the
+// same settings read the runtime was built from. The record is carried with
+// the runtime and is not consulted when the runtime is built.
+//
+//   - Present is true for every runtime built here except an ErrorRuntime,
+//     whose record is the zero value.
+//   - EntryName is the runtimes key the resolved profile names, set only
+//     when that key exists in the overlay-inclusive global view
+//     (config.LoadGlobalSettingsWithOverlay) and, unless the settings
+//     overlay supplies the runtimes section, the project's own settings do
+//     not define the same key (a project-local same-name entry records "").
+//     When resolution fell back to a runtime type or auto-detection, or the
+//     global view cannot be read, it is "".
+//   - KubeconfigContext is a Kubernetes client's raw kubeconfig
+//     current-context at build (k8s.Client.RawCurrentContext), not its
+//     CurrentContext; "" when the client is in-cluster.
+//
+// A runtime resolved before the co-located settings overlay is installed
+// (the agent runtime's startup default) records its entry from the file
+// view, since the overlay does not exist yet.
+func GetRuntimeWithRecord(projectPath, profileName string) (Runtime, config.RuntimeBuildRecord) {
+	sel := selectRuntime(projectPath, profileName)
+	rt := sel.build()
+	return rt, sel.record(rt)
+}
+
+// runtimeSelection is what GetRuntime resolved from settings, before the
+// runtime is constructed.
+type runtimeSelection struct {
+	vs          *config.VersionedSettings
+	projectDir  string
+	profileName string
+	rtConfig    config.V1RuntimeConfig
+	runtimeType string
+	// entryName is the runtimes key the resolved profile names, or "" when
+	// settings did not resolve the profile.
+	entryName string
+	// err, when set, is why no runtime may be built: build returns an
+	// ErrorRuntime carrying it instead of falling back.
+	err error
+}
+
+// record returns the build record of rt, built from s (see
+// GetRuntimeWithRecord).
+func (s runtimeSelection) record(rt Runtime) config.RuntimeBuildRecord {
+	if _, isErr := rt.(*ErrorRuntime); isErr || rt == nil {
+		return config.RuntimeBuildRecord{}
+	}
+	rec := config.RuntimeBuildRecord{Present: true, EntryName: globalEntryName(s.projectDir, s.entryName)}
+	if kr, ok := rt.(*KubernetesRuntime); ok && kr.Client != nil {
+		// "" for an in-cluster client: neither the sentinel branch nor the
+		// deferred loader's in-cluster fallback has a kubeconfig context.
+		rec.KubeconfigContext = kr.Client.RawCurrentContext
+	}
+	return rec
+}
+
+// globalEntryName returns name when it may be recorded as the global
+// runtimes entry a runtime was built from, else "" (see
+// GetRuntimeWithRecord). It only reads settings.
+func globalEntryName(projectDir, name string) string {
+	if name == "" {
+		return ""
+	}
+	gvs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil || gvs == nil {
+		return ""
+	}
+	if _, ok := gvs.Runtimes[name]; !ok {
+		return ""
+	}
+	if config.GetGlobalSettingsOverlay().SuppliesRuntimes() {
+		// The overlay replaces the runtimes section in the project-merged
+		// view too, so no project-local entry can shadow this one.
+		return name
+	}
+	if config.ProjectSettingsDefinesRuntime(projectDir, name) {
+		return ""
+	}
+	return name
+}
+
+// selectRuntime resolves the runtime type and configuration GetRuntime
+// builds, from one settings read.
+func selectRuntime(projectPath string, profileName string) runtimeSelection {
 	projectDir, _ := config.GetResolvedProjectDir(projectPath)
 	vs, warnings, _ := config.LoadEffectiveSettings(projectDir)
 	config.PrintDeprecationWarnings(warnings)
@@ -37,15 +129,34 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 
 	var rtConfig config.V1RuntimeConfig
 	var runtimeType string
+	var entryName string
 
 	if vs != nil {
 		var err error
 		rtConfig, runtimeType, err = vs.ResolveRuntime(profileName)
+		if err == nil {
+			// ResolveRuntime("") resolves vs.ActiveProfile.
+			resolvedProfile := profileName
+			if resolvedProfile == "" {
+				resolvedProfile = vs.ActiveProfile
+			}
+			entryName = vs.Profiles[resolvedProfile].Runtime
+		}
+		var sre *config.StoredProfileRuntimeNotFoundError
+		if err != nil && profileName != "" && errors.As(err, &sre) {
+			// A named profile from the hub's stored profiles whose runtime
+			// is not defined: the stored settings are authoritative, so
+			// neither the legacy runtime-type nor the auto-detect fallback
+			// applies (ptone/scion#4889). An empty profileName (the
+			// default profile, as at broker startup) keeps the fallback.
+			util.Debugf("GetRuntime: stored profile's runtime is not defined: %v", err)
+			return runtimeSelection{vs: vs, projectDir: projectDir, profileName: profileName, err: err}
+		}
 		if err != nil {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
 			// If profile resolution fails, we might be passed a direct runtime type
 			// Fallback to legacy behavior for now if profileName matches a known type
-			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" || profileName == "cloudrun-sandbox" {
+			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" || profileName == "cloudrun-sandbox" || profileName == "substrate" {
 				runtimeType = profileName
 				util.Debugf("GetRuntime: using profileName as runtimeType: %s", runtimeType)
 			} else {
@@ -93,7 +204,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			// Cloud Run Instance detection: CLOUD_RUN_INSTANCE is set on Instances
 			// (unlike K_SERVICE, which is NOT set). Probe the sandbox binary to
 			// distinguish cloudrun-sandbox from cloudrun-instances.
-			if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+			if cloudrunenv.IsInstance() {
 				if SandboxLauncherAvailable() {
 					runtimeType = "cloudrun-sandbox"
 					util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher, using cloudrun-sandbox runtime")
@@ -101,7 +212,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 					runtimeType = "cloudrun-instances"
 					util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher, using cloudrun-instances runtime")
 				}
-			} else if os.Getenv("K_SERVICE") != "" {
+			} else if cloudrunenv.IsService() {
 				runtimeType = "cloudrun"
 				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
 			} else if _, err := exec.LookPath("podman"); err == nil {
@@ -123,13 +234,31 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 
 	util.Debugf("GetRuntime: final runtime type: %s", runtimeType)
 
+	return runtimeSelection{
+		vs:          vs,
+		projectDir:  projectDir,
+		profileName: profileName,
+		rtConfig:    rtConfig,
+		runtimeType: runtimeType,
+		entryName:   entryName,
+	}
+}
+
+// build constructs the runtime s selected. It is GetRuntime's construction
+// step, unchanged.
+func (s runtimeSelection) build() Runtime {
+	if s.err != nil {
+		return &ErrorRuntime{Err: s.err}
+	}
+	vs, profileName, rtConfig, runtimeType := s.vs, s.profileName, s.rtConfig, s.runtimeType
+
 	switch runtimeType {
 	case "container":
 		return NewAppleContainerRuntime()
 	case "docker":
 		// On Cloud Run Instances the docker daemon is unavailable.
 		// CLOUD_RUN_INSTANCE is set on Instances (K_SERVICE is NOT).
-		if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+		if cloudrunenv.IsInstance() {
 			if SandboxLauncherAvailable() {
 				util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
 				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
@@ -153,7 +282,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		// On Cloud Run the docker daemon is unavailable regardless of
 		// whether the CLI binary exists in the container image.
-		if os.Getenv("K_SERVICE") != "" {
+		if cloudrunenv.IsService() {
 			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
 			cfg := rtConfig.CloudRun
 			if cfg == nil {
@@ -189,27 +318,14 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		return pr
 	case "kubernetes", "k8s":
-		k8sClient, err := k8s.NewClientWithContext(os.Getenv("KUBECONFIG"), rtConfig.Context)
+		rt, err := NewKubernetesRuntimeFromConfig(os.Getenv("KUBECONFIG"), rtConfig)
 		if err != nil {
 			return &ErrorRuntime{Err: err}
 		}
-		if err := k8sClient.Verify(); err != nil {
-			return &ErrorRuntime{Err: err}
-		}
-		rt := NewKubernetesRuntime(k8sClient)
-		if rtConfig.Namespace != "" {
-			rt.DefaultNamespace = rtConfig.Namespace
-		}
-		rt.GKEMode = rtConfig.GKE
-		if !rt.GKEMode && k8sClient.IsGKE() {
-			rt.GKEAutoDetected = true
-			util.Debugf("GetRuntime: auto-detected GKE cluster, enabling Autopilot scheduling tolerance")
-		}
-		rt.ListAllNamespaces = rtConfig.ListAllNamespaces
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun
-		if cfg == nil && os.Getenv("K_SERVICE") != "" {
+		if cfg == nil && cloudrunenv.IsService() {
 			// Auto-detected Cloud Run environment with no explicit config
 			// from settings. Create a default config; project/region will
 			// be discovered from GCP metadata when API calls are made.
@@ -243,10 +359,96 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "cloudrun-sandbox":
 		rt := NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
 		return rt
+	case "substrate":
+		// No auto-detect branch: substrate is only ever selected explicitly
+		// by profile (substrate-runtime.md §2), so this case is unreachable via
+		// the "local"/"auto" detection above.
+		//
+		// The runtime definition itself must be operator-only: project-merged
+		// settings (vs) may select an operator-defined substrate profile by
+		// name, but must never define or override its runtime block. See
+		// ValidateOperatorOnlySubstrateProfile's doc comment for why.
+		if verr := ValidateOperatorOnlySubstrateProfile(vs, profileName); verr != nil {
+			util.Debugf("GetRuntime: substrate profile failed operator-only validation: %v", verr)
+			return &ErrorRuntime{Err: substrateProfileInvalid(verr)}
+		}
+		// NewSubstrateRuntime already tags its deterministic config
+		// validation failures with ErrSubstrateProfileInvalid; construct-time
+		// dependency failures (Kubernetes client build, substrate.Dial) are
+		// passed through untagged so they surface as a plain degraded
+		// ErrorRuntime, not a startup refusal. Do not wrap err here.
+		rt, err := NewSubstrateRuntime(rtConfig.Substrate)
+		if err != nil {
+			util.Debugf("GetRuntime: failed to create substrate runtime: %v", err)
+			return &ErrorRuntime{Err: err}
+		}
+		return rt
 	}
 
 	// Fallback should not be reached if logic is correct, but default to Docker
 	return NewDockerRuntime()
+}
+
+// kubernetesIsGKE reports whether client.IsGKE() auto-detection should run:
+// skipped when rtConfig.GKE already decides the outcome explicitly, since
+// IsGKE() calls Discovery().ServerVersion(), a network round trip that
+// serves no purpose once the config has already made the call. Extracted
+// from the GetRuntime kubernetes case so the short-circuit can be
+// unit-tested against a fake client without constructing a real cluster
+// connection.
+func kubernetesIsGKE(rtConfig config.V1RuntimeConfig, client *k8s.Client) bool {
+	return !rtConfig.GKE && client.IsGKE()
+}
+
+// NewKubernetesRuntimeFromConfig builds a Kubernetes runtime from an
+// explicit kubeconfig path (empty: the default loading rules, then in-cluster
+// config) and a runtime config entry: it creates the client for
+// rtConfig.Context, verifies the connection, then applies the namespace,
+// GKE (explicit or auto-detected), listing and priority class settings. It
+// is the body of GetRuntime's kubernetes case, which wraps its error in an
+// ErrorRuntime; it has no side effects beyond building the client, so it is
+// safe to call more than once per process (a flat Runtime Broker host builds
+// one runtime per configured Kubernetes instance).
+func NewKubernetesRuntimeFromConfig(kubeconfigPath string, rtConfig config.V1RuntimeConfig) (*KubernetesRuntime, error) {
+	k8sClient, err := k8s.NewClientWithContext(kubeconfigPath, rtConfig.Context)
+	if err != nil {
+		return nil, err
+	}
+	return NewKubernetesRuntimeFromClient(k8sClient, rtConfig)
+}
+
+// NewKubernetesRuntimeFromClient builds a Kubernetes runtime on an already
+// constructed client: it verifies the connection, then applies rtConfig's
+// namespace, GKE (explicit or auto-detected), listing and priority class
+// settings. Its only error is the connection check's.
+func NewKubernetesRuntimeFromClient(k8sClient *k8s.Client, rtConfig config.V1RuntimeConfig) (*KubernetesRuntime, error) {
+	if err := k8sClient.Verify(); err != nil {
+		return nil, err
+	}
+	rt := NewKubernetesRuntime(k8sClient)
+	applyKubernetesRuntimeConfig(rt, rtConfig, kubernetesIsGKE(rtConfig, k8sClient))
+	return rt, nil
+}
+
+// applyKubernetesRuntimeConfig applies rtConfig's Kubernetes-specific fields
+// to rt: the namespace override, GKE mode (explicit or auto-detected),
+// cross-namespace listing, and the runtime-level default PriorityClassName
+// (settings runtimes.<name>.priority_class_name; see KubernetesRuntime.PriorityClassName
+// and buildPod for how a template/agent-config value can override it).
+// isGKE is the already-computed auto-detection result from the constructed
+// client, passed as a plain bool so this function has no cluster dependency
+// and can be unit-tested without a real or fake Kubernetes client.
+func applyKubernetesRuntimeConfig(rt *KubernetesRuntime, rtConfig config.V1RuntimeConfig, isGKE bool) {
+	if rtConfig.Namespace != "" {
+		rt.DefaultNamespace = rtConfig.Namespace
+	}
+	rt.GKEMode = rtConfig.GKE
+	if !rt.GKEMode && isGKE {
+		rt.GKEAutoDetected = true
+		util.Debugf("GetRuntime: auto-detected GKE cluster, enabling Autopilot scheduling tolerance")
+	}
+	rt.ListAllNamespaces = rtConfig.ListAllNamespaces
+	rt.PriorityClassName = rtConfig.PriorityClassName
 }
 
 func findPodmanNonStandardPath() string {
@@ -278,11 +480,11 @@ func (e *ErrorRuntime) Run(ctx context.Context, config RunConfig) (string, error
 	return "", e.Err
 }
 
-func (e *ErrorRuntime) Stop(ctx context.Context, id string) error {
+func (e *ErrorRuntime) Stop(ctx context.Context, ref RunRef) error {
 	return e.Err
 }
 
-func (e *ErrorRuntime) Delete(ctx context.Context, id string) error {
+func (e *ErrorRuntime) Delete(ctx context.Context, ref RunRef) error {
 	return e.Err
 }
 
@@ -319,6 +521,10 @@ func (e *ErrorRuntime) Sync(ctx context.Context, id string, direction SyncDirect
 }
 
 func (e *ErrorRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	return "", e.Err
+}
+
+func (e *ErrorRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	return "", e.Err
 }
 

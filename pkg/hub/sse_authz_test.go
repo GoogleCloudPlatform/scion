@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -180,6 +181,410 @@ func TestAuthorizeSSESubjects_PassthroughSubjects(t *testing.T) {
 	assert.Nil(t, denied, "notification/broker subjects should pass through")
 }
 
+// --- expandSSEWildcards: NATS wildcard expansion tests (F2) ---
+
+func TestExpandSSEWildcards_ProjectWildcard_SingleProject(t *testing.T) {
+	// User owns one project → project.> expands to project.<uuid>.>
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>"})
+
+	assert.Contains(t, expanded, "project.proj-1.>",
+		"project.> should expand to project.proj-1.>")
+	assert.Contains(t, expanded, "notification.>",
+		"notification.> should pass through unchanged")
+	assert.NotContains(t, expanded, "project.>",
+		"bare project.> should not remain after expansion")
+
+	// Verify authz passes for the expanded subjects.
+	denied := ws.authorizeSSESubjects(req, expanded)
+	assert.Empty(t, denied, "expanded subjects should be authorized")
+}
+
+func TestExpandSSEWildcards_ProjectWildcard_ZeroProjects(t *testing.T) {
+	// User with no projects → project.> expands to nothing (fail-closed).
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{}, // no projects at all
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>"})
+
+	// project.> should have been dropped (no accessible projects).
+	for _, sub := range expanded {
+		assert.False(t, len(sub) >= 8 && sub[:8] == "project.",
+			"no project subjects should remain when user has 0 projects")
+	}
+	assert.Contains(t, expanded, "notification.>",
+		"notification.> should pass through even when no projects")
+}
+
+func TestExpandSSEWildcards_NilListProjectsResult(t *testing.T) {
+	// Regression: if ListProjects returns (nil, nil) — a store contract
+	// violation — expandProjectWildcard must fail-closed (no panic).
+	mockStore := &mockAuthzStore{
+		listProjectsReturnNil: true,
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>"})
+
+	// project.> should be dropped (fail-closed), notification.> passes through.
+	for _, sub := range expanded {
+		assert.False(t, len(sub) >= 8 && sub[:8] == "project.",
+			"no project subjects should remain when ListProjects returns nil")
+	}
+	assert.Contains(t, expanded, "notification.>",
+		"notification.> should pass through even when ListProjects returns nil")
+}
+
+func TestExpandSSEWildcards_ProjectWildcard_MultipleProjects(t *testing.T) {
+	// User owns proj-1 and proj-2, but NOT proj-3 → only accessible ones expand.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+			{ID: "proj-2", OwnerID: "user-1"},
+			{ID: "proj-3", OwnerID: "other-user"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+			"proj-2:user-1": {ProjectID: "proj-2", UserID: "user-1", Role: store.ProjectRoleOwner},
+			// user-1 has no membership in proj-3
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>"})
+
+	assert.Contains(t, expanded, "project.proj-1.>")
+	assert.Contains(t, expanded, "project.proj-2.>")
+	assert.NotContains(t, expanded, "project.proj-3.>",
+		"user should not get subjects for projects they can't access")
+	assert.NotContains(t, expanded, "project.>",
+		"bare wildcard should not remain")
+}
+
+func TestExpandSSEWildcards_SpecificProjectID_Unchanged(t *testing.T) {
+	// Specific project ID (project.<uuid>.>) passes through without expansion.
+	mockStore := &mockAuthzStore{}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	subjects := []string{"project.proj-1.>", "notification.>"}
+	expanded := ws.expandSSEWildcards(req, subjects)
+
+	assert.Equal(t, subjects, expanded,
+		"subjects without wildcards in resource-ID position should pass through unchanged")
+}
+
+func TestExpandSSEWildcards_NotificationBroker_Passthrough(t *testing.T) {
+	// notification.> and broker.> pass through without modification.
+	mockStore := &mockAuthzStore{}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"notification.>", "broker.>"})
+
+	assert.Equal(t, []string{"notification.>", "broker.>"}, expanded,
+		"notification and broker wildcards should pass through unchanged")
+}
+
+func TestExpandSSEWildcards_MixedSubjects(t *testing.T) {
+	// Mixed: project.> + project.<uuid>.> + notification.> + user.> — each handled correctly.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{
+		"project.>",         // wildcard — should expand
+		"project.proj-99.>", // specific — should pass through
+		"notification.>",    // passthrough
+		"broker.>",          // passthrough
+	})
+
+	assert.Contains(t, expanded, "project.proj-1.>",
+		"project.> should expand to accessible project")
+	assert.Contains(t, expanded, "project.proj-99.>",
+		"specific project subject should pass through")
+	assert.Contains(t, expanded, "notification.>")
+	assert.Contains(t, expanded, "broker.>")
+	assert.NotContains(t, expanded, "project.>")
+}
+
+// --- expandSSEWildcards: subject deduplication tests ---
+
+func TestExpandSSEWildcards_DuplicateWildcardInput(t *testing.T) {
+	// Duplicate wildcard input: ["project.>", "project.>", "notification.>"]
+	// Each project.> independently expands to the same project subjects.
+	// After dedup, each project.<uuid>.> should appear exactly once.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+			{ID: "proj-2", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+			"proj-2:user-1": {ProjectID: "proj-2", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "project.>", "notification.>"})
+
+	// Count occurrences of each subject.
+	counts := make(map[string]int)
+	for _, s := range expanded {
+		counts[s]++
+	}
+	assert.Equal(t, 1, counts["project.proj-1.>"],
+		"project.proj-1.> should appear exactly once after dedup")
+	assert.Equal(t, 1, counts["project.proj-2.>"],
+		"project.proj-2.> should appear exactly once after dedup")
+	assert.Equal(t, 1, counts["notification.>"],
+		"notification.> should appear exactly once")
+
+	// Total: 2 projects + 1 notification = 3 (not 2*2 + 1 = 5)
+	assert.Equal(t, 3, len(expanded),
+		"deduped length should be len(projects) + 1, not 2*len(projects) + 1")
+}
+
+func TestExpandSSEWildcards_WildcardExplicitOverlap(t *testing.T) {
+	// Wildcard + explicit overlap: ["project.>", "project.proj-1.>"]
+	// Expansion produces project.proj-1.> from the wildcard, which overlaps
+	// with the explicit project.proj-1.> already in the list.
+	// After dedup, project.proj-1.> should appear exactly once.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+			{ID: "proj-2", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+			"proj-2:user-1": {ProjectID: "proj-2", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "project.proj-1.>"})
+
+	// Count occurrences.
+	counts := make(map[string]int)
+	for _, s := range expanded {
+		counts[s]++
+	}
+	assert.Equal(t, 1, counts["project.proj-1.>"],
+		"project.proj-1.> should appear exactly once (not twice from wildcard + explicit)")
+	assert.Equal(t, 1, counts["project.proj-2.>"],
+		"project.proj-2.> should appear exactly once from wildcard expansion")
+
+	// Total: 2 unique project subjects (proj-1 deduped, proj-2 from wildcard)
+	assert.Equal(t, 2, len(expanded),
+		"deduped length should be 2, not 3")
+
+	// The explicit subject should still be present (independently authorized).
+	assert.Contains(t, expanded, "project.proj-1.>")
+}
+
+func TestExpandSSEWildcards_MixedNotificationDedup(t *testing.T) {
+	// Mixed with notification dedup: ["project.>", "notification.>", "notification.>"]
+	// notification.> appears twice in input — after dedup, only once.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>", "notification.>"})
+
+	counts := make(map[string]int)
+	for _, s := range expanded {
+		counts[s]++
+	}
+	assert.Equal(t, 1, counts["notification.>"],
+		"notification.> should appear exactly once after dedup")
+	assert.Equal(t, 1, counts["project.proj-1.>"],
+		"project.proj-1.> should appear exactly once")
+
+	// Total: 1 project + 1 notification = 2 (not 1 + 2 = 3)
+	assert.Equal(t, 2, len(expanded),
+		"deduped length should be 2")
+}
+
+func TestAuthorizeSSESubjects_WildcardInResourceID_Denied(t *testing.T) {
+	// Belt-and-suspenders: if a wildcard somehow reaches authorizeSSESubjects
+	// in the resource-ID position, it must be denied.
+	mockStore := mockSuperAdminStore("admin-1")
+	ws := &WebServer{
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "admin-1", Email: "admin@b.com", Role: "admin"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	denied := ws.authorizeSSESubjects(req, []string{"project.>", "user.>"})
+	assert.Contains(t, denied, "project.>",
+		"project.> must be denied in authorizeSSESubjects")
+	assert.Contains(t, denied, "user.>",
+		"user.> must be denied in authorizeSSESubjects")
+}
+
+func TestExpandSSEWildcards_UserWildcard_ExpandsToCallerID(t *testing.T) {
+	// user.> should expand to user.<callerID>.>
+	mockStore := &mockAuthzStore{}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"user.>"})
+
+	assert.Equal(t, []string{"user.user-1.>"}, expanded,
+		"user.> should expand to user.<callerID>.>")
+}
+
+func TestExpandSSEWildcards_NoSessionUser(t *testing.T) {
+	// No session user → subjects pass through unchanged (authz will deny).
+	mockStore := &mockAuthzStore{}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	// No user in context.
+
+	subjects := []string{"project.>", "notification.>"}
+	expanded := ws.expandSSEWildcards(req, subjects)
+
+	assert.Equal(t, subjects, expanded,
+		"without session user, subjects should pass through unchanged")
+}
+
+// TestSSE_ChatStarsSubjectIsolation pins that a user's star invalidation
+// (user.<id>.chat.stars) reaches only that user: another signed-in user
+// may not subscribe to it explicitly, and the user.> wildcard a browser
+// subscribes with expands to the caller's own subjects, so the other
+// user's star events are never delivered on it.
+func TestSSE_ChatStarsSubjectIsolation(t *testing.T) {
+	mockStore := &mockAuthzStore{}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	assert.Nil(t, ws.authorizeSSESubjects(req, []string{"user.user-1.chat.stars"}),
+		"a user may subscribe to its own star invalidations")
+	assert.Equal(t, []string{"user.other-user.chat.stars"},
+		ws.authorizeSSESubjects(req, []string{"user.other-user.chat.stars"}),
+		"a user may not subscribe to another user's star invalidations")
+
+	expanded := ws.expandSSEWildcards(req, []string{"user.>"})
+	require.Equal(t, []string{"user.user-1.>"}, expanded)
+	assert.Nil(t, ws.authorizeSSESubjects(req, expanded))
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	ch, unsub := pub.Subscribe(expanded...)
+	defer unsub()
+	pub.PublishChatStarsChanged(context.Background(), "other-user")
+	pub.PublishChatStarsChanged(context.Background(), "user-1")
+
+	var subjects []string
+	timeout := time.After(200 * time.Millisecond)
+collect:
+	for {
+		select {
+		case evt := <-ch:
+			subjects = append(subjects, evt.Subject)
+		case <-timeout:
+			break collect
+		}
+	}
+	assert.Equal(t, []string{"user.user-1.chat.stars"}, subjects,
+		"only the caller's own star invalidation is delivered")
+}
+
 // --- SSE Handler integration test for authz ---
 
 func TestSSEHandler_SubjectAuthzDenied(t *testing.T) {
@@ -193,7 +598,7 @@ func TestSSEHandler_SubjectAuthzDenied(t *testing.T) {
 	// to another user's subject should be denied.
 	req := httptest.NewRequest("GET", "/events?sub=user.other-user.chat.dm", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -207,7 +612,7 @@ func TestSSEHandler_SubjectAuthzAllowed(t *testing.T) {
 	t.Cleanup(pub.Close)
 
 	// DevUserID is admin; subscribing to own user subject should succeed.
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/events?sub=user." + DevUserID + ".chat.dm")
@@ -260,103 +665,4 @@ func TestValidateSSESubjects_WildcardRootRejected(t *testing.T) {
 	}
 }
 
-// mockSuperAdminStore returns a mockAuthzStore pre-configured with a
-// super-admin role binding for the given user ID. This allows the AK1
-// kernel to grant all permissions without a real database.
-func mockSuperAdminStore(userID string) *mockAuthzStore {
-	rdID := "mock-rd-super-admin"
-	return &mockAuthzStore{
-		roleBindings: []*store.RoleBinding{{
-			ID:               "mock-rb-super-admin",
-			RoleDefinitionID: rdID,
-			PrincipalType:    store.RoleBindingPrincipalUser,
-			PrincipalID:      userID,
-			ScopeType:        store.RoleScopeSystem,
-			CreatedBy:        store.SystemReconcileCreatedBy,
-		}},
-		roleDefinitions: map[string]*store.RoleDefinition{
-			rdID: {
-				ID:          rdID,
-				Name:        store.SystemRoleSuperAdmin,
-				ScopeType:   store.RoleScopeSystem,
-				Permissions: allPermissionIDs(),
-			},
-		},
-	}
-}
-
 // --- mock store for authz tests ---
-
-// mockAuthzStore satisfies store.Store for NewAuthzService. Only the methods
-// called by ComputeCapabilitiesBatch's dependency chain are implemented;
-// the embedded interface satisfies everything else at the signature level.
-//
-// Optional fields allow tests to inject role bindings and role definitions
-// so the CO1 kernel can resolve permissions without a real database.
-type mockAuthzStore struct {
-	store.Store // embed to satisfy interface
-
-	roleBindings    []*store.RoleBinding
-	roleDefinitions map[string]*store.RoleDefinition
-}
-
-func (m *mockAuthzStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
-
-func (m *mockAuthzStore) GetEffectiveGroupsForAgent(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
-
-func (m *mockAuthzStore) ListGroups(_ context.Context, _ store.GroupFilter, _ store.ListOptions) (*store.ListResult[store.Group], error) {
-	return &store.ListResult[store.Group]{}, nil
-}
-
-func (m *mockAuthzStore) GetProject(_ context.Context, _ string) (*store.Project, error) {
-	return nil, store.ErrNotFound
-}
-
-func (m *mockAuthzStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
-	return nil, store.ErrNotFound
-}
-
-func (m *mockAuthzStore) GetGroupMembership(_ context.Context, _, _ string, _ string) (*store.GroupMember, error) {
-	return nil, store.ErrNotFound
-}
-
-func (m *mockAuthzStore) GetProjectMembership(_ context.Context, _, _ string) (*store.ProjectMembership, error) {
-	return nil, store.ErrNotFound
-}
-
-func (m *mockAuthzStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ string) ([]*store.RoleBinding, error) {
-	return nil, nil
-}
-
-func (m *mockAuthzStore) GetRoleDefinition(_ context.Context, id string) (*store.RoleDefinition, error) {
-	if m.roleDefinitions != nil {
-		if rd, ok := m.roleDefinitions[id]; ok {
-			return rd, nil
-		}
-	}
-	return nil, store.ErrNotFound
-}
-
-func (m *mockAuthzStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
-	result := make(map[string]*store.RoleDefinition, len(ids))
-	for _, id := range ids {
-		if m.roleDefinitions != nil {
-			if rd, ok := m.roleDefinitions[id]; ok {
-				result[id] = rd
-			}
-		}
-	}
-	return result, nil
-}
-
-func (m *mockAuthzStore) ListRoleBindingsForPrincipals(_ context.Context, _ []store.PrincipalRef, _ []string, _ []string) ([]*store.RoleBinding, error) {
-	return m.roleBindings, nil
-}
-
-func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*store.AccessConstraint, error) {
-	return nil, nil
-}

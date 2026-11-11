@@ -1,0 +1,39 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (1):
+  field  Job.name -> Name  (hub/move.go:6)
+
+Alias entries (1):
+  type  Job = sub.Job
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (1):
+  hub/stay.go
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 2. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: exported struct field (reflection/encoding visibility changes) ==
+  hub/move.go:6: Job.name -> Name: encoding/json, yaml, gob and reflection now see this field; check for json/yaml tags and serialisation of Job (types in other packages that embed Job are not checked for shadowing)
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:4: hub.Job becomes sub.Job for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

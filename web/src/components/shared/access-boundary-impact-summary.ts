@@ -35,9 +35,14 @@ import type {
   LockoutAssessment,
   PreviewCompleteness,
 } from '../../shared/access-boundaries.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 
 @customElement('scion-access-boundary-impact-summary')
 export class ScionAccessBoundaryImpactSummary extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object }) impact: BoundaryImpact | null = null;
   @property({ type: Object }) lockout: LockoutAssessment | null = null;
   @property({ type: Object }) completeness: PreviewCompleteness | null = null;
@@ -286,17 +291,7 @@ export class ScionAccessBoundaryImpactSummary extends LitElement {
   ];
 
   private formatDate(iso: string): string {
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-      });
-    } catch {
-      return iso;
-    }
+    return formatInstantWithZone(iso, 'date') || iso;
   }
 
   private renderLockoutCheck() {

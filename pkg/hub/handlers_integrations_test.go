@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -29,204 +30,20 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --- mock IntegrationManager ---
-
-type mockIntegrationManager struct {
-	plugins            map[string]map[string]string // name → config
-	selfManaged        map[string]bool
-	deploymentModes    map[string]plugin.DeploymentMode
-	healthErr          error
-	infoErr            error
-	configureErr       error
-	replaceConfigErr   error
-	reconnectErr       error
-	updateErr          error
-	installErr         error
-	configureCalls     []string
-	replaceConfigCalls []string
-	lastReplacedConfig map[string]string
-	restartCalls       []string
-	reconnectCalls     []string
-	updateCalls        []string
-	installCalls       []string
-	loadOneCalls       []string
-	loadOneEntries     []plugin.PluginEntry
-	loadOneErr         error
-	brokers            map[string]eventbus.EventBus // name → bus (for GetBroker)
-}
-
-func newMockIntegrationManager() *mockIntegrationManager {
-	return &mockIntegrationManager{
-		plugins:         make(map[string]map[string]string),
-		selfManaged:     make(map[string]bool),
-		deploymentModes: make(map[string]plugin.DeploymentMode),
-	}
-}
-
-func (m *mockIntegrationManager) ListPlugins() []string {
-	keys := make([]string, 0, len(m.plugins))
-	for name := range m.plugins {
-		keys = append(keys, "broker:"+name)
-	}
-	return keys
-}
-
-func (m *mockIntegrationManager) HasPlugin(pluginType, name string) bool {
-	if pluginType != "broker" {
-		return false
-	}
-	_, ok := m.plugins[name]
-	return ok
-}
-
-func (m *mockIntegrationManager) GetPluginConfig(pluginType, name string) map[string]string {
-	if pluginType != "broker" {
-		return nil
-	}
-	cfg, ok := m.plugins[name]
-	if !ok {
-		return nil
-	}
-	out := make(map[string]string, len(cfg))
-	for k, v := range cfg {
-		out[k] = v
-	}
-	return out
-}
-
-func (m *mockIntegrationManager) GetPluginConfigFile(pluginType, name string) string {
-	if pluginType != "broker" {
-		return ""
-	}
-	cfg, ok := m.plugins[name]
-	if !ok {
-		return ""
-	}
-	return cfg["config_file"]
-}
-
-func (m *mockIntegrationManager) IsSelfManaged(pluginType, name string) bool {
-	if pluginType != "broker" {
-		return false
-	}
-	return m.selfManaged[name]
-}
-
-func (m *mockIntegrationManager) GetDeploymentMode(pluginType, name string) plugin.DeploymentMode {
-	if pluginType != "broker" {
-		return plugin.DeploymentModePlugin
-	}
-	if mode, ok := m.deploymentModes[name]; ok {
-		return mode
-	}
-	if m.selfManaged[name] {
-		return plugin.DeploymentModeExternal
-	}
-	return plugin.DeploymentModePlugin
-}
-
-func (m *mockIntegrationManager) ConfigureBroker(name string, extra map[string]string) error {
-	m.configureCalls = append(m.configureCalls, name)
-	return m.configureErr
-}
-
-func (m *mockIntegrationManager) ReplaceBrokerConfig(name string, cfg map[string]string) error {
-	m.replaceConfigCalls = append(m.replaceConfigCalls, name)
-	m.lastReplacedConfig = make(map[string]string, len(cfg))
-	for k, v := range cfg {
-		m.lastReplacedConfig[k] = v
-	}
-	return m.replaceConfigErr
-}
-
-func (m *mockIntegrationManager) RestartBrokerPlugin(name string, cfg map[string]string) error {
-	m.restartCalls = append(m.restartCalls, name)
-	return m.replaceConfigErr
-}
-
-func (m *mockIntegrationManager) Reconnect(pluginType, name string) error {
-	m.reconnectCalls = append(m.reconnectCalls, name)
-	return m.reconnectErr
-}
-
-func (m *mockIntegrationManager) BrokerHealthCheck(name string) (string, string, map[string]string, error) {
-	if m.healthErr != nil {
-		return "", "", nil, m.healthErr
-	}
-	return "healthy", "all good", map[string]string{"connections": "5"}, nil
-}
-
-func (m *mockIntegrationManager) BrokerInfo(name string) (string, string, []string, error) {
-	if m.infoErr != nil {
-		return "", "", nil, m.infoErr
-	}
-	return "v0.8.2", "telegram", []string{"send", "receive"}, nil
-}
-
-func (m *mockIntegrationManager) UpdatePlugin(name string, repoPath string) error {
-	m.updateCalls = append(m.updateCalls, name)
-	return m.updateErr
-}
-
-func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir, configFile string) error {
-	m.installCalls = append(m.installCalls, name)
-	if m.installErr != nil {
-		return m.installErr
-	}
-	m.plugins[name] = map[string]string{}
-	if configFile != "" {
-		m.plugins[name]["config_file"] = configFile
-	}
-	return nil
-}
-
-func (m *mockIntegrationManager) LoadOne(pluginType, name string, entry plugin.PluginEntry, pluginsDir string) error {
-	m.loadOneCalls = append(m.loadOneCalls, name)
-	m.loadOneEntries = append(m.loadOneEntries, entry)
-	if m.loadOneErr != nil {
-		return m.loadOneErr
-	}
-	if pluginType == "broker" {
-		m.plugins[name] = entry.Config
-	}
-	return nil
-}
-
-func (m *mockIntegrationManager) GetBroker(name string) (eventbus.EventBus, error) {
-	if m.brokers != nil {
-		if b, ok := m.brokers[name]; ok {
-			return b, nil
-		}
-	}
-	return nil, fmt.Errorf("mock: GetBroker not wired")
-}
-
-func (m *mockIntegrationManager) GetGRPCBrokerAdapter(name string) plugin.GRPCBrokerClient {
-	return nil
-}
-
-// integAdminServer creates a testServer with a super-admin user for
-// integration tests that exercise authorization paths. Returns the server,
-// the admin identity, and a context with the admin identity set.
-// CO1: Replaces the old pattern of &Server{authzService: NewAuthzService(nil, ...)}.
-func integAdminServer(t *testing.T, suffix string) (*Server, *AuthenticatedUser, context.Context) {
-	t.Helper()
-	srv, s := testServer(t)
-	userID := tid("integ-" + suffix)
-	email := "integ-" + suffix + "@example.com"
-	createTestUserWithRole(t, s, userID, email, "admin", store.SystemRoleSuperAdmin)
-	admin := NewAuthenticatedUser(userID, email, "Admin", "admin", "cli")
-	ctx := contextWithIdentity(context.Background(), admin)
-	return srv, admin, ctx
-}
 
 // --- Auth tests ---
 
@@ -262,7 +79,7 @@ func TestIntegrations_NonAdmin(t *testing.T) {
 	handler := srv.guarded("/api/v1/admin/integrations", srv.handleAdminIntegrations)
 	member := NewAuthenticatedUser(tid("integ-member"), "member@example.com", "Member", "member", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
-	req = req.WithContext(contextWithIdentity(ctx, member))
+	req = req.WithContext(integSessionContext(ctx, member))
 	rr := httptest.NewRecorder()
 	handler(rr, req)
 
@@ -296,7 +113,7 @@ func TestIntegrationByName_NonAdmin(t *testing.T) {
 	handler := srv.guarded("/api/v1/admin/integrations/", srv.handleAdminIntegrationByName)
 	member := NewAuthenticatedUser(tid("integ-member2"), "member2@example.com", "Member2", "member", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
-	req = req.WithContext(contextWithIdentity(ctx, member))
+	req = req.WithContext(integSessionContext(ctx, member))
 	rr := httptest.NewRecorder()
 	handler(rr, req)
 
@@ -311,7 +128,7 @@ func TestListIntegrations_Empty(t *testing.T) {
 	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrations(rr, req)
 
@@ -339,7 +156,7 @@ func TestListIntegrations_WithPlugins(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrations(rr, req)
 
@@ -387,7 +204,7 @@ func TestListIntegrations_MethodNotAllowed(t *testing.T) {
 	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrations(rr, req)
 
@@ -405,7 +222,7 @@ func TestGetIntegration_NotFound(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/nonexistent", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -427,7 +244,7 @@ func TestGetIntegration_OK(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -469,7 +286,7 @@ func TestGetIntegration_MethodNotAllowed(t *testing.T) {
 
 	admin := NewAuthenticatedUser(tid("integ-admin-ma"), "admin-ma@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/integrations/telegram", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -479,6 +296,80 @@ func TestGetIntegration_MethodNotAllowed(t *testing.T) {
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d; body: %s", rr.Code, rr.Body.String())
 	}
+}
+
+// TestUpdateIntegrationRouting_ByIDIsGetOnly pins the update routes
+// (ptone/scion#2422): .../update/{id} is the status lookup and accepts only
+// GET, so POST, PUT and DELETE there get 405 with Allow: GET and never start
+// an update; only POST on the bare .../update starts one.
+func TestUpdateIntegrationRouting_ByIDIsGetOnly(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		t.Run(method+" by id", func(t *testing.T) {
+			mgr := newMockIntegrationManager()
+			mgr.plugins["telegram"] = map[string]string{}
+			mgr.updateErr = fmt.Errorf("update must not run")
+			srv, admin, ctx := integAdminServer(t, "upd-id-"+strings.ToLower(method))
+			srv.config.MaintenanceConfig.RepoPath = "/some/repo"
+			srv.pluginManager = mgr
+
+			req := httptest.NewRequest(method, "/api/v1/admin/integrations/telegram/update/"+uuid.NewString(), nil)
+			req = req.WithContext(integSessionContext(ctx, admin))
+			rr := httptest.NewRecorder()
+			srv.handleAdminIntegrationByName(rr, req)
+
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected 405, got %d; body: %s", rr.Code, rr.Body.String())
+			}
+			if allow := rr.Header().Get("Allow"); allow != "GET" {
+				t.Errorf("expected Allow header %q, got %q", "GET", allow)
+			}
+			if len(mgr.updateCalls) != 0 {
+				t.Errorf("%s on the by-id path started an update: %v", method, mgr.updateCalls)
+			}
+		})
+	}
+
+	t.Run("GET by id reaches the status lookup", func(t *testing.T) {
+		mgr := newMockIntegrationManager()
+		mgr.plugins["telegram"] = map[string]string{}
+		srv, admin, ctx := integAdminServer(t, "upd-id-get")
+		srv.pluginManager = mgr
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/update/"+uuid.NewString(), nil)
+		req = req.WithContext(integSessionContext(ctx, admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+
+		if rr.Code == http.StatusMethodNotAllowed {
+			t.Fatalf("GET on the by-id path must reach the status lookup, got 405; body: %s", rr.Body.String())
+		}
+		if len(mgr.updateCalls) != 0 {
+			t.Errorf("GET on the by-id path started an update: %v", mgr.updateCalls)
+		}
+	})
+
+	t.Run("POST on the bare path starts an update", func(t *testing.T) {
+		mgr := newMockIntegrationManager()
+		mgr.plugins["telegram"] = map[string]string{}
+		// The build fails, so the request ends at UpdatePlugin with a 500
+		// instead of going on to reconfigure the integration.
+		mgr.updateErr = fmt.Errorf("go build failed")
+		srv, admin, ctx := integAdminServer(t, "upd-bare-post")
+		srv.config.MaintenanceConfig.RepoPath = "/some/repo"
+		srv.pluginManager = mgr
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
+		req = req.WithContext(integSessionContext(ctx, admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+
+		if rr.Code == http.StatusMethodNotAllowed {
+			t.Fatalf("POST on the bare update path got 405; body: %s", rr.Body.String())
+		}
+		if len(mgr.updateCalls) != 1 || mgr.updateCalls[0] != "telegram" {
+			t.Errorf("expected one update of telegram, got %v", mgr.updateCalls)
+		}
+	})
 }
 
 // --- Health endpoint ---
@@ -495,7 +386,7 @@ func TestIntegrationHealth_OK(t *testing.T) {
 
 	admin := NewAuthenticatedUser(tid("integ-health-admin"), "integ-health@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/health", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -528,7 +419,7 @@ func TestIntegrationHealth_NotFound(t *testing.T) {
 
 	admin := NewAuthenticatedUser(tid("integ-health-nf"), "integ-health-nf@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/nonexistent/health", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -551,7 +442,7 @@ func TestRestartIntegration_OK(t *testing.T) {
 
 	admin := NewAuthenticatedUser(tid("integ-restart-admin"), "integ-restart@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/restart", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -571,6 +462,8 @@ func TestRestartIntegration_WithSpokeWired(t *testing.T) {
 	// Create a FanOutEventBus with a discord spoke.
 	inproc := eventbus.NewInProcessEventBus(slog.Default())
 	discordBus := eventbus.NewInProcessEventBus(slog.Default())
+	// The restarted plugin's bus, which the spoke refresh installs.
+	mgr.brokers = map[string]eventbus.EventBus{"discord": eventbus.NewInProcessEventBus(slog.Default())}
 	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
 		{Name: "inprocess", Bus: inproc},
 		{Name: "discord", Bus: discordBus},
@@ -587,7 +480,7 @@ func TestRestartIntegration_WithSpokeWired(t *testing.T) {
 
 	admin := NewAuthenticatedUser(tid("integ-spoke-admin"), "integ-spoke@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -629,7 +522,7 @@ func TestRestartIntegration_WithoutSpokeWired(t *testing.T) {
 	createTestUserWithRole(t, st, tid("u1"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
 	admin := NewAuthenticatedUser(tid("u1"), "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -746,7 +639,7 @@ func TestRestartIntegration_NotFound(t *testing.T) {
 
 	admin := NewAuthenticatedUser(tid("integ-notfound-admin"), "integ-notfound@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/nonexistent/restart", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -767,7 +660,7 @@ func TestRestartIntegration_MethodNotAllowed(t *testing.T) {
 
 	admin := NewAuthenticatedUser(tid("integ-methna-admin"), "integ-methna@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/restart", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -911,7 +804,7 @@ func TestUpdateConfig_NoConfigFile(t *testing.T) {
 	admin := NewAuthenticatedUser(tid("u1"), "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -938,7 +831,7 @@ func TestUpdateConfig_WithConfigFile(t *testing.T) {
 	admin := NewAuthenticatedUser(tid("u1-wcf"), "admin-wcf@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095","db_path":"/tmp/tg.db"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -949,6 +842,152 @@ func TestUpdateConfig_WithConfigFile(t *testing.T) {
 	if len(mgr.replaceConfigCalls) != 1 {
 		t.Errorf("expected 1 ReplaceBrokerConfig call, got %d", len(mgr.replaceConfigCalls))
 	}
+}
+
+// The config PUT merges settings key by key (ptone/scion#3913): a key the
+// body omits keeps its stored value, a sent value (including "") replaces
+// it, and a key sent as null is deleted from the stored config, so the
+// plugin's own default applies again. The reconfigure push carries the
+// same merged config.
+func TestUpdateConfig_SettingsKeepOverwriteNullDelete(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "telegram.yaml")
+	seed := "webhook_listen: \":9094\"\ndb_path: /var/tg.db\ninbound_mode: webhook\nallowed_chat_ids: \"1,2\"\n"
+	if err := os.WriteFile(configFile, []byte(seed), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{"config_file": configFile}
+
+	srv, st := testServer(t)
+	srv.pluginManager = mgr
+
+	createTestUserWithRole(t, st, tid("u1-kond"), "admin-kond@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-kond"), "admin-kond@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"webhook_listen":":9095","db_path":null,"inbound_mode":""}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	provider, err := config.NewYAMLConfigProvider(configFile)
+	require.NoError(t, err)
+	stored, err := provider.Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"webhook_listen":   ":9095", // sent: overwritten
+		"inbound_mode":     "",      // sent as "": stored as ""
+		"allowed_chat_ids": "1,2",   // omitted: kept
+	}, stored, "db_path was sent as null and must be deleted")
+
+	require.Len(t, mgr.replaceConfigCalls, 1)
+	assert.NotContains(t, mgr.lastReplacedConfig, "db_path")
+	assert.Equal(t, ":9095", mgr.lastReplacedConfig["webhook_listen"])
+	assert.Equal(t, "1,2", mgr.lastReplacedConfig["allowed_chat_ids"])
+}
+
+// A settings key sent as null that is not stored is a no-op, and a body
+// whose only setting is null still saves (it is a non-empty map).
+func TestUpdateConfig_SettingsNullForUnstoredKeyIsNoOp(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "telegram.yaml")
+	if err := os.WriteFile(configFile, []byte("webhook_listen: \":9094\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{"config_file": configFile}
+
+	srv, st := testServer(t)
+	srv.pluginManager = mgr
+
+	createTestUserWithRole(t, st, tid("u1-knul"), "admin-knul@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-knul"), "admin-knul@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"db_path":null}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	provider, err := config.NewYAMLConfigProvider(configFile)
+	require.NoError(t, err)
+	stored, err := provider.Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"webhook_listen": ":9094"}, stored)
+}
+
+// A config PUT for a plugin with no usable stored config stores the sent
+// keys. The YAML case has no config file yet. The Postgres case has a row
+// whose config is JSON null, which the provider loads as a nil map; the
+// merge must not write into that nil map.
+func TestUpdateConfig_NoStoredConfigStoresNewKeys(t *testing.T) {
+	t.Run("yaml_missing_file", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		configFile := filepath.Join(t.TempDir(), "telegram.yaml")
+
+		mgr := newMockIntegrationManager()
+		mgr.plugins["telegram"] = map[string]string{"config_file": configFile}
+
+		srv, st := testServer(t)
+		srv.pluginManager = mgr
+
+		createTestUserWithRole(t, st, tid("u1-nsc"), "admin-nsc@example.com", "admin", store.SystemRoleSuperAdmin)
+		admin := NewAuthenticatedUser(tid("u1-nsc"), "admin-nsc@example.com", "Admin", "admin", "cli")
+		body := `{"settings":{"webhook_listen":":9095","db_path":null}}`
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+		req = req.WithContext(integSessionContext(req.Context(), admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		provider, err := config.NewYAMLConfigProvider(configFile)
+		require.NoError(t, err)
+		stored, err := provider.Load(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"webhook_listen": ":9095"}, stored)
+	})
+
+	t.Run("postgres_null_config_row", func(t *testing.T) {
+		if !enttest.Active() {
+			t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+		}
+		t.Setenv("HOME", t.TempDir())
+		client := enttest.NewClient(t)
+		ctx := context.Background()
+
+		// Saving a nil map stores the JSON literal null, which Load
+		// returns as a nil map with no error.
+		provider := pgprovider.NewPostgresConfigProvider(client, "discord")
+		require.NoError(t, provider.Save(ctx, nil))
+		loaded, err := provider.Load(ctx)
+		require.NoError(t, err)
+		require.Nil(t, loaded, "precondition: a null config row loads as a nil map")
+
+		mgr := newMockIntegrationManager()
+		mgr.plugins["discord"] = map[string]string{}
+		mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
+
+		srv := &Server{dbDriver: "postgres"}
+		srv.pluginManager = mgr
+		srv.entClient = client
+
+		admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+		body := `{"settings":{"guild_id":"12345"}}`
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
+		req = req.WithContext(integSessionContext(req.Context(), admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		stored, err := provider.Load(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"guild_id": "12345"}, stored)
+	})
 }
 
 func TestUpdateConfig_InstalledButNotLoaded(t *testing.T) {
@@ -976,7 +1015,7 @@ func TestUpdateConfig_InstalledButNotLoaded(t *testing.T) {
 	admin := NewAuthenticatedUser(tid("u1-inbl"), "admin-inbl@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1018,7 +1057,7 @@ func TestUpdateConfig_InstalledButNotLoaded_ActivationFailureIsNonFatal(t *testi
 	admin := NewAuthenticatedUser(tid("u1-actfail"), "admin-actfail@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1039,7 +1078,7 @@ func TestUpdateConfig_InvalidBody(t *testing.T) {
 	createTestUserWithRole(t, st, tid("u1-invbody"), "admin-invbody@example.com", "admin", store.SystemRoleSuperAdmin)
 	admin := NewAuthenticatedUser(tid("u1-invbody"), "admin-invbody@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader("not json"))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1060,12 +1099,16 @@ func TestUpdateConfig_UnknownSecretKey(t *testing.T) {
 	admin := NewAuthenticatedUser(tid("u1-unksec"), "admin-unksec@example.com", "Admin", "admin", "cli")
 	body := `{"secrets":{"unknown_key":"value"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	entries := settingsErrorEntries(t, rr)
+	if entries[0].Field != "secrets.unknown_key" {
+		t.Errorf("field = %q, want secrets.unknown_key", entries[0].Field)
 	}
 }
 
@@ -1083,7 +1126,7 @@ func TestUpdateConfig_NotFound(t *testing.T) {
 	admin := NewAuthenticatedUser(tid("u1-confnf"), "admin-confnf@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/nonexistent/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1192,6 +1235,43 @@ func TestFilterSensitiveConfig_Slack(t *testing.T) {
 	}
 }
 
+func TestFilterSensitiveConfig_DatabaseSettings(t *testing.T) {
+	cfg := map[string]string{
+		"webhook_listen":   ":9094",
+		"database_driver":  "postgres",
+		"database_url":     "host=db.example.internal dbname=hub",
+		"plugin_name":      "telegram",
+		"project_slug_map": "p1:s1",
+	}
+	for key := range hubKeys {
+		if _, ok := cfg[key]; !ok {
+			cfg[key] = "value-" + key
+		}
+	}
+	if len(cfg) != len(hubKeys)+1 {
+		t.Fatalf("test input must hold every hub key plus webhook_listen, got %v", cfg)
+	}
+
+	filtered := filterSensitiveConfig("telegram", cfg)
+
+	for _, key := range []string{"database_driver", "database_url", "plugin_name", "project_slug_map"} {
+		if _, ok := filtered[key]; ok {
+			t.Errorf("%s should be filtered", key)
+		}
+	}
+	for key := range hubKeys {
+		if _, ok := filtered[key]; ok {
+			t.Errorf("hub key %s should be filtered", key)
+		}
+	}
+	if filtered["webhook_listen"] != ":9094" {
+		t.Errorf("expected webhook_listen :9094, got %s", filtered["webhook_listen"])
+	}
+	if len(filtered) != 1 {
+		t.Errorf("expected only webhook_listen to remain, got %v", filtered)
+	}
+}
+
 func TestPluginNameFromKey(t *testing.T) {
 	tests := []struct {
 		key      string
@@ -1219,7 +1299,7 @@ func TestIntegrationByName_UnknownAction(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/unknown", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1243,7 +1323,7 @@ func TestUpdateIntegration_SelfManaged_SQLite(t *testing.T) {
 	createTestUserWithRole(t, st, tid("u1-smsql"), "admin-smsql@example.com", "admin", store.SystemRoleSuperAdmin)
 	admin := NewAuthenticatedUser(tid("u1-smsql"), "admin-smsql@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1258,7 +1338,7 @@ func TestUpdateIntegration_NotFound(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/nonexistent/update", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1275,7 +1355,7 @@ func TestUpdateIntegration_NoRepoPath(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1294,7 +1374,7 @@ func TestUpdateIntegration_BuildError(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1314,7 +1394,7 @@ func TestInstallIntegration_NilPluginManager(t *testing.T) {
 	// pluginManager intentionally left nil
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1331,7 +1411,7 @@ func TestInstallIntegration_AlreadyInstalled(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1347,7 +1427,7 @@ func TestInstallIntegration_UnknownPlugin(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/evil-plugin/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1382,7 +1462,7 @@ func TestInstallIntegration_PreservesExistingConfigFile(t *testing.T) {
 	srv.config.MaintenanceConfig.RepoPath = repoDir
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1405,7 +1485,7 @@ func TestListAvailableIntegrations_NoRepoPath(t *testing.T) {
 	srv, admin, ctx := integAdminServer(t, "avail-nrp")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1438,7 +1518,7 @@ func TestListAvailableIntegrations_WithSource(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1472,7 +1552,7 @@ func TestListAvailableIntegrations_IncludesSlack(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1512,7 +1592,7 @@ func TestListAvailableIntegrations_ExcludesInstalled(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1574,7 +1654,7 @@ func TestUpdateIntegration_HA_Accepted(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1629,7 +1709,7 @@ func TestGetUpdateStatus_ByID(t *testing.T) {
 
 	// First create an update via the HA flow
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	createReq = createReq.WithContext(contextWithIdentity(createReq.Context(), admin))
+	createReq = createReq.WithContext(integSessionContext(createReq.Context(), admin))
 	createRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(createRR, createReq)
 
@@ -1645,7 +1725,7 @@ func TestGetUpdateStatus_ByID(t *testing.T) {
 
 	// Now GET the update status by ID
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/"+updateID, nil)
-	getReq = getReq.WithContext(contextWithIdentity(getReq.Context(), admin))
+	getReq = getReq.WithContext(integSessionContext(getReq.Context(), admin))
 	getRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(getRR, getReq)
 
@@ -1686,7 +1766,7 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 
 	// Create first update, then mark it completed so the 409 guard allows a second.
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	req1 = req1.WithContext(contextWithIdentity(req1.Context(), admin))
+	req1 = req1.WithContext(integSessionContext(req1.Context(), admin))
 	rr1 := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr1, req1)
 	if rr1.Code != http.StatusAccepted {
@@ -1703,7 +1783,7 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 
 	// Create second update.
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	req2 = req2.WithContext(contextWithIdentity(req2.Context(), admin))
+	req2 = req2.WithContext(integSessionContext(req2.Context(), admin))
 	rr2 := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr2, req2)
 	if rr2.Code != http.StatusAccepted {
@@ -1711,7 +1791,7 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/latest", nil)
-	getReq = getReq.WithContext(contextWithIdentity(getReq.Context(), admin))
+	getReq = getReq.WithContext(integSessionContext(getReq.Context(), admin))
 	getRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(getRR, getReq)
 
@@ -1746,7 +1826,7 @@ func TestGetUpdateStatus_NotFound(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/"+uuid.New().String(), nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1770,7 +1850,7 @@ func TestGetUpdateStatus_InvalidID(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/not-a-uuid", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1787,7 +1867,7 @@ func TestGetUpdateStatus_SQLiteReturns409(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/latest", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1813,7 +1893,7 @@ func TestUpdateConfig_HA_Integration(t *testing.T) {
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"guild_id":"12345","application_id":"67890"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1845,7 +1925,7 @@ func TestUpdateConfig_NonHA_NeedsConfigFile(t *testing.T) {
 
 	body := `{"settings":{"webhook_listen":":9095"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1888,7 +1968,7 @@ func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
 
 	// Create an update for discord
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	createReq = createReq.WithContext(contextWithIdentity(createReq.Context(), admin))
+	createReq = createReq.WithContext(integSessionContext(createReq.Context(), admin))
 	createRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(createRR, createReq)
 
@@ -1904,7 +1984,7 @@ func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
 
 	// Try to GET that discord update via the telegram endpoint — should 404
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/update/"+discordUpdateID, nil)
-	getReq = getReq.WithContext(contextWithIdentity(getReq.Context(), admin))
+	getReq = getReq.WithContext(integSessionContext(getReq.Context(), admin))
 	getRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(getRR, getReq)
 
@@ -1930,7 +2010,7 @@ func TestUpdateConfig_HA_SetsUpdatedBy(t *testing.T) {
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"guild_id":"99999"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1963,7 +2043,7 @@ func TestListIntegrations_DeploymentMode(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrations(rr, req)
 
@@ -2003,7 +2083,7 @@ func TestGetIntegration_DeploymentMode(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2063,7 +2143,7 @@ func TestUpdateConfig_HA_SkipsReconfigure(t *testing.T) {
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"guild_id":"12345"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2090,7 +2170,7 @@ func TestGetIntegration_HA_ReadsFromPostgres(t *testing.T) {
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	// Write config to Postgres — this is what PUT would have done.
-	provider := config.NewPostgresConfigProvider(client, "discord")
+	provider := pgprovider.NewPostgresConfigProvider(client, "discord")
 	if err := provider.Save(context.Background(), map[string]string{
 		"guild_id":       "db-value",
 		"application_id": "app-from-db",
@@ -2104,7 +2184,7 @@ func TestGetIntegration_HA_ReadsFromPostgres(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2168,7 +2248,7 @@ func TestGetIntegration_ReadsFromConfigFile(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2266,7 +2346,7 @@ func TestUpdateIntegration_SelfManagedRejected(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2292,7 +2372,7 @@ func TestInstallIntegration_SelfManaged_CreatesAdminConfig(t *testing.T) {
 	srv.config.HubEndpoint = "http://hub.example.com:8080"
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2425,7 +2505,7 @@ func TestCreateBridgeConfigTemplate_PreservesExisting(t *testing.T) {
 	srv.config.HubEndpoint = "http://other-hub:8080"
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2454,11 +2534,8 @@ func TestInstallIntegration_SelfManaged_RegisteredButNotLoaded(t *testing.T) {
 
 	// Seed settings.yaml with a2a-bridge entry (simulates a previous install
 	// where the bridge process was never started, so LoadOne never succeeded).
-	if err := config.AddSelfManagedPluginToSettings(config.SelfManagedPluginEntry{
-		Name:       "a2a-bridge",
-		Address:    "localhost:9090",
-		ConfigFile: "~/.scion/scion-a2a-bridge-admin.yaml",
-	}); err != nil {
+	seed := "server:\n  plugins:\n    broker:\n      a2a-bridge:\n        address: localhost:9090\n        config_file: ~/.scion/scion-a2a-bridge-admin.yaml\n        mode: self-managed\n        self_managed: true\n"
+	if err := os.WriteFile(filepath.Join(tmpHome, ".scion", "settings.yaml"), []byte(seed), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2468,7 +2545,7 @@ func TestInstallIntegration_SelfManaged_RegisteredButNotLoaded(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2495,7 +2572,7 @@ func TestInstallIntegration_SelfManaged_AlreadyInstalled(t *testing.T) {
 	srv.pluginManager = mgr
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2519,7 +2596,7 @@ func TestListAvailableIntegrations_IncludesA2ABridge(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2561,7 +2638,7 @@ func TestListAvailableIntegrations_IncludesDescription(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2597,7 +2674,7 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_NoSource(t *testing.T) {
 	srv.config.MaintenanceConfig.RepoPath = t.TempDir() // RepoPath set but no source dir
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2617,7 +2694,7 @@ func TestUpdateIntegration_SelfManaged_NoRepoPath(t *testing.T) {
 	// No RepoPath set → should reject with guidance
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2647,7 +2724,7 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_SourceExists(t *testing.T)
 	srv.config.MaintenanceConfig.RepoPath = repoPath
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2659,5 +2736,422 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_SourceExists(t *testing.T)
 	// Error body should not leak internal build output
 	if strings.Contains(rr.Body.String(), "go build") {
 		t.Error("response should not leak internal build details")
+	}
+}
+
+// --- broker plugin supervision ---
+
+// supervisionStatusManager is a mockIntegrationManager that also reports
+// supervisor state, as *plugin.Manager does.
+type supervisionStatusManager struct {
+	*mockIntegrationManager
+	status map[string]plugin.SupervisionStatus
+}
+
+func (m *supervisionStatusManager) BrokerSupervision(name string) (plugin.SupervisionStatus, bool) {
+	st, ok := m.status[name]
+	return st, ok
+}
+
+func TestGetIntegrationStatus_SupervisionStates(t *testing.T) {
+	mgr := &supervisionStatusManager{mockIntegrationManager: newMockIntegrationManager(), status: map[string]plugin.SupervisionStatus{
+		"telegram": {State: plugin.SupervisionRestarting, Attempt: 2, DroppedThisOutage: 7},
+		"discord":  {State: plugin.SupervisionFailing, Attempt: 6},
+		"slack":    {State: plugin.SupervisionRunning},
+	}}
+	mgr.infoErr = fmt.Errorf("plugin RPCs must not be called while the session is lost")
+
+	st := getIntegrationStatus(mgr, "telegram")
+	assert.Equal(t, HealthStatusDegraded, st.Health)
+	assert.False(t, st.Connected)
+	assert.Contains(t, st.Message, "attempt 2")
+	assert.Contains(t, st.Message, "7 messages dropped")
+
+	st = getIntegrationStatus(mgr, "discord")
+	assert.Equal(t, HealthStatusUnhealthy, st.Health)
+	assert.False(t, st.Connected)
+	assert.Contains(t, st.Message, "repeatedly failing to restart")
+
+	// Running (and unsupervised) plugins are queried as before.
+	mgr.infoErr = nil
+	for _, name := range []string{"slack", "unsupervised"} {
+		st = getIntegrationStatus(mgr, name)
+		assert.Equal(t, HealthStatusHealthy, st.Health, name)
+		assert.True(t, st.Connected, name)
+	}
+}
+
+func TestGetPluginHubCreds_TransportKeys(t *testing.T) {
+	srv, _ := testServer(t)
+	creds := srv.getPluginHubCreds(context.Background(), "discord")
+	assert.NotContains(t, creds, "transport_mode")
+	assert.NotContains(t, creds, "transport_audience")
+
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	creds = srv.getPluginHubCreds(context.Background(), "discord")
+	assert.Equal(t, "iap", creds["transport_mode"])
+	assert.Equal(t, "/projects/1/global/backendServices/2", creds["transport_audience"])
+
+	// The same values startup injects.
+	mode, audience := srv.PluginTransportAuth()
+	assert.Equal(t, creds["transport_mode"], mode)
+	assert.Equal(t, creds["transport_audience"], audience)
+}
+
+func TestHubKeys_CoverEveryHubCredential(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	srv.dbDriver = "postgres"
+	srv.databaseDSN = "host=db.example.internal dbname=hub"
+
+	creds := srv.getPluginHubCreds(context.Background(), "discord")
+	require.Contains(t, creds, "transport_mode")
+	require.Contains(t, creds, "transport_audience")
+	for key := range creds {
+		assert.True(t, hubKeys[key], "hub credential %s must be listed in hubKeys", key)
+	}
+}
+
+func TestFilterSensitiveConfig_OmitsTransportKeys(t *testing.T) {
+	filtered := filterSensitiveConfig("discord", map[string]string{
+		"guild_id":           "g1",
+		"transport_mode":     "iap",
+		"transport_audience": "/projects/1/global/backendServices/2",
+	})
+	assert.NotContains(t, filtered, "transport_mode")
+	assert.NotContains(t, filtered, "transport_audience")
+	assert.Equal(t, map[string]string{"guild_id": "g1"}, filtered)
+}
+
+func TestResolveIntegrationMergedConfig_TransportKeysComeFromHub(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "discord.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("guild_id: from-file\n"), 0o600))
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{
+		"config_file":        configFile,
+		"transport_mode":     "stale-mode",
+		"transport_audience": "stale-audience",
+	}
+	srv, _ := testServer(t)
+
+	// No hub transport: the cached values are not carried over.
+	merged := srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "from-file", merged["guild_id"])
+	assert.NotContains(t, merged, "transport_mode")
+	assert.NotContains(t, merged, "transport_audience")
+
+	// Hub transport set: the live hub values win over the cached ones.
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	merged = srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "iap", merged["transport_mode"])
+	assert.Equal(t, "/projects/1/global/backendServices/2", merged["transport_audience"])
+}
+
+// replayFailingBus is an EventBus whose Subscribe fails.
+type replayFailingBus struct{}
+
+func (replayFailingBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return nil
+}
+
+func (replayFailingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nil, fmt.Errorf("plugin session lost")
+}
+
+func (replayFailingBus) Close() error { return nil }
+
+// replayAcceptingBus is an EventBus whose Subscribe accepts any pattern,
+// including the nil handler the fan-out passes to non-inprocess spokes, as
+// plugin adapters do.
+type replayAcceptingBus struct{}
+
+func (replayAcceptingBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return nil
+}
+
+func (replayAcceptingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return replayAcceptingSub{}, nil
+}
+
+func (replayAcceptingBus) Close() error { return nil }
+
+type replayAcceptingSub struct{}
+
+func (replayAcceptingSub) Unsubscribe() error { return nil }
+
+func TestRefreshBrokerSpoke_ReturnsReplayError(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.brokers = map[string]eventbus.EventBus{"discord": replayFailingBus{}}
+
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
+	}, slog.Default())
+	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
+	require.NoError(t, err)
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+
+	err = srv.refreshBrokerSpoke(mgr, "discord")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugin session lost")
+	assert.True(t, fanout.HasSpoke("discord"))
+
+	// A missing spoke is added (no subscription to replay fails here).
+	mgr.brokers["telegram"] = replayAcceptingBus{}
+	require.NoError(t, srv.refreshBrokerSpoke(mgr, "telegram"))
+	assert.True(t, fanout.HasSpoke("telegram"))
+}
+
+// supervisionWiringRecorder is a mockIntegrationManager that records the
+// supervisor wiring the hub registers, as *plugin.Manager accepts it.
+type supervisionWiringRecorder struct {
+	*mockIntegrationManager
+	provider plugin.BrokerConfigProvider
+	hooks    []plugin.BrokerRestartHook
+}
+
+func (m *supervisionWiringRecorder) SetBrokerConfigProvider(p plugin.BrokerConfigProvider) {
+	m.provider = p
+}
+
+func (m *supervisionWiringRecorder) OnBrokerRestart(h plugin.BrokerRestartHook) {
+	m.hooks = append(m.hooks, h)
+}
+
+func TestSetPluginManager_WiresBrokerSupervision(t *testing.T) {
+	rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
+	rec.plugins["discord"] = map[string]string{"guild_id": "inline"}
+	newBus := eventbus.NewInProcessEventBus(slog.Default())
+	rec.brokers = map[string]eventbus.EventBus{"discord": newBus}
+
+	srv, _ := testServer(t)
+	srv.transportMode = "iap"
+	srv.transportAudience = "aud"
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
+	}, slog.Default())
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+	srv.SetPluginManager(rec)
+
+	require.NotNil(t, rec.provider, "config provider registered")
+	cfg, err := rec.provider(context.Background(), "discord")
+	require.NoError(t, err)
+	assert.Equal(t, "inline", cfg["guild_id"], "plugin config carried")
+	assert.Equal(t, "discord", cfg["plugin_name"], "hub credentials added")
+	assert.Equal(t, "iap", cfg["transport_mode"])
+
+	require.Len(t, rec.hooks, 1, "restart hook registered")
+	require.NoError(t, rec.hooks[0]("discord"))
+	assert.True(t, fanout.HasSpoke("discord"))
+}
+
+func TestRestartIntegration_ReportsSpokeRefreshFailure(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.brokers = map[string]eventbus.EventBus{"discord": replayFailingBus{}}
+
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
+	}, slog.Default())
+	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
+	require.NoError(t, err)
+
+	srv, st := testServer(t)
+	srv.pluginManager = mgr
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+	createTestUserWithRole(t, st, tid("restart-refresh-admin"), "restart-refresh@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("restart-refresh-admin"), "restart-refresh@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
+	req = req.WithContext(integSessionContext(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	warnings, ok := resp["warnings"].([]interface{})
+	require.True(t, ok, "warnings expected, got %v", resp)
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(fmt.Sprint(w), "message routing was not fully restored") {
+			found = true
+		}
+	}
+	assert.True(t, found, "refresh failure reported in %v", warnings)
+}
+
+// secretGetStub is a secret backend whose Get returns err.
+type secretGetStub struct {
+	secret.SecretBackend
+	err error
+}
+
+func (b secretGetStub) Get(context.Context, string, string, string) (*secret.SecretWithValue, error) {
+	return nil, b.err
+}
+
+// hmacWriteFailStore is a store with no broker secret whose broker secret
+// write fails.
+type hmacWriteFailStore struct{ store.Store }
+
+func (hmacWriteFailStore) GetBrokerSecret(context.Context, string) (*store.BrokerSecret, error) {
+	return nil, store.ErrNotFound
+}
+
+func (hmacWriteFailStore) CreateBrokerSecret(context.Context, *store.BrokerSecret) error {
+	return errors.New("database is locked")
+}
+
+// listProjectsFailStore is a store whose ListProjects fails while its fault
+// switch is armed.
+type listProjectsFailStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (l *listProjectsFailStore) ListProjects(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	if l.fault.Active() {
+		return nil, errors.New("database is locked")
+	}
+	return l.Store.ListProjects(ctx, f, o)
+}
+
+// brokerRowFailStore is a store whose plugin broker row look-up or create
+// fails while its fault switch is armed.
+type brokerRowFailStore struct {
+	store.Store
+	fault      *storeFaultSwitch
+	failLookup bool // false: the look-up reports not found and the create fails
+}
+
+func (b *brokerRowFailStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if b.fault.Active() {
+		if b.failLookup {
+			return nil, errors.New("database is locked")
+		}
+		return nil, store.ErrNotFound
+	}
+	return b.Store.GetRuntimeBroker(ctx, id)
+}
+
+func (b *brokerRowFailStore) CreateRuntimeBrokerClearingCredentials(ctx context.Context, r *store.RuntimeBroker) error {
+	if b.fault.Active() {
+		return errors.New("database is locked")
+	}
+	return b.Store.CreateRuntimeBrokerClearingCredentials(ctx, r)
+}
+
+// brokerRowFault arms a brokerRowFailStore and gives the server a broker
+// auth service over the unwrapped store, so a secret it generated would be
+// visible there.
+func brokerRowFault(failLookup bool) func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+	return func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+		svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), st)
+		t.Cleanup(svc.Close)
+		srv.brokerAuthService = svc
+		_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *brokerRowFailStore {
+			return &brokerRowFailStore{Store: inner, fault: f, failLookup: failLookup}
+		})
+		fault.Arm()
+	}
+}
+
+func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, srv *Server, st store.Store, rec *supervisionWiringRecorder)
+		wantErr string // "" means no error
+		wantIs  error  // when set, errors.Is(err, wantIs), no hmac_key and no stored broker secret
+		notIs   error  // when set, the error must not match it
+		wantKey bool   // a confirmed broker row: a hub key and the row, on a first and a second call
+	}{
+		{name: "unreadable config file", wantErr: "resolve config file", setup: func(t *testing.T, _ *Server, _ store.Store, rec *supervisionWiringRecorder) {
+			bad := filepath.Join(t.TempDir(), "discord.yaml")
+			require.NoError(t, os.WriteFile(bad, []byte("bot_token: [unterminated\n"), 0o600))
+			rec.plugins["discord"] = map[string]string{"config_file": bad}
+		}},
+		{name: "secret backend failure", wantErr: "load secret for", setup: func(_ *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			srv.secretBackend = secretGetStub{err: errors.New("backend down")}
+		}},
+		{name: "missing secret is not an error", setup: func(_ *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			srv.secretBackend = secretGetStub{err: store.ErrNotFound}
+		}},
+		{name: "hmac key failure", wantErr: "hmac key", notIs: errPluginBrokerRow, setup: func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+			svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), hmacWriteFailStore{st})
+			t.Cleanup(svc.Close)
+			srv.brokerAuthService = svc
+		}},
+		{name: "broker row look-up failure", wantErr: "plugin broker row look-up failed", wantIs: errPluginBrokerRow, setup: brokerRowFault(true)},
+		{name: "broker row create failure", wantErr: "plugin broker row create failed", wantIs: errPluginBrokerRow, setup: brokerRowFault(false)},
+		{name: "broker row confirmed", wantKey: true, setup: func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+			svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), st)
+			t.Cleanup(svc.Close)
+			srv.brokerAuthService = svc
+		}},
+		{name: "project list failure", wantErr: "project slug map", setup: func(t *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *listProjectsFailStore {
+				return &listProjectsFailStore{Store: inner, fault: f}
+			})
+			fault.Arm()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
+			rec.plugins["discord"] = map[string]string{}
+			srv, st := testServer(t)
+			// Close the server's own broker auth service before dropping it:
+			// Shutdown closes only srv.brokerAuthService, so a dropped service
+			// would keep its nonce cache goroutine until the package exits,
+			// which the package-exit goroutine guard counts.
+			if svc := srv.brokerAuthService; svc != nil {
+				svc.Close()
+			}
+			srv.brokerAuthService = nil
+			tc.setup(t, srv, st, rec)
+			srv.SetPluginManager(rec)
+			require.NotNil(t, rec.provider)
+
+			cfg, err := rec.provider(context.Background(), "discord")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err, "an unreadable input fails the restart attempt")
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+			if tc.wantIs != nil {
+				assert.ErrorIs(t, err, tc.wantIs)
+				assert.Empty(t, cfg["hmac_key"], "no hub key without a confirmed broker row")
+				require.NotEmpty(t, cfg["broker_id"])
+				_, secretErr := st.GetBrokerSecret(context.Background(), cfg["broker_id"])
+				assert.ErrorIs(t, secretErr, store.ErrNotFound, "no broker secret is generated without a confirmed broker row")
+			}
+			if tc.notIs != nil {
+				require.NotErrorIs(t, err, tc.notIs)
+			}
+			if tc.wantKey {
+				// The first call created the plugin's broker row; the second finds it present.
+				again, err2 := rec.provider(context.Background(), "discord")
+				require.NoError(t, err2)
+				for i, c := range []map[string]string{cfg, again} {
+					assert.NotEmpty(t, c["hmac_key"], "call %d: a confirmed broker row yields a hub key", i+1)
+					_, rowErr := st.GetRuntimeBroker(context.Background(), c["broker_id"])
+					assert.NoError(t, rowErr, "call %d: the plugin broker row exists", i+1)
+				}
+			}
+			assert.Equal(t, "discord", cfg["plugin_name"])
+
+			// The admin paths' lenient resolver returns the same map and no error.
+			lenient := srv.resolveIntegrationMergedConfig(context.Background(), rec, "discord")
+			assert.Equal(t, cfg["plugin_name"], lenient["plugin_name"])
+			assert.Equal(t, cfg["hub_url"], lenient["hub_url"])
+		})
 	}
 }

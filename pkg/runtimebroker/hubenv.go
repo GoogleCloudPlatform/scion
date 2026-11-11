@@ -15,13 +15,18 @@
 package runtimebroker
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
+	"strings"
 
+	gcemetadata "cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 const redactedEnvValue = "<redacted>"
@@ -33,52 +38,215 @@ var safeEnvLogKeys = map[string]struct{}{
 	"SCION_BROKER_NAME":       {},
 	"SCION_CREATOR":           {},
 	"SCION_DEBUG":             {},
-	"SCION_GROVE_ID":          {},
-	"SCION_GROVE_PATH":        {},
+	"SCION_LOG_LEVEL":         {},
+	"SCION_LAUNCH_ID":         {},
 	"SCION_PROJECT_ID":        {},
 	"SCION_PROJECT_PATH":      {},
+	"SCION_HUB_EXPERIMENTS":   {},
 	"SCION_HUB_ENDPOINT":      {},
 	"SCION_HUB_URL":           {},
 	"SCION_TELEMETRY_ENABLED": {},
 }
 
-func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) string {
+// startOperation identifies which dispatch path is asking for a hub
+// endpoint, so resolveEffectiveHubEndpoint selects its ranking explicitly
+// rather than inferring one from request shape. There is no usable zero
+// value: buildStartContext rejects an empty Operation, and
+// resolveEffectiveHubEndpoint rejects any value it does not recognize.
+type startOperation string
+
+const (
+	// opCreate: the request-level HubEndpoint (the Hub's endpoint, carried
+	// on the create request) ranks first.
+	opCreate startOperation = "create"
+	// opHTTPStart and opHTTPRestart: the broker's HTTP startAgent and
+	// restartAgent handlers. The Hub sends its endpoint as the same
+	// request-level HubEndpoint field these requests carry, resolved with
+	// the same ranking as opCreate.
+	opHTTPStart   startOperation = "http-start"
+	opHTTPRestart startOperation = "http-restart"
+)
+
+// valid reports whether op is one of the defined operations, so a caller can
+// reject an empty or unrecognized value before any side effect rather than
+// only inside resolveEffectiveHubEndpoint.
+func (op startOperation) valid() bool {
+	switch op {
+	case opCreate, opHTTPStart, opHTTPRestart:
+		return true
+	default:
+		return false
+	}
+}
+
+// hubEndpointInputs bundles resolveEffectiveHubEndpoint's inputs by name, so
+// each value is bound to a named field at the call site rather than by
+// position.
+type hubEndpointInputs struct {
+	Op startOperation
+	// ReqHubEndpoint is the request-level HubEndpoint field, ranked first by
+	// opCreate, opHTTPStart, and opHTTPRestart alike.
+	ReqHubEndpoint string
+	// ConnectionHubEndpoint is the endpoint named by the request's
+	// X-Scion-Hub-Connection header, when present.
+	ConnectionHubEndpoint string
+	// BrokerHubEndpoint is this broker's own configured HubEndpoint.
+	BrokerHubEndpoint    string
+	ResolvedEnv          map[string]string
+	ProjectPath          string
+	ContainerHubEndpoint string
+	// ColocatedPublicHubEndpoint is the hub's public URL when colocated
+	// containers cannot reach it (see ServerConfig.ColocatedPublicHubEndpoint).
+	// A resolved endpoint equal to it is replaced by the dispatch runtime's
+	// ColocatedRuntimeHubEndpoints entry.
+	ColocatedPublicHubEndpoint string
+	// ColocatedRuntimeHubEndpoints is ServerConfig.ColocatedRuntimeHubEndpoints.
+	ColocatedRuntimeHubEndpoints map[string]string
+	RuntimeName                  string
+	HubListenPort                int
+	// FlatCloudRun is set for a flat cloudrun Runtime Broker instance
+	// (amendment P5-CR): its agents get ContainerHubEndpoint, the URL the
+	// flat host validated at activation, and nothing else.
+	FlatCloudRun bool
+}
+
+// resolveEffectiveHubEndpoint resolves the hub endpoint to stamp into a
+// dispatched agent for the given operation, then applies the cloudrun-family
+// runtime overrides that follow endpoint resolution on every operation.
+//
+// The second return value, trusted, reports whether that endpoint is
+// operator-derived — see resolveHubEndpointForCreate's own doc comment for
+// exactly which tiers count. buildStartContext uses it to decide
+// api.StartOptions.TrustedHubEndpoint, the one value Substrate's egress
+// allowlist may trust (pkg/agent/run.go, pkg/runtime/substrate_egress.go).
+// This return value changes nothing about the endpoint itself: the value
+// this function returns and delivers into the agent's own SCION_HUB_ENDPOINT
+// env is identical whether or not it is trusted.
+func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (endpoint string, trusted bool, err error) {
+	// A flat cloudrun instance's agents get only the endpoint its host
+	// resolved from its own configuration and validated at activation
+	// (ContainerHubEndpoint): no request-level, connection, resolved-env or
+	// project-settings tier applies, and the K_SERVICE derivation below
+	// never runs. An endpoint that fails the activation rules here refuses
+	// the start; it is never replaced by a derived one.
+	if in.FlatCloudRun {
+		if !in.Op.valid() {
+			return "", false, fmt.Errorf("resolveEffectiveHubEndpoint: unknown start operation %q", in.Op)
+		}
+		if err := ValidateFlatCloudRunHubEndpoint(in.ContainerHubEndpoint); err != nil {
+			return "", false, fmt.Errorf("cannot resolve hub endpoint for a flat Cloud Run instance: %w", err)
+		}
+		return in.ContainerHubEndpoint, true, nil
+	}
+	switch in.Op {
+	case opCreate, opHTTPStart, opHTTPRestart:
+		endpoint, trusted = resolveHubEndpointForCreate(
+			in.ReqHubEndpoint,
+			in.ConnectionHubEndpoint,
+			in.BrokerHubEndpoint,
+			in.ResolvedEnv,
+			in.ProjectPath,
+			in.ContainerHubEndpoint,
+			colocatedRewrite{
+				PublicHubEndpoint:   in.ColocatedPublicHubEndpoint,
+				RuntimeHubEndpoints: in.ColocatedRuntimeHubEndpoints,
+			},
+			in.RuntimeName,
+		)
+	default:
+		return "", false, fmt.Errorf("resolveEffectiveHubEndpoint: unknown start operation %q", in.Op)
+	}
+
+	// On the cloudrun-sandbox runtime, sandboxes cannot reach the hub's
+	// public IAP-fronted URL (they hold no IAP credential). The hub is on the
+	// same Instance, listening on 0.0.0.0, and reachable via the launcher's
+	// link-local address. Override the endpoint so the sandbox's sciontool
+	// init (and the metadata emulator's FetchGCPToken) can reach the hub.
+	// This overrides whatever the resolution above produced, on every
+	// operation. The override itself is infra-derived (GCE metadata / the
+	// broker's own listen port), so it is always trusted.
+	if in.RuntimeName == "cloudrun-sandbox" {
+		sandboxEndpoint, serr := cloudrunSandboxHubEndpoint(in.HubListenPort)
+		if serr != nil {
+			return "", false, fmt.Errorf("cannot resolve hub endpoint for sandbox: %w", serr)
+		}
+		return sandboxEndpoint, true, nil
+	}
+	// On the cloudrun (CRI) runtime, standalone instances run on separate VMs
+	// (potentially in different regions) and cannot reach the broker's
+	// localhost endpoint. Unlike cloudrun-sandbox (co-located with the hub,
+	// reachable via link-local), CRI instances need the hub's public Cloud
+	// Run service URL. Resolve it from the K_SERVICE env var and GCE
+	// metadata — also infra-derived, so also always trusted.
+	if in.RuntimeName == "cloudrun" && isLocalhostEndpoint(endpoint) {
+		criEndpoint, cerr := cloudrunInstancesHubEndpoint(ctx)
+		if cerr != nil {
+			return "", false, fmt.Errorf("cannot resolve hub endpoint for Cloud Run instance: %w", cerr)
+		}
+		return criEndpoint, true, nil
+	}
+	return endpoint, trusted, nil
+}
+
+// resolveHubEndpointForCreate resolves the hub endpoint through five tiers,
+// in priority order: the request-level HubEndpoint, the hub connection
+// endpoint, this broker's own configured HubEndpoint, the resolved env
+// (ResolvedEnv, i.e. hub-side AppliedConfig.Env — creator-controlled), and
+// finally project settings. All five tiers feed the returned endpoint,
+// which is what SCION_HUB_ENDPOINT delivers to the agent.
+//
+// trusted reports whether that endpoint came from an OPERATOR-DERIVED tier:
+// only the first three (the request HubEndpoint, the connection endpoint,
+// or this broker's own configured HubEndpoint) — never the resolved-env
+// tier, which a project or template creator controls, and never project
+// settings either, since for a hub-managed project that file's own content
+// is itself hub-resolved, the same tenant-reachable path the resolved-env
+// tier already excludes. Once either of those last two tiers supplies the
+// endpoint, trusted stays false for exactly that result, even though the
+// endpoint itself is no longer empty and is still delivered to the agent.
+// The final localhost/connection-endpoint substitution and the
+// container-bridge override below only ever replace the endpoint with
+// another operator-derived value (the connection endpoint or a rewrite of
+// the broker's own bridge address), so neither one can turn a trusted
+// result into an untrusted one or vice versa.
+func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint string, colocated colocatedRewrite, runtimeName string) (endpoint string, trusted bool) {
 	hubEndpoint := reqHubEndpoint
+	trusted = hubEndpoint != ""
 	if hubEndpoint == "" {
 		hubEndpoint = connectionHubEndpoint
+		trusted = hubEndpoint != ""
 	}
 	if hubEndpoint == "" {
 		hubEndpoint = brokerHubEndpoint
+		trusted = hubEndpoint != ""
 	}
 	if hubEndpoint == "" {
+		// hubEndpointFromResolvedEnv is the one tier that is NOT
+		// operator-derived: it reads ResolvedEnv, the hub-resolved
+		// AppliedConfig.Env a project or template creator controls. A
+		// value from here must never be trusted for egress, so trusted
+		// stays false even though hubEndpoint itself is no longer empty.
 		hubEndpoint = hubEndpointFromResolvedEnv(resolvedEnv)
 	}
 	if hubEndpoint == "" {
+		// hubEndpointFromProjectSettings is also excluded from trust: for a
+		// hub-managed project this file's content is itself hub-resolved,
+		// the same degenerate precondition (every earlier tier empty) that
+		// makes the resolved-env tier untrustworthy above. trusted stays
+		// false even though hubEndpoint itself is no longer empty; only the
+		// delivered (non-egress) SCION_HUB_ENDPOINT value uses this tier.
 		hubEndpoint = hubEndpointFromProjectSettings(projectPath)
 	}
 	// A localhost endpoint from a remote hub dispatch refers to the hub
 	// machine's loopback, not this broker's. When we have a non-localhost
 	// connection endpoint (the URL this broker used to reach the hub),
-	// prefer it since it is known to be reachable from this broker.
+	// prefer it since it is known to be reachable from this broker. This
+	// substitutes an operator-derived value, so it always sets trusted.
 	if isLocalhostEndpoint(hubEndpoint) && connectionHubEndpoint != "" && !isLocalhostEndpoint(connectionHubEndpoint) {
 		hubEndpoint = connectionHubEndpoint
+		trusted = true
 	}
-	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName)
-}
-
-func resolveHubEndpointForStart(brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) string {
-	// Prefer the Hub-dispatched endpoint from resolved env — the Hub knows
-	// its own public URL and injects it via SCION_HUB_ENDPOINT. The broker's
-	// own HubEndpoint config may be a localhost address (e.g. combo server)
-	// which would incorrectly trigger the container bridge override.
-	hubEndpoint := hubEndpointFromResolvedEnv(resolvedEnv)
-	if hubEndpoint == "" {
-		hubEndpoint = brokerHubEndpoint
-	}
-	if hubEndpoint == "" {
-		hubEndpoint = hubEndpointFromProjectSettings(projectPath)
-	}
-	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName)
+	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, colocated, runtimeName), trusted
 }
 
 func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
@@ -91,13 +259,23 @@ func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
 	return ""
 }
 
+// hubEndpointFromProjectSettings returns the hub endpoint from the project's
+// settings file. It does not look at hub.enabled: the broker is
+// authoritative about hub connectivity, so a project that set
+// hub.enabled=false on this host still gets its endpoint.
 func hubEndpointFromProjectSettings(projectPath string) string {
 	if projectPath == "" {
 		return ""
 	}
 	settingsDir := resolveProjectSettingsDir(projectPath)
-	projectSettings, err := config.LoadSettingsFromDir(settingsDir)
-	if err != nil || projectSettings.IsHubExplicitlyDisabled() {
+	if settingsDir != projectPath {
+		if ignored := config.GetSettingsPath(projectPath); ignored != "" {
+			slog.Warn("Ignoring a settings file at the workspace root; project settings are read from the project's .scion directory",
+				"path", ignored, "settings_dir", settingsDir)
+		}
+	}
+	projectSettings, err := config.LoadProjectSettingsFromDir(settingsDir)
+	if err != nil {
 		return ""
 	}
 	return projectSettings.GetHubEndpoint()
@@ -107,12 +285,47 @@ func hubEndpointFromProjectSettings(projectPath string) string {
 // host's gateway. When the ContainerHubEndpoint uses one of these, the localhost
 // endpoint's port must be grafted onto it; a real public domain is used as-is.
 var bridgeHostnames = map[string]struct{}{
-	"host.docker.internal":     {},
-	"host.containers.internal": {},
+	"host.docker.internal": {},
+	podmanHostAlias:        {},
 }
 
-func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName string) string {
-	if containerHubEndpoint == "" || runtimeName == "kubernetes" || !isLocalhostEndpoint(endpoint) {
+// podmanHostAlias is the hostname Podman maps to the host in every
+// container's /etc/hosts.
+const podmanHostAlias = "host.containers.internal"
+
+// colocatedRewrite is the colocated hub's public URL that this host does not
+// serve (e.g. an IAP-fronted Cloud Run URL), with the URL each local
+// container runtime reaches the hub at instead.
+type colocatedRewrite struct {
+	// PublicHubEndpoint is ServerConfig.ColocatedPublicHubEndpoint.
+	PublicHubEndpoint string
+	// RuntimeHubEndpoints is ServerConfig.ColocatedRuntimeHubEndpoints.
+	RuntimeHubEndpoints map[string]string
+}
+
+// applyContainerBridgeOverride replaces endpoint with a container-reachable
+// URL when a non-Kubernetes container cannot reach endpoint itself:
+//   - on the docker and podman runtimes only, when endpoint equals
+//     colocated.PublicHubEndpoint, it is replaced wholesale by the dispatch
+//     runtime's colocated.RuntimeHubEndpoints entry (kept when there is
+//     none). This does not depend on containerHubEndpoint, which follows
+//     the broker's default runtime.
+//   - when endpoint is a loopback URL, it is replaced by
+//     containerHubEndpoint.
+//
+// Other runtimes (cloudrun, Apple container) keep the public URL: they do
+// not run on this host's Docker bridge.
+func applyContainerBridgeOverride(endpoint, containerHubEndpoint string, colocated colocatedRewrite, runtimeName string) string {
+	if isKubernetesRuntimeName(runtimeName) {
+		return endpoint
+	}
+	if isBridgeContainerRuntimeName(runtimeName) && sameEndpoint(endpoint, colocated.PublicHubEndpoint) {
+		if target := colocated.RuntimeHubEndpoints[runtimeName]; target != "" {
+			return target
+		}
+		return endpoint
+	}
+	if containerHubEndpoint == "" || !isLocalhostEndpoint(endpoint) {
 		return endpoint
 	}
 	bridgeURL, err := url.Parse(containerHubEndpoint)
@@ -146,12 +359,29 @@ func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName st
 	return bridgeURL.String()
 }
 
+// isBridgeContainerRuntimeName reports whether runtimeName runs agents as
+// local containers on this host's Docker-style bridge network, where a
+// host-gateway alias reaches the colocated hub.
+func isBridgeContainerRuntimeName(runtimeName string) bool {
+	return runtimeName == "docker" || runtimeName == "podman"
+}
+
+// sameEndpoint reports whether a and b name the same URL, ignoring a
+// trailing slash and letter case. An empty b never matches.
+func sameEndpoint(a, b string) bool {
+	if b == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
+}
+
 // colocatedExtraHosts returns --add-host entries needed when the hub and
 // broker are co-located on the same machine. Docker bridge containers cannot
 // reach the host's own public domain via hairpin NAT (e.g. on GCE), so we
-// map the domain to host-gateway to route through the Docker bridge.
+// map the domain to host-gateway to route through the Docker bridge. Podman's
+// native host.containers.internal gets no entry.
 func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName string) []string {
-	if !isColocated || runtimeName == "kubernetes" || hubEndpoint == "" || isLocalhostEndpoint(hubEndpoint) {
+	if !isColocated || isKubernetesRuntimeName(runtimeName) || hubEndpoint == "" || isLocalhostEndpoint(hubEndpoint) {
 		return nil
 	}
 	u, err := url.Parse(hubEndpoint)
@@ -160,6 +390,12 @@ func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName strin
 	}
 	host := u.Hostname()
 	if host == "" || net.ParseIP(host) != nil {
+		return nil
+	}
+	// Podman maps host.containers.internal to the host itself, so it needs
+	// no --add-host flag on any Podman version (host-gateway arrived in
+	// Podman 4.7; older versions reject it).
+	if runtimeName == "podman" && host == podmanHostAlias {
 		return nil
 	}
 	return []string{host + ":host-gateway"}
@@ -208,6 +444,51 @@ func cloudrunSandboxHubEndpoint(hubListenPort int) (string, error) {
 	}
 
 	return fmt.Sprintf("http://%s", net.JoinHostPort(linkLocal, fmt.Sprintf("%d", hubListenPort))), nil
+}
+
+// cloudrunInstancesHubEndpoint computes the external hub endpoint for agents
+// running on the cloudrun (Cloud Run Instances) runtime. Unlike cloudrun-sandbox
+// (where the sandbox is co-located on the same Instance and can use a link-local
+// address), CRI agents run on standalone VMs in potentially different regions
+// and need the hub's public Cloud Run service URL.
+//
+// The URL is constructed from:
+//   - K_SERVICE (env var set by Cloud Run, giving the service name)
+//   - Numeric project ID (from GCE metadata server)
+//   - Zone → region (from GCE metadata server, stripped to region)
+//
+// Returns an error if any of these cannot be resolved — the agent start must
+// fail rather than fall back to a localhost URL that will never be reachable
+// from a standalone CRI instance.
+func cloudrunInstancesHubEndpoint(ctx context.Context) (string, error) {
+	return resolveCloudRunServiceURL(
+		cloudrunenv.ServiceName(),
+		func() (string, error) { return gcemetadata.NumericProjectIDWithContext(ctx) },
+		func() (string, error) { return gcemetadata.ZoneWithContext(ctx) },
+	)
+}
+
+// resolveCloudRunServiceURL constructs a Cloud Run service URL from the service
+// name, numeric project ID, and zone. The zone is converted to a region by
+// stripping the trailing segment (e.g. "us-central1-1" → "us-central1").
+// Extracted from cloudrunInstancesHubEndpoint for testability.
+func resolveCloudRunServiceURL(kService string, numericProjectIDFn func() (string, error), zoneFn func() (string, error)) (string, error) {
+	if kService == "" {
+		return "", fmt.Errorf("cloudrun hub endpoint: K_SERVICE not set (not running on Cloud Run)")
+	}
+	numericProjectID, err := numericProjectIDFn()
+	if err != nil {
+		return "", fmt.Errorf("cloudrun hub endpoint: numeric project ID: %w", err)
+	}
+	zone, err := zoneFn()
+	if err != nil {
+		return "", fmt.Errorf("cloudrun hub endpoint: zone: %w", err)
+	}
+	region := zone
+	if idx := strings.LastIndex(zone, "-"); idx > 0 {
+		region = zone[:idx]
+	}
+	return fmt.Sprintf("https://%s-%s.%s.run.app", kService, numericProjectID, region), nil
 }
 
 func redactEnvValueForLog(key, value string) string {

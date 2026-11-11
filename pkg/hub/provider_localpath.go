@@ -1,0 +1,200 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// initLinkedProjectDir initializes the .scion directory of a provider's
+// linked project path when a provider is registered with one. A variable so
+// tests can register broker-shaped paths without writing outside their temp
+// directories.
+var initLinkedProjectDir = config.InitProject
+
+// linkedProjectScionDir returns the .scion directory to initialize for a
+// provider local path. Clients send either the project's .scion directory
+// (for example "<repo>/.scion") or the project root; a path whose last
+// element is already .scion is used as is, and any other path gets .scion
+// appended. isBrokerGlobalDirPath accepts the same two shapes.
+func linkedProjectScionDir(localPath string) string {
+	clean := filepath.Clean(localPath)
+	if filepath.Base(clean) == config.DotScion {
+		return clean
+	}
+	return filepath.Join(clean, config.DotScion)
+}
+
+// linkedProjectInitDir returns the .scion directory the hub initializes for
+// an embedded broker's provider local path, and false when the path must not
+// be initialized: the machine's global scion directory, or a home directory
+// whose .scion is that directory, is set up by global init, not by
+// linked-project init. It skips paths isBrokerGlobalDirPath matches. Because
+// the embedded broker shares the hub's filesystem, it also skips this
+// process's own global directory and the home directory that contains it
+// (config.IsGlobalProjectDir, resolving symbolic links). This covers homes
+// outside the shapes that check recognizes.
+func linkedProjectInitDir(localPath string) (string, bool) {
+	if isBrokerGlobalDirPath(localPath) {
+		return "", false
+	}
+	scionDir := linkedProjectScionDir(localPath)
+	if config.IsGlobalProjectDir(scionDir) {
+		return "", false
+	}
+	return scionDir, true
+}
+
+// globalProjectSlug is the slug of a broker's global project
+// (config.GlobalProjectSlug).
+const globalProjectSlug = config.GlobalProjectSlug
+
+// isGlobalHubProject reports whether a hub project with this slug is the
+// global project. Only the slug counts, the same rule dispatch uses to mark
+// the global project for the broker. Project create, clone, update and
+// register with a git remote cannot take the slug (see
+// isReservedProjectSlug); project names and labels can be set by clients and
+// do not identify the global project.
+func isGlobalHubProject(slug string) bool {
+	return config.IsGlobalProjectSlug(slug)
+}
+
+// isBrokerGlobalDirPath reports whether localPath has the shape of a broker's
+// global scion directory, or of a project root whose .scion entry is that
+// directory: a user home directory (/root, /home/<user> or /Users/<user>),
+// or a ".scion" entry directly inside one.
+//
+// The hub cannot inspect the broker's filesystem, so this is a fast,
+// shape-only check that fails a request before any write. The broker is the
+// authority: it refuses a global-directory path for any other project at
+// dispatch time, including homes this check does not recognize.
+//
+// config.GetGlobalDir places the global directory at $HOME/.scion, and a
+// project rooted at a home directory resolves to that same directory, so
+// neither shape names an ordinary project.
+func isBrokerGlobalDirPath(localPath string) bool {
+	if localPath == "" {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(localPath))
+	if !strings.HasPrefix(clean, "/") {
+		return false
+	}
+	home := clean
+	if filepath.Base(clean) == config.DotScion {
+		home = filepath.ToSlash(filepath.Dir(clean))
+	}
+	if home == "/root" {
+		return true
+	}
+	parent := filepath.ToSlash(filepath.Dir(home))
+	return (parent == "/home" || parent == "/Users") && filepath.Base(home) != config.DotScion
+}
+
+// validateProviderLocalPath rejects a provider local path that points at the
+// broker's global directory for a project other than the global project.
+// Dispatching such a project with that path makes the broker treat its
+// global directory as the project.
+func validateProviderLocalPath(projectName, projectSlug, localPath string) error {
+	if !isBrokerGlobalDirPath(localPath) || isGlobalHubProject(projectSlug) {
+		return nil
+	}
+	return fmt.Errorf("localPath %q is the broker's global scion directory and cannot be used for project %q; "+
+		"register the provider without a path (the broker then uses its hub-managed project directory) "+
+		"or pass the project's own directory", localPath, projectName)
+}
+
+// restrictedProviderPathPrefixes are host system directories a provider
+// local path may not name or sit under.
+var restrictedProviderPathPrefixes = []string{"/etc", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot", "/lib"}
+
+// checkProviderLocalPath validates a requested provider local path for the
+// named project and returns it cleaned. The path must be absolute, must not
+// name or sit under a restricted system directory, and must pass
+// validateProviderLocalPath. Every broker's path is checked the same way;
+// whether the directory exists is checked only for the embedded broker, by
+// the caller. field names the request field in error messages.
+func checkProviderLocalPath(field, projectName, projectSlug, localPath string) (string, error) {
+	clean := filepath.Clean(localPath)
+	if !filepath.IsAbs(clean) {
+		return "", fmt.Errorf("%s must be an absolute path", field)
+	}
+	for _, prefix := range restrictedProviderPathPrefixes {
+		if clean == prefix || strings.HasPrefix(clean, prefix+"/") {
+			return "", fmt.Errorf("%s points to a restricted system directory", field)
+		}
+	}
+	if err := validateProviderLocalPath(projectName, projectSlug, clean); err != nil {
+		return "", err
+	}
+	return clean, nil
+}
+
+// registerProviderLocalPath returns the local path to store for a provider
+// written by project register or by a provider-add.
+//
+//   - A new project, or a broker that is not yet a provider, takes the
+//     requested path. For a new project it is checked again against the
+//     slug actually assigned; a global-directory path it may not hold is
+//     dropped.
+//   - A stored path that checkProviderLocalPath refuses for this project
+//     (not absolute, under a restricted system directory, or the broker's
+//     global directory for a project other than the global project) is
+//     replaced by the requested path, or cleared when the request has none,
+//     so re-running provide repairs it.
+//   - Otherwise the stored path is kept: an existing provider with no path
+//     keeps none, which avoids converting a hub-native project into a linked
+//     one, and a linked path is not dropped by a register that omits it.
+//
+// An error reading the stored provider, other than store.ErrNotFound, is
+// returned so the caller fails the request without writing the provider.
+//
+// requestedPath must already have passed checkProviderLocalPath.
+func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.Project, brokerID, requestedPath string, created bool) (string, error) {
+	if created {
+		// The request was checked against the slug register expected to
+		// assign. A concurrent register can take that slug first, so check
+		// again against the slug the new project actually got, and drop a
+		// global-directory path it may not hold.
+		if err := validateProviderLocalPath(project.Name, project.Slug, requestedPath); err != nil {
+			s.projectsLogger().Warn("dropping provider local path for new project",
+				"project_id", project.ID, "slug", project.Slug, "error", err.Error())
+			return "", nil
+		}
+		return requestedPath, nil
+	}
+	existing, err := s.store.GetProjectProvider(ctx, project.ID, brokerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return requestedPath, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if existing.LocalPath == "" {
+		return "", nil
+	}
+	clean, err := checkProviderLocalPath("localPath", project.Name, project.Slug, existing.LocalPath)
+	if err != nil {
+		return requestedPath, nil
+	}
+	return clean, nil
+}

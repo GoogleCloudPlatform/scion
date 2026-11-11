@@ -460,6 +460,35 @@ func TestNFSResolve_SubPathRootDefault(t *testing.T) {
 	}
 }
 
+// TestNFSResolve_Owner verifies that Resolve carries the configured nfs uid
+// and gid, and the default 1000 for an unset one.
+func TestNFSResolve_Owner(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		uid, gid         int
+		wantUID, wantGID int
+	}{
+		{name: "configured", uid: 2001, gid: 3001, wantUID: 2001, wantGID: 3001},
+		{name: "unset", wantUID: 1000, wantGID: 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewNFSBackend(&config.V1NFSConfig{
+				MountRoot: "/mnt/nfs",
+				Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion-workspaces"}},
+				UID:       tc.uid,
+				GID:       tc.gid,
+			})
+			res, err := b.Resolve(ResolveInput{ProjectID: "proj1", Mode: store.SharingModeSharedPlain})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if res.OwnerUID != tc.wantUID || res.OwnerGID != tc.wantGID {
+				t.Errorf("owner = %d:%d, want %d:%d", res.OwnerUID, res.OwnerGID, tc.wantUID, tc.wantGID)
+			}
+		})
+	}
+}
+
 // --- Local Backend Resolve tests ---
 
 func TestLocalBackendResolve(t *testing.T) {
@@ -968,4 +997,44 @@ func TestProvisionShared_NonGit(t *testing.T) {
 	if err != nil {
 		t.Errorf("ProvisionShared for non-git project should succeed, got error: %v", err)
 	}
+}
+
+// TestWorkspaceBackends_RejectInvalidSubPathRoot checks that every backend
+// that builds paths from subpath_root validates it first (shared validator
+// config.ResolveSubPathRoot), and that an empty value keeps the default.
+func TestWorkspaceBackends_RejectInvalidSubPathRoot(t *testing.T) {
+	backends := map[string]func(root string) WorkspaceBackend{
+		"nfs": func(root string) WorkspaceBackend {
+			return NewNFSBackend(&config.V1NFSConfig{
+				MountRoot:   "/mnt/nfs",
+				Shares:      []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
+				SubPathRoot: root,
+			})
+		},
+		"cloudrun-volume": func(root string) WorkspaceBackend {
+			return NewCloudRunVolumeBackend(&config.V1CloudRunVolumeConfig{VolumeName: "vol", SubPathRoot: root})
+		},
+		"gke-shared-volume": func(root string) WorkspaceBackend {
+			return NewGKESharedVolumeBackend(&config.V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: root})
+		},
+	}
+
+	for name, newBackend := range backends {
+		t.Run(name, func(t *testing.T) {
+			res, err := newBackend("").Resolve(ResolveInput{ProjectID: "proj-1"})
+			if err != nil {
+				t.Fatalf("default subpath_root: %v", err)
+			}
+			if want := filepath.Join(config.DefaultWorkspaceSubPathRoot, "proj-1", "workspace"); res.ServerRelativePath != want {
+				t.Errorf("ServerRelativePath = %q, want %q", res.ServerRelativePath, want)
+			}
+
+			for _, root := range []string{"/projects", "../projects", "projects/../x", "projects/", "./projects"} {
+				if _, err := newBackend(root).Resolve(ResolveInput{ProjectID: "proj-1"}); err == nil {
+					t.Errorf("subpath_root %q: expected an error", root)
+				}
+			}
+		})
+	}
+
 }

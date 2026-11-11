@@ -75,7 +75,7 @@ As an alternative to the OTel pipeline, the Hub and Broker can send logs directl
 export SCION_CLOUD_LOGGING=true
 export SCION_GCP_PROJECT_ID="your-project-id"
 
-# Optional: customize the log name (default: "scion")
+# Optional: customize the log name (default: "scion-server")
 export SCION_CLOUD_LOGGING_LOG_ID="scion-hub"
 
 scion server start --enable-hub
@@ -99,7 +99,7 @@ Agents use `sciontool` as their init process, which includes an embedded OTLP fo
 
 #### Via Settings File (Recommended)
 
-The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates and individual agents can further override these via their `scion-agent.yaml`.
+The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates cannot set telemetry (a template's `telemetry:` block is ignored), and an individual agent can only turn it on or off; the project's telemetry policy beats both. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).
 
 ```yaml
 # In ~/.scion/settings.yaml (global) or .scion/settings.yaml (project)
@@ -107,6 +107,9 @@ telemetry:
   enabled: true
   cloud:
     enabled: true
+    # Required when exporting to Google Cloud — without it the metrics
+    # dashboard has no project to query and stays empty.
+    gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
   filter:
@@ -129,20 +132,35 @@ SCION_TELEMETRY_ENABLED="true"
 
 #### Harness-Specific Configuration
 
-If you are using agents that natively support OpenTelemetry (like `opencode`), you may need to explicitly tell the agent where to find the `sciontool` forwarder (which is `localhost` from the agent's perspective):
+Each harness integrates with `sciontool`'s telemetry pipeline differently depending on its native telemetry support:
 
-- **gRPC (Default)**: `OTEL_EXPORTER_OTLP_ENDPOINT="localhost:4317"`
-- **HTTP**: `OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"`
+- **OpenTelemetry-native harnesses** (e.g. `opencode`): These harnesses emit OTLP data directly. Point them at the `sciontool` forwarder on localhost:
+  - **gRPC (Default)**: `OTEL_EXPORTER_OTLP_ENDPOINT="localhost:4317"`
+  - **HTTP**: `OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"`
 
-These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings.
+- **Claude Code (logs-first route)**: Claude Code emits structured OTLP log records (scope `com.anthropic.claude_code.events`) rather than spans or metrics. The `sciontool` receiver normalizes Claude's event names to the canonical `agent.*` namespace (e.g. `user_prompt` → `agent.user.prompt`) and **unconditionally redacts** all Claude log bodies to protect prompt privacy, regardless of the configured filter policy. When Claude is the active harness and telemetry is enabled, the broker propagates the telemetry backend configuration (`gcp` or `otlp`) via the `SCION_TELEMETRY_CLOUD_PROVIDER` environment variable to `sciontool` to prevent accidental metrics export before credentials are available.
+
+- **Gemini CLI**: The harness provisioner points Gemini CLI's native OTel (logs and metrics) at the local `sciontool` receiver over gRPC on `4317`, so it passes through redaction and identity stamping. Its usage (`gen_ai.api.calls`, `scion.usage.tokens`) is derived from the native `gemini_cli.api_response` and `gemini_cli.api_error` log events — see the usage source description under [Automated Metrics Collection](/scion/hosted/single-node/metrics/#automated-metrics-collection). Session metrics still come from session-file parsing — see [Session Metrics (Gemini)](/scion/hosted/single-node/metrics/#session-metrics-gemini).
+
+- **Copilot and Grok Build**: The harness provisioner always points the native OTel exporter at the local `sciontool` receiver (Copilot over HTTP on `4318`, Grok Build over gRPC on `4317`), never directly at `SCION_OTEL_ENDPOINT`, so their telemetry passes through redaction and identity stamping. `SCION_COPILOT_OTEL_ENDPOINT` and `SCION_GROK_BUILD_OTEL_ENDPOINT` override the endpoint for local debugging only; they bypass redaction entirely. See [Supported Harnesses](/scion/supported-harnesses/).
+
+:::caution[Reserved telemetry variables]
+When a harness provisioner configures native telemetry, the variables that control it are reserved: `CLAUDE_CODE_ENABLE_TELEMETRY`, `GEMINI_TELEMETRY_*`, `COPILOT_OTEL_*`, `GROK_TELEMETRY_*`, `GROK_EXTERNAL_OTEL`, and `OTEL_*`. If the runtime environment (for example, Project or Broker env on the Hub) sets any of them to a value other than the one the provisioner generated, the agent fails to start with a `native telemetry policy conflict` error naming the key.
+:::
+
+These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion injects `SCION_HARNESS` into every agent container, and `SCION_MODEL` when the agent's configuration names a model, to enable harness-aware telemetry attribution (see [Native Metrics Pipeline](/scion/hosted/single-node/metrics/#native-metrics-pipeline) for how a missing model is labelled).
 
 ## Agent Logs
 
 Agent logs are written to `/home/scion/agent.log` inside the container. The sciontool logging system writes to both stderr and this file.
 
+Each `agent.log` line starts with a UTC RFC 3339 timestamp, followed by `[sciontool] [LEVEL]`, an optional `[TAG]`, and the message, for example `2026-10-02T00:30:15.123456789Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: ...`. Per-service `<name>.lifecycle.log` lines use the same timestamp in brackets: `[2026-10-02T00:30:15.123456789Z] message`. Timestamps are always UTC, whatever `TZ` the agent runs with; the agent process itself keeps its own `TZ`.
+
 ### Cloud Log Viewer & Hub API
 
-Scion provides a built-in Cloud Log Viewer in the Web UI to stream agent logs in real-time. This is backed by the Hub API, which retrieves logs directly from the active runtime broker or from the persisted `agent.log` file, ensuring comprehensive visibility into agent execution regardless of its current state.
+Scion provides a built-in Cloud Log Viewer in the Web UI to stream agent and system diagnostics logs in real time. It is backed by the Hub API:
+- `GET /api/v1/agents/:id/logs` (and `GET /api/v1/projects/:projectId/agents/:agentId/logs`) retrieves the persisted `agent.log` from the agent's Runtime Broker.
+- `GET /api/v1/agents/:id/cloud-logs` and `GET /api/v1/agents/:id/cloud-logs/stream` (and their project-scoped counterparts), plus `GET /api/v1/admin/diagnostics/logs` and `GET /api/v1/admin/diagnostics/logs/stream` (requires `hub.diagnostics.read`), query and tail Google Cloud Logging. On all six cloud log endpoints, the `severity` query parameter accepts only a Cloud Logging severity name (`DEFAULT`, `DEBUG`, `INFO`, `NOTICE`, `WARNING`, `ERROR`, `CRITICAL`, `ALERT`, or `EMERGENCY`, matched ASCII case-insensitively); any other non-empty value is refused before a filter is built with HTTP `400` (`validation_error`, `details.field: "severity"`).
 
 ### Log Ownership and Permissions
 
@@ -150,9 +168,99 @@ The `sciontool` utility ensures that `agent.log` is owned by the `scion` user du
 
 ### Log Levels
 
-- **INFO**: Normal operational events
-- **ERROR**: Critical failures
-- **DEBUG**: Detailed information (enabled with `SCION_DEBUG=true` or `SCION_LOG_LEVEL=debug`)
+Scion uses four log levels: **DEBUG** (detailed diagnostics), **INFO** (normal operational events, the default), **WARN** (something an operator should notice) and **ERROR** (failures). The Hub and Broker server log, the CLI's `[DEBUG]` lines on stderr, and `sciontool`'s `agent.log` all read their level from one shared setting, described in [Controlling the Log Level](#controlling-the-log-level).
+
+## Controlling the Log Level
+
+### `SCION_LOG_LEVEL`
+
+`SCION_LOG_LEVEL` sets the level for the server, the CLI and `sciontool`. The value is a comma-separated list:
+
+- The first entry, if it has no `=`, is the **default level**: `debug`, `info`, `warn` (or `warning`) or `error`. Names are case-insensitive. If you leave it out, the default level is `info`.
+- Each further entry is a **per-component level**: `<component>=<level>`.
+
+```bash
+# Everything at DEBUG
+SCION_LOG_LEVEL=debug scion server start --enable-hub
+
+# Only warnings and errors
+SCION_LOG_LEVEL=warn scion server start --enable-hub
+
+# INFO overall, DEBUG for auth decisions
+SCION_LOG_LEVEL=info,hub.auth=debug scion server start --enable-hub
+
+# CLI: show only the [hubsync] debug lines of a CLI command
+SCION_LOG_LEVEL=info,hubsync=debug scion list
+```
+
+Component names are the server's [subsystem names](#available-subsystems), such as `hub.auth` or `broker.heartbeat`, and the tags on the CLI's `[DEBUG]` lines, such as `hubsync`. Matching is hierarchical on dots: `hub=debug` applies to `hub.auth` and `hub.maintenance.pull-images` unless a longer key such as `hub.auth=info` is also given. Component keys that match nothing are accepted and have no effect.
+
+Server output written through Go's standard `log` package (for example lines that start with `Warning:`) is logged at INFO level, so `SCION_LOG_LEVEL=warn` or `error` hides it.
+
+If a level name is not valid, Scion prints a warning to stderr once and falls back: an invalid default level becomes `info`, and an invalid component entry is ignored.
+
+Where each part of Scion applies the level:
+
+| Part | Where it applies |
+| :--- | :--- |
+| Hub and Broker server log | The default level and per-component levels filter the main server log on every sink: stdout, OpenTelemetry and direct Cloud Logging. OpenTelemetry export used to receive DEBUG records even at the default level; it now follows `SCION_LOG_LEVEL` like the other sinks. The HTTP request log and the message log are an access and audit trail: `SCION_LOG_LEVEL` can only make them more verbose (`debug`), so `warn` or `error` never drops their INFO entries. |
+| CLI | `[DEBUG]` lines on stderr appear when the default level is `debug`. Tagged lines such as `[hubsync]` also appear when that tag's component level is `debug`. |
+| `sciontool` (`agent.log`) | The default level filters DEBUG, INFO and WARN lines. A tag on a line, or a `subsystem` attribute on a structured log record, is matched against the per-component levels. |
+
+The log level only changes logging. It does not enable any HTTP routes; diagnostic endpoints are controlled separately by `scion server start --enable-debug-endpoints`.
+
+### Precedence
+
+When more than one source sets a level, the one with the highest precedence wins:
+
+1. **Flag**: `scion server start --debug` sets the server's default level to `debug` and keeps any per-component levels from the environment. `scion --debug` turns on all of the CLI's `[DEBUG]` output for that command only; it does not change the environment of agents the command starts. `sciontool --log-level <spec>` takes the same syntax as `SCION_LOG_LEVEL` and replaces it completely.
+2. **Environment variable**: `SCION_LOG_LEVEL`, or the deprecated `SCION_DEBUG` (see below).
+3. **Setting**: the `server.log_level` setting (or `SCION_SERVER_LOGLEVEL`) has the lowest precedence of the explicit sources. The server applies it at startup and again on a file-mode settings reload or admin server-config save, and the change reaches every sink, including direct Cloud Logging. Clearing it reverts to the default. At startup the server logs one `Log level resolved` line with the level and the source that set it (`default` when the setting holds the default value). The line is logged at INFO, or at WARN when the level is `warn`, so it is hidden only at `error`. Its values are `debug`, `info`, `warn` and `error`; see the [server configuration reference](/scion/reference/server-config/).
+4. **Default**: `info`.
+
+If both `SCION_LOG_LEVEL` and `SCION_DEBUG` are set, `SCION_LOG_LEVEL` wins.
+
+### `SCION_DEBUG` (deprecated)
+
+`SCION_DEBUG` is deprecated and is planned for removal one release after its deprecation. It still works: any non-empty value means the same as `SCION_LOG_LEVEL=debug`, for the server, the CLI and `sciontool`. The one exception is `scion` commands run inside an agent, which ignore it (see [Debugging an agent](#debugging-an-agent)). When it is used, each process prints this warning to stderr once:
+
+```text
+Warning: SCION_DEBUG is deprecated and will be removed in a future release; use SCION_LOG_LEVEL=debug instead.
+```
+
+Because `SCION_DEBUG` is now an alias, a Hub or Broker started with `SCION_DEBUG` set in its environment logs at DEBUG level, which it did not do before. The warning is not written to `agent.log`. `sciontool hook` and `sciontool status` run as short-lived subprocesses whose stderr their caller captures, so they never print it.
+
+Switch scripts and environment files from `SCION_DEBUG=1` to `SCION_LOG_LEVEL=debug`.
+
+### Debugging an agent
+
+Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or with a debug level in its own environment) and `scion --debug` on the command line no longer set `SCION_DEBUG` or `SCION_LOG_LEVEL` in the agents they start. Earlier releases set `SCION_DEBUG=1` in every agent in those cases, which made `scion` commands inside agents print debug output. Agents started by an older Hub or Broker may still have `SCION_DEBUG=1` in their environment, so `scion` commands inside an agent (agent CLI mode) ignore `SCION_DEBUG` and print no deprecation warning for it. They still honour `SCION_LOG_LEVEL` and `--debug`. `sciontool` in the agent still treats `SCION_DEBUG` as the deprecated alias.
+
+To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the same syntax as above, and `scion` commands and `sciontool` inside the agent apply it.
+
+- **One agent, at start**: pass `--agent-log-level` to `scion start` or `scion resume`. It sets `SCION_LOG_LEVEL` in that agent's environment. An invalid value is rejected before the agent starts.
+
+  ```bash
+  scion start my-agent --agent-log-level debug
+  scion start my-agent --agent-log-level info,hubsync=debug
+  ```
+
+  The value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
+
+- **Many agents, through the Hub**: store `SCION_LOG_LEVEL` as a Hub environment variable at the scope you want. Use `--always` so it is injected without a template requesting it.
+
+  ```bash
+  # Every agent in the current project
+  scion hub env set --project --always SCION_LOG_LEVEL=debug
+
+  # Every agent you start
+  scion hub env set --always SCION_LOG_LEVEL=debug
+
+  # Turn it off again
+  scion hub env clear --project SCION_LOG_LEVEL
+  ```
+
+- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of an inline `--config` file (a template cannot set `SCION_*` keys). A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
 
 ## Telemetry Collection
 
@@ -170,6 +278,35 @@ The collector writes bounded delivery snapshots to local stderr and `agent.log` 
 
 The server admits at most 16 active HTTP and gRPC processing requests together. A gRPC client can queue a 17th call locally on the same connection before the server receives it; use a caller deadline to bound that wait. The server's 15-second intake deadline starts only after it receives a stream. These are local collector limits, not end-to-end delivery or process-memory guarantees.
 
+### Hub Endpoint for Usage Analytics
+
+Configure agents with an `https` hub endpoint. sciontool reads the hub's identity from that endpoint to attribute usage analytics, and it holds usage records until the hub's identity is confirmed.
+
+Each agent home keeps its usage records in `.scion/analytics-outbox/`, tied to the hub that agent first reported to (the `hub_id` file). If a later reading of the hub's identity differs, and a second reading at least five minutes later agrees, sciontool records the home as moved to another hub (the `relocated` file). From then on it stops recording new usage for that home and holds the records that are not yet final. Records that were already final are still delivered unchanged.
+
+#### Recovering from a mistaken hub move
+
+Use this only when the agent never left its hub and the hub ID was read wrong, for example after a proxy or configuration change. If the agent was linked to a different hub, or the hub's own ID changed, do not recover: usage for that home stays held.
+
+1. Confirm that the agent's current hub registration is the hub named in the home's `.scion/analytics-outbox/hub_id`. Check this against the hub's configured ID (`server.hub.hub_id`, or the hub-id file on the hub host).
+2. Stop the agent through the hub, and confirm that no container or pod still has its home mounted.
+3. Take the outbox lock and keep it for steps 4 to 7, for example `flock .scion/analytics-outbox/lock bash`. Run these steps in that shell, from the outbox directory.
+4. Record the contents of `hub_id`, `relocated`, `epoch`, `seq`, `hub_mismatch` and `relocated_refused`, and the SHA-256 of every `ready-*`, `finalizing-*` and `staging.jsonl` file.
+5. Append one complete line to `relocation_history.jsonl`. The line is a JSON object with `observed_hub_id` (the content of `relocated`), `pinned_hub_id`, `hub_mismatch_total`, `relocated_refused_total`, `reset_at` (RFC 3339, UTC), `operator`, `reason` and `evidence_ref`. Then flush the file and the directory to disk (`sync relocation_history.jsonl .`). Read the last line back and check that it parses as JSON and names the same `observed_hub_id` and `pinned_hub_id`. If it does not, stop: leave `relocated` in place, and retry later by appending a new complete line. Never edit or truncate this file.
+6. Check that the files recorded in step 4 are unchanged. If anything differs, stop and leave `relocated` in place.
+7. Remove only the `relocated` file, then flush the directory (`sync .`). Do not change `hub_id`, `epoch`, `seq`, the counter files, or any `ready-*`, `finalizing-*` or staging file.
+8. Leave the locked shell, start the agent, then verify the result:
+   - held records are delivered under the original hub (the decisive check);
+   - after at least five minutes, the agent log shows no relocation warning (a hub ID that still reads wrong is recorded again only after a second reading five minutes later);
+   - the `ready-*` files from before the recovery still have the SHA-256 values recorded in step 4;
+   - the counters have not changed.
+
+If a recovery is interrupted before step 7, `relocated` is still present and usage stays held. Start again at step 3. The history line from the interrupted attempt stays in the file: a line marks a completed recovery only if the `relocated` file was removed afterwards. If a recovery is interrupted after step 7, continue with step 8.
+
+`relocated` is the current hold, and `relocation_history.jsonl` keeps the record of earlier holds. After a recovery, the history still shows that the home was once marked as moved.
+
+If the hub really is different, sciontool records the move again and finalizes nothing new under the old hub.
+
 ### What's Collected
 
 | Data Type | Source | Description |
@@ -177,6 +314,7 @@ The server admits at most 16 active HTTP and gRPC processing requests together. 
 | Traces | Agent OTLP | Span data for tool calls, API requests |
 | Metrics | sciontool | Counters and histograms for tokens, tools, and latency |
 | Correlated Logs | sciontool | Log records linked to traces for every hook event |
+| Native Logs | Claude Code OTLP | Structured log records (bodies redacted); event names normalized to `agent.*` namespace |
 | Hook Events | Harness hooks | Tool calls, prompts, model invocations converted to spans |
 | Session Metrics | Gemini session files | Token counts, turn counts, tool statistics |
 
@@ -186,6 +324,7 @@ By default, user prompts (`agent.user.prompt`) are excluded from telemetry to pr
 
 - **Redacted**: `prompt`, `user.email`, `tool_output`, `tool_input`
 - **Hashed**: `session_id`
+- **Claude log bodies**: Unconditionally redacted (`[REDACTED]`) regardless of filter configuration. Claude Code emits free-form text in its OTLP log bodies; the receiver enforces redaction even if a custom policy omits `log.body` from its redaction list.
 
 ## HTTP Request Logs
 
@@ -221,11 +360,26 @@ httpRequest.status >= 400
 labels.project_id = "my-project"
 
 -- Correlate a request with its application logs
-logName="projects/YOUR_PROJECT/logs/scion" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"
+logName="projects/YOUR_PROJECT/logs/scion-server" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"
 jsonPayload.request_id = "YOUR_REQUEST_ID"
 ```
 
 See the [Local Development Logging guide](/scion/contributing/logging/#http-request-logging) for the full field reference and file output format.
+
+## Artifact Decision Log
+
+The Hub writes one structured entry per artifact decision (publish, versions, grants, share links, moves, expiry, deletion, owner liveness marks and authorization refusals) to a dedicated log, `scion-artifacts`. With `SCION_CLOUD_LOGGING=true` it is a separate Cloud Logging log. Otherwise it goes to stdout. Entries carry the artifact id (from the parsed route, never the raw path), the outcome, a fixed reason code for refusals and failures, and, for decisions made on a request, the route template and the `request_id` of the matching request log line:
+
+```
+-- Every decision about one artifact
+logName="projects/YOUR_PROJECT/logs/scion-artifacts"
+labels.artifact_id = "ARTIFACT_ID"
+
+-- Refusals and the request they answered
+logName="projects/YOUR_PROJECT/logs/scion-artifacts" AND labels.outcome = "refused"
+```
+
+Reads answered with `404` are logged at `DEBUG` only. Share-link tokens, titles, notes, file contents and credentials are never logged. See [Artifacts: Decision log](/scion/reference/artifacts/#decision-log) for the actions, fields and reason codes.
 
 ## Querying Logs by Subsystem
 
@@ -245,6 +399,7 @@ Hub and Broker logs include a `subsystem` attribute that identifies the internal
 | `hub.templates` | Template CRUD, hydration, and bootstrap |
 | `hub.workspace` | Git worktree sync operations |
 | `hub.dispatcher` | HTTP agent dispatch to brokers |
+| `hub.web` | Web server requests and sessions. At `debug`, every web request is logged; requests that return an error status or are aborted are logged at info and more verbose levels. |
 | `broker.agent-lifecycle` | Container provisioning, environment resolution, template hydration |
 | `broker.control-channel` | Broker-side WebSocket connection to the hub |
 | `broker.messages` | Message injection into agent tmux sessions |
@@ -257,17 +412,17 @@ In combo server mode (`scion-server`), both `hub.*` and `broker.*` subsystem log
 
 ### Cloud Logging Query Examples
 
-All examples assume your logs are in the `scion` log name. Adjust the `logName` filter to match your configuration.
+All examples assume your logs are in the `scion-server` log name. Adjust the `logName` filter to match your configuration.
 
 #### Filter by Server Component
 
 ```
 -- All hub logs (hub-only or combo mode)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 labels.component="scion-hub"
 
 -- All logs from combo server mode
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 labels.component="scion-server"
 ```
 
@@ -275,15 +430,15 @@ labels.component="scion-server"
 
 ```
 -- All hub subsystem logs
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^hub\."
 
 -- All broker subsystem logs
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^broker\."
 
 -- A specific subsystem
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.notifications"
 ```
 
@@ -291,16 +446,16 @@ jsonPayload.subsystem = "hub.notifications"
 
 ```
 -- All agent lifecycle events across hub and broker
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 
 -- Agent lifecycle for a specific agent
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 jsonPayload.agent_id = "my-agent-id"
 
 -- Only errors in agent lifecycle
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 severity >= ERROR
 ```
@@ -309,30 +464,54 @@ severity >= ERROR
 
 ```
 -- All message-related logs (hub routing + broker injection)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 
 -- Messages from a specific sender
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.sender = "agent-slug"
 
 -- Messages to a specific recipient in a project
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.recipient = "target-agent"
 jsonPayload.project_id = "my-project-id"
+```
+
+#### Agent Telemetry Logs
+
+Logs that agents export through the `sciontool` telemetry pipeline go to the `scion-agents` log name, not `scion-server`. The exporter turns each OpenTelemetry resource attribute into a log label with the same key. Agent identity is carried only in these resource-attribute labels: there are no top-level `agent_id` or `project_id` labels on agent telemetry log entries. The only extra label is `hub`, which is set from `SCION_HUB_NAME` when present.
+
+The identity labels are stamped by the `sciontool` receiver from the agent's authoritative identity (see [Identity Enforcement](/scion/hosted/single-node/metrics/#identity-enforcement)), so filter on these:
+
+- `labels."scion.project.id"` for the agent's project.
+- `labels."scion.agent.id"` for the agent ID.
+- `labels."scion.agent.slug"` for the agent slug.
+
+```
+-- Agent telemetry logs for a project
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.project.id" = "my-project-id"
+
+-- Agent telemetry logs for one agent, by slug
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.slug" = "my-agent-slug"
+
+-- Agent telemetry logs for one agent, by ID
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.id" = "my-agent-id"
 ```
 
 #### Auth and Security Auditing
 
 ```
 -- All authentication and authorization events
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.auth"
 
 -- Auth failures only
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.auth"
 severity >= WARNING
 ```
@@ -341,11 +520,11 @@ severity >= WARNING
 
 ```
 -- All control channel activity (hub + broker sides)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.control-channel$"
 
 -- Control channel errors (connectivity issues)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.control-channel$"
 severity >= ERROR
 ```
@@ -354,12 +533,12 @@ severity >= ERROR
 
 ```
 -- All hub logs EXCEPT heartbeat noise
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^hub\."
 jsonPayload.subsystem != "broker.heartbeat"
 
 -- Only high-priority subsystems (notifications, auth, agent lifecycle)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.notifications" OR
 jsonPayload.subsystem = "hub.auth" OR
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
@@ -369,13 +548,13 @@ jsonPayload.subsystem =~ "\.agent-lifecycle$"
 
 ```
 -- Errors across all subsystems in the last hour
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem != ""
 severity >= ERROR
 timestamp >= "2026-03-03T00:00:00Z"
 
 -- Debug-level broker logs for troubleshooting
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^broker\."
 severity = DEBUG
 ```
@@ -392,14 +571,14 @@ Scion includes a comprehensive structured messaging pipeline that provides relia
 - **Web UI "Messages" Tab**: An interactive interface in the dashboard allows administrators and users to trace message flows in real-time.
 - **Multi-Stage Broker Adapter**: Ensures robust delivery of messages to the agent containers, including external notifications. You can monitor message flow health in logs using the `hub.messages` and `broker.messages` subsystems.
 
-## Stalled Agent Detection
+## Stalled and Offline Agent Detection
 
-The Hub includes an automated monitoring system to detect "zombie" or stalled agents. This system tracks the heartbeat signals emitted by runtime brokers.
+The Hub runs two separate checks on running agents, each every 5 minutes. They set different activity values and have different causes.
 
-- **Heartbeat Timeout**: If an agent stops responding and fails to emit a heartbeat within the configured `StalledThreshold`, it is automatically transitioned to an `offline` activity status.
-- **Common Causes**: Currently, this may be due to an agent being unable to refresh its auth token, which disconnects it from sending its heartbeat and other updates. These agents can be stopped and restarted to be provisioned with a new auth token. They should be able to refresh this token as long as they can maintain a connection to the Hub.
-- **Notifications**: Stalled events can trigger automated browser push notifications (by default, `stalled` and `error` states are included in the default notification triggers), proactively alerting administrators to health issues.
-- **Visibility**: The Web UI clearly flags offline agents with specialized status badges, ensuring they are not lost among active workloads.
+- **Offline (no heartbeat)**: An agent whose last heartbeat is more than 2 minutes old is set to the `offline` activity. The process, or its connection to the Hub, is gone. One cause is an agent that cannot refresh its auth token, which stops its heartbeat and other updates. Stop and restart such an agent to give it a new token; an agent that keeps its connection to the Hub refreshes its token on its own. Agents whose activity is `blocked`, `completed` or `limits_exceeded` are not marked offline.
+- **Stalled (heartbeat but no activity)**: A `running` agent whose heartbeat is still arriving (within the last 2 minutes) but that has sent no activity events within `server.hub.stalled_threshold` (default `5m`) is set to the `stalled` activity. The process is alive but not making progress. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded. With `server.hub.auto_suspend_stalled` on (default off), the Hub also suspends it; see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
+- **Notifications**: A notification subscription can include the **Stalled** and **Error** triggers. The subscription set up during agent creation with notifications enabled, and a subscription you add from the web UI, include both by default, along with **Completed**, **Waiting on Parent**, **Limits Exceeded** and **Halted**. `scion start` sets one up unless you pass `--no-notify`, and so does the web UI's create form when **Notify me on important agent state changes** is checked. A subscription you add with `scion notifications subscribe` starts with only `COMPLETED`, `WAITING_FOR_INPUT` and `LIMITS_EXCEEDED`; pass `--triggers` to include others.
+- **Visibility**: The Web UI shows `offline` and `stalled` agents with their own status badges, so they are not lost among active workloads.
 
 ## Server Maintenance Logs
 
@@ -410,7 +589,7 @@ Server maintenance operations (like `rebuild-server`, `rebuild-web`, and `pull-i
 ### Logs Not Appearing in GCP
 
 1.  **Verify Endpoints**: Ensure `SCION_OTEL_ENDPOINT` is set to `monitoring.googleapis.com:443`.
-2.  **Check Credentials**: Outside of GKE/Cloud Run (where ADC is automatic), agents need a GCP service account key file. Verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
+2.  **Check Credentials**: Outside Kubernetes, an agent with no GCP identity configured runs in metadata mode `block`, where ADC gets no token. Such agents need either a service account assigned with `--service-account` (`echo $SCION_METADATA_MODE` inside the agent prints `assign`) or a GCP service account key file. For the key file, verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
 3.  **Check Permissions**: Verify the Workload Identity or Service Account has `roles/logging.logWriter`.
 4.  **Inspect Agent Init**: View the agent container logs (stderr) to see if `sciontool` reported a telemetry startup failure:
     ```
@@ -440,7 +619,7 @@ If you see logs but they aren't linked to traces in the Cloud Trace waterfall:
 * **Observable:** Loop between user `login` and `session_expired` states.
 * **Root Cause:** The Hub regenerated its JWT/session signing keys on restart, or there is a multi-replica key mismatch (replicas using different signing keys).
 * **Operator Action:** 
-  1. Pin the session/JWT signing key securely in the deployment configuration. Ensure `SESSION_SECRET` (or `SharedSigningSecret`) is set consistently across all Hub replicas and survives restarts.
+  1. Pin the session/JWT signing key securely in the deployment configuration. Ensure `SCION_SERVER_SESSION_SECRET` (or `SharedSigningSecret`) is set consistently across all Hub replicas and survives restarts.
   2. Have users run `scion message <agent> "continue"` to trigger resume, or perform a manual login refresh.
 
 #### 3. Duplicate `sciontool` Processes (Split-Brain Agent)
@@ -494,5 +673,6 @@ The response returns process uptime and real-time divergence counters, along wit
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration
+- [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/) - Cloud Monitoring dashboard for Hub metrics
 - [Hub Server](/scion/hosted/single-node/hub-server/) - Hub integration for hosted mode
 - [Runtime Broker](/scion/hosted/ha/runtime-broker/) - Broker setup and configuration

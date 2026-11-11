@@ -28,6 +28,7 @@ import (
 )
 
 func TestHandleBrokerCallback_Success(t *testing.T) {
+	t.Parallel()
 	srv, _ := testServer(t)
 
 	payload := brokerCallbackRequest{
@@ -55,6 +56,7 @@ func TestHandleBrokerCallback_Success(t *testing.T) {
 }
 
 func TestHandleBrokerCallback_NoBrokerAuth(t *testing.T) {
+	t.Parallel()
 	srv, _ := testServer(t)
 
 	payload := brokerCallbackRequest{
@@ -74,6 +76,7 @@ func TestHandleBrokerCallback_NoBrokerAuth(t *testing.T) {
 }
 
 func TestHandleBrokerCallback_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
 	srv, _ := testServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/broker/callback", nil)
@@ -86,6 +89,7 @@ func TestHandleBrokerCallback_MethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleBrokerCallback_NilData(t *testing.T) {
+	t.Parallel()
 	srv, _ := testServer(t)
 
 	payload := brokerCallbackRequest{Data: nil}
@@ -103,6 +107,7 @@ func TestHandleBrokerCallback_NilData(t *testing.T) {
 }
 
 func TestHandleBrokerCallback_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	srv, _ := testServer(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/callback", bytes.NewReader([]byte("not json")))

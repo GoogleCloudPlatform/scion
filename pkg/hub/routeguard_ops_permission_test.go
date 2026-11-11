@@ -107,13 +107,17 @@ func TestRouteGuardOpsPermissions(t *testing.T) {
 		resource   string
 		action     string
 	}{
-		{"/api/v1/admin/maintenance", "hub.admin_mode.update", "hub", "update"},
+		{"/api/v1/admin/maintenance", "hub.admin_mode.read", "hub", "read"},
 		{"/api/v1/admin/maintenance/operations", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/operations/", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/migrations/", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/check-updates", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/restart", "hub.maintenance.execute", "hub", "execute"},
+		{"/api/v1/admin/maintenance/update-status", "hub.maintenance.execute", "hub", "execute"},
+		{"/api/v1/admin/maintenance/releases", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/agents/reset-auth-all", "hub.auth_reset.execute", "hub", "execute"},
+		{"/api/v1/admin/conduit/grant-keys/rotate", "hub.conduit_grant_keys.execute", "hub", "execute"},
+		{"/api/v1/admin/conduit/grant-keys/revoke", "hub.conduit_grant_keys.execute", "hub", "execute"},
 		{"/api/v1/admin/diagnostics/logs", "hub.diagnostics.read", "hub", "read"},
 		{"/api/v1/admin/diagnostics/logs/stream", "hub.diagnostics.read", "hub", "read"},
 	}
@@ -138,8 +142,11 @@ func TestRouteGuardOpsPermissions(t *testing.T) {
 			meta := routeMetadataTable[route.pattern]
 			handler := srv.routeGuard(meta, okHandler)
 
+			// An interactive session, as the auth middleware records it:
+			// session-only routes refuse any other credential.
 			req := httptest.NewRequest(http.MethodGet, route.pattern, nil)
-			req = req.WithContext(contextWithIdentity(ctx, superAdmin))
+			req = req.WithContext(contextWithCredentialContext(contextWithIdentity(ctx, superAdmin),
+				CredentialContext{Kind: CredentialKindInteractive}))
 			rr := httptest.NewRecorder()
 			handler(rr, req)
 

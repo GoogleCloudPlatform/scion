@@ -175,12 +175,16 @@ step_dockerfile() {
 # step_context_dir <step_id>
 #
 # Echoes the absolute path to the build context for the step. scion-base
-# uses the repo root because it copies go source; everything else uses its
-# own image-build subdirectory.
+# uses the repo root because it copies go source; core-base and thick-prep use
+# image-build/ itself so both can COPY the shared lib/ scripts they run
+# (install-core-toolchain.sh, verify-base-contract.sh) -- docker cannot COPY
+# from outside the context, and duplicating those scripts per-directory is
+# exactly the drift they exist to prevent. Everything else uses its own
+# image-build subdirectory.
 step_context_dir() {
   case "$1" in
-    core-base)     echo "${IMAGE_BUILD_DIR}/core-base" ;;
-    thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep" ;;
+    core-base)     echo "${IMAGE_BUILD_DIR}" ;;
+    thick-prep)    echo "${IMAGE_BUILD_DIR}" ;;
     scion-base)    echo "${REPO_ROOT}" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
     scion-omni)    echo "${REPO_ROOT}" ;;
@@ -225,7 +229,8 @@ _omni_chain_parent() {
 # step_build_args <step_id>
 #
 # Emits one KEY=VALUE line per build-arg on stdout. Reads orchestrator
-# state from environment: REGISTRY, TAG, SHORT_SHA, COMMIT_SHA, BASE_TAG.
+# state from environment: REGISTRY, TAG, SHORT_SHA, COMMIT_SHA, VERSION,
+# BUILD_TIME, BASE_TAG.
 # BASE_TAG is the tag (sha or mutable) the orchestrator chose for this
 # step's parent image. When REGISTRY is empty (local-only build), BASE_IMAGE
 # is emitted with a bare image name (e.g. core-base:latest) so it matches
@@ -248,7 +253,17 @@ step_build_args() {
       fi
       ;;
     thick-prep)
-      # No build-args — BASE_IMAGE default is in the Dockerfile ARG.
+      # BASE_IMAGE default is in the Dockerfile ARG. The mirror passthroughs are
+      # the same as core-base's and must be emitted here too: thick-prep now
+      # runs the same npm install as core-base, and a build behind a corporate
+      # proxy that worked on one chain failing on the other is the exact drift
+      # image-build/lib/ exists to eliminate.
+      if [[ -n "${NPM_REGISTRY:-}" ]]; then
+        echo "NPM_REGISTRY=${NPM_REGISTRY}"
+      fi
+      if [[ -n "${PIP_INDEX_URL:-}" ]]; then
+        echo "PIP_INDEX_URL=${PIP_INDEX_URL}"
+      fi
       ;;
     scion-base)
       if [[ "${THICK_BUILD:-}" == "true" ]]; then
@@ -258,6 +273,14 @@ step_build_args() {
       fi
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
+      fi
+      if [[ -n "${VERSION:-}" ]]; then
+        echo "VERSION=${VERSION}"
+      fi
+      # Commit time (build-images.sh); the Dockerfile falls back to the
+      # build host clock when it is empty.
+      if [[ -n "${BUILD_TIME:-}" ]]; then
+        echo "BUILD_TIME=${BUILD_TIME}"
       fi
       ;;
     scion-hub)
@@ -273,6 +296,14 @@ step_build_args() {
       fi
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
+      fi
+      if [[ -n "${VERSION:-}" ]]; then
+        echo "VERSION=${VERSION}"
+      fi
+      # Commit time (build-images.sh); the Dockerfile falls back to the
+      # build host clock when it is empty.
+      if [[ -n "${BUILD_TIME:-}" ]]; then
+        echo "BUILD_TIME=${BUILD_TIME}"
       fi
       ;;
     *)

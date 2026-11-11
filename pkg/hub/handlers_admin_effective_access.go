@@ -72,7 +72,7 @@ type adminEffectiveAccessRestriction struct {
 // handleAdminEffectiveAccess serves GET /api/v1/admin/effective-access.
 func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodHead)
 		return
 	}
 
@@ -101,7 +101,7 @@ func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Reque
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
 		Resource:   Resource{Type: "hub", ID: "hub"},
-		Action:     Action("manage"),
+		Action:     ActionRead,
 		Permission: "hub.audit.read",
 	})
 	if !decision.Allowed {
@@ -172,8 +172,15 @@ func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Reque
 	}
 
 	// List system-scoped bindings for the principal closure.
+	// Read through the authorization service's store, so a hub test
+	// identity shows only the system grants authorization honours (the
+	// test-identity grant clamp, authz_test_fixture_clamp.go).
 	scopeTypes := []string{store.RoleScopeSystem}
-	bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, nil)
+	bindingStore := store.Store(s.store)
+	if s.authzService != nil && s.authzService.store != nil {
+		bindingStore = s.authzService.store
+	}
+	bindings, err := bindingStore.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to list role bindings", nil)

@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -55,6 +57,7 @@ func TestNewProviders_IgnoresExternalEndpoint(t *testing.T) {
 		Enabled:      true,
 		CloudEnabled: true,
 		Endpoint:     "", // no endpoint
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, false)
 	if err != nil {
@@ -219,6 +222,25 @@ func TestHookProviderEmitsCounterDeltaAndOtherInstrumentTemporalities(t *testing
 }
 
 func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing.T) {
+	t.Run("clean env", func(t *testing.T) {
+		testHookProviderStrictCloudAdmission(t, nil)
+	})
+	// ptone/scion#2249: the OTel SDK merges resource.Environment() into
+	// every provider resource, so OTEL_RESOURCE_ATTRIBUTES and
+	// OTEL_SERVICE_NAME in sciontool's environment must not reach the
+	// loopback providers' resource and fail GCP admission.
+	t.Run("OTEL resource env set", func(t *testing.T) {
+		testHookProviderStrictCloudAdmission(t, map[string]string{
+			"OTEL_RESOURCE_ATTRIBUTES": "deployment.environment=prod,host.name=leak,service.name=env-service,scion.agent.id=env-agent",
+			"OTEL_SERVICE_NAME":        "env-service-name",
+		})
+	})
+}
+
+func testHookProviderStrictCloudAdmission(t *testing.T, ambient map[string]string) {
+	for key, value := range ambient {
+		t.Setenv(key, value)
+	}
 	for key, value := range map[string]string{
 		"SCION_AGENT_ID": "agent", "SCION_AGENT_SLUG": "slug", "SCION_PROJECT_ID": "project",
 		"SCION_HARNESS": "claude", "SCION_MODEL": "model", "SCION_BROKER_ID": "broker-id", "SCION_BROKER_NAME": "broker",
@@ -238,6 +260,7 @@ func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing
 		for key, want := range map[string]string{
 			"scion.agent.id": "agent", "scion.agent.slug": "slug", "scion.project.id": "project",
 			"scion.harness": "claude", "scion.model": "model", "scion.broker.id": "broker-id", "scion.broker.name": "broker",
+			"service.name": "sciontool",
 		} {
 			if got := attrValue(decision.Data[0].Resource.Attributes, key); got != want {
 				results <- fmt.Errorf("authoritative resource %s = %q, want %q", key, got, want)
@@ -264,9 +287,9 @@ func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing
 	}
 	meter := providers.MeterProvider.Meter(hookMetricScope)
 	tool, _ := meter.Int64Counter("agent.tool.calls", metric.WithUnit("{call}"))
-	tokens, _ := meter.Int64Counter("scion.hook.tokens.input", metric.WithUnit("{token}"))
+	tokens, _ := meter.Int64Counter(telemetrycontract.MetricUsageTokens, metric.WithUnit("{token}"))
 	tool.Add(context.Background(), 1)
-	tokens.Add(context.Background(), 3)
+	tokens.Add(context.Background(), 3, metric.WithAttributes(attribute.String(telemetrycontract.TokenTypeLabel, telemetrycontract.TokenTypeInput)))
 	if err := providers.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -361,6 +384,7 @@ func TestNewProviders_CloudDisabledStillUsesLocalBoundary(t *testing.T) {
 		Enabled:      true,
 		CloudEnabled: false,
 		Endpoint:     "localhost:4317",
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, false)
 	if err != nil {
@@ -372,12 +396,31 @@ func TestNewProviders_CloudDisabledStillUsesLocalBoundary(t *testing.T) {
 	shutdownProvidersForTest(t, p)
 }
 
+// startStubLoopbackReceiver starts a loopback receiver with no-op handlers
+// on an ephemeral port and returns that port, so provider tests export to a
+// live endpoint instead of dialing 127.0.0.1:0 and waiting out the export
+// timeout at Shutdown.
+func startStubLoopbackReceiver(t *testing.T) int {
+	t.Helper()
+	receiver := NewReceiver(&Config{Enabled: true},
+		func(context.Context, []*tracepb.ResourceSpans) error { return nil },
+		WithLogHandler(func(context.Context, []*logspb.ResourceLogs) error { return nil }),
+		WithMetricHandler(func(context.Context, []*metricpb.ResourceMetrics) error { return nil }),
+	)
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatalf("start stub receiver: %v", err)
+	}
+	t.Cleanup(func() { _ = receiver.Stop(context.Background()) })
+	port, _ := receiver.BoundPorts()
+	return port
+}
+
 func shutdownProvidersForTest(t *testing.T, providers *Providers) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := providers.Shutdown(ctx); err != nil {
-		t.Logf("Shutdown returned expected error without a receiver: %v", err)
+		t.Fatalf("Shutdown: %v", err)
 	}
 }
 
@@ -394,6 +437,7 @@ func TestNewProviders_SyncMode(t *testing.T) {
 		CloudEnabled: true,
 		Endpoint:     "localhost:4317",
 		Insecure:     true,
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, false)
 	if err != nil {
@@ -412,13 +456,7 @@ func TestNewProviders_SyncMode(t *testing.T) {
 		t.Error("expected non-nil MeterProvider")
 	}
 
-	// Shutdown may return export errors when no collector is listening;
-	// this is expected in tests and not a provider creation failure.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := p.Shutdown(ctx); err != nil {
-		t.Logf("Shutdown returned expected export error (no collector): %v", err)
-	}
+	shutdownProvidersForTest(t, p)
 }
 
 func TestNewProviders_BatchMode(t *testing.T) {
@@ -427,6 +465,7 @@ func TestNewProviders_BatchMode(t *testing.T) {
 		CloudEnabled: true,
 		Endpoint:     "localhost:4317",
 		Insecure:     true,
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, true)
 	if err != nil {
@@ -445,11 +484,146 @@ func TestNewProviders_BatchMode(t *testing.T) {
 		t.Error("expected non-nil MeterProvider")
 	}
 
-	// Shutdown may return export errors when no collector is listening;
-	// this is expected in tests and not a provider creation failure.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownProvidersForTest(t, p)
+}
+
+func TestNewHookProviders_NilAndDisabled(t *testing.T) {
+	for _, cfg := range []*Config{nil, {Enabled: false}} {
+		p, err := NewHookProviders(context.Background(), cfg)
+		if err != nil || p != nil {
+			t.Fatalf("NewHookProviders(%+v) = %v, %v; want nil, nil", cfg, p, err)
+		}
+	}
+}
+
+// hookProviderTestBound is the CI bound for a full hook-provider export cycle
+// (span, log, metric flush on shutdown) when the receiver is missing or
+// unresponsive. The designed worst case is 2*HookExportTimeout +
+// HookShutdownTimeout (0.75s); the OTLP defaults this replaces take 10s or
+// more, so 2s leaves CI headroom while still catching a regression.
+const hookProviderTestBound = 2 * time.Second
+
+// exerciseHookProviders runs one span, one log record and one counter through
+// p, shuts it down within HookShutdownTimeout, and returns the elapsed time.
+func exerciseHookProviders(t *testing.T, p *Providers) time.Duration {
+	t.Helper()
+	ctx := context.Background()
+	start := time.Now()
+	_, span := p.TracerProvider.Tracer("hook.test").Start(ctx, "tool.call")
+	span.End()
+	var record otellog.Record
+	record.SetEventName("tool.call")
+	p.LoggerProvider.Logger("hook.test").Emit(ctx, record)
+	counter, err := p.MeterProvider.Meter("hook.test").Int64Counter("hook.counter")
+	if err != nil {
+		t.Fatalf("create counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+	shutdownCtx, cancel := context.WithTimeout(ctx, HookShutdownTimeout)
 	defer cancel()
-	if err := p.Shutdown(ctx); err != nil {
-		t.Logf("Shutdown returned expected export error (no collector): %v", err)
+	_ = p.Shutdown(shutdownCtx) // the metric flush fails: no usable receiver
+	return time.Since(start)
+}
+
+// With nothing listening, hook providers must fail every export immediately
+// because retries are disabled; this takes a few milliseconds. With retries
+// on, the OTLP exporter retries Unavailable until each export's
+// HookExportTimeout, so the three exports take about 3*HookExportTimeout.
+// The 2*HookExportTimeout bound separates the two with wide margin on both
+// sides.
+func TestNewHookProviders_NoReceiverFailsFast(t *testing.T) {
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	if elapsed := exerciseHookProviders(t, p); elapsed > 2*HookExportTimeout {
+		t.Fatalf("hook export with no receiver took %s; are retries enabled?", elapsed)
+	}
+}
+
+// A receiver that accepts TCP connections but never answers cannot fail
+// fast, so only HookExportTimeout and HookShutdownTimeout bound the exports.
+// Without them each export waits the OTLP default 10s.
+func TestNewHookProviders_UnresponsiveReceiverIsBounded(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: listener.Addr().(*net.TCPAddr).Port})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	if elapsed := exerciseHookProviders(t, p); elapsed > hookProviderTestBound {
+		t.Fatalf("hook export with an unresponsive receiver took %s", elapsed)
+	}
+}
+
+// Hook providers still deliver every signal to a live receiver.
+func TestNewHookProviders_RoutesAllSignalsToLoopback(t *testing.T) {
+	var spans, logs, metrics atomic.Int64
+	receiver := NewReceiver(&Config{Enabled: true},
+		func(_ context.Context, batches []*tracepb.ResourceSpans) error {
+			spans.Add(int64(len(batches)))
+			return nil
+		},
+		WithLogHandler(func(_ context.Context, batches []*logspb.ResourceLogs) error {
+			logs.Add(int64(len(batches)))
+			return nil
+		}),
+		WithMetricHandler(func(_ context.Context, batches []*metricpb.ResourceMetrics) error {
+			metrics.Add(int64(len(batches)))
+			return nil
+		}),
+	)
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatalf("start receiver: %v", err)
+	}
+	defer func() { _ = receiver.Stop(context.Background()) }()
+	port, _ := receiver.BoundPorts()
+
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: port})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	ctx := context.Background()
+	_, span := p.TracerProvider.Tracer("hook.test").Start(ctx, "tool.call")
+	span.End()
+	var record otellog.Record
+	record.SetEventName("tool.call")
+	p.LoggerProvider.Logger("hook.test").Emit(ctx, record)
+	counter, err := p.MeterProvider.Meter("hook.test").Int64Counter("hook.counter")
+	if err != nil {
+		t.Fatalf("create counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+	shutdownCtx, cancel := context.WithTimeout(ctx, HookShutdownTimeout)
+	defer cancel()
+	if err := p.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown providers: %v", err)
+	}
+	if spans.Load() == 0 || logs.Load() == 0 || metrics.Load() == 0 {
+		t.Fatalf("loopback captures: spans=%d logs=%d metrics=%d", spans.Load(), logs.Load(), metrics.Load())
 	}
 }

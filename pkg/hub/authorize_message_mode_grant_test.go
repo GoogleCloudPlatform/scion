@@ -58,7 +58,7 @@ func grantGuardSetup(t *testing.T) (*Server, store.Store, string, *store.User) {
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, projectID, owner
 }
@@ -225,37 +225,3 @@ func TestIsNewHubGrant(t *testing.T) {
 // grantGuardAgentIdentity is a minimal AgentIdentity implementation for
 // grant guard unit tests, with scope and ancestry support.
 // ---------------------------------------------------------------------------
-
-type grantGuardAgentIdentity struct {
-	id        string
-	projectID string
-	scopes    []AgentTokenScope
-	ancestry  []string
-}
-
-func newTestAgentIdentity(id, projectID string, scopes []AgentTokenScope) *grantGuardAgentIdentity {
-	return &grantGuardAgentIdentity{id: id, projectID: projectID, scopes: scopes}
-}
-
-func (a *grantGuardAgentIdentity) ID() string         { return a.id }
-func (a *grantGuardAgentIdentity) Type() string       { return "agent" }
-func (a *grantGuardAgentIdentity) ProjectID() string  { return a.projectID }
-func (a *grantGuardAgentIdentity) Ancestry() []string { return a.ancestry }
-func (a *grantGuardAgentIdentity) OriginUserID() string {
-	if len(a.ancestry) > 0 {
-		return a.ancestry[0]
-	}
-	return ""
-}
-func (a *grantGuardAgentIdentity) TokenID() string { return "test-token" }
-func (a *grantGuardAgentIdentity) Scopes() []AgentTokenScope {
-	return a.scopes
-}
-func (a *grantGuardAgentIdentity) HasScope(scope AgentTokenScope) bool {
-	for _, s := range a.scopes {
-		if s == scope {
-			return true
-		}
-	}
-	return false
-}
