@@ -157,17 +157,29 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 
 		// Reply polling reads the agent's reply from the caller's own
 		// conversation with the agent, with the caller's own credential. It
-		// applies to calls without a caller and to local user callers, unless
+		// applies to calls without a caller and to user callers, unless
 		// reply_poll.enabled is false; agent callers wait on the push path.
-		// A federated user also waits on the push path: the hub serves it
-		// only its own DM under the chat route, not the conversation list
-		// this reader uses.
+		// A federated user's conversation is read with its own credential
+		// through the chat route of its own conversation with the agent
+		// (visitorDMReader), the only conversation read the hub admits for
+		// it; a local caller's through the conversation API.
+		// A conversation key that cannot be derived is the uniform refusal,
+		// before anything is sent.
 		var reader replyReader
-		if e.bridge.config.ReplyPoll.IsEnabled() && (caller == nil || (!caller.IsAgent() && !federatedUser)) {
-			if convs := writeClient.Conversations(); convs != nil {
+		var visitorReader *visitorDMReader
+		if e.bridge.config.ReplyPoll.IsEnabled() && (caller == nil || !caller.IsAgent()) {
+			if federatedUser {
+				var readerErr error
+				if visitorReader, readerErr = newVisitorDMReader(e.bridge, caller, agentCtx.AgentID); readerErr != nil {
+					e.log.Info("reply preflight refused", "task_id", taskID, "reason", string(pollRefused))
+					yield(failedStatusEvent(execCtx, pollRefused.terminalMessage()), nil)
+					return
+				}
+			} else if convs := writeClient.Conversations(); convs != nil {
 				reader = convs
 			}
 		}
+		polling := reader != nil || visitorReader != nil
 
 		// Translate A2A message parts to Scion format.
 		scionMsg := TranslateA2APartsToScion(execCtx.Message.Parts)
@@ -259,7 +271,7 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		// concurrent call would read the same conversation. The check comes
 		// before the task is registered, so a refused call never becomes the
 		// newest cache entry for the agent.
-		if reader != nil {
+		if polling {
 			waitKey := replyWaitKey(caller, e.bridge.adminTopicUserID(), agentCtx.AgentID)
 			if !e.bridge.acquireReplyWait(waitKey) {
 				e.log.Info("refusing a concurrent call from the same caller to the agent", "task_id", taskID)
@@ -279,12 +291,16 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
 
 		var conversationID string
-		if reader != nil {
+		if polling {
 			// Preflight: the caller must be able to read its conversation
 			// with the agent. A refusal ends the call before anything is
 			// sent; there is never a fallback to the admin credential.
 			var refusal pollOutcome
-			conversationID, refusal = replyPreflight(ctx, reader, agentCtx.AgentID, time.Now())
+			if visitorReader != nil {
+				refusal = visitorReplyPreflight(ctx, visitorReader)
+			} else {
+				conversationID, refusal = replyPreflight(ctx, reader, agentCtx.AgentID, time.Now())
+			}
 			if msg := refusal.terminalMessage(); msg != "" {
 				e.log.Info("reply preflight refused", "task_id", taskID, "reason", string(refusal))
 				yield(failedStatusEvent(execCtx, msg), nil)
@@ -344,7 +360,7 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		}
 
 		waitOpts := waitOptions{sdkStore: e.bridge.sdkTaskStore}
-		if reader != nil {
+		if polling {
 			// Plugin mode: the wait starts after the task's last event, so a
 			// continuation never returns an earlier turn's reply. Standalone
 			// mode keeps the task's durable cursor.
@@ -382,13 +398,17 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		}
 		waitCtx := ctx
 		var poller *replyPoller
-		if reader != nil {
+		if polling {
 			switch {
 			case anchorID != "":
 				var endWait context.CancelCauseFunc
 				waitCtx, endWait = context.WithCancelCause(ctx)
 				defer endWait(nil)
-				poller = newReplyPoller(e.bridge, reader, string(taskID), agentCtx.AgentSlug, agentCtx.AgentID, anchorID, conversationID, endWait)
+				if visitorReader != nil {
+					poller = newVisitorReplyPoller(e.bridge, visitorReader, string(taskID), agentCtx.AgentSlug, agentCtx.AgentID, anchorID, endWait)
+				} else {
+					poller = newReplyPoller(e.bridge, reader, string(taskID), agentCtx.AgentSlug, agentCtx.AgentID, anchorID, conversationID, endWait)
+				}
 				if e.bridge.sdkTaskStore != nil {
 					poller.fence = e.bridge.standaloneAppendFence(string(taskID))
 				}

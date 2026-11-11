@@ -17,6 +17,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -29,9 +30,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
-// Reply routing with reply polling on: a federated user waits on the push
-// path, a member of the project polls, and the bridge's own sends take
-// replies on the topic of the user they were sent as.
+// Reply routing with reply polling on: a federated user and a member of the
+// project each poll their own conversation with the agent, and the bridge's
+// own sends take replies on the topic of the user they were sent as.
 
 const (
 	routingMemberID    = "33333333-4444-4555-8666-777777777777"
@@ -162,16 +163,17 @@ func runExecutorAsync(ctx context.Context, b *Bridge, taskID string, caller *Cal
 	return done
 }
 
-// TestExecutor_FederatedUserWaitsOnPushPathWithPollingOn: with reply
-// polling on, a federated user's call makes no request to the
-// conversation routes (the hub refuses a visitor there), its task is never
-// marked as owned by a reply poller, and the reply pushed on the user's
-// own topic is returned.
-func TestExecutor_FederatedUserWaitsOnPushPathWithPollingOn(t *testing.T) {
+// TestExecutor_FederatedUserPollsOwnConversationWithPollingOn: with reply
+// polling on, a federated user's call makes no request to the conversation
+// routes (the hub refuses a visitor there), its task is marked as owned by
+// a reply poller while the call waits, and the reply is read from the
+// user's own conversation with the agent.
+func TestExecutor_FederatedUserPollsOwnConversationWithPollingOn(t *testing.T) {
+	const polledText = "the reply in the federated user's conversation"
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
 	hub.set(func(h *fedUserHub) { h.visitorConvStatus = http.StatusForbidden })
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
 	if !b.config.ReplyPoll.IsEnabled() {
 		t.Fatal("reply polling is off; the case needs it on")
 	}
@@ -179,38 +181,57 @@ func TestExecutor_FederatedUserWaitsOnPushPathWithPollingOn(t *testing.T) {
 	done := sendAsync(t, ts, "agent1", token)
 
 	// The first request the call makes to the hub's message or
-	// conversation routes: a conversation read would come before the send.
+	// conversation routes: a conversation route request from the preflight
+	// would come before the send.
 	snap := waitForHubCalls(t, hub, "a message send or a conversation request", func(s fedUserHubCalls) bool {
 		return len(s.sent) > 0 || len(s.convRequests) > 0
 	})
 	if len(snap.convRequests) != 0 {
 		t.Fatalf("conversation route requests %+v before the send, want none for a federated user", snap.convRequests)
 	}
+	if snap.sent[0].DMReadsBefore != 1 {
+		t.Fatalf("reads of the federated user's conversation before the send = %d, want 1 (the preflight)", snap.sent[0].DMReadsBefore)
+	}
+	// The call is still waiting: no reply is in the conversation yet.
 	taskID, entry := onlyOtherTask(t, b, agentKey(fedUserProjectID, "agent1"))
-	if entry.pollerLive {
-		t.Fatalf("task %s is marked as owned by a reply poller, want the push path for a federated user", taskID)
+	if !entry.pollerLive {
+		t.Fatalf("task %s is not marked as owned by a reply poller, want it marked while the federated user's call waits", taskID)
 	}
 
-	deliverReply(t, b)
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(polledText) })
 
 	status, body := awaitResult(t, done)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", status, body)
 	}
-	if !strings.Contains(body, fedUserReplyText) {
-		t.Fatalf("response does not carry the pushed reply; body %s", body)
+	if !strings.Contains(body, polledText) {
+		t.Fatalf("response does not carry the reply read from the federated user's conversation; body %s", body)
 	}
-	if got := hub.snapshot().convRequests; len(got) != 0 {
+	after := hub.snapshot()
+	if got := after.convRequests; len(got) != 0 {
 		t.Fatalf("conversation route requests %+v, want none for a federated user", got)
+	}
+	var polls int
+	for _, q := range after.dmReadQueries {
+		if q.Get("limit") == fmt.Sprint(replyPollPageSize) {
+			polls++
+		}
+	}
+	if polls == 0 {
+		t.Fatalf("no poll read of the federated user's conversation (queries %v)", after.dmReadQueries)
 	}
 }
 
-// TestExecutor_MemberPollerAndFederatedUserPushWaitOnOneAgent: a member's
-// call on agent1 has a live reply poller while a federated user waits on
-// the push path on the same agent. The member's pushed copy is dropped,
-// and the federated user's own pushed reply reaches the federated user.
-func TestExecutor_MemberPollerAndFederatedUserPushWaitOnOneAgent(t *testing.T) {
-	const memberReplyText = "reply from agent1 to the member"
+// TestExecutor_MemberPollerAndFederatedUserPollerOnOneAgent: a member's
+// call on agent1 has a live reply poller while a federated user's call on
+// the same agent has its own. The member's pushed copy is dropped, the
+// federated user's pushed copy is dropped too, and the federated user gets
+// only the reply read from its own conversation.
+func TestExecutor_MemberPollerAndFederatedUserPollerOnOneAgent(t *testing.T) {
+	const (
+		memberReplyText = "reply from agent1 to the member"
+		polledText      = "the reply in the federated user's conversation"
+	)
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
 	hub.set(func(h *fedUserHub) { h.visitorConvStatus = http.StatusForbidden })
@@ -234,8 +255,8 @@ func TestExecutor_MemberPollerAndFederatedUserPushWaitOnOneAgent(t *testing.T) {
 	if !entry.userCaller || entry.callerUserID != fedUserAccountID {
 		t.Fatalf("federated user's task entry %+v, want a user caller with the hub account ID %s", entry, fedUserAccountID)
 	}
-	if entry.pollerLive {
-		t.Fatalf("federated user's task %s is marked as owned by a reply poller, want the push path", visitorTask)
+	if !entry.pollerLive {
+		t.Fatalf("federated user's task %s is not marked as owned by a reply poller, want its own poller", visitorTask)
 	}
 
 	// The member's pushed copy: the member's poller owns that reply.
@@ -247,17 +268,23 @@ func TestExecutor_MemberPollerAndFederatedUserPushWaitOnOneAgent(t *testing.T) {
 		t.Fatalf("%d events appended to the federated user's task for the member's reply, want 0", n)
 	}
 
-	// The federated user's own reply.
+	// The federated user's pushed copy: its own poller owns that reply.
 	deliverReplyTo(t, b, fedUserAccountID, fedUserReplyText)
-	if n := eventsCarrying(t, b, visitorTask, fedUserReplyText); n == 0 {
-		t.Fatal("the federated user's pushed reply was not appended to its task")
+	if n := eventsCarrying(t, b, visitorTask, fedUserReplyText); n != 0 {
+		t.Fatalf("%d events appended to the federated user's task for its pushed copy, want 0 while its poller is live", n)
 	}
+
+	// The federated user's reply, in its own conversation.
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(polledText) })
 	status, body := awaitResult(t, done)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", status, body)
 	}
-	if !strings.Contains(body, fedUserReplyText) || strings.Contains(body, memberReplyText) {
-		t.Fatalf("response %s, want the federated user's own reply only", body)
+	if !strings.Contains(body, polledText) || strings.Contains(body, memberReplyText) || strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response %s, want only the reply read from the federated user's conversation", body)
+	}
+	if n := eventsCarrying(t, b, memberTask, polledText); n != 0 {
+		t.Fatalf("%d events appended to the member's task for the federated user's reply, want 0", n)
 	}
 	if got := convRequestsWith(hub.snapshot(), token); len(got) != 0 {
 		t.Fatalf("conversation route requests with the federated user's credential %+v, want none", got)

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -365,6 +366,20 @@ type fedUserHub struct {
 	// the admin agent reads ("agent-get") and the sends ("send").
 	order        []string
 	convRequests []fedUserHubConvRequest
+	// dmReadQueries records the query of every conversation read.
+	dmReadQueries []url.Values
+	// dmReadSeq, when not empty, answers the next conversation reads in
+	// order, in place of dmReadStatus (0: 200 with dmMessages).
+	dmReadSeq []int
+	// dmMessages is the conversation page the reads answer, newest first.
+	dmMessages []map[string]interface{}
+	// dmMessagesByKey, when not nil, answers each conversation read with
+	// the page of the conversation key read (none for a key it lacks), in
+	// place of dmMessages.
+	dmMessagesByKey map[string][]map[string]interface{}
+	// dmNullReads is the number of next conversation reads answered 200
+	// with a JSON null body, after the dmReadSeq and dmReadStatus answers.
+	dmNullReads int
 
 	// visitorConvStatus answers /api/v1/conversations* requests that carry
 	// a federation credential, as the hub refuses a visitor there; 0: 404,
@@ -382,6 +397,8 @@ type fedUserHubSend struct {
 	AgentID  string
 	Body     map[string]interface{}
 	FedToken string
+	// DMReadsBefore is the number of conversation reads before the send.
+	DMReadsBefore int
 }
 
 func writeHubError(w http.ResponseWriter, status int) {
@@ -465,7 +482,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			var body map[string]interface{}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			agentID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/message")
-			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken})
+			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken, DMReadsBefore: len(h.dmReadKeys)})
 			h.order = append(h.order, "send")
 			if h.sendStatus != 0 {
 				writeHubError(w, h.sendStatus)
@@ -485,16 +502,41 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/"), "/messages")
 			h.dmReadKeys = append(h.dmReadKeys, key)
 			h.dmReadTokens = append(h.dmReadTokens, fedToken)
+			h.dmReadQueries = append(h.dmReadQueries, r.URL.Query())
 			h.order = append(h.order, "dm-read")
 			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
-			if h.dmReadStatus != 0 {
-				writeHubError(w, h.dmReadStatus)
+			status := h.dmReadStatus
+			if len(h.dmReadSeq) > 0 {
+				status = h.dmReadSeq[0]
+				h.dmReadSeq = h.dmReadSeq[1:]
+			}
+			if status != 0 {
+				writeHubError(w, status)
 				return
 			}
-			writeJSON(map[string]interface{}{"messages": []interface{}{}})
+			if h.dmNullReads > 0 {
+				h.dmNullReads--
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, "null")
+				return
+			}
+			rows := h.dmMessages
+			if h.dmMessagesByKey != nil {
+				rows = h.dmMessagesByKey[key]
+			}
+			page, next, ok := fedUserDMPage(rows, r.URL.Query())
+			if !ok {
+				writeHubError(w, http.StatusBadRequest)
+				return
+			}
+			resp := map[string]interface{}{"messages": page}
+			if next != "" {
+				resp["nextCursor"] = next
+			}
+			writeJSON(resp)
 		case strings.HasPrefix(r.URL.Path, "/api/v1/conversations"):
 			h.convRequests = append(h.convRequests, fedUserHubConvRequest{Path: r.URL.Path, FedToken: fedToken})
 			if fedToken != "" && h.visitorConvStatus != 0 {
@@ -526,6 +568,33 @@ func (h *fedUserHub) set(fn func(h *fedUserHub)) {
 	fn(h)
 }
 
+// fedUserDMPage pages the conversation rows (newest first) as the hub's
+// chat history does: up to limit rows from the cursor's position, and an
+// opaque cursor for the next (older) page when rows remain. ok is false for
+// a cursor the double did not issue.
+func fedUserDMPage(rows []map[string]interface{}, query url.Values) (page []map[string]interface{}, next string, ok bool) {
+	start := 0
+	if c := query.Get("cursor"); c != "" {
+		n, err := strconv.Atoi(strings.TrimPrefix(c, fedUserDMCursorPrefix))
+		if !strings.HasPrefix(c, fedUserDMCursorPrefix) || err != nil || n < 0 || n > len(rows) {
+			return nil, "", false
+		}
+		start = n
+	}
+	end := len(rows)
+	if limit, err := strconv.Atoi(query.Get("limit")); err == nil && limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	page = append([]map[string]interface{}{}, rows[start:end]...)
+	if end < len(rows) {
+		next = fedUserDMCursorPrefix + strconv.Itoa(end)
+	}
+	return page, next, true
+}
+
+// fedUserDMCursorPrefix starts the page cursors fedUserDMPage issues.
+const fedUserDMCursorPrefix = "opaque-page-"
+
 // fedUserHubCalls is a copy of what the hub double has seen.
 type fedUserHubCalls struct {
 	meCalls      int
@@ -539,23 +608,26 @@ type fedUserHubCalls struct {
 	agentGets    []string
 	order        []string
 	convRequests []fedUserHubConvRequest
+	// dmReadQueries is the query of every conversation read.
+	dmReadQueries []url.Values
 }
 
 func (h *fedUserHub) snapshot() fedUserHubCalls {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return fedUserHubCalls{
-		meCalls:      h.meCalls,
-		meFedTokens:  append([]string(nil), h.meFedTokens...),
-		sent:         append([]fedUserHubSend(nil), h.sent...),
-		listQueries:  append([]url.Values(nil), h.listQueries...),
-		listTokens:   append([]string(nil), h.listTokens...),
-		dmReadKeys:   append([]string(nil), h.dmReadKeys...),
-		dmReadTokens: append([]string(nil), h.dmReadTokens...),
-		createCalls:  h.createCalls,
-		agentGets:    append([]string(nil), h.agentGets...),
-		order:        append([]string(nil), h.order...),
-		convRequests: append([]fedUserHubConvRequest(nil), h.convRequests...),
+		meCalls:       h.meCalls,
+		meFedTokens:   append([]string(nil), h.meFedTokens...),
+		sent:          append([]fedUserHubSend(nil), h.sent...),
+		listQueries:   append([]url.Values(nil), h.listQueries...),
+		listTokens:    append([]string(nil), h.listTokens...),
+		dmReadKeys:    append([]string(nil), h.dmReadKeys...),
+		dmReadTokens:  append([]string(nil), h.dmReadTokens...),
+		createCalls:   h.createCalls,
+		agentGets:     append([]string(nil), h.agentGets...),
+		order:         append([]string(nil), h.order...),
+		dmReadQueries: append([]url.Values(nil), h.dmReadQueries...),
+		convRequests:  append([]fedUserHubConvRequest(nil), h.convRequests...),
 	}
 }
 
@@ -633,6 +705,14 @@ const fedUserSendBody = `{
 		}
 	}
 }`
+
+// fedUserPushOnly turns reply polling off (reply_poll.enabled: false), so
+// the executor waits on pushed replies only: the path these tests drive
+// with deliverReply.
+func fedUserPushOnly(cfg *Config) {
+	off := false
+	cfg.ReplyPoll.Enabled = &off
+}
 
 // sendAsync sends the JSON-RPC SendMessage in the background and returns a
 // channel with the status and body.
@@ -848,7 +928,7 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 func TestExecutor_FederatedUserReplyThroughUserTopic(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, broker, ts := newFedUserTestServer(t, hub)
+	b, broker, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	sent := waitForSend(t, hub)
@@ -901,7 +981,7 @@ func TestExecutor_FederatedUserReplyThroughUserTopic(t *testing.T) {
 func TestExecutor_FederatedUserRevokedEndsTask(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	waitForSend(t, hub)
@@ -929,7 +1009,7 @@ func TestExecutor_FederatedUserRevokedEndsTask(t *testing.T) {
 func TestExecutor_FederatedUserRecheckUnavailableStopsReply(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	waitForSend(t, hub)
@@ -1179,7 +1259,7 @@ func TestExecutor_FederatedUserNeverGetsAnotherUsersReply(t *testing.T) {
 	)
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	// The other user's task on agent1 started first.
 	aKey := agentKey(fedUserProjectID, "agent1")
@@ -1254,7 +1334,7 @@ func TestExecutor_FederatedUserNeverGetsAnotherVisitorsReply(t *testing.T) {
 	)
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	aKey := agentKey(fedUserProjectID, "agent1")
 	b.registerActiveTaskFor("agent-task", aKey, &CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer})
@@ -1583,43 +1663,58 @@ func TestIsAgentCallerOwnerKey(t *testing.T) {
 
 // TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused: a user
 // access credential from an identity issuer whose user has no project
-// visitor account on the hub is refused by the hub (403 on GET
-// /api/v1/auth/me, GoogleCloudPlatform/scion#3577). The bridge answers the
-// JSON-RPC send with the uniform refusal before any task starts: nothing
-// is sent, no topic is subscribed and no access re-check is made.
+// visitor account on the hub is refused, with reply polling on. The hub
+// either refuses it (403 on GET /api/v1/auth/me,
+// upstream issue 3577) or answers 200 with an ID that names no
+// visitor account. Either way the bridge answers the JSON-RPC send with the
+// uniform refusal before any task starts: nothing is sent, no topic is
+// subscribed, and no access re-check or reply read is made.
 func TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused(t *testing.T) {
 	const (
 		issuer  = "https://accounts.example.com"
 		subject = "idp-user-1"
 	)
-	token := buildTestJWT(t, map[string]interface{}{
-		"iss":   issuer,
-		"sub":   subject,
-		"aud":   "https://hub-b.example.com",
-		"email": "person@example.com",
-	})
-	hub := newFedUserHub(t, token)
-	hub.set(func(h *fedUserHub) { h.meStatus = http.StatusForbidden })
-	_, broker, ts := newFedUserTestServer(t, hub)
+	for _, tc := range []struct {
+		name string
+		hub  func(h *fedUserHub)
+	}{
+		{"hub refuses the credential", func(h *fedUserHub) { h.meStatus = http.StatusForbidden }},
+		{"hub answer names no visitor account", func(h *fedUserHub) { h.meID = issuer + ":" + subject }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := buildTestJWT(t, map[string]interface{}{
+				"iss":   issuer,
+				"sub":   subject,
+				"aud":   "https://hub-b.example.com",
+				"email": "person@example.com",
+			})
+			hub := newFedUserHub(t, token)
+			hub.set(tc.hub)
+			b, broker, ts := newFedUserTestServer(t, hub)
+			if !b.config.ReplyPoll.IsEnabled() {
+				t.Fatal("reply polling is off; this test needs the default (on)")
+			}
 
-	status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
-	if status != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body %s", status, body)
-	}
-	if got := strings.TrimSpace(body); got != federatedUserRefusalText {
-		t.Errorf("body = %q, want the uniform refusal %q", got, federatedUserRefusalText)
-	}
-	snap := hub.snapshot()
-	if snap.meCalls != 1 || snap.meFedTokens[0] != token {
-		t.Errorf("auth/me calls = %d with credentials %v, want 1 with the caller's credential", snap.meCalls, snap.meFedTokens)
-	}
-	if len(snap.sent) != 0 || snap.createCalls != 0 || len(snap.listQueries) != 0 || len(snap.dmReadKeys) != 0 {
-		t.Errorf("hub calls after the refusal: sends %d, creates %d, agent lists %d, access re-checks %d; want none",
-			len(snap.sent), snap.createCalls, len(snap.listQueries), len(snap.dmReadKeys))
-	}
-	if brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, "admin@test")) ||
-		brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
-		t.Error("subscribed to a user topic for a refused caller")
+			status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+			if status != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body %s", status, body)
+			}
+			if got := strings.TrimSpace(body); got != federatedUserRefusalText {
+				t.Errorf("body = %q, want the uniform refusal %q", got, federatedUserRefusalText)
+			}
+			snap := hub.snapshot()
+			if snap.meCalls != 1 || snap.meFedTokens[0] != token {
+				t.Errorf("auth/me calls = %d with credentials %v, want 1 with the caller's credential", snap.meCalls, snap.meFedTokens)
+			}
+			if len(snap.sent) != 0 || snap.createCalls != 0 || len(snap.listQueries) != 0 || len(snap.dmReadKeys) != 0 {
+				t.Errorf("hub calls after the refusal: sends %d, creates %d, agent lists %d, access re-checks %d; want none",
+					len(snap.sent), snap.createCalls, len(snap.listQueries), len(snap.dmReadKeys))
+			}
+			if brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, "admin@test")) ||
+				brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
+				t.Error("subscribed to a user topic for a refused caller")
+			}
+		})
 	}
 }
 
@@ -1973,7 +2068,9 @@ func TestExecutor_FederatedUserLaunchingAgentRefusalIsUniform(t *testing.T) {
 // TestExecutor_FederatedUserLaunchingAgentAllowedWaits: when the hub allows
 // the federated user to message an agent that is still launching, the
 // bridge asks the hub first (the caller's own read of its conversation with
-// the agent), then waits for the launch, then sends as the user.
+// the agent), then waits for the launch, then sends as the user. Reply
+// polling is off, so the reply is the pushed one; the polled case is
+// TestExecutor_FederatedUserLaunchingAgentAllowedWaitsPolled.
 func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
@@ -1984,7 +2081,7 @@ func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
 		}
 	})
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 	b.launchPollInterval = 5 * time.Millisecond
 
 	done := sendAsync(t, ts, "agent1", token)
@@ -2019,6 +2116,66 @@ func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 	}
 	if !strings.Contains(body, fedUserReplyText) {
 		t.Fatalf("response does not carry the agent's reply; body %s", body)
+	}
+}
+
+// TestExecutor_FederatedUserLaunchingAgentAllowedWaitsPolled: with reply
+// polling on, a federated user's message to an agent that is still
+// launching is checked with the caller's own conversation read before the
+// launch wait, read again by the reply preflight after the wait and before
+// the send, and the reply is the one read from that conversation. Every
+// read is of the caller's conversation key with the caller's credential.
+func TestExecutor_FederatedUserLaunchingAgentAllowedWaitsPolled(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
+		}
+	})
+	b, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	done := sendAsync(t, ts, "agent1", token)
+	sent := waitForSend(t, hub)
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(fedUserReplyText) })
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the agent's reply; body %s", body)
+	}
+	if sent.DMReadsBefore != 2 {
+		t.Errorf("conversation reads before the send = %d, want 2 (the check before the launch wait and the preflight)", sent.DMReadsBefore)
+	}
+
+	snap := hub.snapshot()
+	firstGet := slices.Index(snap.order, "agent-get")
+	if firstGet < 0 {
+		t.Fatalf("the bridge did not wait for the launch (no read of the agent); hub requests %v", snap.order)
+	}
+	var reads []int
+	for i, req := range snap.order {
+		if req == "dm-read" {
+			reads = append(reads, i)
+		}
+	}
+	sendAt := slices.Index(snap.order, "send")
+	if len(reads) < 2 || reads[0] > firstGet || reads[1] < firstGet || reads[1] > sendAt {
+		t.Errorf("hub requests in order %v, want a conversation read before the first agent read and another between the launch wait and the send", snap.order)
+	}
+	wantKey := visitorDMKey(t)
+	for i, key := range snap.dmReadKeys {
+		if key != wantKey || snap.dmReadTokens[i] != token {
+			t.Errorf("read %d: key %q with credential %q, want %q with the caller's", i, key, snap.dmReadTokens[i], wantKey)
+		}
+	}
+	if len(snap.dmReadKeys) < 4 {
+		t.Errorf("conversation reads = %d, want at least the launch check, the preflight, a poll and the access re-check", len(snap.dmReadKeys))
 	}
 }
 
@@ -2180,7 +2337,7 @@ func fedUser2Token(t *testing.T) string {
 // through the local cache, each task is registered for its own account
 // once the launch ends: each account's reply reaches only that account's
 // task, and the second account can neither read nor cancel the first
-// account's task.
+// account's task. Reply polling is off, so the replies are the pushed ones.
 func TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount(t *testing.T) {
 	const (
 		firstReplyText  = "reply from agent1 to the first visitor"
@@ -2196,7 +2353,7 @@ func TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount(t *testing.T) 
 			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
 		}
 	})
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 	b.launchPollInterval = 5 * time.Millisecond
 
 	waitForSends := func(n int) []fedUserHubSend {

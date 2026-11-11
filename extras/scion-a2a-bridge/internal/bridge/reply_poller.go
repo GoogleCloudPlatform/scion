@@ -105,6 +105,10 @@ const (
 	pollTooMany      pollOutcome = "too_many"
 	pollError        pollOutcome = "error"
 	pollNoAnchor     pollOutcome = "no_anchor"
+	// pollRefused is a federated user's read refused by the hub (401, 403
+	// or 404). It ends the call with the uniform refusal, so a federated
+	// user cannot tell refusal reasons apart.
+	pollRefused pollOutcome = "refused"
 )
 
 // terminalMessage returns the message a call ends with on a terminal
@@ -119,6 +123,8 @@ func (o pollOutcome) terminalMessage() string {
 		return replyMsgNotListed
 	case pollTooMany:
 		return replyMsgTooMany
+	case pollRefused:
+		return federatedUserRefusalText
 	default:
 		return ""
 	}
@@ -319,6 +325,10 @@ type replyPoller struct {
 	agentID   string
 	anchorID  string
 
+	// visitor, when set, reads a federated user's own conversation with
+	// the agent instead of reader (visitorDMReader).
+	visitor *visitorDMReader
+
 	// endCall ends the call's wait with a cause, on a terminal outcome.
 	endCall func(error)
 	// fence, when set, is checked before the reply is appended, in addition
@@ -427,6 +437,9 @@ func (p *replyPoller) pollCapped(ctx context.Context) (pollOutcome, *hubstore.Me
 
 // pollOnce makes one poll of the caller's conversation.
 func (p *replyPoller) pollOnce(ctx context.Context) (pollOutcome, *hubstore.Message) {
+	if p.visitor != nil {
+		return p.scanPages(ctx, visitorReadOutcome, p.visitor.page)
+	}
 	if p.conversationID == "" {
 		// Listed once per call: after the preflight (or the first poll) has
 		// found the conversation, its ID is reused. Only while the list
@@ -456,21 +469,40 @@ func (p *replyPoller) pollOnce(ctx context.Context) (pollOutcome, *hubstore.Mess
 		// anchor, truncated, only widens the window.
 		p.afterBound = anchor.CreatedAt.Add(-time.Second).UTC().Format(time.RFC3339)
 	}
-	var rows []hubstore.Message
-	cursor := ""
-	for page := 0; page < replyPollMaxPages; page++ {
+	return p.scanPages(ctx, readOutcome, func(ctx context.Context, cursor string) ([]hubstore.Message, string, error) {
 		res, err := p.reader.ListMessages(ctx, p.conversationID, &hubclient.ConversationMessagesOptions{
 			After:  p.afterBound,
 			Limit:  replyPollPageSize,
 			Cursor: cursor,
 		})
 		if err != nil {
-			return readOutcome(err), nil
+			return nil, "", err
 		}
 		if res == nil {
-			return readOutcome(errNoReadResult), nil
+			return nil, "", errNoReadResult
 		}
-		rows = append(rows, res.Items...)
+		return res.Items, res.NextCursor, nil
+	})
+}
+
+// replyPageFetch reads one newest-first page of the caller's conversation
+// with the agent, from cursor ("" for the newest page). It returns the
+// page's messages and the cursor of the next (older) page, "" when there is
+// none.
+type replyPageFetch func(ctx context.Context, cursor string) ([]hubstore.Message, string, error)
+
+// scanPages reads newest-first pages with fetch, following the page cursor
+// up to replyPollMaxPages pages, until the anchor is on the pages read. It
+// maps a failed read with outcomeOf.
+func (p *replyPoller) scanPages(ctx context.Context, outcomeOf func(error) pollOutcome, fetch replyPageFetch) (pollOutcome, *hubstore.Message) {
+	var rows []hubstore.Message
+	cursor := ""
+	for page := 0; page < replyPollMaxPages; page++ {
+		items, next, err := fetch(ctx, cursor)
+		if err != nil {
+			return outcomeOf(err), nil
+		}
+		rows = append(rows, items...)
 		reply, anchorSeen := selectReply(rows, p.anchorID, p.agentID)
 		if anchorSeen {
 			if reply == nil {
@@ -478,12 +510,12 @@ func (p *replyPoller) pollOnce(ctx context.Context) (pollOutcome, *hubstore.Mess
 			}
 			return pollFound, reply
 		}
-		if res.NextCursor == "" {
+		if next == "" {
 			// The anchor is not on the pages and there is no further page:
 			// nothing is taken as newer than an anchor not seen.
 			return pollNotYet, nil
 		}
-		cursor = res.NextCursor
+		cursor = next
 	}
 	// replyPollMaxPages full pages after the anchor and more to come: every
 	// later poll sees even more newer messages, so the anchor can no longer
