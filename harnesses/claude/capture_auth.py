@@ -58,9 +58,16 @@ def _store_oauth_token(token: str, scope: str = "project") -> bool:
              "--scope", scope],
             capture_output=True, text=True, timeout=10,
         )
-        if result.returncode == 0:
+        outcome = scion_harness.secret_set_outcome(result, scope)
+        if outcome == "pending":
+            print(scion_harness.captured_message("CLAUDE_CODE_OAUTH_TOKEN", "tmux scrollback", outcome))
+            return True
+        if outcome == "stored":
             print("capture-auth: CLAUDE_CODE_OAUTH_TOKEN captured from tmux scrollback")
             return True
+        if outcome == "held":
+            print(scion_harness.held_message("CLAUDE_CODE_OAUTH_TOKEN"))
+            return False
         print(f"capture-auth: failed to store oauth token: {result.stderr.strip()}",
               file=sys.stderr)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:

@@ -2611,12 +2611,25 @@ const (
 	// cleaned start of the review's summary note, or is empty when the
 	// review has none.
 	NotificationKindArtifactReviewSummary = "artifact_review_summary"
+	// NotificationKindSecretPending: an agent saved a user-scope secret
+	// that waits for the owner's approval. The owner is the only
+	// recipient; AgentID and ProjectID are the writing agent and its
+	// project. ResourceType is NotificationResourcePendingSecret and
+	// ResourceID the latest pending secret's id. One is stored per owner,
+	// writing agent and clock hour and updated in place by each later write
+	// in that hour, with the count of that agent's pending secrets; a write
+	// that would replace an approved secret is announced separately, at
+	// most once per owner, agent and key per hour. It never carries a
+	// value.
+	NotificationKindSecretPending = "secret_pending"
 )
 
 // Notification.ResourceType values.
 const (
 	// NotificationResourceArtifact: ResourceID is an artifact id.
 	NotificationResourceArtifact = "artifact"
+	// NotificationResourcePendingSecret: ResourceID is a pending secret id.
+	NotificationResourcePendingSecret = "pending_secret"
 )
 
 // Notification.Status values of NotificationKindArtifactGrant rows.
@@ -2633,6 +2646,10 @@ const (
 // NotificationKindArtifactReviewSummary row: a reviewer finalized a review
 // of the user's artifact.
 const NotificationStatusArtifactReviewSubmitted = "ARTIFACT_REVIEW_SUBMITTED"
+
+// NotificationStatusSecretPending is the Status of a
+// NotificationKindSecretPending row.
+const NotificationStatusSecretPending = "SECRET_PENDING"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
@@ -2727,6 +2744,9 @@ const (
 	NotificationReasonSubscriberGone = "subscriber_gone"
 	// NotificationReasonWatchedAgentGone: the watched agent was deleted.
 	NotificationReasonWatchedAgentGone = "watched_agent_gone"
+	// NotificationReasonSubscriberHeld: the subscriber agent is held
+	// (ptone/scion#7145); the notification was dropped, not delivered.
+	NotificationReasonSubscriberHeld = "subscriber_held"
 )
 
 // ValidNotificationReason reports whether reason is a known
@@ -2734,7 +2754,8 @@ const (
 func ValidNotificationReason(reason string) bool {
 	switch reason {
 	case NotificationReasonExpired, NotificationReasonSubscriptionGone,
-		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone:
+		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone,
+		NotificationReasonSubscriberHeld:
 		return true
 	}
 	return false

@@ -3129,7 +3129,8 @@ func isProxyRoute(path string) bool {
 //     the agent-facing /api/v1/agent/ endpoints (minted tokens, secret
 //     fetch), agent token refresh, delegation exchange, broker registration,
 //     join and secret rotation, project registration, invite creation, test
-//     identities, and every env or secrets route;
+//     identities, every env or secrets route, and the pending secret
+//     reveal (/api/v1/pending-secrets/{id}/reveal);
 //   - responses with signed object-store or capability URLs: every agent
 //     workspace route (sync-from, sync-to; the status GET is included as a
 //     fail-safe), template, user template, harness-config and skill upload
@@ -3179,6 +3180,10 @@ func isCompressBypassPath(path string) bool {
 	}
 	segs := strings.Split(strings.TrimPrefix(trimmed, api), "/")
 	if isSignedURLPath(segs) {
+		return true
+	}
+	// The pending secret reveal returns a held secret value.
+	if len(segs) == 3 && segs[0] == "pending-secrets" && segs[2] == "reveal" {
 		return true
 	}
 	for i, seg := range segs {
@@ -4579,9 +4584,13 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
-	// Request logging
+	// Request logging. A request the mounted hub handler's own
+	// request logger has logged gets no second, web line (ptone/scion#7367);
+	// a request the web chain answers itself is still logged here. A
+	// request the content host guard below refuses never reaches this
+	// logger: the guard logs that refusal itself (logContentHostRefused).
 	if ws.requestLogger != nil {
-		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
+		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold, logging.DeferToNestedRequestLog())(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}

@@ -77,7 +77,8 @@ func TestServer_AgentSecretsUserScopeOnly_DefaultAndValues(t *testing.T) {
 // in {false, true}, verify the expected outcome. With the setting nil or
 // false, every case behaves as today (201). With the setting true, "" and
 // "project" return 403 secret_scope_restricted regardless of force, and the
-// backend Set/GetMeta are never reached; "user" still returns 201.
+// backend Set/GetMeta are never reached; "user" returns 202 (pending
+// approval) whatever the setting.
 func TestAgentSecretScopePolicy_Table(t *testing.T) {
 	type tc struct {
 		name        string
@@ -101,6 +102,10 @@ func TestAgentSecretScopePolicy_Table(t *testing.T) {
 			for _, force := range []bool{false, true} {
 				restricted := setting != nil && *setting && scope != "user"
 				wantStatus := http.StatusCreated
+				if scope == "user" {
+					// A user-scope agent write waits for the owner's approval.
+					wantStatus = http.StatusAccepted
+				}
 				wantErrCode := ""
 				if restricted {
 					wantStatus = http.StatusForbidden

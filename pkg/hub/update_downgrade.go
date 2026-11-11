@@ -68,7 +68,7 @@ func (s *Server) updateSnapshotter(ctx context.Context) maintenance.DBSnapshotte
 		settings = filepath.Join(dir, "settings.yaml")
 	}
 	return maintenance.NewSQLiteSnapshotter(maintenance.SQLiteSnapshotOptions{
-		DB:           db,
+		File:         file,
 		Dir:          updateSnapshotDir(mc, s.updateInstaller().Name(), file),
 		SettingsPath: settings,
 	})

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authctx"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -162,6 +163,16 @@ func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a c
 		// these credential kinds can be rebuilt.
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "This credential cannot open sessions held by a separate relay", nil)
 		return
+	}
+	if p.Kind == registry.PrincipalUser && c.AuthType == AuthTypeJWT {
+		// The session generation of the replayed handshake, which every
+		// later re-check of this session compares with the user row.
+		gen, ok := authctx.SessionGeneration(r.Context())
+		if !ok {
+			refuseConduitUncapturedSessionGeneration(w)
+			return
+		}
+		c.SessionGen = gen
 	}
 	if c.AuthType == AuthTypeProxy && !s.relayIAPPinned() {
 		// A relay-forwarded proxy credential is accepted only as a Google

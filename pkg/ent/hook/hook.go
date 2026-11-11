@@ -777,6 +777,18 @@ func (f NotificationSubscriptionFunc) Mutate(ctx context.Context, m ent.Mutation
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.NotificationSubscriptionMutation", m)
 }
 
+// The PendingSecretFunc type is an adapter to allow the use of ordinary
+// function as PendingSecret mutator.
+type PendingSecretFunc func(context.Context, *ent.PendingSecretMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f PendingSecretFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.PendingSecretMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.PendingSecretMutation", m)
+}
+
 // The PolicyBindingFunc type is an adapter to allow the use of ordinary
 // function as PolicyBinding mutator.
 type PolicyBindingFunc func(context.Context, *ent.PolicyBindingMutation) (ent.Value, error)

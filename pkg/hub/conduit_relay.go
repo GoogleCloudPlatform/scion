@@ -626,7 +626,13 @@ func (s *Server) decideConduitFor(w http.ResponseWriter, r *http.Request, forRel
 	// upgrade. A broker authenticates with HMAC headers in its own handler,
 	// so it is recognized by its broker-id header rather than by a context
 	// identity.
-	identity := GetIdentityFromContext(r.Context())
+	// A hub user token request without a session generation is refused,
+	// never defaulted (conduitCaptureSessionGeneration).
+	identity, ok := conduitCaptureSessionGeneration(r.Context(), GetIdentityFromContext(r.Context()))
+	if !ok {
+		refuseConduitUncapturedSessionGeneration(w)
+		return conduitAdmission{}, false
+	}
 	agentIdent, isAgent := identity.(AgentIdentity)
 	userIdent, isUser := identity.(UserIdentity)
 	switch {

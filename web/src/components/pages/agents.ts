@@ -45,6 +45,7 @@ import {
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { mergeChanged, dropTombstonedPairs } from '../../client/agent-merge.js';
@@ -1228,6 +1229,7 @@ export class ScionPageAgents extends LitElement {
       if (!response.ok) {
         throw new Error(await lifecycleActionErrorMessage(response, `Failed to ${action} agent`));
       }
+      if (actionUrls[action].endsWith('/start')) void showPendingSecretsStartHint();
 
       this.backgroundRefresh();
     } catch (err) {

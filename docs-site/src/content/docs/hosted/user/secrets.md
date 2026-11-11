@@ -306,12 +306,115 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     telling you to retry with `--scope user`. This does not affect writes you make yourself through
     the web UI or `scion hub secret set --project`.*
 
+#### Approving user secrets saved by your agents
+
+A user-scoped secret that an agent saves (with `sciontool secret set --scope user`, or through
+harness credential capture) is not delivered to any agent until you approve it. A user secret
+reaches your agents in every project, so you decide on each one an agent saves:
+
+*   The save is held as a **pending secret**. `sciontool` reports
+    `saved, pending approval in Scion`, and capture-auth reports `captured (pending approval in Scion)`.
+    `--force` has no effect at user scope.
+*   If you already have a user secret with the same name, it stays in effect until you approve
+    the replacement.
+*   A pending secret expires 7 days after the agent first saved it. The agent that saved it can
+    replace it with a new value; the expiry stays the same.
+*   While a secret is pending, another agent cannot save a user secret with the same name. Its
+    save is refused with `409` (`secret_pending_held_by_other_agent`), and capture-auth exits
+    with code `3`. Approve or reject the pending secret first.
+
+Review and decide with the `scion` CLI. Values are shown only by `reveal`:
+
+```bash
+# List your pending secrets: name, type, target, the agent and project that saved it,
+# when it was saved and when it expires
+scion hub secret pending list
+
+# Show one, with the project secrets of the same name it would override
+scion hub secret pending show <ID>
+
+# Print its value to check it before approving (audited; it stays pending)
+scion hub secret pending reveal <ID>
+
+# Approve one: it becomes your user secret, delivered from your agents' next start
+scion hub secret pending approve <ID>
+
+# Approve without sharing it with agents that your agents create
+scion hub secret pending approve <ID> --no-progeny
+
+# Reject one: the pending secret is deleted
+scion hub secret pending reject <ID>
+```
+
+Only you can list, show, reveal, approve or reject your pending secrets, from an interactive
+login (`scion hub auth login`). Agents, access tokens, other users and hub admins cannot see or
+decide on them.
+
+*   An approval writes the secret only while your existing user secret of that name is the one
+    the agent saw when it saved the pending secret. If you created, changed or deleted that
+    secret since, the approval is refused with `409` (`secret_pending_existing_changed`) and
+    nothing changes. Reject the pending secret and have the agent save it again.
+*   An approval and a rejection of the same pending secret never both succeed: the second one
+    answers `404`.
+*   Deleting a project deletes the pending secrets its agents saved. Deleting the agent that
+    saved a pending secret does not; you can still approve or reject it.
+*   Approve, reject and reveal are refused (`403`) when a browser sends them from another site.
+    Behind a front proxy, the proxy must pass the public `Host` header through to the Hub
+    unchanged; otherwise approvals, rejections and reveals from the web UI are refused with `403`.
+
+##### Limits, expiry, reveal and notifications
+
+*   **Limits**: one agent can have at most 10 pending secrets, and your account at most 50 from
+    all agents. A save over a limit is refused with `429` (`secret_pending_cap`, `details.cap` is
+    `agent` or `owner`) and nothing is stored; `sciontool` reports that too many secrets await
+    your approval. An agent saving a secret it already has pending again replaces it and does
+    not count twice.
+*   **Expiry**: an expired secret is gone at once on every path (it is not listed and cannot be
+    approved, rejected or revealed), and an hourly cleanup deletes it and its stored value. The
+    same cleanup deletes a stored pending value that no pending secret refers to any more (for
+    example after a Hub restart in the middle of a save or an approval), once it is more than an
+    hour old; with the GCP Secret Manager backend these are the Hub's own `pending-` secrets,
+    never another secret.
+*   **Show and reveal**: `scion hub secret pending show <ID>` prints its name, type, target,
+    length, the agent and project that saved it, its times, what approving it would do, and the
+    project secrets of the same name, in projects you can see, that it would override. The value
+    is never shown there. `scion hub secret pending reveal <ID>` prints the value so you can
+    check it before you approve it; the secret stays pending, and the Hub records every reveal in
+    its audit log. On a terminal, control characters in the value (escape sequences, carriage
+    returns) are shown as visible escapes such as `\x1b`; redirected to a file, or with `--raw`,
+    the value is written exactly as stored. Names an agent chose (key, target, agent and project
+    names) are shown the same way in `pending list` and `pending show`. Reveal works only from
+    your own interactive login: agents, user access tokens, federated callers, other users and
+    Hub admins are refused.
+*   **Listing**: `scion hub secret list` (user scope) has a `STATE` column, `approved` or
+    `pending`; a name with an approved secret and a pending replacement appears twice. The Hub
+    API offers the same list as `GET /api/v1/secrets?scope=user&includePending=true` (field
+    `items`, each with a `state`), for your own login only.
+*   **Notifications**: when an agent saves a secret for your account, you get a notification
+    naming the agent, its project, the secret's name and type, and the time, never the value.
+    An agent's saves within one hour share one notification: each later save updates it with
+    the latest secret and how many of that agent's secrets await your approval (and how many of
+    those would replace an existing secret), and shows it again. A save that would replace one
+    of your approved secrets is always announced on its own, as a replacement, at most once per
+    agent and secret name per hour; your approved value stays in effect until you approve the
+    replacement.
+*   **Start hint**: when you start an agent with `scion start` and secrets await your approval,
+    the CLI prints `N secrets await approval`. It is printed on your terminal only, never inside
+    an agent.
+*   **Audit**: every save, replacement, refused save, approval, rejection, reveal and expiry of a
+    pending secret is written to the Hub's structured audit log (`secret_pending_create`,
+    `_replace`, `_refused`, `_approve`, `_reject`, `_reveal`, `_expire`) with the secret's name,
+    type and target, the agent, the project and who acted. The value and its length are never
+    logged.
+
+Project-scoped secrets that an agent saves are stored directly.
+
 #### Using the Hub API Directly
 Under the hood, `scion secret` and `sciontool` interact with the Hub's agent-specific secrets API:
 
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
-*   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a secret.
+*   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a project-scoped secret (`201` created, `204` updated). A user-scoped write (`"scope": "user"`) is held for your approval and answers `202` with `{"key", "scope", "state": "pending", "pendingId", "expiresAt", "replacesExisting", "message"}`, or `409` with code `secret_pending_held_by_other_agent` when another agent's pending secret holds the name.
 *   **`POST /api/v1/agent/secrets`**: Fetches several secret values in one call. There is no agent ID in the URL: the Hub identifies the agent from its token. The request body is `{"keys": ["KEY_A", "KEY_B"]}` (at most 100 keys). Each entry in the response has a `status` of `ok`, `not_found`, or `entitled_but_unavailable`. `sciontool init` calls this endpoint at startup to fetch the keys listed in `SCION_SECRET_KEYS`.
 
 #### Security & Audit Logging

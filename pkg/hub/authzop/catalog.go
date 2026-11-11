@@ -180,6 +180,15 @@ var SecurityMutationSymbols = map[string]string{
 	"UpdateEncryptionPolicy":    "update-resource",
 	"CreateEncryptionMigration": "create-resource",
 	"UpdateEncryptionMigration": "update-resource",
+	// Pending secrets: user-scope secrets written by an agent that wait
+	// for the owner's approval, and their held values.
+	"CreateOrReplacePendingSecret":  "create-resource",
+	"ClaimPendingSecret":            "delete-resource",
+	"ClaimPendingSecretForApproval": "delete-resource",
+	"RestorePendingSecret":          "create-resource",
+	"DeletePendingSecretsByScope":   "delete-resource",
+	"DeletePendingSecretsByProject": "delete-resource",
+	"ScanPendingSecretPayloads":     "read-secret",
 
 	// Broker secret operations
 	"CreateBrokerSecret":            "create-resource",
@@ -536,6 +545,12 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/user_delete_data.go — deleted user's user-scope secrets when no secret backend is configured (ptone/scion#2769)
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Reads a deleted user's user-scope secret row only to tell a value stored in the hub database from an external reference; never returned; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Deletes a deleted user's user-scope secret rows whose value is stored in the hub database when no secret backend is configured; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
+	{File: "pkg/hub/user_delete_data.go", Function: "removeUserPendingSecrets", Symbol: "DeletePendingSecretsByScope", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Deletes the pending secrets awaiting a deleted user's decision and releases their held values; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
+	// pkg/hub/handlers_pending_secrets.go — pending secrets (agent write, owner decision)
+	{File: "pkg/hub/handlers_pending_secrets.go", Function: "agentWritePendingUserSecret", Symbol: "CreateOrReplacePendingSecret", OperationID: "agent.secrets.access"},
+	{File: "pkg/hub/handlers_pending_secrets.go", Function: "approvePendingSecret", Symbol: "ClaimPendingSecretForApproval", OperationID: "secret.user.pending.decide"},
+	{File: "pkg/hub/handlers_pending_secrets.go", Function: "restoreClaimedPendingSecret", Symbol: "RestorePendingSecret", OperationID: "secret.user.pending.decide"},
+	{File: "pkg/hub/handlers_pending_secrets.go", Function: "rejectPendingSecret", Symbol: "ClaimPendingSecret", OperationID: "secret.user.pending.decide"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "createSuperAdminBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding creation inside single atomic WithTx in updateUser; caller checks user.promote + CanDelegate; uses SystemReconcileCreatedBy sentinel", Scope: "pkg/hub/handlers_users_core.go"}},
 	{File: "pkg/hub/handlers_users_core.go", Function: "deleteSuperAdminBindingTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding deletion inside single atomic WithTx in updateUser; caller checks user.promote + CanDelegate from canonical binding state; guarded by checkLastSuperAdminTx with serialization lock, self-lockout re-check, and full error propagation (R4-fix)", Scope: "pkg/hub/handlers_users_core.go"}},
 
@@ -595,6 +610,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteRoleBindingsForScope", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGroup", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteSecretsByScope", OperationID: "project.lifecycle.delete"},
+	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeletePendingSecretsByProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGCPServiceAccount", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteProjectVisitorRulesByProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "Delete", Symbol: "DeleteProject", OperationID: "project.lifecycle.delete"},
@@ -713,7 +729,8 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/server.go", Function: "sweepOrphanedGroupMemberships", Symbol: "DeleteOrphanedGroupMemberships", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: delete group memberships whose user and agent are both NULL (principal deleted, ON DELETE SET NULL); such rows are always orphans and carry no principal; idempotent, every startup (ptone/scion#2769)", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/agent_token_mint.go", Function: "recordAgentCredential", Symbol: "CreateAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent credential record at agent token issue, server infrastructure", Scope: "pkg/hub/agent_token_mint.go"}},
-	{File: "pkg/hub/encryption_scan.go", Function: "scanSecretPayloads", Symbol: "ScanSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Authenticating payload scan (ptone/scion#1530 §5, §6) shared by the startup encryption audit, key status and the read-only keys verify command: authenticates every stored payload in process memory; reports identities and counts only", Scope: "pkg/hub/encryption_scan.go"}},
+	{File: "pkg/hub/encryption_scan.go", Function: "scanPayloadPages", Symbol: "ScanSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Authenticating payload scan (ptone/scion#1530 §5, §6) shared by the startup encryption audit, key status and the read-only keys verify command: authenticates every stored payload in process memory; reports identities and counts only", Scope: "pkg/hub/encryption_scan.go"}},
+	{File: "pkg/hub/encryption_scan.go", Function: "scanPayloadPages", Symbol: "ScanPendingSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Authenticating payload scan (ptone/scion#1530 §5, §6) over the held values of pending secrets, part of the same scan as the stored payloads: authenticates every held local value in process memory; reports identities and counts only", Scope: "pkg/hub/encryption_scan.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key rotation, server infrastructure", Scope: "pkg/hub/server.go"}},

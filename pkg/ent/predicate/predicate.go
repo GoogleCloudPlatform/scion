@@ -198,6 +198,9 @@ type Notification func(*sql.Selector)
 // NotificationSubscription is the predicate function for notificationsubscription builders.
 type NotificationSubscription func(*sql.Selector)
 
+// PendingSecret is the predicate function for pendingsecret builders.
+type PendingSecret func(*sql.Selector)
+
 // PolicyBinding is the predicate function for policybinding builders.
 type PolicyBinding func(*sql.Selector)
 

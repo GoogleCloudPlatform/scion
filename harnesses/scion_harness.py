@@ -2555,6 +2555,50 @@ _CA_EXIT_ERROR = 1
 _CA_EXIT_NO_CREDS = 2
 _CA_EXIT_CONFLICT = 3
 
+# Hub error code for a user secret name that another agent's pending secret
+# holds. Only that agent's write, or the owner's decision, can change it.
+SECRET_PENDING_HELD_BY_OTHER_AGENT = "secret_pending_held_by_other_agent"
+
+
+def secret_set_outcome(result: "subprocess.CompletedProcess[str]", scope: str = "") -> str:
+    """Classify a finished ``sciontool secret set`` run at the given scope.
+
+    A successful user-scope save is always "pending": every user-scope
+    secret an agent saves waits for the owner's approval, whatever the
+    output says. Returns one of:
+      - "pending": saved, waiting for the owner's approval in Scion (every
+        user-scope write; it never conflicts with an existing secret);
+      - "stored": stored directly (project scope);
+      - "held": another agent's pending secret holds the name;
+      - "conflict": the project secret already exists and --force was not
+        given;
+      - "error": any other failure.
+    """
+    output = f"{result.stdout or ''}\n{result.stderr or ''}"
+    if result.returncode == 0:
+        if scope == "user" or "pending approval" in output.lower():
+            return "pending"
+        return "stored"
+    if SECRET_PENDING_HELD_BY_OTHER_AGENT in output:
+        return "held"
+    if "already exists" in output.lower():
+        return "conflict"
+    return "error"
+
+
+def captured_message(key: str, source: str, outcome: str) -> str:
+    """The capture-auth line for a credential that was saved."""
+    if outcome == "pending":
+        return f"capture-auth: {key}: captured (pending approval in Scion)"
+    return f"capture-auth: {key}: captured from {source}"
+
+
+def held_message(key: str) -> str:
+    """The capture-auth line for a name another agent's pending secret holds."""
+    return (f"capture-auth: {key}: a pending secret with this name, saved by another "
+            "agent, is awaiting your approval in Scion; approve or reject it, then "
+            "capture again")
+
 
 def capture_auth_main(argv: list[str] | None = None) -> int:
     """Portable capture-auth logic. Returns exit code."""
@@ -2625,15 +2669,18 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
             print(f"capture-auth: {key}: source not found ({source})")
             continue
 
-        ok, err = _capture_one_cred(entry, args.force, args.scope)
-        if err == "CONFLICT":
+        outcome, err = _capture_one_cred(entry, args.force, args.scope)
+        if outcome == "conflict":
             print(f'CONFLICT: secret "{key}" already exists (use --force to overwrite)')
+            conflicts += 1
+        elif outcome == "held":
+            print(held_message(key))
             conflicts += 1
         elif err:
             print(f"capture-auth: {key}: {err}", file=sys.stderr)
             errors += 1
-        elif ok:
-            print(f"capture-auth: {key}: captured from {source}")
+        elif outcome in ("pending", "stored"):
+            print(captured_message(key, source, outcome))
             captured += 1
 
     if conflicts > 0:
@@ -2648,17 +2695,25 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
     return _CA_EXIT_OK
 
 
-def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -> tuple[bool, str | None]:
+def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -> tuple[str, str | None]:
+    """Save one credential with ``sciontool secret set``.
+
+    Returns (outcome, error): outcome is a secret_set_outcome value, or ""
+    when nothing was attempted; error describes an "error" outcome or an
+    invalid entry. A user-scope save waits for the owner's approval and
+    never conflicts with an existing secret, so --force only matters at
+    project scope.
+    """
     key = entry.get("key", "")
     source = expand_path(entry.get("source", ""))
     secret_type = entry.get("type", "file")
     target = entry.get("target", "")
 
     if not key or not source:
-        return False, "invalid entry: missing key or source"
+        return "error", "invalid entry: missing key or source"
 
     if not os.path.isfile(source):
-        return False, None
+        return "", None
 
     cmd = ["sciontool", "secret", "set", key, f"@{source}",
            "--type", secret_type, "--target", target,
@@ -2671,14 +2726,11 @@ def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
-        return False, "sciontool not found in PATH"
+        return "error", "sciontool not found in PATH"
     except subprocess.TimeoutExpired:
-        return False, f"sciontool timed out for key {key}"
+        return "error", f"sciontool timed out for key {key}"
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "already exists" in stderr.lower():
-            return False, "CONFLICT"
-        return False, f"sciontool failed for {key}: {stderr}"
-
-    return True, None
+    outcome = secret_set_outcome(result, scope)
+    if outcome == "error":
+        return outcome, f"sciontool failed for {key}: {result.stderr.strip()}"
+    return outcome, None

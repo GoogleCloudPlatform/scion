@@ -1195,6 +1195,18 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Authenticated: the caller's own pending secrets
+	// -------------------------------------------------------------------------
+	"/api/v1/pending-secrets": {
+		Pattern: "/api/v1/pending-secrets", RouteID: "pendingSecrets.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/pending-secrets/": {
+		Pattern: "/api/v1/pending-secrets/", RouteID: "pendingSecrets.decide",
+		Classification: RouteAuthenticated,
+	},
+
+	// -------------------------------------------------------------------------
 	// Authenticated: Usage self-service
 	// -------------------------------------------------------------------------
 	"/api/v1/usage/me": {

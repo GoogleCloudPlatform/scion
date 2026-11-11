@@ -55,6 +55,8 @@ type AuditRecord struct {
 	Key     string
 	Scope   string
 	ScopeID string
+	// Pending is set for a pending secret (ID is the pending ID).
+	Pending bool
 	Kind    string
 }
 
@@ -214,7 +216,7 @@ func checkEncryptionPolicy(ctx context.Context, st store.SecretEncryptionStore, 
 // readable rows are counted by format and key ID; unreadable rows are
 // listed with their failure kind. A scan failure is returned; record
 // failures are reported in the result.
-func runEncryptionAudit(ctx context.Context, st store.SecretStore, c *secret.ValueCipher) (EncryptionAudit, error) {
+func runEncryptionAudit(ctx context.Context, st payloadScanStore, c *secret.ValueCipher) (EncryptionAudit, error) {
 	a := EncryptionAudit{Done: true, ByFormat: map[string]int{}, ByKID: map[string]int{}}
 	n, err := scanSecretPayloads(ctx, st, c, func(row ScanRow) error {
 		cl := row.Class
@@ -233,9 +235,9 @@ func runEncryptionAudit(ctx context.Context, st store.SecretStore, c *secret.Val
 			}
 			return nil
 		}
-		rec := AuditRecord{ID: row.ID, Key: row.Key, Scope: row.Scope, ScopeID: row.ScopeID, Kind: cl.Failure}
+		rec := AuditRecord{ID: row.ID, Key: row.Key, Scope: row.Scope, ScopeID: row.ScopeID, Pending: row.Pending, Kind: cl.Failure}
 		a.Unreadable = append(a.Unreadable, rec)
-		if isInfraBackup(row.Key, row.Scope) {
+		if !row.Pending && isInfraBackup(row.Key, row.Scope) {
 			a.BackupUnreadable = append(a.BackupUnreadable, rec)
 		}
 		return nil
@@ -326,7 +328,7 @@ func (s *Server) auditFlagged(key, scope, scopeID string) bool {
 	s.encryptionAuditMu.RLock()
 	defer s.encryptionAuditMu.RUnlock()
 	for _, r := range s.encryptionAudit.Unreadable {
-		if r.Key == key && r.Scope == scope && r.ScopeID == scopeID {
+		if !r.Pending && r.Key == key && r.Scope == scope && r.ScopeID == scopeID {
 			return true
 		}
 	}

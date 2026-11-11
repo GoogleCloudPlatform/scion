@@ -395,6 +395,21 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	if !ok || isNilIdentity(req.Identity) {
 		return conduitAuthzDenied, "identity may not open streams", fmt.Errorf("%w: identity may not open streams", errConduitForbidden)
 	}
+	// Fail closed when a hub user token request reaches here with an
+	// identity that carries no session generation: an entry point that did
+	// not capture it (conduitCaptureSessionGeneration). Without this, the
+	// user-status check below would skip the comparison for that stream.
+	// The guard lives here, not in conduitUserStatus, because it needs the
+	// request's auth type, which the re-check paths (notify, sweep, resync)
+	// do not have: moved there, it would never fire on them. On those paths
+	// the entry-point capture is the guarantee.
+	// A request running as a verified port page view link (portViewLinkFor)
+	// is not judged by its own credential: it gets only what the link grants.
+	if requestAuthType(ctx) == AuthTypeJWT && !portViewLinkFor(ctx, req.Identity) {
+		if _, captured := conduitCapturedSessionGeneration(req.Identity); !captured {
+			return conduitAuthzDenied, conduitReasonSessionRevoked, fmt.Errorf("%w: session generation not captured", errConduitPrincipalInactive)
+		}
+	}
 	switch verdict, reason := s.conduitUserStatus(ctx, req.Identity, ident.ID()); verdict {
 	case conduitAuthzAllowed:
 	case conduitAuthzDenied:
@@ -443,6 +458,14 @@ func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userI
 	user, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: userID})
 	switch refusal := classifyUserAccount(user, err); refusal {
 	case accountAllowed:
+		// An identity a hub user token authenticated carries the session
+		// generation it was authenticated with (conduit_session_generation.go).
+		// Skipping an identity without one is sound only while every
+		// in-process entry point refuses a hub user token request whose
+		// generation is absent (conduitCaptureSessionGeneration).
+		if gen, ok := conduitCapturedSessionGeneration(identity); ok && !conduitSessionGenerationCurrent(user.SessionGeneration, gen) {
+			return conduitAuthzDenied, conduitReasonSessionRevoked
+		}
 		return conduitAuthzAllowed, ""
 	case accountLookupFault:
 		return conduitAuthzUnavailable, accountRefusalReason(refusal)

@@ -4364,6 +4364,10 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 	if err != nil {
 		return
 	}
+	// A held sender gets no notice (ptone/scion#7145).
+	if heldNoticeWithheld(ctx, s.store, s.recordLog(), senderAgent, heldNoticeBroadcastFailed) {
+		return
+	}
 
 	// ptone/scion#1841: sanitize the (possibly broker-supplied) error text
 	// before it reaches the sender's terminal, as publishDeliveryFailed does.

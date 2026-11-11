@@ -80,6 +80,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/pendingsecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -246,6 +247,8 @@ type Client struct {
 	Notification *NotificationClient
 	// NotificationSubscription is the client for interacting with the NotificationSubscription builders.
 	NotificationSubscription *NotificationSubscriptionClient
+	// PendingSecret is the client for interacting with the PendingSecret builders.
+	PendingSecret *PendingSecretClient
 	// PolicyBinding is the client for interacting with the PolicyBinding builders.
 	PolicyBinding *PolicyBindingClient
 	// Project is the client for interacting with the Project builders.
@@ -383,6 +386,7 @@ func (c *Client) init() {
 	c.NonceCache = NewNonceCacheClient(c.config)
 	c.Notification = NewNotificationClient(c.config)
 	c.NotificationSubscription = NewNotificationSubscriptionClient(c.config)
+	c.PendingSecret = NewPendingSecretClient(c.config)
 	c.PolicyBinding = NewPolicyBindingClient(c.config)
 	c.Project = NewProjectClient(c.config)
 	c.ProjectContributor = NewProjectContributorClient(c.config)
@@ -570,6 +574,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		NonceCache:                    NewNonceCacheClient(cfg),
 		Notification:                  NewNotificationClient(cfg),
 		NotificationSubscription:      NewNotificationSubscriptionClient(cfg),
+		PendingSecret:                 NewPendingSecretClient(cfg),
 		PolicyBinding:                 NewPolicyBindingClient(cfg),
 		Project:                       NewProjectClient(cfg),
 		ProjectContributor:            NewProjectContributorClient(cfg),
@@ -684,6 +689,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		NonceCache:                    NewNonceCacheClient(cfg),
 		Notification:                  NewNotificationClient(cfg),
 		NotificationSubscription:      NewNotificationSubscriptionClient(cfg),
+		PendingSecret:                 NewPendingSecretClient(cfg),
 		PolicyBinding:                 NewPolicyBindingClient(cfg),
 		Project:                       NewProjectClient(cfg),
 		ProjectContributor:            NewProjectContributorClient(cfg),
@@ -761,12 +767,12 @@ func (c *Client) Use(hooks ...Hook) {
 		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
 		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
 		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent,
-		c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
+		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
+		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
 		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
 		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
 		c.UserDeletionAgent, c.UserTerminalWorkspace,
@@ -796,12 +802,12 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
 		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
 		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent,
-		c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
+		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
+		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
 		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
 		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
 		c.UserDeletionAgent, c.UserTerminalWorkspace,
@@ -941,6 +947,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Notification.mutate(ctx, m)
 	case *NotificationSubscriptionMutation:
 		return c.NotificationSubscription.mutate(ctx, m)
+	case *PendingSecretMutation:
+		return c.PendingSecret.mutate(ctx, m)
 	case *PolicyBindingMutation:
 		return c.PolicyBinding.mutate(ctx, m)
 	case *ProjectMutation:
@@ -9888,6 +9896,139 @@ func (c *NotificationSubscriptionClient) mutate(ctx context.Context, m *Notifica
 	}
 }
 
+// PendingSecretClient is a client for the PendingSecret schema.
+type PendingSecretClient struct {
+	config
+}
+
+// NewPendingSecretClient returns a client for the PendingSecret from the given config.
+func NewPendingSecretClient(c config) *PendingSecretClient {
+	return &PendingSecretClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `pendingsecret.Hooks(f(g(h())))`.
+func (c *PendingSecretClient) Use(hooks ...Hook) {
+	c.hooks.PendingSecret = append(c.hooks.PendingSecret, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `pendingsecret.Intercept(f(g(h())))`.
+func (c *PendingSecretClient) Intercept(interceptors ...Interceptor) {
+	c.inters.PendingSecret = append(c.inters.PendingSecret, interceptors...)
+}
+
+// Create returns a builder for creating a PendingSecret entity.
+func (c *PendingSecretClient) Create() *PendingSecretCreate {
+	mutation := newPendingSecretMutation(c.config, OpCreate)
+	return &PendingSecretCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of PendingSecret entities.
+func (c *PendingSecretClient) CreateBulk(builders ...*PendingSecretCreate) *PendingSecretCreateBulk {
+	return &PendingSecretCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *PendingSecretClient) MapCreateBulk(slice any, setFunc func(*PendingSecretCreate, int)) *PendingSecretCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &PendingSecretCreateBulk{err: fmt.Errorf("calling to PendingSecretClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*PendingSecretCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &PendingSecretCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for PendingSecret.
+func (c *PendingSecretClient) Update() *PendingSecretUpdate {
+	mutation := newPendingSecretMutation(c.config, OpUpdate)
+	return &PendingSecretUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *PendingSecretClient) UpdateOne(_m *PendingSecret) *PendingSecretUpdateOne {
+	mutation := newPendingSecretMutation(c.config, OpUpdateOne, withPendingSecret(_m))
+	return &PendingSecretUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *PendingSecretClient) UpdateOneID(id uuid.UUID) *PendingSecretUpdateOne {
+	mutation := newPendingSecretMutation(c.config, OpUpdateOne, withPendingSecretID(id))
+	return &PendingSecretUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for PendingSecret.
+func (c *PendingSecretClient) Delete() *PendingSecretDelete {
+	mutation := newPendingSecretMutation(c.config, OpDelete)
+	return &PendingSecretDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *PendingSecretClient) DeleteOne(_m *PendingSecret) *PendingSecretDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *PendingSecretClient) DeleteOneID(id uuid.UUID) *PendingSecretDeleteOne {
+	builder := c.Delete().Where(pendingsecret.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &PendingSecretDeleteOne{builder}
+}
+
+// Query returns a query builder for PendingSecret.
+func (c *PendingSecretClient) Query() *PendingSecretQuery {
+	return &PendingSecretQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypePendingSecret},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a PendingSecret entity by its id.
+func (c *PendingSecretClient) Get(ctx context.Context, id uuid.UUID) (*PendingSecret, error) {
+	return c.Query().Where(pendingsecret.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *PendingSecretClient) GetX(ctx context.Context, id uuid.UUID) *PendingSecret {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *PendingSecretClient) Hooks() []Hook {
+	return c.hooks.PendingSecret
+}
+
+// Interceptors returns the client interceptors.
+func (c *PendingSecretClient) Interceptors() []Interceptor {
+	return c.inters.PendingSecret
+}
+
+func (c *PendingSecretClient) mutate(ctx context.Context, m *PendingSecretMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&PendingSecretCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&PendingSecretUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&PendingSecretUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&PendingSecretDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown PendingSecret mutation op: %q", m.Op())
+	}
+}
+
 // PolicyBindingClient is a client for the PolicyBinding schema.
 type PolicyBindingClient struct {
 	config
@@ -14334,7 +14475,7 @@ type (
 		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
 		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
@@ -14359,7 +14500,7 @@ type (
 		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
 		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,

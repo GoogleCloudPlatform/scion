@@ -272,6 +272,21 @@ const (
 	// cannot lock) still holds against a concurrent batch. A value in an
 	// unused gap of the range.
 	LockHubSettingsGuardedBatch AdvisoryLockKey = 0x5C10001F
+
+	// LockPendingSecretExpiry guards the periodic pending secret expiry
+	// sweep ("pending-secret-expiry"), so one replica per tick deletes
+	// expired pending secrets and releases their held values. A value in an
+	// unused gap of the range.
+	LockPendingSecretExpiry AdvisoryLockKey = 0x5C10001B
+
+	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
+	// secret write lock: a transaction-scoped
+	// pg_advisory_xact_lock(classid, objid) with objid
+	// StableProjectHash(owner scope ID), taken by
+	// CreateOrReplacePendingSecret so the per-agent and per-owner caps are
+	// checked and applied atomically. Like LockQuotaEnforcement it is in the
+	// per-object range; it is not taken through AdvisoryLocker.
+	LockPendingSecretOwnerWrite AdvisoryLockKey = 0x5C101004
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
