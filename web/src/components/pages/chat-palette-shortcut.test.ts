@@ -112,6 +112,11 @@ function makeKeydownEvent(
 function createUnattachedPage(): any {
   const el = document.createElement('scion-page-chat') as any;
   el.pageData = { user: { id: 'user-me' } };
+  // Native checkVisibility() (happy-dom 21+, real browsers) is false for a
+  // disconnected element, so hide it: these tests exercise the manual
+  // ancestor walk in `_isPageVisible()`. The native branch is covered by
+  // its own test below.
+  el.checkVisibility = undefined;
   return el;
 }
 
@@ -441,8 +446,41 @@ describe('_isPageVisible', () => {
     expect(page._isPageVisible()).toBe(false);
   });
 
-  it('is true for a connected, unhidden page', () => {
+  it('is true for an unhidden page', () => {
     const page = createUnattachedPage();
+    expect(page._isPageVisible()).toBe(true);
+  });
+
+  it('prefers native checkVisibility() where implemented', () => {
+    const page = createUnattachedPage();
+    delete page.checkVisibility;
+    // Disconnected: native checkVisibility() is false.
+    expect(page._isPageVisible()).toBe(false);
+    document.body.appendChild(page);
+    expect(page._isPageVisible()).toBe(true);
+  });
+
+  it('passes the visibility options to checkVisibility() and returns its answer', () => {
+    const page = createUnattachedPage();
+    const checkVisibility = vi.fn().mockReturnValue(false);
+    page.checkVisibility = checkVisibility;
+    expect(page._isPageVisible()).toBe(false);
+    expect(checkVisibility).toHaveBeenCalledWith({ checkOpacity: false, checkVisibilityCSS: true });
+    checkVisibility.mockReturnValue(true);
+    expect(page._isPageVisible()).toBe(true);
+  });
+
+  it('native checkVisibility() reports a connected page under a display:none ancestor as hidden', () => {
+    // Inline display:none, not the hidden attribute: happy-dom's computed
+    // style has no UA `[hidden] { display: none }` rule (browsers do).
+    const page = createUnattachedPage();
+    delete page.checkVisibility;
+    const ancestor = document.createElement('div');
+    ancestor.style.display = 'none';
+    ancestor.appendChild(page);
+    document.body.appendChild(ancestor);
+    expect(page._isPageVisible()).toBe(false);
+    ancestor.style.display = '';
     expect(page._isPageVisible()).toBe(true);
   });
 });
@@ -1509,13 +1547,12 @@ describe('palette focus capture/restore: textarea selection', () => {
     expect(fallbackSpy).toHaveBeenCalled();
   });
 
-  // Note: happy-dom implements neither `checkVisibility()` nor real layout
-  // (its `getClientRects()` always returns one stub rect regardless of CSS),
-  // so a connected element actually hidden by CSS can't be distinguished
-  // from a connected-and-visible one here — that scenario is covered by the
-  // Chromium e2e fixture instead. `_isInvokerVisible`'s own branching is
-  // still unit-tested below by stubbing `checkVisibility`/`getClientRects`
-  // directly on the element.
+  // Note: happy-dom 21 implements `checkVisibility()` (from computed styles)
+  // but has no layout engine (its `getClientRects()` always returns one stub
+  // rect regardless of CSS), so layout-dependent visibility can't be
+  // checked here — that scenario is covered by the Chromium e2e fixture
+  // instead. `_isInvokerVisible`'s own branching is still unit-tested below
+  // by stubbing `checkVisibility`/`getClientRects` directly on the element.
 
   it('restores focus to a visible position:fixed invoker instead of falling back', () => {
     // `offsetParent` is null both for a genuinely hidden element and for a
@@ -1593,14 +1630,14 @@ describe('palette focus capture/restore: textarea selection', () => {
   });
 
   it('falls back to the getClientRects check when checkVisibility is not implemented', () => {
-    // No `checkVisibility` property at all (the happy-dom/legacy-engine
-    // case): an invoker with no client rects (no layout box, e.g.
-    // `display: none`) must still fall back.
+    // The native `checkVisibility` is hidden on the invoker (set to
+    // undefined) to model a legacy engine without it: an invoker with no
+    // client rects (no layout box, e.g. `display: none`) must still fall back.
     const page = createUnattachedPage();
     const input = document.createElement('input');
     document.body.appendChild(input);
     input.focus();
-    expect((input as unknown as { checkVisibility?: unknown }).checkVisibility).toBeUndefined();
+    (input as unknown as { checkVisibility?: unknown }).checkVisibility = undefined;
     vi.spyOn(input, 'getClientRects').mockReturnValue([] as unknown as DOMRectList);
 
     page._capturePaletteInvokerFocus();
