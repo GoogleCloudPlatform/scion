@@ -97,6 +97,12 @@ To also re-upload config files, update systemd/Caddy, and refresh GKE credential
 ./scripts/starter-hub/gce-start-hub.sh --full
 ```
 
+On `--full` updates (without `--reset-db`), `merge-settings.py` merges the
+generated `settings.yaml` into any existing `/home/scion/.scion/settings.yaml`
+so operator-managed sections (`server.plugins`, `server.message_broker`,
+`plugins`) survive; YAML comments are not preserved across the merge round-trip
+(key order is kept).
+
 Behind an upstream TLS terminator, skip the Caddy/TLS step (no Caddyfile, no
 Caddy install, no HTTPS health check) and give the terminator's `https://` URL;
 the script stops without it, because the Hub refuses an `http` base URL on a
@@ -135,7 +141,7 @@ A non-zero exit from the script stops `gce-certs.sh`. See *Certificate renewal* 
 `sleep` commands, and runs `fix-tls-rotation.sh` against a fake root with stub
 `systemctl`, `certbot`, `caddy`, `runuser`, `id`, and `openssl s_client`
 (`tests/lib-tls`). It
-never contacts GCP and needs only bash and openssl:
+never contacts GCP and needs bash, openssl, and `python3` with `PyYAML`:
 
 ```bash
 ./scripts/starter-hub/tests/run.sh

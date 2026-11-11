@@ -233,6 +233,10 @@ SETTINGS_EOF
         substep "Note: agent images come from $(effective_image_registry) on the VM. This script does not build them; see image-build/README.md, or set SCION_IMAGE_REGISTRY in hub.env."
     fi
 
+    # Merge helper, run right before the file is installed. Uploaded next to
+    # the other config files and lands in /tmp on the instance.
+    cp "${SCRIPT_DIR}/merge-settings.py" "$UPLOAD_DIR/scion-merge-settings.py"
+
     # systemd service file, rendered from scion-hub.service.tmpl. Rebuild
     # from git compares the installed unit against that template, so the
     # unit text lives only there. Lines starting with ## are template notes.
@@ -290,12 +294,60 @@ if $FULL_DEPLOY; then
     # Place uploaded config files
     echo ""
     echo "==> Placing config files..."
+    MERGED_SETTINGS=""
+    cleanup_uploaded_settings() {
+        sudo rm -f /tmp/scion-settings.yaml /tmp/scion-merge-settings.py
+        if [ -n "${MERGED_SETTINGS:-}" ]; then
+            sudo rm -f "$MERGED_SETTINGS"
+        fi
+    }
+    trap cleanup_uploaded_settings EXIT
     sudo mkdir -p /home/scion/.scion
     sudo chown scion:scion /home/scion/.scion
     '"${PLACE_HUB_ENV}"'
-    sudo mv /tmp/scion-settings.yaml /home/scion/.scion/settings.yaml
-    sudo chown scion:scion /home/scion/.scion/settings.yaml
-    echo "  -> Installed settings.yaml"
+    # The settings.yaml generated above only holds the keys this script manages.
+    # Installing it over an existing file silently drops everything else, so on
+    # an update merge into the existing file and keep sections we do not own
+    # (broker plugin config, message_broker, ...). --reset-db and fresh
+    # instances start from the generated file (with a 0600 backup on --reset-db).
+    SETTINGS_PATH=/home/scion/.scion/settings.yaml
+    if [ "$RESET_DB" != "true" ] && sudo test -s "$SETTINGS_PATH"; then
+        if ! sudo python3 -c "import yaml" >/dev/null 2>&1; then
+            echo "  -> Installing python3-yaml for the settings merge..."
+            sudo apt-get update -qq || true
+            sudo apt-get install -y -qq python3-yaml || true
+        fi
+        if ! sudo python3 -c "import yaml" >/dev/null 2>&1; then
+            cleanup_uploaded_settings
+            echo "  -> WARNING: settings.yaml NOT updated (merge failed: python3-yaml is not installed and could not be installed); fix and re-run" >&2
+            exit 1
+        fi
+        MERGED_SETTINGS=$(sudo mktemp "${SETTINGS_PATH}.XXXXXX")
+        if MERGE_OUT=$(sudo python3 /tmp/scion-merge-settings.py "$SETTINGS_PATH" /tmp/scion-settings.yaml "$MERGED_SETTINGS" 2>&1); then
+            if [ -n "$MERGE_OUT" ]; then
+                echo "  -> $MERGE_OUT"
+            fi
+            sudo chmod 0600 "$MERGED_SETTINGS"
+            sudo chown scion:scion "$MERGED_SETTINGS"
+            sudo mv -f "$MERGED_SETTINGS" "$SETTINGS_PATH"
+            MERGED_SETTINGS=""
+            echo "  -> Merged and installed settings.yaml"
+        else
+            cleanup_uploaded_settings
+            MERGED_SETTINGS=""
+            echo "  -> WARNING: settings.yaml NOT updated (merge failed: ${MERGE_OUT:-unknown error}); fix and re-run" >&2
+            exit 1
+        fi
+    else
+        if [ "$RESET_DB" = "true" ] && sudo test -s "$SETTINGS_PATH"; then
+            BACKUP_PATH="${SETTINGS_PATH}.bak.$(date +%s)"
+            sudo install -m 0600 -o scion -g scion "$SETTINGS_PATH" "$BACKUP_PATH"
+            echo "  -> Backed up existing settings.yaml to ${BACKUP_PATH} (--reset-db)"
+        fi
+        sudo install -m 0600 -o scion -g scion /tmp/scion-settings.yaml "$SETTINGS_PATH"
+        echo "  -> Installed settings.yaml"
+    fi
+    cleanup_uploaded_settings
 
     # Ensure all build/runtime dependencies are present (cloud-init may have failed or not finished)
     NEED_APT_UPDATE=false

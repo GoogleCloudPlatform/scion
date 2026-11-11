@@ -1315,6 +1315,167 @@ test_tls_certs_installs_rotation_on_existing_and_new_certs() {
     assert_not_contains "$ssh" "RENEWED_DOMAINS%%" "no inline deploy hook"
 }
 
+# --- merge-settings.py and gce-start-hub.sh --full settings placement (#3422) ---
+
+test_merge_settings_helper() {
+    local out rc
+    out="$(bash "${TESTS_DIR}/test-merge-settings.sh" 2>&1)"
+    rc=$?
+    assert_eq 0 "$rc" "test-merge-settings.sh passes (${out})"
+}
+
+settings_mode() {
+    python3 -c 'import os, sys; print(f"{os.stat(sys.argv[1]).st_mode & 0o777:04o}")' "$1"
+}
+
+settings_tmp_count() {
+    find "${VM_TMP}" "${VM_SCION}" -maxdepth 1 \
+        \( -name 'scion-settings.yaml' -o -name 'scion-merge-settings.py' -o -name 'settings.yaml.??????' -o -name '.settings.yaml.*' \) \
+        2>/dev/null | wc -l | tr -d ' '
+}
+
+settings_setup_vm() {
+    fresh_state
+    VM_DIR="${STATE_DIR}/vm"
+    VM_TMP="${VM_DIR}/tmp"
+    VM_SCION="${VM_DIR}/home/scion/.scion"
+    VM_BIN="${STATE_DIR}/vm-bin"
+    mkdir -p "${VM_TMP}" "${VM_DIR}/home/scion" "${VM_BIN}"
+    # shellcheck disable=SC2016 # the stub's own code, expanded when it runs
+    cat > "${VM_BIN}/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+    chown) exit 0 ;;
+    apt-get) exit 0 ;;
+    install)
+        shift
+        args=()
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -o|-g) shift 2 ;;
+                *) args+=("$1"); shift ;;
+            esac
+        done
+        exec install "${args[@]}"
+        ;;
+    *) exec "$@" ;;
+esac
+EOF
+    chmod +x "${VM_BIN}/sudo"
+}
+
+settings_run_remote_placement() {
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full "$@"
+    assert_eq 0 "$RC" "gce-start-hub.sh --full $* succeeds"
+    if [[ -f "${STUB_SCP_DIR}/scion-merge-settings.py" ]]; then pass; else fail "scion-merge-settings.py uploaded"; fi
+    if bash -n "${STUB_SSH_LOG}"; then pass; else fail "remote SSH script is valid bash syntax"; fi
+
+    cp "${STUB_SCP_DIR}/scion-settings.yaml" "${VM_TMP}/scion-settings.yaml"
+    chmod 0644 "${VM_TMP}/scion-settings.yaml"
+    cp "${STUB_SCP_DIR}/scion-merge-settings.py" "${VM_TMP}/scion-merge-settings.py"
+
+    python3 - "${STUB_SSH_LOG}" "${STATE_DIR}/remote-placement.sh" "${VM_DIR}" "${VM_TMP}" <<'PY'
+import pathlib, sys
+ssh_log, out_path, vm_dir, vm_tmp = sys.argv[1:5]
+text = pathlib.Path(ssh_log).read_text(encoding="utf-8")
+text = text.split("# Ensure all build/runtime dependencies are present")[0]
+text = text.replace("/home/scion", vm_dir + "/home/scion")
+text = text.replace("/tmp/hub.env", vm_tmp + "/hub.env")
+text = text.replace("/tmp/scion-", vm_tmp + "/scion-")
+pathlib.Path(out_path).write_text(text + "\n", encoding="utf-8")
+PY
+    if bash -n "${STATE_DIR}/remote-placement.sh"; then pass; else fail "extracted placement snippet is valid bash"; fi
+
+    PLACE_OUT="$(PATH="${VM_BIN}:${PATH}" bash "${STATE_DIR}/remote-placement.sh" 2>&1)"
+    PLACE_RC=$?
+}
+
+test_full_settings_remote_placement() {
+    # 1. Fresh instance: installed 0600, uploaded temp files cleaned up.
+    settings_setup_vm
+    settings_run_remote_placement
+    assert_eq 0 "$PLACE_RC" "fresh placement succeeds (${PLACE_OUT})"
+    assert_eq "0600" "$(settings_mode "${VM_SCION}/settings.yaml")" "fresh settings.yaml is 0600"
+    assert_eq "0" "$(settings_tmp_count)" "uploaded temp files removed after fresh install"
+
+    # 2. Update with existing 0644 settings.yaml: merges operator sections and tightens to 0600.
+    mkdir -p "${VM_SCION}"
+    cat > "${VM_SCION}/settings.yaml" <<'EOF'
+active_profile: remote
+server:
+  mode: production
+  message_broker:
+    enabled: true
+    backend: nats
+  plugins:
+    broker:
+      telegram:
+        db_path: /srv/tg.db
+EOF
+    chmod 0644 "${VM_SCION}/settings.yaml"
+    : > "${STUB_LOG}"
+    : > "${STUB_SSH_LOG}"
+    settings_run_remote_placement
+    assert_eq 0 "$PLACE_RC" "merge placement succeeds (${PLACE_OUT})"
+    assert_eq "0600" "$(settings_mode "${VM_SCION}/settings.yaml")" "merged settings.yaml is 0600"
+    assert_contains "$(cat "${VM_SCION}/settings.yaml")" "db_path: /srv/tg.db" "operator server.plugins survives --full"
+    assert_contains "$(cat "${VM_SCION}/settings.yaml")" "backend: nats" "operator message_broker survives --full"
+    assert_contains "$(cat "${VM_SCION}/settings.yaml")" "active_profile: local" "generated active_profile wins"
+    assert_eq "0" "$(settings_tmp_count)" "uploaded and merged temp files removed after merge"
+
+    # 3. Broken YAML in existing settings.yaml: non-zero exit, warning, existing untouched.
+    settings_setup_vm
+    mkdir -p "${VM_SCION}"
+    printf 'broken: [unclosed\n' > "${VM_SCION}/settings.yaml"
+    chmod 0600 "${VM_SCION}/settings.yaml"
+    cp "${VM_SCION}/settings.yaml" "${STATE_DIR}/before-broken.yaml"
+    settings_run_remote_placement
+    assert_ne 0 "$PLACE_RC" "failed merge exits non-zero"
+    assert_contains "$PLACE_OUT" "WARNING: settings.yaml NOT updated (merge failed:" "prints merge-failed warning"
+    if cmp -s "${STATE_DIR}/before-broken.yaml" "${VM_SCION}/settings.yaml"; then
+        pass
+    else
+        fail "existing settings.yaml must stay byte-identical on merge failure"
+    fi
+    assert_eq "0" "$(settings_tmp_count)" "temp files removed on merge failure"
+
+    # 4. Missing python3-yaml after apt: non-zero exit, warning, existing untouched.
+    settings_setup_vm
+    mkdir -p "${VM_SCION}"
+    printf 'active_profile: remote\n' > "${VM_SCION}/settings.yaml"
+    chmod 0600 "${VM_SCION}/settings.yaml"
+    cp "${VM_SCION}/settings.yaml" "${STATE_DIR}/before-noyaml.yaml"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "${VM_BIN}/python3"
+    chmod +x "${VM_BIN}/python3"
+    settings_run_remote_placement
+    rm -f "${VM_BIN}/python3"
+    assert_ne 0 "$PLACE_RC" "missing python3-yaml exits non-zero"
+    assert_contains "$PLACE_OUT" "WARNING: settings.yaml NOT updated (merge failed: python3-yaml" "names missing python3-yaml"
+    if cmp -s "${STATE_DIR}/before-noyaml.yaml" "${VM_SCION}/settings.yaml"; then
+        pass
+    else
+        fail "existing settings.yaml must stay byte-identical when PyYAML is missing"
+    fi
+    assert_eq "0" "$(settings_tmp_count)" "temp files removed when PyYAML is missing"
+
+    # 5. --reset-db backs up existing settings.yaml (0600, timestamped) and writes fresh 0600 file.
+    settings_setup_vm
+    mkdir -p "${VM_SCION}"
+    printf 'plugins:\n  keep_in_backup: true\n' > "${VM_SCION}/settings.yaml"
+    chmod 0644 "${VM_SCION}/settings.yaml"
+    settings_run_remote_placement --reset-db
+    assert_eq 0 "$PLACE_RC" "--reset-db placement succeeds (${PLACE_OUT})"
+    assert_eq "0600" "$(settings_mode "${VM_SCION}/settings.yaml")" "--reset-db settings.yaml is 0600"
+    assert_not_contains "$(cat "${VM_SCION}/settings.yaml")" "keep_in_backup" "--reset-db writes fresh settings.yaml"
+    local backups=("${VM_SCION}"/settings.yaml.bak.*)
+    assert_eq 1 "${#backups[@]}" "--reset-db writes one timestamped backup"
+    assert_eq "0600" "$(settings_mode "${backups[0]}")" "--reset-db backup is 0600"
+    assert_contains "$(cat "${backups[0]}")" "keep_in_backup: true" "--reset-db backup holds prior content"
+    assert_eq "0" "$(settings_tmp_count)" "temp files removed after --reset-db"
+}
+
 mapfile -t TESTS < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
 for t in "${TESTS[@]}"; do
     CURRENT="$t"
