@@ -19,7 +19,14 @@
 # commit matches the branch HEAD, and creates the corresponding stable tag
 # (without the -preview.N suffix).
 #
-# Usage: ./scripts/release/promote-stable.sh [--dry-run] [release-branch]
+# It also creates the next release branch, release/vX.(Y+1), in the same
+# atomic push, so the weekly preview workflow has a line to roll forward. The
+# next branch starts at the stable commit when the newest nightly on main
+# contains it, else at that newest nightly; it never starts past the newest
+# nightly, so the weekly workflow can fast-forward it. No preview tag is
+# created for the next line.
+#
+# Usage: ./scripts/release/promote-stable.sh [--dry-run] [--no-next-branch] [release-branch]
 #
 # If release-branch is not specified, auto-detects the latest release/vX.Y branch.
 
@@ -51,12 +58,14 @@ dry_run_msg() { printf '%b%s%b\n' "${YELLOW}" "[dry-run] $1" "${RESET}"; }
 # --- Parse flags ----------------------------------------------------------
 
 DRY_RUN=false
+NEXT_BRANCH_ENABLED=true
 RELEASE_BRANCH=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
+    --no-next-branch) NEXT_BRANCH_ENABLED=false ;;
     -h|--help)
-      echo "Usage: $0 [--dry-run] [release-branch]"
+      echo "Usage: $0 [--dry-run] [--no-next-branch] [release-branch]"
       echo ""
       echo "Promote the latest preview to a stable release."
       echo ""
@@ -64,8 +73,10 @@ for arg in "$@"; do
       echo "  release-branch  e.g. release/v0.3 (auto-detected if omitted)"
       echo ""
       echo "Options:"
-      echo "  --dry-run  Show what would be done without executing"
-      echo "  -h, --help Show this help message"
+      echo "  --dry-run         Show what would be done without executing"
+      echo "  --no-next-branch  Push only the stable tag; do not create the next"
+      echo "                    release/vX.(Y+1) branch"
+      echo "  -h, --help        Show this help message"
       exit 0
       ;;
     -*)  die "unknown option: $arg" ;;
@@ -93,16 +104,23 @@ git fetch origin --tags
 # --- Determine release branch --------------------------------------------
 
 if [ -z "$RELEASE_BRANCH" ]; then
-  # Auto-detect: pick the highest release/vX.Y from remote refs.
+  # Auto-detect: pick the highest release/vX.Y from remote refs, ignoring
+  # names that are not exactly release/vX.Y (as select-weekly-preview.sh does).
   RELEASE_BRANCH=""
-  for ref in $(git for-each-ref --sort=v:refname --format='%(refname:short)' 'refs/remotes/origin/release/v*'); do
-    RELEASE_BRANCH="${ref#origin/}"
+  for ref in $(git for-each-ref --sort=v:refname --format='%(refname)' 'refs/remotes/origin/release/v*'); do
+    name="${ref#refs/remotes/origin/}"
+    if [[ "$name" =~ ^release/v[0-9]+\.[0-9]+$ ]]; then
+      RELEASE_BRANCH="$name"
+    fi
   done
   if [ -z "$RELEASE_BRANCH" ]; then
     die "no release branches found on origin"
   fi
   info "Auto-detected release branch: ${RELEASE_BRANCH}"
 fi
+
+[[ "$RELEASE_BRANCH" =~ ^release/v[0-9]+\.[0-9]+$ ]] \
+  || die "'${RELEASE_BRANCH}' is not a release/vX.Y branch"
 
 # Validate the branch exists on origin.
 if ! git rev-parse "origin/${RELEASE_BRANCH}" >/dev/null 2>&1; then
@@ -149,6 +167,61 @@ if git rev-parse "$STABLE_TAG" >/dev/null 2>&1; then
   die "stable tag '${STABLE_TAG}' already exists"
 fi
 
+# --- Determine the next release branch ------------------------------------
+
+# release/vX.Y -> release/vX.(Y+1). The weekly preview workflow refuses a
+# promoted line, so the next line must exist for it to tag
+# vX.(Y+1).0-preview.1.
+NEXT_BRANCH=""
+NEXT_BASE=""
+NEXT_RULE=""
+NEWER_NIGHTLY=false
+if [ "$NEXT_BRANCH_ENABLED" = true ]; then
+  NEXT_BRANCH="release/v${MAJOR}.$((10#${MINOR} + 1))"
+
+  git rev-parse -q --verify "refs/remotes/origin/main^{commit}" >/dev/null \
+    || die "origin/main not found; cannot choose a base for ${NEXT_BRANCH} (use --no-next-branch to push only the stable tag)"
+
+  # Ask origin directly: a stale remote-tracking ref must not hide or invent
+  # the branch.
+  NEXT_LS_STATUS=0
+  git ls-remote --exit-code --heads origin "refs/heads/${NEXT_BRANCH}" >/dev/null || NEXT_LS_STATUS=$?
+  case "$NEXT_LS_STATUS" in
+    0) die "branch '${NEXT_BRANCH}' already exists on origin (use --no-next-branch to push only the stable tag)" ;;
+    2) ;;
+    *) die "could not list branches on origin (git ls-remote exit ${NEXT_LS_STATUS})" ;;
+  esac
+
+  # Newest nightly-YYYYMMDD tag on main, newest by name as in
+  # select-weekly-preview.sh.
+  NEWEST_NIGHTLY=""
+  NEWEST_NIGHTLY_COMMIT=""
+  while IFS= read -r t; do
+    [[ "$t" =~ ^nightly-[0-9]{8}$ ]] || continue
+    sha="$(git rev-parse "refs/tags/${t}^{commit}")"
+    if git merge-base --is-ancestor "$sha" "refs/remotes/origin/main"; then
+      NEWEST_NIGHTLY="$t"
+      NEWEST_NIGHTLY_COMMIT="$sha"
+      break
+    fi
+  done < <(git tag -l --sort=-v:refname 'nightly-*')
+
+  [ -n "$NEWEST_NIGHTLY" ] \
+    || die "no nightly-YYYYMMDD tag is reachable from origin/main; cannot choose a base for ${NEXT_BRANCH} (use --no-next-branch to push only the stable tag)"
+
+  if git merge-base --is-ancestor "$PREVIEW_COMMIT" "$NEWEST_NIGHTLY_COMMIT"; then
+    NEXT_BASE="$PREVIEW_COMMIT"
+    NEXT_RULE="stable commit (contained in ${NEWEST_NIGHTLY}, the newest nightly on main)"
+    # The weekly selection only takes a nightly the branch does not contain.
+    if [ "$NEWEST_NIGHTLY_COMMIT" != "$PREVIEW_COMMIT" ]; then
+      NEWER_NIGHTLY=true
+    fi
+  else
+    NEXT_BASE="$NEWEST_NIGHTLY_COMMIT"
+    NEXT_RULE="${NEWEST_NIGHTLY}, the newest nightly on main (the stable commit is not in it)"
+  fi
+fi
+
 # --- Confirm what we will do ----------------------------------------------
 
 echo ""
@@ -157,11 +230,23 @@ echo "  Branch:          ${RELEASE_BRANCH}"
 echo "  Preview tag:     ${LATEST_PREVIEW_TAG}"
 echo "  Stable tag:      ${STABLE_TAG}"
 echo "  Commit:          ${PREVIEW_COMMIT}"
+if [ "$NEXT_BRANCH_ENABLED" = true ]; then
+  echo "  Next branch:     ${NEXT_BRANCH}"
+  echo "  Next base:       ${NEXT_BASE}"
+  echo "  Next base rule:  ${NEXT_RULE}"
+else
+  echo "  Next branch:     (not created: --no-next-branch)"
+fi
 echo ""
 
 if [ "$DRY_RUN" = true ]; then
   dry_run_msg "Would create stable tag '${STABLE_TAG}' on commit ${PREVIEW_COMMIT}"
-  dry_run_msg "Would push tag to origin"
+  if [ "$NEXT_BRANCH_ENABLED" = true ]; then
+    dry_run_msg "Would create branch '${NEXT_BRANCH}' on commit ${NEXT_BASE}"
+    dry_run_msg "Would push tag and branch to origin in one atomic push"
+  else
+    dry_run_msg "Would push tag to origin"
+  fi
   echo ""
   dry_run_msg "No changes were made."
   exit 0
@@ -181,8 +266,21 @@ esac
 info "Creating stable tag ${STABLE_TAG}..."
 git tag "$STABLE_TAG" "$PREVIEW_COMMIT"
 
-info "Pushing tag to origin..."
-git push origin "$STABLE_TAG"
+if [ "$NEXT_BRANCH_ENABLED" = true ]; then
+  # One atomic push: the stable tag never exists without the next line, and
+  # the next line never exists without the stable tag. The empty lease makes
+  # the branch push a create: it is refused if the branch appeared on origin
+  # after the check above, even as a fast-forward.
+  info "Pushing tag ${STABLE_TAG} and branch ${NEXT_BRANCH} to origin (atomic)..."
+  if ! git push --atomic --force-with-lease="refs/heads/${NEXT_BRANCH}:" origin \
+      "refs/tags/${STABLE_TAG}" "${NEXT_BASE}:refs/heads/${NEXT_BRANCH}"; then
+    git tag -d "$STABLE_TAG" >/dev/null
+    die "atomic push failed; neither ${STABLE_TAG} nor ${NEXT_BRANCH} was created on origin (local tag removed)"
+  fi
+else
+  info "Pushing tag to origin..."
+  git push origin "refs/tags/${STABLE_TAG}"
+fi
 
 # --- Summary --------------------------------------------------------------
 
@@ -192,5 +290,21 @@ echo "  Branch:      ${RELEASE_BRANCH}"
 echo "  Preview tag: ${LATEST_PREVIEW_TAG} (promoted from)"
 echo "  Stable tag:  ${STABLE_TAG}"
 echo "  Commit:      ${PREVIEW_COMMIT}"
+if [ "$NEXT_BRANCH_ENABLED" = true ]; then
+  echo "  Next branch: ${NEXT_BRANCH} at ${NEXT_BASE}"
+fi
 echo ""
 echo "The build-release workflow should now be triggered by the tag push."
+if [ "$NEXT_BRANCH_ENABLED" = true ]; then
+  NEXT_PREVIEW="${NEXT_BRANCH#release/}.0-preview.1"
+  if [ "$NEWER_NIGHTLY" = true ]; then
+    echo "The weekly preview workflow tags ${NEXT_PREVIEW} on ${NEXT_BRANCH} on Friday, once a"
+    echo "nightly newer than ${NEXT_BRANCH} has passed CI."
+    echo "To tag it sooner, dispatch build-preview-weekly.yml by hand: a nightly on main is"
+    echo "newer than ${NEXT_BRANCH}, and the newest such nightly that passed CI is used."
+  else
+    echo "No nightly on main is newer than ${NEXT_BRANCH} yet, so the weekly preview workflow,"
+    echo "scheduled or dispatched by hand, tags ${NEXT_PREVIEW} only after the next nightly"
+    echo "that passes CI."
+  fi
+fi
