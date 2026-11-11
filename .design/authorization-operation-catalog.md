@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 382
+**Operations:** 386
 
 ## Table of Contents
 
@@ -36,7 +36,7 @@
 - [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
 - [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
 - [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
-- [agent.secrets.access](#agentsecretsaccess) — List, read and write the secrets available to the calling agent: its project's and its creating user's
+- [agent.secrets.access](#agentsecretsaccess) — List, read and write the secrets available to the calling agent: its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 - [agent.stopall](#agentstopall) — Stop all running agents on the hub
 - [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
 - [project.membership.add](#projectmembershipadd) — Add a member to a project with a specified role
@@ -76,8 +76,8 @@
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
 - [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant); a steward may change the expiry but a move from it is refused with 403 steward_action_not_allowed
 - [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
-- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)
-- [artifact.grant.notify](#artifactgrantnotify) — Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level and, for review until the review ladder lands, only to a user who can already read the artifact; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited); the review path for non-managers never notifies
+- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; every other caller that can read the artifact is refused with the same 403 before its body is read, and an accepted request can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)
+- [artifact.grant.notify](#artifactgrantnotify) — Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited)
 - [artifact.grant.delete](#artifactgrantdelete) — Remove one grant from an artifact; the home project's grant cannot be removed
 - [artifact.link.list](#artifactlinklist) — List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
 - [artifact.link.create](#artifactlinkcreate) — Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
@@ -201,6 +201,7 @@
 - [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, project:read on the agent's project, and the create_thread action of chat-space-access (project.chat_post; 403 chat_post_denied without it); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 - [chat.decision.read](#chatdecisionread) — Read one version of a choice prompt decision. Needs read access to the prompt's conversation (project:read for a thread; the caller in a user slot of a DM key). Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.chat_choices is off
 - [chat.decision.answer](#chatdecisionanswer) — Answer a choice prompt decision by choice id (the label is copied from the stored row). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off
+- [chat.choiceprompt.answer](#chatchoicepromptanswer) — Answer every actionable decision of a choice prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one choice-response message in one transaction, delivers it to the asking agent and publishes choice.updated per row. 404 while web.chat_choices is off
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -364,6 +365,9 @@
 - [env.user.write](#envuserwrite) — Create, update or delete the caller's own user-level environment variables (scope=user, the default). A federated caller is refused (requireProfileWriter)
 - [secret.user.read](#secretuserread) — Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
 - [secret.user.write](#secretuserwrite) — Create, update or delete the caller's own user-level secrets (scope=user, the default). A federated caller is refused (requireProfileWriter)
+- [secret.user.pending.read](#secretuserpendingread) — List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval, alone or merged with the caller's approved user secrets (includePending=true). Metadata and provenance only, never the value. A federated caller is refused
+- [secret.user.pending.decide](#secretuserpendingdecide) — Approve (writing the caller's own user-level secret the agent requested) or reject one of the caller's own pending secrets. Another user's or an expired pending secret is not found. A federated caller is refused (requireProfileWriter)
+- [secret.user.pending.reveal](#secretuserpendingreveal) — Return the held value of one of the caller's own pending secrets, audited (secret_pending_reveal). Another user's or an expired pending secret is not found. Cross-site and non-JSON browser requests are refused. A federated caller is refused (requireProfileWriter)
 - [env.hub.read](#envhubread) — Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin
 - [env.hub.write](#envhubwrite) — Create, update or delete hub-level environment variables (scope=hub). A user must be an unscoped admin
 - [secret.hub.read](#secrethubread) — Read hub-level secrets (scope=hub). Agents may read; a user must be an unscoped admin
@@ -1477,7 +1481,7 @@
 
 **Domain:** agent
 
-**Description:** List, read and write the secrets available to the calling agent: its project's and its creating user's
+**Description:** List, read and write the secrets available to the calling agent: its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 
 ### Entry Points
 
@@ -3270,7 +3274,7 @@
 
 **Domain:** artifact
 
-**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)
+**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; every other caller that can read the artifact is refused with the same 403 before its body is read, and an accepted request can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)
 
 ### Entry Points
 
@@ -3293,7 +3297,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds
 
 ### Audit
 
@@ -3303,20 +3307,20 @@
 - **After Fields:** grantId, subjectKind, subjectRef, permission, newPermission
 - **Atomic:** Yes
 
-**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `review_subject_cannot_read`, `review_replaces_access`, `steward_action_not_allowed`
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `steward_action_not_allowed`
 
 ### Tests
 
 - `pkg/hub:TestArtifactsGrantsOnRoutes`
-- `pkg/hub:TestArtifactCanGrantReviewOnRoutes`
-- `pkg/hub:TestArtifactHostMayGrantReview_ScopedToken`
 - `pkg/artifacts:TestGrantsAdminGate`
-- `pkg/artifacts:TestReviewGrantAllowed`
-- `pkg/artifacts:TestReviewGrantDenied`
+- `pkg/artifacts:TestPutGrantNonAdministratorUniform403`
 - `pkg/hub:TestArtifactStewardOnRoutes`
 - `pkg/artifacts:TestStewardBoundedTable`
 - `pkg/artifacts:TestStewardEvents`
 - `pkg/artifacts:TestStoreCreationEvents`
+- `pkg/artifacts:TestMigration0014ReviewLadder`
+- `pkg/artifacts:TestGrantWritesAllowlist`
+- `pkg/artifacts:TestPutGrantEventFaultRollsBack`
 
 ---
 
@@ -3324,7 +3328,7 @@
 
 **Domain:** artifact
 
-**Description:** Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level and, for review until the review ladder lands, only to a user who can already read the artifact; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited); the review path for non-managers never notifies
+**Description:** Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited)
 
 ### Entry Points
 
@@ -7609,6 +7613,56 @@
 - `pkg/hub:TestDecisionAnswer_ConcurrentOneWinner`
 - `pkg/hub:TestDecisionAnswer_IdempotencyKeyKeepsChecks`
 - `pkg/hub:TestDecisionAnswer_AskerRefusesMessages`
+
+---
+
+## chat.choiceprompt.answer
+
+**Domain:** chat
+
+**Description:** Answer every actionable decision of a choice prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one choice-response message in one transaction, delivers it to the asking agent and publishes choice.updated per row. 404 while web.chat_choices is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/choice-prompts/{messageId}/answers` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.choiceprompt.answer`
+- **Context Fields:** actor_id, prompt_message_id, batch_id
+- **After Fields:** response_message_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The answers and their response message are stored in one transaction before agent delivery, which is fire-and-forget
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** idempotency_key of the set
+- **Retry:** a client retry with the same idempotency key and answers replays the recorded set
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestChoiceSetAnswer_RecordsAndDeliversOneResponse`
+- `pkg/hub:TestChoiceSetAnswer_ChangedSet409`
+- `pkg/hub:TestChoiceSetAnswer_Authorization`
 
 ---
 
@@ -13598,6 +13652,134 @@
 - `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
 - `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
 - `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.pending.read
+
+**Domain:** secret
+
+**Description:** List the caller's own pending secrets: user-scope secrets written by an agent that wait for the caller's approval, alone or merged with the caller's approved user secrets (includePending=true). Metadata and provenance only, never the value. A federated caller is refused
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/pending-secrets` |
+| http_route | GET | `/api/v1/secrets` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestPendingSecretsAPI_Refusals`
+- `pkg/hub:TestPendingSecretsAPI_ListApproveReject`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.pending.decide
+
+**Domain:** secret
+
+**Description:** Approve (writing the caller's own user-level secret the agent requested) or reject one of the caller's own pending secrets. Another user's or an expired pending secret is not found. A federated caller is refused (requireProfileWriter)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/pending-secrets/{id}/approve` |
+| http_route | POST | `/api/v1/pending-secrets/{id}/reject` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `secret.write`
+- **Context Fields:** actor_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestPendingSecretsAPI_Refusals`
+- `pkg/hub:TestPendingSecretsAPI_ListApproveReject`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.pending.reveal
+
+**Domain:** secret
+
+**Description:** Return the held value of one of the caller's own pending secrets, audited (secret_pending_reveal). Another user's or an expired pending secret is not found. Cross-site and non-JSON browser requests are refused. A federated caller is refused (requireProfileWriter)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/pending-secrets/{id}/reveal` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `secret.read`
+- **Context Fields:** actor_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestPendingSecretsAPI_Refusals`
+- `pkg/hub:TestPendingSecretsAPI_ListApproveReject`
+- `pkg/hub:TestPendingSecretsAPI_Reveal`
+- `pkg/hub:TestPendingSecretsAPI_RevealRefusals`
+- `pkg/hub:TestPendingSecretsAPI_RevealCrossSiteRefused`
+- `pkg/hub:TestPendingSecretsAPI_RevealNoCORSHeaders`
+- `pkg/hub:TestPendingSecretsAPI_RevealProxyModeCrossSite`
 
 ### Exemptions
 

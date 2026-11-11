@@ -169,3 +169,7 @@ func (l *recordingAuditLogger) deniedCount() int {
 	}
 	return n
 }
+
+func (l *recordingAuditLogger) LogPendingSecretEvent(context.Context, *PendingSecretEvent) error {
+	return nil
+}

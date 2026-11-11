@@ -186,6 +186,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/chat/attachments":                       "policy:chat-attachment",
 	"/api/v1/chat/attachments/":                      "policy:chat-attachment",
 	"/api/v1/decisions/":                             "policy:chat",
+	"/api/v1/choice-prompts/":                        "policy:chat",
 	"/api/v1/runtime-brokers/connect":                "broker-hmac:control-channel",
 	"/api/v1/attachment-deliveries/":                 "broker-hmac:attachment-delivery",
 	"/api/v1/agent/gcp-token":                        "agent-token:gcp-token",
@@ -256,6 +257,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/usage":                            "hub-admin:quota",
 	"/api/v1/admin/usage/":                           "hub-admin:quota",
 	"/api/v1/usage/me":                               "authenticated:quota-usage",
+	"/api/v1/pending-secrets":                        "authenticated:user-secret",
+	"/api/v1/pending-secrets/":                       "authenticated:user-secret",
 	// Role management (PR-C1)
 	"/api/v1/admin/roles":          "hub-admin:role",
 	"/api/v1/admin/roles/":         "hub-admin:role",

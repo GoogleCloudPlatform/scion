@@ -16,9 +16,11 @@ package secret
 
 import (
 	"context"
+	"errors"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -31,6 +33,13 @@ type SMClient interface {
 	DeleteSecret(ctx context.Context, req *smpb.DeleteSecretRequest) error
 	GetSecret(ctx context.Context, req *smpb.GetSecretRequest) (*smpb.Secret, error)
 	Close() error
+}
+
+// smSecretLister is implemented by an SMClient that can list secrets. It
+// is kept apart from SMClient so clients that never list need not
+// implement it; GCPBackend.ListHeldPending uses it when present.
+type smSecretLister interface {
+	ListSecrets(ctx context.Context, req *smpb.ListSecretsRequest) ([]*smpb.Secret, error)
 }
 
 // gcpSMClient wraps the real GCP Secret Manager client to implement SMClient.
@@ -68,6 +77,23 @@ func (c *gcpSMClient) DeleteSecret(ctx context.Context, req *smpb.DeleteSecretRe
 
 func (c *gcpSMClient) GetSecret(ctx context.Context, req *smpb.GetSecretRequest) (*smpb.Secret, error) {
 	return c.client.GetSecret(ctx, req)
+}
+
+// ListSecrets implements smSecretLister: it returns every secret the
+// request matches, across all result pages.
+func (c *gcpSMClient) ListSecrets(ctx context.Context, req *smpb.ListSecretsRequest) ([]*smpb.Secret, error) {
+	var out []*smpb.Secret
+	it := c.client.ListSecrets(ctx, req)
+	for {
+		sec, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sec)
+	}
 }
 
 func (c *gcpSMClient) Close() error {

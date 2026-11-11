@@ -478,13 +478,34 @@ type ChatSearchResult struct {
 // NewWebChatStore creates a new WebChatStore backed by the given database.
 // The driverName selects the SQL dialect: "postgres" or "pgx" for Postgres,
 // anything else (including "" and "sqlite") for SQLite.
-func NewWebChatStore(db *sql.DB, driverName string) WebChatStore {
+func NewWebChatStore(db *sql.DB, driverName string, opts ...WebChatStoreOption) WebChatStore {
+	var o webChatStoreOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	switch driverName {
 	case "postgres", "pgx":
 		return &pgWebChatStore{db: db}
 	default:
-		return &sqliteWebChatStore{db: db}
+		return &sqliteWebChatStore{db: db, searchDB: o.searchDB}
 	}
+}
+
+// WebChatStoreOption configures a store built by NewWebChatStore.
+type WebChatStoreOption func(*webChatStoreOptions)
+
+type webChatStoreOptions struct {
+	searchDB *sql.DB
+}
+
+// WithSearchDB gives a SQLite store a separate read-only handle for
+// SearchChatMessages (ptone/scion#7586), opened by entc.OpenSQLiteSearchReader.
+// A slow search then holds a connection of its own, not the main handle's
+// single connection that every other request needs. A nil db, or a Postgres
+// store, keeps searching on the main handle: Postgres bounds a search with a
+// READ ONLY transaction and statement_timeout on its shared pool instead.
+func WithSearchDB(db *sql.DB) WebChatStoreOption {
+	return func(o *webChatStoreOptions) { o.searchDB = db }
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +516,17 @@ func NewWebChatStore(db *sql.DB, driverName string) WebChatStore {
 // Uses ? placeholders and SQLite-appropriate DDL types (TEXT, INTEGER).
 type sqliteWebChatStore struct {
 	db *sql.DB
+	// searchDB is the read-only search handle (WithSearchDB), or nil to
+	// search on db.
+	searchDB *sql.DB
+}
+
+// searchHandle returns the handle SearchChatMessages reads through.
+func (s *sqliteWebChatStore) searchHandle() *sql.DB {
+	if s.searchDB != nil {
+		return s.searchDB
+	}
+	return s.db
 }
 
 // DefaultMigrationBatchSize is the number of rows updated per batch
@@ -1629,6 +1661,30 @@ func (s *sqliteWebChatStore) TouchDMActivity(ctx context.Context, conversationKe
 // Wave-2 Search methods (SQLite)
 // ---------------------------------------------------------------------------
 
+// escapeLikeTerm escapes a search term for a LIKE or ILIKE pattern written
+// with ESCAPE '\', so every character of the term matches literally. The
+// backslash is escaped FIRST: escaping % or _ first would add backslashes
+// that the backslash pass then doubles, turning "\%" back into a wildcard.
+// A term ending in a single backslash ("ab\") becomes "ab\\" and so cannot
+// escape the pattern's closing %.
+func escapeLikeTerm(term string) string {
+	term = strings.ReplaceAll(term, `\`, `\\`)
+	term = strings.ReplaceAll(term, `%`, `\%`)
+	term = strings.ReplaceAll(term, `_`, `\_`)
+	return term
+}
+
+// searchError wraps a search query error. When the search's context has
+// ended, the result also matches ctx.Err() (context.DeadlineExceeded or
+// context.Canceled) under errors.Is, whatever form the driver reported the
+// interrupt in, so the handler can map a timeout to 503 SEARCH_TIMEOUT.
+func searchError(ctx context.Context, step string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		return fmt.Errorf("webchat store: %s: %w", step, errors.Join(err, ctxErr))
+	}
+	return fmt.Errorf("webchat store: %s: %w", step, err)
+}
+
 // SearchChatMessages performs a case-insensitive substring search over the
 // messages table, scoped to channel='web'. SQLite LIKE is case-insensitive
 // for ASCII which covers most search queries.
@@ -1640,12 +1696,14 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 		filter.Limit = 200
 	}
 
-	// Check if the messages table exists.
-	tableExists, err := s.tableExists(ctx, "messages")
-	if err != nil {
-		return nil, "", err
+	// Check if the messages table exists, through the search handle, so a
+	// search never queues for the main handle's connection (round-2 R2-03).
+	var tables int
+	if err := s.searchHandle().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'messages'").Scan(&tables); err != nil {
+		return nil, "", searchError(ctx, "check table messages exists", err)
 	}
-	if !tableExists {
+	if tables == 0 {
 		return nil, "", nil
 	}
 
@@ -1653,9 +1711,15 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 	var conditions []string
 	var args []interface{}
 
-	conditions = append(conditions, "channel = 'web'")
-	conditions = append(conditions, "msg LIKE '%' || ? || '%'")
-	args = append(args, filter.Query)
+	conditions = append(conditions, "m.channel = 'web'")
+	// The term is matched literally: escapeLikeTerm escapes \, % and _, so
+	// user input can never widen the pattern (design v3 section 9 item 3).
+	conditions = append(conditions, `m.msg LIKE '%' || ? || '%' ESCAPE '\'`)
+	args = append(args, escapeLikeTerm(filter.Query))
+	// A soft-deleted message is never a result, even before (or without)
+	// the best-effort blanking of its text: the rule the history endpoint
+	// applies (design v3 section 9 item 4).
+	conditions = append(conditions, "x.deleted_at IS NULL")
 
 	if filter.ConversationKey != "" {
 		conditions = append(conditions, "thread_id = ?")
@@ -1707,17 +1771,21 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 	}
 
 	query := fmt.Sprintf(`
-SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
-  FROM messages
+SELECT m.id, m.project_id, COALESCE(m.thread_id, ''), m.sender, m.msg, m.created
+  FROM messages m
+  LEFT JOIN webchat_message_ext x ON x.message_id = m.id
  WHERE %s
- ORDER BY created DESC, id DESC
+ ORDER BY m.created DESC, m.id DESC
  LIMIT ?
 `, strings.Join(conditions, " AND "))
 	args = append(args, filter.Limit+1) // fetch one extra to detect next page
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	// The read-only search handle (WithSearchDB) keeps a slow search off the
+	// main handle. The caller's context deadline interrupts the statement
+	// (modernc calls sqlite3_interrupt when the context ends).
+	rows, err := s.searchHandle().QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("webchat store: search messages: %w", err)
+		return nil, "", searchError(ctx, "search messages", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1733,7 +1801,7 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("webchat store: search rows: %w", err)
+		return nil, "", searchError(ctx, "search rows", err)
 	}
 
 	// Determine next cursor.

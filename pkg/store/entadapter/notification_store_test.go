@@ -933,3 +933,28 @@ func TestPurgeOrphanedNotifications_StopsWhenDeleteRemovesNothing(t *testing.T) 
 	assert.Equal(t, 0, purged)
 	assert.Equal(t, 1, deletes, "the purge stops after one delete that removes nothing")
 }
+
+func TestNotificationStore_UpdateNotificationContent(t *testing.T) {
+	s := newTestNotificationStore(t)
+	ctx := context.Background()
+	created := time.Now().UTC().Truncate(time.Second)
+	n := &store.Notification{
+		ID: uuid.NewString(), SubscriptionID: store.CreatorFallbackSubscriptionID, AgentID: uuid.Nil.String(),
+		ProjectID: uuid.Nil.String(), SubscriberType: store.SubscriberTypeUser, SubscriberID: "user-1",
+		Status: "SECRET_PENDING", Message: "first", CreatedAt: created, Kind: "secret_pending",
+		ResourceType: "pending_secret", ResourceID: "pend-1",
+	}
+	require.NoError(t, s.CreateNotification(ctx, n))
+	require.NoError(t, s.AcknowledgeNotification(ctx, n.ID))
+
+	require.NoError(t, s.UpdateNotificationContent(ctx, n.ID, "second", "pend-2"))
+	got, err := s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "second", got.Message)
+	assert.Equal(t, "pend-2", got.ResourceID)
+	assert.False(t, got.Acknowledged, "an updated notification shows again")
+	assert.True(t, got.CreatedAt.Equal(created))
+	assert.Equal(t, "secret_pending", got.Kind)
+
+	assert.ErrorIs(t, s.UpdateNotificationContent(ctx, uuid.NewString(), "x", "y"), store.ErrNotFound)
+}

@@ -60,6 +60,7 @@ interface AgentNotificationsResponse {
 }
 import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { agentPlacementView } from './agent-placement.js';
 import {
   gcpModeLabel,
@@ -1318,6 +1319,7 @@ export class ScionPageAgentDetail extends LitElement {
         // The hub's start warnings (for example, a token issued without the
         // artifact scopes).
         await showResponseBodyWarnings(response);
+        void showPendingSecretsStartHint();
       }
 
       this.backgroundRefresh();

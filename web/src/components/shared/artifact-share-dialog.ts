@@ -22,16 +22,6 @@
  * A share link opens the artifact in the hub's sandboxed viewer; the token
  * is shown only in the answer that created it and never again.
  *
- * With mode "review" it is the Grant review access dialog, for a caller the
- * hub reports canGrantReview for (the delegating user of the agent that
- * owns the artifact, the project owners and admins of its home project,
- * and super-admins; design D24, ptone/scion#4014): only the people search,
- * offering users, with the permission fixed to review (ptone/scion#4538: a
- * user who can already read the artifact may then publish reviews of it,
- * and nothing else; the grant gives no read access). It loads neither the
- * grants nor the share links (both admin-only) and shows the grants it
- * made, not a grant list.
- *
  * With mode "retention" it is the Retention and access dialog, for a caller
  * who may change the artifact's expiry, revoke its links and remove its
  * grants but is not offered sharing here (a steward, canShare without
@@ -49,7 +39,7 @@
  * caller who may change access or retention, with People and access, Link
  * sharing and Retention each editable, read-only or hidden as the page's
  * capabilities decide (artifact-access-sections.ts). Every render and load
- * decision reads those section states; the three older modes are fixed
+ * decision reads those section states; the two older modes are fixed
  * presets of them, so they render as before.
  */
 
@@ -110,13 +100,13 @@ export interface ShareSubject {
 }
 
 /**
- * "share": the full Share dialog; "review": Grant review access only;
- * "retention": the Retention and access dialog (ptone/scion#4535, mock
- * states S5 and S6): retention, share links with Revoke only, and grants
- * with Remove only; "manage": the Manage access dialog (ptone/scion#7107),
- * its sections decided from the capabilities.
+ * "share": the full Share dialog; "retention": the Retention and access
+ * dialog (ptone/scion#4535, mock states S5 and S6): retention, share links
+ * with Revoke only, and grants with Remove only; "manage": the Manage
+ * access dialog (ptone/scion#7107), its sections decided from the
+ * capabilities.
  */
-export type ShareDialogMode = 'share' | 'review' | 'retention' | 'manage';
+export type ShareDialogMode = 'share' | 'retention' | 'manage';
 
 /** A retention choice: keep, the current expiry, or a number of days from now. */
 export type RetentionChoice = 'never' | 'current' | `${number}d`;
@@ -407,10 +397,9 @@ export class ScionArtifactShareDialog extends LitElement {
     return sectionStates(this.capabilities, { stewardCreateLink: STEWARD_CREATE_LINK });
   }
 
-  /** The add row gives users review access only (review-only or bounded). */
+  /** The add row gives users review access only (a steward: bounded). */
   private get reviewAdd(): boolean {
-    const p = this.states.people;
-    return p === 'review-only' || p === 'bounded';
+    return this.states.people === 'bounded';
   }
 
   /** The caller's steward clause: the capabilities' in manage mode, the property otherwise. */
@@ -609,7 +598,7 @@ export class ScionArtifactShareDialog extends LitElement {
     }
   }
 
-  /** Review mode's Add: a review grant to the picked user, and nothing else. */
+  /** A steward's Add: a review grant to the picked user, and nothing else. */
   private async grantReview(): Promise<void> {
     const a = this.artifact;
     const s = this.subject;
@@ -623,7 +612,7 @@ export class ScionArtifactShareDialog extends LitElement {
       this.subject = null;
       this.query = '';
       // A steward also sees the grant list: reload it so the new grant shows.
-      if (this.states.people === 'bounded') void this.load(true);
+      void this.load(true);
     } catch (err) {
       this.fail(err, 'Could not grant review access');
     } finally {
@@ -932,24 +921,6 @@ export class ScionArtifactShareDialog extends LitElement {
     `;
   }
 
-  private renderReview(a: Artifact): TemplateResult {
-    // Follows the people section of the approved Share mock, limited to
-    // giving a user review access (ptone/scion#4593).
-    return html`
-      <section aria-labelledby="review-heading">
-        <p class="hint" id="review-heading">
-          Give a person who can already read “${a.title}” review access. They will be able to
-          publish reviews of it, and nothing else.
-        </p>
-        <p class="hint">
-          Review access is only for people who can already read this artifact: members of its home
-          project, or of a project it is shared with.
-        </p>
-        ${this.renderReviewAdd()}
-      </section>
-    `;
-  }
-
   /** The review add row: who was given review access, the people search and Add. */
   private renderReviewAdd(): TemplateResult {
     return html`
@@ -999,40 +970,26 @@ export class ScionArtifactShareDialog extends LitElement {
 
   /**
    * Manage mode's people section (mock v1): the full section for a manager;
-   * review access plus the grant list with Remove for a steward; review
-   * access only, with no list, for a caller who may only give review.
+   * review access plus the grant list with Remove for a steward.
    */
-  private renderManagePeople(a: Artifact): TemplateResult | typeof nothing {
+  private renderManagePeople(): TemplateResult | typeof nothing {
     const st = this.states.people;
     if (st === 'hidden') return nothing;
     if (st === 'edit') return this.renderPeople('People and access');
     if (st === 'remove-only') return this.renderAccessList('People and access');
-    if (st === 'bounded') {
-      const others = this.grants.filter((g) => !g.home);
-      return html`
-        <section aria-labelledby="people-heading">
-          <h3 id="people-heading"><sl-icon name="people"></sl-icon>People and access</h3>
-          <p class="hint">
-            You can give review access here and remove anyone's access. To give
-            <em>${PERMISSION_LABELS.read}</em> or <em>${PERMISSION_LABELS.write}</em>, use
-            <code>scion artifact grants</code> for now.
-          </p>
-          ${this.renderReviewAdd()} ${this.grants.map((g) => this.renderGrantReadOnly(g))}
-          ${others.length === 0
-            ? html`<p class="empty">No other people or projects have access.</p>`
-            : nothing}
-        </section>
-      `;
-    }
+    const others = this.grants.filter((g) => !g.home);
     return html`
       <section aria-labelledby="people-heading">
         <h3 id="people-heading"><sl-icon name="people"></sl-icon>People and access</h3>
         <p class="hint">
-          Give a person who can already read “${a.title}” review access. They can then publish
-          reviews of it, and nothing else. The list of who has access is shown only to the owner,
-          managers and stewards.
+          You can give review access here and remove anyone's access. To give
+          <em>${PERMISSION_LABELS.read}</em> or <em>${PERMISSION_LABELS.write}</em>, use
+          <code>scion artifact grants</code> for now.
         </p>
-        ${this.renderReviewAdd()}
+        ${this.renderReviewAdd()} ${this.grants.map((g) => this.renderGrantReadOnly(g))}
+        ${others.length === 0
+          ? html`<p class="empty">No other people or projects have access.</p>`
+          : nothing}
       </section>
     `;
   }
@@ -1074,21 +1031,6 @@ export class ScionArtifactShareDialog extends LitElement {
     void lookup().then((name) => {
       if (name && this.isConnected) this.names = new Map(this.names).set(key, name);
     });
-  }
-
-  /** Manage mode's retention for a caller who may not change it. */
-  private renderRetentionReadOnly(a: Artifact): TemplateResult {
-    return html`
-      <section aria-labelledby="retention-heading">
-        <h3 id="retention-heading"><sl-icon name="clock"></sl-icon>Retention</h3>
-        <p class="expires">
-          ${a.expiresAt
-            ? html`Expires <strong>${formatInstant(a.expiresAt)}</strong>.`
-            : html`Kept until deleted.`}
-        </p>
-        <p class="hint">Only the owner, a manager or a steward can change this.</p>
-      </section>
-    `;
   }
 
   /** Retention mode's hint for share links, by what the caller may do elsewhere. */
@@ -1280,17 +1222,12 @@ export class ScionArtifactShareDialog extends LitElement {
   private renderSections(a: Artifact): TemplateResult {
     const st = this.states;
     if (this.mode === 'manage') {
-      return html`${this.renderAuthorityNote(a)} ${this.renderManagePeople(a)}
+      return html`${this.renderAuthorityNote(a)} ${this.renderManagePeople()}
       ${st.links === 'hidden' ? nothing : this.renderLinks(a)}
-      ${st.retention === 'edit'
-        ? this.renderRetention(a)
-        : st.retention === 'read-only'
-          ? this.renderRetentionReadOnly(a)
-          : nothing}`;
+      ${st.retention === 'edit' ? this.renderRetention(a) : nothing}`;
     }
     let people: TemplateResult | typeof nothing = nothing;
     if (st.people === 'edit') people = this.renderPeople();
-    else if (st.people === 'review-only') people = this.renderReview(a);
     else if (st.people === 'remove-only') people = this.renderAccessList();
     const links = st.links === 'hidden' ? nothing : this.renderLinks(a);
     const retention = st.retention === 'edit' ? this.renderRetention(a) : nothing;
@@ -1335,7 +1272,6 @@ export class ScionArtifactShareDialog extends LitElement {
 
   private dialogLabel(a: Artifact | null): string {
     if (this.mode === 'manage') return a ? `Manage access: “${a.title}”` : 'Manage access';
-    if (this.mode === 'review') return 'Grant review access';
     if (this.mode === 'retention')
       return a ? `Retention and access: “${a.title}”` : 'Retention and access';
     return a ? `Share “${a.title}”` : 'Share';
@@ -1353,31 +1289,27 @@ export class ScionArtifactShareDialog extends LitElement {
       >
         ${a ? this.renderBody(a) : nothing}
         <div slot="footer" class="footer">
-          ${this.mode === 'review'
-            ? html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
-                >Close</sl-button
-              >`
-            : this.retentionChanged
-              ? html`
-                  <sl-button
-                    size="small"
-                    ?disabled=${this.saving}
-                    @click=${(): void => {
-                      this.retention = this.initialRetention;
-                    }}
-                    >Cancel</sl-button
-                  >
-                  <sl-button
-                    size="small"
-                    variant="primary"
-                    ?loading=${this.saving}
-                    @click=${(): void => void this.saveRetention()}
-                    >Save</sl-button
-                  >
-                `
-              : html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
-                  >Done</sl-button
-                >`}
+          ${this.retentionChanged
+            ? html`
+                <sl-button
+                  size="small"
+                  ?disabled=${this.saving}
+                  @click=${(): void => {
+                    this.retention = this.initialRetention;
+                  }}
+                  >Cancel</sl-button
+                >
+                <sl-button
+                  size="small"
+                  variant="primary"
+                  ?loading=${this.saving}
+                  @click=${(): void => void this.saveRetention()}
+                  >Save</sl-button
+                >
+              `
+            : html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
+                >Done</sl-button
+              >`}
         </div>
       </sl-dialog>
     `;

@@ -353,6 +353,17 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	countedOutcome = ""
+	// A hub user token request by the link's own user runs as itself: its
+	// session generation is captured and re-checked (proxyToAgentPort). A
+	// hub user token request by ANOTHER user (a sub-request, not a
+	// navigation) runs as the link: it gets what the link grants to any
+	// holder, and its own credential is never captured, so that user's
+	// generation is never stamped on the link user's identity
+	// (contextWithPortViewLink). Other credentials, and none, capture
+	// nothing and need no marker.
+	if u := GetUserIdentityFromContext(r.Context()); requestAuthType(r.Context()) == AuthTypeJWT && (u == nil || u.ID() != grant.UserID) {
+		r = r.WithContext(contextWithPortViewLink(r.Context(), grant))
+	}
 	s.proxyToAgentPort(w, r, identity, agent, exposed, "/"+sub, portProxyPolicy{
 		surface:  portProxySurfaceView,
 		caller:   "user:" + grant.UserID,

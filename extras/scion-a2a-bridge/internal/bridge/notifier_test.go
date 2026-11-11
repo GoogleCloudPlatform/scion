@@ -179,7 +179,7 @@ func TestDegradationToPurePolling(t *testing.T) {
 
 	// Start blocking wait (uses polling only).
 	go func() {
-		ev, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second)
+		ev, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second, waitOptions{})
 		resultCh <- result{ev, err}
 	}()
 
@@ -274,7 +274,7 @@ func TestNotifierReconnectsOnConnectionDeath(t *testing.T) {
 	// Start blocking wait — notifier.Register will try to start the broken
 	// connection, fail, and degrade to polling.
 	go func() {
-		ev, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second)
+		ev, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second, waitOptions{})
 		resultCh <- result{ev, err}
 	}()
 

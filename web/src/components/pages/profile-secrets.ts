@@ -61,8 +61,9 @@ export class ScionPageProfileSecrets extends LitElement {
         <div class="page-header-info">
           <h1>Secrets</h1>
           <p>
-            Manage encrypted secrets for your agents. Values are write-only and cannot be retrieved
-            after saving.
+            Manage encrypted secrets for your agents. Saved values cannot be retrieved. Secrets your
+            agents save wait for your approval before they are delivered; you can reveal a pending
+            value before you approve it.
           </p>
         </div>
       </div>

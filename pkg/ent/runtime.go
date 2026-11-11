@@ -69,6 +69,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/pendingsecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -1263,8 +1264,12 @@ func init() {
 			return nil
 		}
 	}()
+	// decisionanswerDescMatchedDefault is the schema descriptor for matched_default field.
+	decisionanswerDescMatchedDefault := decisionanswerFields[22].Descriptor()
+	// decisionanswer.DefaultMatchedDefault holds the default value on creation for the matched_default field.
+	decisionanswer.DefaultMatchedDefault = decisionanswerDescMatchedDefault.Default.(bool)
 	// decisionanswerDescCreatedAt is the schema descriptor for created_at field.
-	decisionanswerDescCreatedAt := decisionanswerFields[21].Descriptor()
+	decisionanswerDescCreatedAt := decisionanswerFields[23].Descriptor()
 	// decisionanswer.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decisionanswer.DefaultCreatedAt = decisionanswerDescCreatedAt.Default.(func() time.Time)
 	// decisionanswerDescID is the schema descriptor for id field.
@@ -2294,6 +2299,52 @@ func init() {
 	notificationsubscriptionDescID := notificationsubscriptionFields[0].Descriptor()
 	// notificationsubscription.DefaultID holds the default value on creation for the id field.
 	notificationsubscription.DefaultID = notificationsubscriptionDescID.Default.(func() uuid.UUID)
+	pendingsecretFields := schema.PendingSecret{}.Fields()
+	_ = pendingsecretFields
+	// pendingsecretDescKey is the schema descriptor for key field.
+	pendingsecretDescKey := pendingsecretFields[1].Descriptor()
+	// pendingsecret.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	pendingsecret.KeyValidator = pendingsecretDescKey.Validators[0].(func(string) error)
+	// pendingsecretDescScope is the schema descriptor for scope field.
+	pendingsecretDescScope := pendingsecretFields[4].Descriptor()
+	// pendingsecret.ScopeValidator is a validator for the "scope" field. It is called by the builders before save.
+	pendingsecret.ScopeValidator = pendingsecretDescScope.Validators[0].(func(string) error)
+	// pendingsecretDescScopeID is the schema descriptor for scope_id field.
+	pendingsecretDescScopeID := pendingsecretFields[5].Descriptor()
+	// pendingsecret.ScopeIDValidator is a validator for the "scope_id" field. It is called by the builders before save.
+	pendingsecret.ScopeIDValidator = pendingsecretDescScopeID.Validators[0].(func(string) error)
+	// pendingsecretDescAllowProgeny is the schema descriptor for allow_progeny field.
+	pendingsecretDescAllowProgeny := pendingsecretFields[6].Descriptor()
+	// pendingsecret.DefaultAllowProgeny holds the default value on creation for the allow_progeny field.
+	pendingsecret.DefaultAllowProgeny = pendingsecretDescAllowProgeny.Default.(bool)
+	// pendingsecretDescValueRef is the schema descriptor for value_ref field.
+	pendingsecretDescValueRef := pendingsecretFields[9].Descriptor()
+	// pendingsecret.ValueRefValidator is a validator for the "value_ref" field. It is called by the builders before save.
+	pendingsecret.ValueRefValidator = pendingsecretDescValueRef.Validators[0].(func(string) error)
+	// pendingsecretDescValueLen is the schema descriptor for value_len field.
+	pendingsecretDescValueLen := pendingsecretFields[10].Descriptor()
+	// pendingsecret.ValueLenValidator is a validator for the "value_len" field. It is called by the builders before save.
+	pendingsecret.ValueLenValidator = pendingsecretDescValueLen.Validators[0].(func(int) error)
+	// pendingsecretDescAgentID is the schema descriptor for agent_id field.
+	pendingsecretDescAgentID := pendingsecretFields[11].Descriptor()
+	// pendingsecret.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	pendingsecret.AgentIDValidator = pendingsecretDescAgentID.Validators[0].(func(string) error)
+	// pendingsecretDescAgentSlug is the schema descriptor for agent_slug field.
+	pendingsecretDescAgentSlug := pendingsecretFields[12].Descriptor()
+	// pendingsecret.AgentSlugValidator is a validator for the "agent_slug" field. It is called by the builders before save.
+	pendingsecret.AgentSlugValidator = pendingsecretDescAgentSlug.Validators[0].(func(string) error)
+	// pendingsecretDescProjectID is the schema descriptor for project_id field.
+	pendingsecretDescProjectID := pendingsecretFields[13].Descriptor()
+	// pendingsecret.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	pendingsecret.ProjectIDValidator = pendingsecretDescProjectID.Validators[0].(func(string) error)
+	// pendingsecretDescProjectName is the schema descriptor for project_name field.
+	pendingsecretDescProjectName := pendingsecretFields[14].Descriptor()
+	// pendingsecret.ProjectNameValidator is a validator for the "project_name" field. It is called by the builders before save.
+	pendingsecret.ProjectNameValidator = pendingsecretDescProjectName.Validators[0].(func(string) error)
+	// pendingsecretDescID is the schema descriptor for id field.
+	pendingsecretDescID := pendingsecretFields[0].Descriptor()
+	// pendingsecret.DefaultID holds the default value on creation for the id field.
+	pendingsecret.DefaultID = pendingsecretDescID.Default.(func() uuid.UUID)
 	policybindingFields := schema.PolicyBinding{}.Fields()
 	_ = policybindingFields
 	// policybindingDescCreated is the schema descriptor for created field.

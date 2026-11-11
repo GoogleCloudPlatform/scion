@@ -427,6 +427,90 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 	return client, nil
 }
 
+// SQLiteSearchReaderMaxOpen is the default connection cap of the search
+// reader. It matches the default hub-wide search cap on SQLite.
+const SQLiteSearchReaderMaxOpen = 2
+
+// SQLiteSearchReaderIdleTime is how long the search reader keeps an idle
+// connection open.
+const SQLiteSearchReaderIdleTime = 30 * time.Second
+
+// OpenSQLiteSearchReader opens a separate read-only *sql.DB on the hub's
+// SQLite file for chat search (ptone/scion#7586). A search reads through its
+// own pool, so a slow search cannot hold the main handle's connection that
+// every other request needs.
+//
+// The connections are opened with mode=ro and cache=private, and with
+// query_only(1) as a second guard against writes. busy_timeout(2000) makes a
+// read wait briefly for a writer's lock instead of failing at once. Times are
+// read as UTC, the same as the main handle. The pool opens at most
+// SQLiteSearchReaderMaxOpen connections, keeps one idle and drops it after
+// SQLiteSearchReaderIdleTime. A caller with a different hub-wide search cap
+// calls SetMaxOpenConns with that cap, so a search never queues for a
+// connection. Like OpenSQLiteReadOnly, it does not switch the journal mode:
+// the hub's main handle has already put the database in WAL mode.
+//
+// An in-memory DSN cannot be shared by a second pool. For one, the caller
+// keeps using the main handle (see SQLiteDSNIsMemory).
+func OpenSQLiteSearchReader(dsn string) (*sql.DB, error) {
+	if SQLiteDSNIsMemory(dsn) {
+		return nil, fmt.Errorf("opening sqlite search reader: in-memory DSN has no separate reader")
+	}
+	ro, err := withSQLiteURIParams(withUTCTimezone(dsn), map[string]string{"mode": "ro", "cache": "private"})
+	if err != nil {
+		return nil, fmt.Errorf("opening sqlite search reader: %w", err)
+	}
+	db, err := sql.Open("sqlite", sqliteDSNPragmas(ro, "query_only(1)", "busy_timeout(2000)"))
+	if err != nil {
+		return nil, fmt.Errorf("opening sqlite search reader: %w", err)
+	}
+	db.SetMaxOpenConns(SQLiteSearchReaderMaxOpen)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(SQLiteSearchReaderIdleTime)
+	if err := requireSQLitePragmaOn(db, "query_only"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enabling query_only mode on search reader: %w", err)
+	}
+	return db, nil
+}
+
+// SQLiteDSNIsMemory reports whether dsn names an in-memory SQLite database
+// (":memory:", "file::memory:..." or a URI with mode=memory). Such a database
+// lives inside one pool, so a second pool on the same DSN would see a
+// different, empty database.
+func SQLiteDSNIsMemory(dsn string) bool {
+	base, rawQuery, _ := strings.Cut(dsn, "?")
+	base = strings.TrimPrefix(base, "file:")
+	if base == "" || base == ":memory:" {
+		return true
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(values.Get("mode"), "memory")
+}
+
+// withSQLiteURIParams returns dsn as a "file:" URI with each of params set,
+// replacing a caller value for the same key. modernc opens the name with
+// SQLITE_OPEN_URI, so mode and cache are honoured only on a "file:" name.
+// A query that cannot be parsed is an error, never the DSN unchanged: that
+// would drop the params silently (round-3 item R3-03).
+func withSQLiteURIParams(dsn string, params map[string]string) (string, error) {
+	base, rawQuery, _ := strings.Cut(dsn, "?")
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "", fmt.Errorf("parse sqlite DSN query: %w", err)
+	}
+	if !strings.HasPrefix(base, "file:") {
+		base = "file:" + base
+	}
+	for k, v := range params {
+		values.Set(k, v)
+	}
+	return base + "?" + values.Encode(), nil
+}
+
 // OpenPostgres creates an Ent client backed by PostgreSQL.
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").

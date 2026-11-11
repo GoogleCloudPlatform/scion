@@ -29,6 +29,39 @@ type Config struct {
 	Timeouts  TimeoutConfig   `yaml:"timeouts"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	ReplyPoll ReplyPollConfig `yaml:"reply_poll"`
+}
+
+// defaultReplyPollConcurrency is the default cap on in-flight reply poll
+// reads per bridge process.
+const defaultReplyPollConcurrency = 64
+
+// ReplyPollConfig controls how the executor returns an agent's reply: by
+// reading it from the caller's own conversation with the agent, with the
+// caller's own credential.
+type ReplyPollConfig struct {
+	// Enabled turns reply polling on. Unset means on. When false, the
+	// executor waits on pushed broker messages only, as before reply
+	// polling existed: no same-caller check, no conversation preflight, no
+	// poller and no wait filter. The push path's user check and the admin
+	// topic subscription apply either way.
+	Enabled *bool `yaml:"enabled"`
+	// Concurrency caps the reply poll reads in flight per bridge process.
+	// Zero or less means the default (64).
+	Concurrency int `yaml:"concurrency"`
+}
+
+// IsEnabled reports whether reply polling is on (the default).
+func (c ReplyPollConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// MaxConcurrent returns the cap on in-flight reply poll reads.
+func (c ReplyPollConfig) MaxConcurrent() int {
+	if c.Concurrency <= 0 {
+		return defaultReplyPollConcurrency
+	}
+	return c.Concurrency
 }
 
 // BridgeConfig holds the A2A protocol server settings.

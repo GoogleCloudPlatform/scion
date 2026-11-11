@@ -869,10 +869,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Artifact store initialized")
 				}
 
-				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
+				searchOpts, closeSearch := webChatSearchOptions(cfg)
+				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver, searchOpts...)
 				if err := ws.Init(); err != nil {
+					closeSearch()
 					log.Printf("Warning: failed to initialize webchat store: %v", err)
 				} else {
+					defer closeSearch()
 					webStore = ws
 					hubSrv.SetWebChatStore(webStore)
 					log.Printf("Web chat store initialized")
@@ -2488,6 +2491,17 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 	return endpoint
 }
 
+// serverConfiguredHubEndpoint is the server's own explicit
+// server.hub.endpoint (SCION_SERVER_HUB_ENDPOINT when set), as loaded, with
+// no derivation; "" for a nil config. Code outside the server's files reads
+// the server's configured endpoint through it.
+func serverConfiguredHubEndpoint(cfg *config.GlobalConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Hub.Endpoint
+}
+
 // resolveHubEndpointWithSource determines the Hub's public endpoint URL and
 // reports which input it came from.
 func resolveHubEndpointWithSource(cfg *config.GlobalConfig, brokerSettings *config.Settings) (string, hubEndpointSource) {
@@ -2950,6 +2964,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
+		ChatSearchTimeout:            chatSearchTimeout(cfg),
+		ChatSearchMaxConcurrent:      cfg.Hub.Chat.Search.MaxConcurrent,
+		DatabaseMaxOpenConns:         cfg.Database.MaxOpenConns,
 		PerfTrace:                    cfg.Hub.PerfTrace,
 		CSPReportRawSamples:          cfg.Hub.CSPReportRawSamples,
 		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,
@@ -3165,6 +3182,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitIngressDrainMetrics(drainRec)
 	}
 
+	if searchRec, err := hub.NewOTelChatSearchMetrics(mp); err != nil {
+		log.Printf("WARNING: hub chat search metrics disabled: %v", err)
+	} else {
+		hubSrv.SetChatSearchMetrics(searchRec)
+	}
+
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit agent refresh metrics disabled: %v", err)
 	} else {
@@ -3275,6 +3298,12 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 }
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+	// A serving hub always has a store: the auth middleware's per-request
+	// user-row checks (account status, session generation) read it, and
+	// are skipped without one.
+	if s == nil {
+		return nil, errors.New("hub server initialization failed: no store configured")
+	}
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
 	hubCfg.MaintenanceConfig.Installer = detectUpdateInstaller(ctx, hubCfg.MaintenanceConfig)

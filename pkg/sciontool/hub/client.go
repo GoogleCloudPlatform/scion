@@ -526,6 +526,40 @@ type SetSecretResponse struct {
 	Key     string `json:"key"`
 	Scope   string `json:"scope"`
 	ScopeID string `json:"scopeId"`
+
+	// State is "pending" when the Hub accepted a user-scope write for the
+	// owner's approval (202); it is empty for a project-scope write, which
+	// is stored directly.
+	State            string    `json:"state,omitempty"`
+	PendingID        string    `json:"pendingId,omitempty"`
+	ExpiresAt        time.Time `json:"expiresAt,omitempty"`
+	ReplacesExisting bool      `json:"replacesExisting,omitempty"`
+	Message          string    `json:"message,omitempty"`
+}
+
+// Pending reports whether the write waits for the owner's approval.
+func (r *SetSecretResponse) Pending() bool { return r != nil && r.State == "pending" }
+
+// ErrCodeSecretPendingHeldByOtherAgent is the Hub error code for a write to a
+// user secret name that another agent's pending secret holds.
+const ErrCodeSecretPendingHeldByOtherAgent = "secret_pending_held_by_other_agent"
+
+// ErrCodeSecretPendingCap is the Hub error code (429) for a user secret
+// write over the pending secret caps: too many secrets from this agent, or
+// for its owner, await approval.
+const ErrCodeSecretPendingCap = "secret_pending_cap"
+
+// secretErrorCode returns the error code of a Hub error response body.
+func secretErrorCode(body []byte) string {
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return ""
+	}
+	return env.Error.Code
 }
 
 type ExposedPort struct {
@@ -716,7 +750,7 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 	respBody, _ := io.ReadAll(resp.Body)
 
 	switch resp.StatusCode {
-	case http.StatusCreated:
+	case http.StatusCreated, http.StatusAccepted:
 		var result SetSecretResponse
 		if err := json.Unmarshal(respBody, &result); err != nil {
 			return nil, fmt.Errorf("failed to parse response: %w", err)
@@ -728,7 +762,17 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 		}
 		return &SetSecretResponse{Key: key, Scope: scope}, nil
 	case http.StatusConflict:
+		if secretErrorCode(respBody) == ErrCodeSecretPendingHeldByOtherAgent {
+			return nil, fmt.Errorf("secret %q: a pending secret with this name, saved by another agent, is awaiting your approval in Scion; "+
+				"approve or reject it before saving this one (%s)", key, ErrCodeSecretPendingHeldByOtherAgent)
+		}
 		return nil, fmt.Errorf("secret %q already exists (use --force to overwrite)", key)
+	case http.StatusTooManyRequests:
+		if secretErrorCode(respBody) == ErrCodeSecretPendingCap {
+			return nil, fmt.Errorf("secret %q not saved: too many secrets already await your approval in Scion; "+
+				"approve or reject them before saving more (%s)", key, ErrCodeSecretPendingCap)
+		}
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	default:
 		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	}

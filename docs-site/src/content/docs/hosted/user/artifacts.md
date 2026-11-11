@@ -258,20 +258,18 @@ A steward cannot give *Can manage* or move the artifact to another project. The 
 
 Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked (for an artifact whose delegating user was not recorded on the artifact at creation), or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
 
-When the `web.artifact_manage_access` experiment is on, the artifact page replaces **Share**, **Grant review access** and **Retention…** with a single **Manage access** dialog, where stewards can create and revoke share links, give a user *Can review*, remove grants, and change the artifact's expiry; giving *Can view* or *Can edit* still uses `scion artifact grants`. With `web.artifact_manage_access` off, stewards share from the CLI:
+When the `web.artifact_manage_access` experiment is on, the artifact page replaces **Share** and **Retention…** with a single **Manage access** dialog, where stewards can create and revoke share links, give a user *Can review*, remove grants, and change the artifact's expiry; giving *Can view* or *Can edit* still uses `scion artifact grants`. With `web.artifact_manage_access` off, stewards share from the CLI:
 
 ```bash
 scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission read
 scion artifact share scion://artifact/5f1c2d3e-... --ttl 3d
 ```
 
-### Grant review access to an agent's artifact
+### Give review access to an agent's artifact
 
-For an artifact **owned by an agent**, admins of its home project who are not stewards may still give a person review access, even though they cannot otherwise manage the artifact. The stewards (the user who delegated to the agent, and the project's owners) can do this too, and more; see [Share an agent's artifact](#share-an-agents-artifact). When the `hub.artifact_sponsor_review_grant` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on (off by default), the Hub automatically gives the recorded delegating user a *Can review* grant (`user:<id>`) when an agent creates a new artifact in a project, if that user is active and holds a role that reads in the artifact's home project; that automatic grant gives review access while the user keeps a role that reads in the home project, until its permission is changed or it is removed.
+For an artifact **owned by an agent**, its stewards (the user who delegated to the agent, and the owners of its home project) give a person review access: with **Manage access** when the `web.artifact_manage_access` experiment is on, or with `scion artifact grants <ref> --add user:<id> --permission review`; see [Share an agent's artifact](#share-an-agents-artifact). When the `hub.artifact_sponsor_review_grant` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on (off by default), the Hub automatically gives the recorded delegating user a *Can review* grant (`user:<id>`) when an agent creates a new artifact in a project, if that user is active and holds a role that reads in the artifact's home project; that automatic grant gives review access while the user keeps a role that reads in the home project, until its permission is changed or it is removed.
 
-With `web.artifact_manage_access` off, non-owner project admins and stewards see **Grant review access** on the artifact page instead of **Share** (with `web.artifact_manage_access` on, they use **Manage access**). Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
-
-Review access added by a non-steward project admin (or created automatically by `hub.artifact_sponsor_review_grant`) does not give read access: the person must already be able to read the artifact, through its home project or a grant to one of their projects, and if that access ends, so does review. A non-steward project admin's review grant is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review. A *Can review* grant added by the artifact's owner, a user with *Can manage*, or a steward also gives read access on its own (see [Grants](/scion/reference/artifacts/#grants)).
+*Can review* lets the person read the artifact and publish reviews of it, and nothing else; *Can edit* and *Can manage* include it. The automatic grant is the one exception: while it keeps its automatic form, it counts only while its holder keeps a role that reads in the artifact's home project (see [Grants](/scion/reference/artifacts/#grants)).
 
 ## Attach artifacts in chat
 

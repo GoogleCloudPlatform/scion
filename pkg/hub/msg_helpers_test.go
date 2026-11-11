@@ -59,6 +59,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "choices_answer.go", function: "deliverChoiceResponse", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage in handleDecisionAnswer before RecordAnswer and delivery"},
 
+	// choices_batch.go: deliverChoiceSetResponse — the one choice-response of
+	// a set submit to the asking agent; handleChoiceSetAnswer calls
+	// authorizeAgentMessage on the asker before the set is recorded, and
+	// the delivery runs only after that (not for an all-confirm set, which
+	// is not delivered).
+	{file: "choices_batch.go", function: "deliverChoiceSetResponse", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage in handleChoiceSetAnswer before RecordAnswerSet and delivery"},
+
 	// handlers_agent_messaging.go: publishBroadcastDeliveryFailed — derivative
 	// notice back to the original sender agent.
 	{file: "handlers_agent_messaging.go", function: "publishBroadcastDeliveryFailed", symbol: "DispatchAgentMessage",

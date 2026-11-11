@@ -1241,7 +1241,11 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 				email, _ := session.Values[sessKeyUserEmail].(string)
 				name, _ := session.Values[sessKeyUserName].(string)
 				role, _ := session.Values[sessKeyUserRole].(string)
-				if tok, _, err := ws.userTokenSvc.GenerateAccessToken(uid, email, name, role, ClientTypeWeb); err == nil {
+				// Carry the session's own generation, never a fresh row
+				// read: a session established before a revocation yields a
+				// token the hub refuses. A cookie without the key reads 0.
+				gen, _ := session.Values[sessKeySessionGeneration].(int64)
+				if tok, _, err := ws.userTokenSvc.MintAccessToken(uid, email, name, role, gen, ClientTypeWeb); err == nil {
 					accessToken = tok
 				} else {
 					ws.logger().Warn("Failed to regenerate Bearer token for cookie-overflow session", "error", err, "user", uid)
@@ -1283,7 +1287,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		if !tokenValid {
 			refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
 			if refreshToken != "" && ws.userTokenSvc != nil {
-				newAccess, newRefresh, expiresIn, err := ws.userTokenSvc.RefreshTokens(refreshToken)
+				newAccess, newRefresh, expiresIn, err := ws.refreshHubTokens(r.Context(), refreshToken)
 				if err == nil {
 					accessToken = newAccess
 					tokenValid = true
@@ -1300,11 +1304,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// If token is still invalid after refresh attempt, the signing
-		// key was likely rotated. Clear the session and force re-login.
-		if !tokenValid {
-			ws.logger().Info("Hub token irrecoverably invalid, clearing session",
-				"user", session.Values[sessKeyUserEmail])
+		// clearSession ends the session and answers the request: a JSON
+		// 401 for a browser, otherwise the request continues without a
+		// token and the hub returns 401.
+		clearSession := func() {
 			for key := range session.Values {
 				delete(session.Values, key)
 			}
@@ -1326,6 +1329,16 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			}
 			// Non-browser: let Hub return 401.
 			next.ServeHTTP(w, r)
+		}
+
+		// If token is still invalid after refresh attempt, the signing key
+		// was likely rotated, or the refresh was refused (account not
+		// active, or the session generation differs from the users row).
+		// Clear the session and force re-login.
+		if !tokenValid {
+			ws.logger().Info("Hub token irrecoverably invalid, clearing session",
+				"user", session.Values[sessKeyUserEmail])
+			clearSession()
 			return
 		}
 
@@ -1334,7 +1347,13 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			if time.Now().UnixMilli() >= expiryMs {
 				refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
 				if refreshToken != "" && ws.userTokenSvc != nil {
-					newAccess, newRefresh, expiresIn, err := ws.userTokenSvc.RefreshTokens(refreshToken)
+					newAccess, newRefresh, expiresIn, err := ws.refreshHubTokens(r.Context(), refreshToken)
+					if errors.Is(err, errHubRefreshRefused) {
+						ws.logger().Info("Hub token refresh refused, clearing session",
+							"user", session.Values[sessKeyUserEmail])
+						clearSession()
+						return
+					}
 					if err == nil {
 						accessToken = newAccess
 						session.Values[sessKeyHubAccessToken] = newAccess
@@ -1370,6 +1389,42 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		r2.Header.Set("Authorization", "Bearer "+accessToken)
 		next.ServeHTTP(w, r2)
 	})
+}
+
+// errHubRefreshRefused is returned by refreshHubTokens when the users row
+// refuses the refresh: the account is not active, or the refresh token's
+// session generation differs from the row's.
+var errHubRefreshRefused = errors.New("hub token refresh refused")
+
+// refreshHubTokens rotates the session's hub token pair from its refresh
+// token. With a store, the users row must be active and its session
+// generation must equal the refresh token's (any difference refuses with
+// errHubRefreshRefused). The row is read only to compare: the new pair
+// carries the presented refresh token's own session generation, never a
+// fresh row read. Without a store (standalone web) nothing is compared and
+// the hub's bearer arm decides on use.
+func (ws *WebServer) refreshHubTokens(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, expiresIn int64, err error) {
+	claims, err := ws.userTokenSvc.ValidateRefreshToken(refreshToken)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("invalid refresh token: %w", err)
+	}
+	if ws.store != nil {
+		u, uErr := checkUserAccount(ctx, ws.store, PrincipalContext{Kind: PrincipalKindUser, ID: claims.UserID})
+		switch refusal := classifyUserAccount(u, uErr); refusal {
+		case accountAllowed:
+		case accountLookupFault:
+			return "", "", 0, fmt.Errorf("hub token refresh: user lookup failed: %w", uErr)
+		default:
+			ws.logger().Warn("Hub token refresh refused: account not active",
+				"user_id", claims.UserID, "reason", accountRefusalReason(refusal))
+			return "", "", 0, errHubRefreshRefused
+		}
+		if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
+			logSessionGenerationRefusal(ctx, ws.logger(), "web_refresh", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
+			return "", "", 0, errHubRefreshRefused
+		}
+	}
+	return ws.userTokenSvc.MintTokenPair(claims.UserID, claims.Email, claims.DisplayName, claims.Role, claims.SessionGeneration, claims.ClientType)
 }
 
 // registerRoutes sets up the web server routes.
@@ -3074,7 +3129,8 @@ func isProxyRoute(path string) bool {
 //     the agent-facing /api/v1/agent/ endpoints (minted tokens, secret
 //     fetch), agent token refresh, delegation exchange, broker registration,
 //     join and secret rotation, project registration, invite creation, test
-//     identities, and every env or secrets route;
+//     identities, every env or secrets route, and the pending secret
+//     reveal (/api/v1/pending-secrets/{id}/reveal);
 //   - responses with signed object-store or capability URLs: every agent
 //     workspace route (sync-from, sync-to; the status GET is included as a
 //     fail-safe), template, user template, harness-config and skill upload
@@ -3124,6 +3180,10 @@ func isCompressBypassPath(path string) bool {
 	}
 	segs := strings.Split(strings.TrimPrefix(trimmed, api), "/")
 	if isSignedURLPath(segs) {
+		return true
+	}
+	// The pending secret reveal returns a held secret value.
+	if len(segs) == 3 && segs[0] == "pending-secrets" && segs[2] == "reveal" {
 		return true
 	}
 	for i, seg := range segs {
@@ -3250,6 +3310,30 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, dbUserContextKey{}, res.row)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
+			}
+
+			// A session loaded here skips sessionAuthMiddleware's check, so
+			// it follows its user's session generation here, the rule hub
+			// JWTs follow (see sessionGenerationRefusal): when the session's
+			// generation differs from the user row's, the session ends. It
+			// is cleared, no hub token is minted, and the request continues
+			// with no user (a new dev session comes only from a sign-in
+			// link). A session without the key reads 0.
+			if ws.store != nil {
+				if dbUser, err := ws.store.GetUser(r.Context(), uid); err == nil {
+					if stored, _ := session.Values[sessKeySessionGeneration].(int64); stored != dbUser.SessionGeneration {
+						ws.logger().Info("Ending web session", "user_id", uid, "reason", sessionGenerationRefusal(stored, dbUser.SessionGeneration))
+						for key := range session.Values {
+							delete(session.Values, key)
+						}
+						session.Options.MaxAge = -1
+						if err := session.Save(r, w); err != nil {
+							ws.logger().Warn("Failed to clear web session", "error", err)
+						}
+						next.ServeHTTP(w, r)
+						return
+					}
+				}
 			}
 
 			user := &webSessionUser{
@@ -3419,8 +3503,12 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				// calls within this session also reflect the change.
 				if ws.userTokenSvc != nil {
 					name, _ := session.Values[sessKeyUserName].(string)
-					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-						uid, email, name, expectedRole, ClientTypeWeb,
+					// Carry the session's own generation, never a fresh
+					// row read (see the cookie-overflow mint in
+					// sessionToBearerMiddleware).
+					gen, _ := session.Values[sessKeySessionGeneration].(int64)
+					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+						uid, email, name, expectedRole, gen, ClientTypeWeb,
 					)
 					if err == nil {
 						session.Values[sessKeyHubAccessToken] = accessToken
@@ -3630,8 +3718,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
 		if ws.userTokenSvc != nil {
-			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-				user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+				user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 			)
 			if err == nil {
 				session.Values[sessKeyHubAccessToken] = accessToken
@@ -3747,8 +3835,11 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 					return
 				}
 
+				// Any difference refuses, the rule hub JWTs follow (see
+				// sessionGenerationRefusal). A cookie without the key
+				// reads 0.
 				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
-				if dbUser.SessionGeneration > cookieGen {
+				if dbUser.SessionGeneration != cookieGen {
 					// Generation mismatch — force re-login
 					session.Options.MaxAge = -1
 					_ = session.Save(r, w)
@@ -4128,8 +4219,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Generate Hub tokens if token service is available
 	if ws.userTokenSvc != nil {
-		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 		)
 		if err != nil {
 			ws.logger().Warn("Failed to generate Hub tokens", "error", err)
@@ -4493,9 +4584,13 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
-	// Request logging
+	// Request logging. A request the mounted hub handler's own
+	// request logger has logged gets no second, web line (ptone/scion#7367);
+	// a request the web chain answers itself is still logged here. A
+	// request the content host guard below refuses never reaches this
+	// logger: the guard logs that refusal itself (logContentHostRefused).
 	if ws.requestLogger != nil {
-		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
+		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold, logging.DeferToNestedRequestLog())(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}

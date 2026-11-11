@@ -30,7 +30,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -304,12 +303,11 @@ func (b *Bridge) federatedUserMessageableAgents(ctx context.Context, caller *Cal
 // instead of the reply. Returns errFederatedUserRefused on a refusal and
 // another error when the hub could not be asked; both stop the reply.
 func (b *Bridge) recheckFederatedUserAccess(ctx context.Context, caller *CallerIdentity, agentID string) error {
-	key, err := messages.DMConversationKey("agent", agentID, "user", caller.UserID)
+	r, err := newVisitorDMReader(b, caller, agentID)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errFederatedUserRefused, err)
+		return err
 	}
-	query := url.Values{"limit": []string{"1"}}
-	return b.federatedUserGet(ctx, caller, "/api/v1/chat/conversations/"+url.PathEscape(key)+"/messages", query, nil)
+	return r.check(ctx)
 }
 
 // federatedUserRefusalMessage is the agent message of a task that ends with

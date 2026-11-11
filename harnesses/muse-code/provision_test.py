@@ -34,25 +34,25 @@ scion_harness = provision.scion_harness
 MANAGED_BEGIN = "<!-- BEGIN SCION MANAGED -->"
 MANAGED_END = "<!-- END SCION MANAGED -->"
 
-# Seed settings.json content matching the home/ seed file.
-SEED_SETTINGS = {
-    "schema_version": 1,
-    "hooks": {
-        "SessionStart": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SessionEnd": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "UserPromptSubmit": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreToolUse": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostToolUse": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreLLMCall": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostLLMCall": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PermissionRequest": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreCompact": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostCompact": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SubagentStart": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SubagentStop": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "Stop": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-    },
-}
+# Seed settings.json content, loaded from the shipped home/ seed file so the
+# tests always exercise the exact bytes the image ships (ptone/scion#5023).
+SHIPPED_SETTINGS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "home", ".config", "muse", "settings.json"
+)
+with open(SHIPPED_SETTINGS_PATH, "r", encoding="utf-8") as _f:
+    SEED_SETTINGS = json.load(_f)
+
+# The exact key set of scion-owned hook handlers, pinned here independently of
+# provision.py so a change on either side fails a test. muse 1.4.7 rejects the
+# "name" handler key ("unknown handler field name") and skips the handler
+# (ptone/scion#5023).
+EXPECTED_SCION_HANDLER_KEYS = {"type", "command"}
+EXPECTED_HOOK_EVENTS = (
+    "SessionStart", "SessionEnd", "UserPromptSubmit",
+    "PreToolUse", "PostToolUse", "PreLLMCall", "PostLLMCall",
+    "PermissionRequest", "PreCompact", "PostCompact",
+    "SubagentStart", "SubagentStop", "Stop",
+)
 
 
 @contextmanager
@@ -600,6 +600,159 @@ class MuseCodeProvisionTest(unittest.TestCase):
             # Managed block should appear exactly once.
             self.assertEqual(content.count(MANAGED_BEGIN), 1)
 
+
+# --- Hook handler format (ptone/scion#5023) ---------------------------------
+
+
+class MuseHookHandlerFormatTest(unittest.TestCase):
+    """Pins the muse hook handler format the harness ships and writes.
+
+    muse 1.4.7 rejects the "name" handler key ("unknown handler field name")
+    and skips the handler, which silently disabled every sciontool hook.
+    Scion-owned handlers carry exactly EXPECTED_SCION_HANDLER_KEYS; a format
+    change must fail here, not in a live agent.
+    """
+
+    def _assert_scion_hooks(self, hooks: dict) -> None:
+        self.assertEqual(sorted(hooks), sorted(EXPECTED_HOOK_EVENTS))
+        for event in EXPECTED_HOOK_EVENTS:
+            entries = hooks[event]
+            self.assertEqual(len(entries), 1, event)
+            self.assertEqual(entries[0]["matcher"], "*", event)
+            handlers = entries[0]["hooks"]
+            self.assertEqual(len(handlers), 1, event)
+            self.assertEqual(set(handlers[0]), EXPECTED_SCION_HANDLER_KEYS, event)
+            self.assertEqual(handlers[0]["type"], "command", event)
+            self.assertEqual(
+                handlers[0]["command"], "sciontool hook --dialect=muse-code", event
+            )
+
+    def test_scion_handler_keys_match_pin(self) -> None:
+        self.assertEqual(set(provision.SCION_HANDLER_KEYS), EXPECTED_SCION_HANDLER_KEYS)
+        self.assertEqual(tuple(provision._HOOK_EVENTS), EXPECTED_HOOK_EVENTS)
+
+    def test_shipped_settings_handler_format(self) -> None:
+        self.assertEqual(SEED_SETTINGS.get("schema_version"), 1)
+        self._assert_scion_hooks(SEED_SETTINGS["hooks"])
+
+    def test_default_hook_entry_handler_format(self) -> None:
+        hooks = {event: provision._DEFAULT_HOOK_ENTRY for event in provision._HOOK_EVENTS}
+        self._assert_scion_hooks(hooks)
+
+    def test_cold_start_writes_pinned_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            manifest = _make_bundle(tmp, home)
+
+            with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                provision.provision(ctx)
+
+            settings = _read_json(os.path.join(home, ".config", "muse", "settings.json"))
+            self._assert_scion_hooks(settings["hooks"])
+
+    def test_seeded_provision_keeps_pinned_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            _write_seed_settings(home)
+            manifest = _make_bundle(tmp, home)
+
+            with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                provision.provision(ctx)
+
+            settings = _read_json(os.path.join(home, ".config", "muse", "settings.json"))
+            self._assert_scion_hooks(settings["hooks"])
+
+    def test_repair_strips_legacy_name_and_keeps_user_handler(self) -> None:
+        user_handler = {
+            "name": "my-audit",
+            "type": "command",
+            "command": "/usr/local/bin/audit --json",
+        }
+        legacy = json.loads(json.dumps(SEED_SETTINGS))
+        for entries in legacy["hooks"].values():
+            entries[0]["hooks"][0]["name"] = "scion-hook"
+        legacy["hooks"]["PreToolUse"].append(
+            {"matcher": "Bash", "hooks": [dict(user_handler)]}
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            settings_dir = os.path.join(home, ".config", "muse")
+            settings_path = os.path.join(settings_dir, "settings.json")
+            os.makedirs(settings_dir)
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(legacy, f)
+            manifest = _make_bundle(tmp, home)
+
+            results = []
+            for _ in range(2):
+                with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                    ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                    provision.provision(ctx)
+                results.append(_read_json(settings_path))
+
+        # A second provision of the same home is a no-op on settings.json.
+        self.assertEqual(results[1], results[0])
+        hooks = results[0]["hooks"]
+        user_entries = hooks["PreToolUse"][1:]
+        self.assertEqual(user_entries, [{"matcher": "Bash", "hooks": [user_handler]}])
+        hooks["PreToolUse"] = hooks["PreToolUse"][:1]
+        self._assert_scion_hooks(hooks)
+
+    def test_repair_strips_only_scion_handler_in_shared_hooks_list(self) -> None:
+        scion_command = "sciontool hook --dialect=muse-code"
+        # User handlers, including near misses of the scion command, are never
+        # treated as scion-owned and keep every key.
+        user_handlers = [
+            {"name": "my-audit", "type": "command", "command": "audit --json"},
+            {"name": "other-dialect", "type": "command",
+             "command": "sciontool hook --dialect=claude"},
+            {"name": "extra-flag", "type": "command",
+             "command": scion_command + " --verbose"},
+            {"name": "trailing-space", "type": "command",
+             "command": scion_command + " "},
+        ]
+        hooks = {
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {"name": "scion-hook", "type": "command",
+                         "command": scion_command},
+                        *[dict(h) for h in user_handlers],
+                    ],
+                }
+            ]
+        }
+        provision._repair_scion_handlers(hooks)
+        self.assertEqual(
+            hooks["PreToolUse"][0]["hooks"],
+            [{"type": "command", "command": scion_command}, *user_handlers],
+        )
+
+    def test_repair_tolerates_malformed_shapes(self) -> None:
+        malformed = [
+            None,
+            [],
+            "hooks",
+            {"Stop": None},
+            {"Stop": "x"},
+            {"Stop": [None, "x", 3]},
+            {"Stop": [{"matcher": "*"}]},
+            {"Stop": [{"matcher": "*", "hooks": None}]},
+            {"Stop": [{"matcher": "*", "hooks": "x"}]},
+            {"Stop": [{"matcher": "*", "hooks": [None, "x", 3, []]}]},
+            {"Stop": [{"matcher": "*", "hooks": [{"name": "n", "command": None}]}]},
+        ]
+        for value in malformed:
+            with self.subTest(value=value):
+                before = json.dumps(value, sort_keys=True)
+                provision._repair_scion_handlers(value)  # type: ignore[arg-type]
+                self.assertEqual(json.dumps(value, sort_keys=True), before)
 
 
 # --- Agent Plugins ----------------------------------------------------------

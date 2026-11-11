@@ -5104,15 +5104,16 @@ func TestReincarnateAgent_StepCASPersistentErrorEndsFailed(t *testing.T) {
 // not just the in-process Go error value a fake dispatcher would hand back
 // directly. It proves a 409 from the broker (a refused reprovision, e.g.
 // agent.ErrReprovisionRefused) ends with the record failed and its Error
-// field carrying the broker's reason, and the agent at reincarnation_state=
+// field carrying the broker's status, code and filtered message
+// (brokerRecordText, never the raw body), and the agent at reincarnation_state=
 // failed / phase=error, exactly like any other reprovision-dispatch failure.
 func TestReincarnateAgent_E2E_BrokerReprovisionRefusal409EndsInFailedRecord(t *testing.T) {
 	const refusalReason = "reprovision refused: agent e2e-409-agent container is still running, stop it first"
 	fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/v1/agents") {
 			// Mirrors runtimebroker/errors.go's Conflict(...) envelope exactly,
-			// so brokerHTTPError's "runtime broker returned error 409: <body>"
-			// carries the same text a real broker would send.
+			// so brokerHTTPError sees the same status and code a real broker
+			// would send.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -5165,8 +5166,10 @@ func TestReincarnateAgent_E2E_BrokerReprovisionRefusal409EndsInFailedRecord(t *t
 
 	settled := waitForReincarnationSettled(t, s, agent.ID)
 	assert.Equal(t, store.AgentReincarnationStateFailed, settled.State)
-	assert.Contains(t, settled.Error, "409", "the record's error must surface the broker's HTTP status")
-	assert.Contains(t, settled.Error, refusalReason, "the record's error must surface the broker's refusal reason verbatim")
+	assert.Contains(t, settled.Error, "runtime broker returned error 409 (conflict): Failed to provision agent: "+refusalReason,
+		"the record carries the broker's status, code and rendered message: it passes the relay filter (brokerRecordText)")
+	assert.NotContains(t, settled.Error, `"error"`,
+		"the broker's raw JSON body stays in the hub log, out of the stored record")
 
 	after, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)

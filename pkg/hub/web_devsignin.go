@@ -207,8 +207,13 @@ func (ws *WebServer) populateDevSession(ctx context.Context, session *sessions.S
 	// is reflected.
 	devEmail := "dev@localhost"
 	devName := "Development User"
+	// The hub tokens carry the row's session generation. When the row
+	// cannot be read they carry 0, which the hub accepts only for a user
+	// whose sessions were never revoked.
+	var devGen int64
 	if ws.store != nil {
 		if dbUser, err := ws.store.GetUser(ctx, DevUserID); err == nil {
+			devGen = dbUser.SessionGeneration
 			if dbUser.Email != "" {
 				devEmail = dbUser.Email
 			}
@@ -239,8 +244,8 @@ func (ws *WebServer) populateDevSession(ctx context.Context, session *sessions.S
 	// Hub JWTs so the session-to-bearer middleware can authenticate API
 	// requests, mirroring handleOAuthCallback.
 	if ws.userTokenSvc != nil {
-		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-			devUser.UserID, devUser.Email, devUser.Name, devUser.Role, ClientTypeWeb,
+		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+			devUser.UserID, devUser.Email, devUser.Name, devUser.Role, devGen, ClientTypeWeb,
 		)
 		if err == nil {
 			session.Values[sessKeyHubAccessToken] = accessToken

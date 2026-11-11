@@ -110,6 +110,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockTestIdentityReaper,
 		LockAgentDelegatedCredentialPurge,
 		LockChatRetention,
+		LockPendingSecretExpiry,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -123,6 +124,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 	// Per-object class IDs must not collide with singletons or each other.
 	classIDs := []AdvisoryLockKey{
 		LockQuotaEnforcement,
+		LockPendingSecretOwnerWrite,
 		testLockClassID,
 	}
 	for _, k := range classIDs {
@@ -211,6 +213,8 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockAgentDelegatedCredentialPurge", LockAgentDelegatedCredentialPurge},
 		{"LockChatRetention", LockChatRetention},
 		{"LockHubSettingsGuardedBatch", LockHubSettingsGuardedBatch},
+		{"LockPendingSecretExpiry", LockPendingSecretExpiry},
+		{"LockPendingSecretOwnerWrite", LockPendingSecretOwnerWrite},
 	}
 
 	// --- Check 1: value uniqueness ---

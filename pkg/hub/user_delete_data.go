@@ -526,12 +526,13 @@ func lockAgentGuardUserTx(ctx context.Context, tx store.Store, a *store.Agent) e
 // secrets and env vars, which may call an external secret backend.
 const userScopedDataCleanupTimeout = 30 * time.Second
 
-// removeUserScopedData deletes the user-scope env vars and secrets of a user
-// that has been deleted. It runs after the delete transaction commits and is
-// best effort: the secret backend may be external (GCP Secret Manager) and
-// cannot join the transaction, so a failure is logged at Warn and never
-// fails the request. Anything left behind is retried by the startup sweep
-// (sweepOrphanedUserScopedData). It reports whether everything was removed.
+// removeUserScopedData deletes the user-scope env vars, secrets and pending
+// secrets of a user that has been deleted. It runs after the delete
+// transaction commits and is best effort: the secret backend may be
+// external (GCP Secret Manager) and cannot join the transaction, so a
+// failure is logged at Warn and never fails the request. Anything left
+// behind is retried by the startup sweep (sweepOrphanedUserScopedData). It
+// reports whether everything was removed.
 func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 	// The user's scheduled chat messages go too, on their own bounded
 	// context (best effort; one left behind fails at fire time and is
@@ -557,6 +558,9 @@ func (s *Server) removeUserScopedDataCtx(ctx context.Context, userID string) boo
 	}
 
 	backend := s.GetSecretBackend()
+	if !s.removeUserPendingSecrets(ctx, backend, userID) {
+		ok = false
+	}
 	if backend == nil {
 		return s.removeUserScopedSecretRowsWithoutBackend(ctx, userID) && ok
 	}
@@ -581,6 +585,36 @@ func (s *Server) removeUserScopedDataCtx(ctx context.Context, userID string) boo
 		slog.Info("user delete: removed user-scope secrets", "user_id", userID, "count", removed)
 	}
 	return ok
+}
+
+// removeUserPendingSecrets deletes the pending secrets awaiting the
+// deleted user's decision and then releases their held values. With no
+// secret backend configured the rows are kept (a held value may live in an
+// external backend), so a later sweep can release them; a kept pending
+// secret is never delivered and expires. It reports whether none are left.
+func (s *Server) removeUserPendingSecrets(ctx context.Context, backend secret.SecretBackend, userID string) bool {
+	if backend == nil {
+		rows, err := s.store.ListPendingSecretsByOwner(ctx, store.ScopeUser, userID)
+		if err != nil {
+			slog.Warn("user delete: failed to list pending secrets", "user_id", userID, "error", err)
+			return false
+		}
+		return len(rows) == 0
+	}
+	refs, err := s.store.DeletePendingSecretsByScope(ctx, store.ScopeUser, userID)
+	if err != nil {
+		slog.Warn("user delete: failed to remove pending secrets", "user_id", userID, "error", err)
+		return false
+	}
+	for _, ref := range refs {
+		if err := backend.DropPending(ctx, ref); err != nil {
+			slog.Warn("user delete: releasing a pending secret value failed", "user_id", userID, "error", err)
+		}
+	}
+	if len(refs) > 0 {
+		slog.Info("user delete: removed pending secrets", "user_id", userID, "count", len(refs))
+	}
+	return true
 }
 
 // removeUserScopedSecretRowsWithoutBackend handles a deleted user's
@@ -675,9 +709,10 @@ func (s *Server) startUserScopedDataSweep(parent context.Context) <-chan struct{
 }
 
 // findOrphanedUserScopeIDs returns, sorted, the scope IDs of user-scope
-// secrets and env vars whose user no longer exists. A user lookup error
-// other than not-found leaves that ID out, so its values are kept. If ctx
-// ends during the lookups, it returns ctx's error and no IDs.
+// secrets, pending secrets and env vars whose user no longer exists. A
+// user lookup error other than not-found leaves that ID out, so its values
+// are kept. If ctx ends during the lookups, it returns ctx's error and no
+// IDs.
 func (s *Server) findOrphanedUserScopeIDs(ctx context.Context) ([]string, error) {
 	scopeIDs := make(map[string]bool)
 	envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser})
@@ -693,6 +728,13 @@ func (s *Server) findOrphanedUserScopeIDs(ctx context.Context) ([]string, error)
 	}
 	for _, sec := range secrets {
 		scopeIDs[sec.ScopeID] = true
+	}
+	pendingOwners, err := s.store.ListPendingSecretScopeIDs(ctx, store.ScopeUser)
+	if err != nil {
+		return nil, fmt.Errorf("list pending secret owners: %w", err)
+	}
+	for _, id := range pendingOwners {
+		scopeIDs[id] = true
 	}
 
 	ids := make([]string, 0, len(scopeIDs))

@@ -24,7 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 )
 
@@ -213,7 +212,7 @@ const releaseClassBelowFloor = "below-floor"
 // decided (no date on one side of a cross-channel comparison) is reported
 // as switch-older: the update executor refuses such a target as a possible
 // downgrade, so the picker must offer it only behind the typed
-// confirmation. A release older than floor (version.DowngradeFloor) is
+// confirmation. A release older than floor (the hub's downgradeFloor) is
 // below-floor whatever its order: the executor refuses it
 // (below_downgrade_floor). A release whose floor order cannot be decided
 // (no publish date) keeps its class; the executor decides.
@@ -259,7 +258,7 @@ func (s *Server) buildReleasesResponse(ctx context.Context, cur runningBuild, re
 			out.Latest = &latest
 		}
 		for _, r := range ch.Releases {
-			out.Releases = append(out.Releases, newReleasesEntry(r, releaseClass(running, r, version.DowngradeFloor)))
+			out.Releases = append(out.Releases, newReleasesEntry(r, releaseClass(running, r, downgradeFloor)))
 		}
 		resp.Channels[name] = out
 	}

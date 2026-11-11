@@ -429,3 +429,7 @@ func (f *materialFixture) recordAgentEdge(t *testing.T) {
 	(&userScopeCeilingFixture{materialFixture: f}).recordEdge(t, store.DelegationPrincipalUser, f.UserID, f.AgentID,
 		store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 }
+
+func (plainAuditLogger) LogPendingSecretEvent(context.Context, *PendingSecretEvent) error {
+	return nil
+}

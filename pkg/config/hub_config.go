@@ -88,6 +88,9 @@ type HubServerConfig struct {
 	// When true, the broker skips file cleanup for soft-deleted agents.
 	SoftDeleteRetainFiles bool `json:"softDeleteRetainFiles" yaml:"softDeleteRetainFiles" koanf:"softDeleteRetainFiles"`
 
+	// Chat holds web chat server limits (settings server.hub.chat).
+	Chat HubChatConfig `json:"chat" yaml:"chat" koanf:"chat"`
+
 	// HubID is a unique identifier for this hub instance.
 	// Used to namespace secrets and other hub-scoped resources in shared GCP projects.
 	// Defaults to sha256(hostname)[:12] if not set.

@@ -454,6 +454,10 @@ func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 	NotFound(w, "Port")
 }
 
+// portTunnelFailedMessage is the client-facing text for a failed legacy
+// port-forward tunnel request.
+const portTunnelFailedMessage = "Port-forward tunnel failed"
+
 // proxyToAgentPort proxies r to the agent's exposed port as identity, the
 // caller's access already decided: over the agent's conduit session when
 // this node can route it and the port is loopback, else over the
@@ -474,6 +478,32 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
 	// inside the agent.
 	conduitOn := s.conduitRoutable()
+	// Every caller of proxyToAgentPort (the agent port route and the port
+	// page view) captures the session generation here, so a stream opened
+	// below is closed by the later re-check once the user's sessions are
+	// revoked. A hub user token request without a session generation is
+	// refused, never defaulted (conduitCaptureSessionGeneration).
+	// The generation stamped is the one the request's own hub user token
+	// carries, so it may only go onto that same user: the page view's
+	// identity comes from its link, and only page navigations check that the
+	// signed-in user is the link's. A hub user token request for any other
+	// identity is refused.
+	// A verified page view link (portViewLinkFor) runs as the link: its
+	// request's own credential is not captured.
+	if !portViewLinkFor(r.Context(), identity) {
+		if conduitAuthTypeCapturesSessionGeneration(requestAuthType(r.Context())) {
+			if u := GetUserIdentityFromContext(r.Context()); u == nil || isNilIdentity(identity) || u.ID() != identity.ID() {
+				refuseConduitUncapturedSessionGeneration(w)
+				return
+			}
+		}
+		var ok bool
+		identity, ok = conduitCaptureSessionGeneration(r.Context(), identity)
+		if !ok {
+			refuseConduitUncapturedSessionGeneration(w)
+			return
+		}
+	}
 	if conduitOn && isLoopbackHost(exposed.Host) {
 		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
@@ -571,12 +601,21 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 			writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, err.Error(), nil)
 			return
 		}
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Port-forward tunnel failed: "+err.Error(), nil)
+		// The tunnel's error text stays in the hub log; the client gets
+		// the fixed message.
+		errText := err.Error()
+		slog.Warn("port-forward tunnel request failed", "agent_id", agent.ID,
+			"error_len", len(errText), "error", brokerBodyForLog(errText))
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, portTunnelFailedMessage, nil)
 		return
 	}
 	if resp.Error != "" {
 		outcome = portViewRequestOffline
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, resp.Error, nil)
+		// resp.Error is the far end's free text: hub log only, capped and
+		// rendered.
+		slog.Warn("port-forward tunnel returned an error", "agent_id", agent.ID,
+			"error_len", len(resp.Error), "error", brokerBodyForLog(resp.Error))
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, portTunnelFailedMessage, nil)
 		return
 	}
 	// The app's headers, minus hop-by-hop and the ones the hub controls,

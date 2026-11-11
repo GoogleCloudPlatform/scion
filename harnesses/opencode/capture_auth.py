@@ -62,12 +62,16 @@ def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
         print("capture-auth: sciontool timed out setting OPENCODE_AUTH", file=sys.stderr)
         return False
 
-    if result.returncode != 0:
+    outcome = scion_harness.secret_set_outcome(result, scope)
+    if outcome == "held":
+        print(scion_harness.held_message("OPENCODE_AUTH"))
+        return False
+    if outcome not in ("pending", "stored"):
         print(f"capture-auth: failed to set OPENCODE_AUTH: {result.stderr.strip()}", file=sys.stderr)
         return False
 
     if not quiet:
-        print(f"capture-auth: OPENCODE_AUTH: captured from {_OPENCODE_AUTH}")
+        print(scion_harness.captured_message("OPENCODE_AUTH", _OPENCODE_AUTH, outcome))
     return True
 
 

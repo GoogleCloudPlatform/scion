@@ -415,6 +415,11 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		scope = store.ScopeUser
 	}
 
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
+		return
+	}
+
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
@@ -631,6 +636,10 @@ type ListSecretsResponse struct {
 	Secrets []store.Secret `json:"secrets"`
 	Scope   string         `json:"scope"`
 	ScopeID string         `json:"scopeId"`
+	// Items is the merged view of approved and pending user secrets,
+	// present only for scope=user&includePending=true
+	// (listSecretsWithPending).
+	Items []SecretListItem `json:"items,omitempty"`
 }
 
 type SetSecretRequest struct {
@@ -787,6 +796,10 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		scope = store.ScopeUser
 	}
 
+	if s.serveSecretListWithPending(w, r, scope) {
+		return
+	}
+
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
@@ -844,6 +857,11 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 	scope := query.Get("scope")
 	if scope == "" {
 		scope = store.ScopeUser
+	}
+
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
+		return
 	}
 
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
@@ -1429,6 +1447,16 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// A user-scope write by an agent waits for the owning user's approval:
+	// it is recorded as a pending secret and never written to the secrets
+	// table here, so force does not apply. An approved secret of the same
+	// name stays in effect until the owner approves the replacement.
+	if scope == store.ScopeUser {
+		allowProgeny := req.AllowProgeny != nil && *req.AllowProgeny
+		s.agentWritePendingUserSecret(w, r, agentID, projectID, scopeID, key, decoded, secretType, target, allowProgeny)
+		return
+	}
+
 	// Check for existing secret when force is not set.
 	// Note: the backend's UpsertSecret has the same check-then-write pattern
 	// internally, so this is consistent with the existing TOCTOU window.
@@ -1452,22 +1480,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		allowProgeny = *req.AllowProgeny
 	}
 
-	// Attribution. A user-scoped secret belongs to the user whose scope it
-	// lives in, even when an agent is what wrote it — which is the normal case
-	// for harness credential capture.
-	//
-	// Two things go wrong if the writing agent is recorded instead. Progeny
-	// lookup matches created_by against the agent's ancestry chain
-	// (ListProgenySecrets -> CreatedByIn), and ancestry entries are bare UUIDs,
-	// so an "agent:<uuid>" value can never match and a captured credential can
-	// never be inherited. Even unprefixed it would only reach descendants of
-	// the one agent that captured it, rather than the owning user's agents.
-	//
-	// The agent is still recorded as the updater, so provenance is not lost.
+	// Attribution: only project-scope writes reach this point. A user-scope
+	// write is attributed when its owner approves it (approvePendingSecret).
 	createdBy := fmt.Sprintf("agent:%s", agentID)
-	if scope == store.ScopeUser && scopeID != "" {
-		createdBy = scopeID
-	}
 
 	input := &secret.SetSecretInput{
 		Name:         key,

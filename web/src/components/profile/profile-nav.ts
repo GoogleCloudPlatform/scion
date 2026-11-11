@@ -24,6 +24,10 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
+import {
+  PENDING_SECRETS_CHANGED_EVENT,
+  fetchPendingSecretCount,
+} from '../../client/pending-secrets.js';
 
 import type { User, Project } from '../../shared/types.js';
 
@@ -104,6 +108,16 @@ export class ScionProfileNav extends LitElement {
 
   @state()
   private githubAppUrl: string | null = null;
+
+  /** The user's pending secrets, shown as a badge on the Secrets link. */
+  @state()
+  private pendingSecretCount = 0;
+
+  private boundOnPendingSecretsChanged = (e: Event): void => {
+    const count = (e as CustomEvent<{ count?: number }>).detail?.count;
+    if (typeof count === 'number') this.pendingSecretCount = count;
+    else void this.loadPendingSecretCount();
+  };
 
   static override styles = css`
     :host {
@@ -348,6 +362,23 @@ export class ScionProfileNav extends LitElement {
       transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
+    .nav-badge {
+      margin-left: auto;
+      min-width: 1.25rem;
+      padding: 0 0.375rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      line-height: 1.25rem;
+      text-align: center;
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    :host([collapsed]) .nav-badge {
+      display: none;
+    }
+
     .nav-link-external {
       display: flex;
       align-items: center;
@@ -513,6 +544,25 @@ export class ScionProfileNav extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.checkGitHubApp();
+    void this.loadPendingSecretCount();
+    window.addEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
+  }
+
+  private async loadPendingSecretCount(): Promise<void> {
+    const n = await fetchPendingSecretCount();
+    if (n !== null) this.pendingSecretCount = n;
+  }
+
+  private renderItemBadge(item: NavItem): TemplateResult | typeof nothing {
+    if (item.path !== '/profile/secrets' || this.pendingSecretCount <= 0) return nothing;
+    const n = this.pendingSecretCount;
+    const label = n === 1 ? '1 secret awaits approval' : `${n} secrets await approval`;
+    return html`<span class="nav-badge" title=${label} aria-label=${label}>${n}</span>`;
   }
 
   /**
@@ -607,6 +657,7 @@ export class ScionProfileNav extends LitElement {
                       >
                         <sl-icon name="${item.icon}"></sl-icon>
                         <span class="nav-link-text">${item.label}</span>
+                        ${this.renderItemBadge(item)}
                       </a>
                     </li>
                     ${item.path === '/profile/tokens' && this.githubAppUrl

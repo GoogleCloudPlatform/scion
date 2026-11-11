@@ -97,16 +97,6 @@ type ArtifactResponse struct {
 	// a review grant (ptone/scion#4538). It is false whenever CanPublish is
 	// true, since a publisher may review too.
 	CanReview bool `json:"canReview,omitempty"`
-	// CanGrantReview, on a GET of the artifact or of one of its versions,
-	// is true when the caller may not manage the artifact but may give a
-	// user review access to it (a review grant; design D24,
-	// ptone/scion#4014): the delegating user of the agent that owns it, the
-	// project owners and admins of its home project, and super-admins. It
-	// is false whenever CanManage is true, since a manager grants through
-	// the full sharing routes. It is advisory: the grant itself is decided
-	// under the artifact's lock and can still be refused, for example for an
-	// existing admin grant or a concurrent move.
-	CanGrantReview bool `json:"canGrantReview,omitempty"`
 	// ScopeDeleted, on a GET of the artifact or of one of its versions, is
 	// true when the artifact's home project no longer exists, as on list
 	// rows. It is advisory: when the host cannot tell, it is left unset

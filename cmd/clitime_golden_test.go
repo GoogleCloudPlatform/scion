@@ -147,9 +147,11 @@ func TestGoldenCLITimes(t *testing.T) {
 
 	messagesHeader := "ID            AGENT           TYPE            TIME                    MESSAGE\n" +
 		"------------  --------------  --------------  ----------------------  -------\n"
+	// User scope: the table has a STATE column; a Hub answering without
+	// the merged list shows every secret approved.
 	secretsHeader := "Secrets (scope: user):\n" +
-		"KEY                             TYPE          PROGENY   VERSION   UPDATED\n" +
-		"------------------------------  ------------  --------  --------  -----------------------\n"
+		"KEY                             STATE     TYPE          PROGENY   VERSION   UPDATED\n" +
+		"------------------------------  --------  ------------  --------  --------  -----------------------\n"
 
 	tests := []struct {
 		name string
@@ -178,19 +180,19 @@ func TestGoldenCLITimes(t *testing.T) {
 			name: "hub secret list local zone",
 			args: []string{"hub", "secret", "list"},
 			want: secretsHeader +
-				"API_KEY                         environment   -         v3        2026-01-03 08:30:00 JST\n",
+				"API_KEY                         approved  environment   -         v3        2026-01-03 08:30:00 JST\n",
 		},
 		{
 			name: "hub secret list --tz America/New_York",
 			args: []string{"--tz", "America/New_York", "hub", "secret", "list"},
 			want: secretsHeader +
-				"API_KEY                         environment   -         v3        2026-01-02 18:30:00 EST\n",
+				"API_KEY                         approved  environment   -         v3        2026-01-02 18:30:00 EST\n",
 		},
 		{
 			name: "hub secret list --utc",
 			args: []string{"--utc", "hub", "secret", "list"},
 			want: secretsHeader +
-				"API_KEY                         environment   -         v3        2026-01-02 23:30:00 UTC\n",
+				"API_KEY                         approved  environment   -         v3        2026-01-02 23:30:00 UTC\n",
 		},
 	}
 	for _, tc := range tests {

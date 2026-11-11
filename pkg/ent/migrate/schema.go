@@ -1303,6 +1303,8 @@ var (
 		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
 		{Name: "delegation_grant_id", Type: field.TypeString, Nullable: true},
 		{Name: "idempotency_key", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "batch_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "matched_default", Type: field.TypeBool, Default: false},
 		{Name: "created_at", Type: field.TypeTime},
 	}
 	// DecisionAnswersTable holds the schema information for the "decision_answers" table.
@@ -1324,7 +1326,7 @@ var (
 			{
 				Name:    "decisionanswer_project_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[21]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[23]},
 			},
 			{
 				Name:    "decisionanswer_response_message_id",
@@ -1335,6 +1337,11 @@ var (
 				Name:    "decisionanswer_answered_by_user_id",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAnswersColumns[9]},
+			},
+			{
+				Name:    "decisionanswer_batch_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[21]},
 			},
 		},
 	}
@@ -2465,6 +2472,57 @@ var (
 				Name:    "notificationsubscription_project_id",
 				Unique:  false,
 				Columns: []*schema.Column{NotificationSubscriptionsColumns[5]},
+			},
+		},
+	}
+	// PendingSecretsColumns holds the columns for the "pending_secrets" table.
+	PendingSecretsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "key", Type: field.TypeString},
+		{Name: "secret_type", Type: field.TypeEnum, Enums: []string{"environment", "variable", "file"}, Default: "environment"},
+		{Name: "target", Type: field.TypeString, Nullable: true},
+		{Name: "scope", Type: field.TypeString},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "allow_progeny", Type: field.TypeBool, Default: false},
+		{Name: "injection_mode", Type: field.TypeEnum, Enums: []string{"always", "as_needed"}, Default: "as_needed"},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "value_ref", Type: field.TypeString},
+		{Name: "value_len", Type: field.TypeInt},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "agent_slug", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "project_name", Type: field.TypeString},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+		{Name: "replaces_secret_id", Type: field.TypeString, Nullable: true},
+		{Name: "replaces_version", Type: field.TypeInt, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime},
+	}
+	// PendingSecretsTable holds the schema information for the "pending_secrets" table.
+	PendingSecretsTable = &schema.Table{
+		Name:       "pending_secrets",
+		Columns:    PendingSecretsColumns,
+		PrimaryKey: []*schema.Column{PendingSecretsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "pendingsecret_key_scope_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{PendingSecretsColumns[1], PendingSecretsColumns[4], PendingSecretsColumns[5]},
+			},
+			{
+				Name:    "pendingsecret_scope_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{PendingSecretsColumns[4], PendingSecretsColumns[5]},
+			},
+			{
+				Name:    "pendingsecret_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{PendingSecretsColumns[11]},
+			},
+			{
+				Name:    "pendingsecret_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{PendingSecretsColumns[19]},
 			},
 		},
 	}
@@ -3699,6 +3757,7 @@ var (
 		NonceCacheTable,
 		NotificationsTable,
 		NotificationSubscriptionsTable,
+		PendingSecretsTable,
 		PolicyBindingsTable,
 		ProjectsTable,
 		ProjectContributorsTable,
@@ -3892,6 +3951,9 @@ func init() {
 	}
 	NotificationSubscriptionsTable.Annotation = &entsql.Annotation{
 		Table: "notification_subscriptions",
+	}
+	PendingSecretsTable.Annotation = &entsql.Annotation{
+		Table: "pending_secrets",
 	}
 	PolicyBindingsTable.ForeignKeys[0].RefTable = AccessPoliciesTable
 	PolicyBindingsTable.ForeignKeys[1].RefTable = UsersTable

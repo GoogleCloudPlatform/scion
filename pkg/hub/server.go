@@ -320,6 +320,18 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
+	// ChatSearchTimeout bounds one GET /api/v1/chat/search (server config
+	// hub.chat.search.timeout). Zero means DefaultChatSearchTimeout.
+	ChatSearchTimeout time.Duration
+	// ChatSearchMaxConcurrent caps the chat searches running hub-wide at once
+	// (server config hub.chat.search.max_concurrent). Zero means
+	// DefaultChatSearchMaxConcurrent. On Postgres the effective cap is
+	// clamped to a quarter of DatabaseMaxOpenConns (EffectiveChatSearchCap).
+	ChatSearchMaxConcurrent int
+	// DatabaseMaxOpenConns is the hub's main pool size (server config
+	// database.max_open_conns after the driver defaults). It bounds the
+	// Postgres chat search cap. Zero means unknown (read as the default pool).
+	DatabaseMaxOpenConns int
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -2006,6 +2018,13 @@ type Server struct {
 	// terminating hub ingress (conduit_ingress_drain.go); nil until
 	// SetConduitIngressDrainMetrics.
 	conduitIngressDrainMetrics atomic.Pointer[OTelConduitIngressDrainMetrics]
+	// chatSearchMetrics records hub_chat_search_duration_seconds
+	// (chat_search_bound.go); nil until SetChatSearchMetrics.
+	chatSearchMetrics atomic.Pointer[OTelChatSearchMetrics]
+	// chatSearchGate bounds concurrent chat searches (chat_search_bound.go),
+	// built on first use from the config and the web chat store's backend.
+	chatSearchGateOnce sync.Once
+	chatSearchGate     *searchGate
 	// conduitBrokerRPCMetrics counts routed broker requests that fell back
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.
@@ -7013,6 +7032,9 @@ func (s *Server) registerSchedulerHandlers() {
 	// by hub.agent_delegation, so rows issued before the experiment was
 	// turned off are still cleaned up.
 	s.scheduler.RegisterRecurringSingleton("agent-delegated-credential-purge", 60, store.LockAgentDelegatedCredentialPurge, s.agentDelegatedCredentialPurgeHandler(time.Now))
+	// Hourly: a pending secret past its expiry is already treated as gone
+	// on every path; this deletes its row and releases its held value.
+	s.registerPendingSecretExpiry(s.scheduler)
 	// Not a singleton: this instance can only self-heal the providers of
 	// brokers it personally holds a live local control-channel socket for
 	// (see brokerProviderSelfHealHandler), so every instance must run it.
@@ -7795,6 +7817,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/env/", s.guarded("/api/v1/env/", s.handleEnvVarByKey))
 	s.mux.HandleFunc("/api/v1/secrets", s.guarded("/api/v1/secrets", s.handleSecrets))
 	s.mux.HandleFunc("/api/v1/secrets/", s.guarded("/api/v1/secrets/", s.handleSecretByKey))
+	s.mux.HandleFunc("/api/v1/pending-secrets", s.guarded("/api/v1/pending-secrets", s.handlePendingSecrets))
+	s.mux.HandleFunc("/api/v1/pending-secrets/", s.guarded("/api/v1/pending-secrets/", s.handlePendingSecrets))
 
 	// Session metrics (DB-backed, distinct from Cloud Monitoring metrics dashboard)
 	s.mux.HandleFunc("/api/v1/metrics/session/", s.guarded("/api/v1/metrics/session/", s.handleSessionMetrics))
@@ -7981,6 +8005,8 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 		// Choice prompt decisions: read and answer (web.chat_choices; 404 while off).
 		s.mux.HandleFunc("/api/v1/decisions/", s.guarded("/api/v1/decisions/", s.chatRoute(s.handleDecisionRoutes)))
+		// Choice prompt set answers (web.chat_choices; 404 while off).
+		s.mux.HandleFunc("/api/v1/choice-prompts/", s.guarded("/api/v1/choice-prompts/", s.chatRoute(s.handleChoicePromptRoutes)))
 	}
 
 	// Attachment delivery capability redemption by brokers (ptone/scion#4596).
@@ -8881,11 +8907,14 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 		// Mint a short-lived JWT with a service claim. The bridge's
 		// hubJWTAuthMiddleware pins on role=="service" — without this
 		// claim, any valid user token could trigger sweeps.
-		token, _, err := s.userTokenService.GenerateAccessToken(
+		// The synthetic identity has no users row, so its session
+		// generation is 0. Only the bridge consumes this token.
+		token, _, err := s.userTokenService.MintAccessToken(
 			"hub-scheduler",        // userID — synthetic service identity
 			"hub-scheduler@system", // email
 			"Hub Scheduler",        // displayName
 			"service",              // role — the pinned service claim
+			0,                      // sessionGeneration — no users row
 			ClientTypeAPI,          // clientType
 		)
 		if err != nil {

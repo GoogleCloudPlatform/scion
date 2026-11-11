@@ -75,6 +75,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "port_proxy"},
 	{"server", "hub", "sse"},
 	{"server", "hub", "platform_request_timeout"},
+	// Web chat search limits (ptone/scion#7586): Layer 0, read at startup.
+	{"server", "hub", "chat"},
 	{"server", "hub", "disable_legacy_storage_fallback"},
 	{"server", "relay"},
 	// server.keyring_file is never API-writable: rejectGateProtectedSettingsKeys

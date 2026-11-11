@@ -311,6 +311,9 @@ func (walkDirSearcher) Search(root *os.Root, query string, limit int) (FileSearc
 			// the whole listing — skip it and keep walking.
 			return nil
 		}
+		if skip, err := skipDotGitEntry(d); skip {
+			return err
+		}
 		if path == "." || d.IsDir() {
 			return nil
 		}
@@ -751,38 +754,13 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 				return
 			}
 
-			// Create parent directories, confined to the root: a component
-			// that is, or leads through, a symlink out of the workspace is
-			// refused by root.MkdirAll rather than followed.
-			if dir := filepath.Dir(relPath); dir != "." {
-				if err := root.MkdirAll(dir, 0755); err != nil {
-					_ = src.Close()
-					notAccessible(w, "upload-mkdir", relPath, err)
-					return
-				}
-			}
-
-			// Write file to disk
-			dst, err := root.Create(relPath)
-			if err != nil {
-				_ = src.Close()
-				notAccessible(w, "upload", relPath, err)
-				return
-			}
-
-			written, err := io.Copy(dst, src)
+			// Write through the opened parent directory: a .git directory
+			// on the way, a symlink as the target, or a path out of the
+			// workspace is refused rather than followed.
+			written, info, err := writeWorkspaceFile(root, relPath, src)
 			_ = src.Close()
-			_ = dst.Close()
-
 			if err != nil {
-				InternalError(w)
-				return
-			}
-
-			// Get file info for response
-			info, err := root.Stat(relPath)
-			if err != nil {
-				InternalError(w)
+				writeWorkspaceFileError(w, "upload", relPath, err)
 				return
 			}
 
@@ -806,26 +784,46 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 // When "format=json" is set, the file content is returned as a JSON object
 // with metadata, suitable for the inline file editor.
 func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.Request, root *os.Root, filePath string) {
-	// Validate the file path. This lexical check is kept as defence in depth:
-	// it rejects the obvious shapes early, but it cannot see symlinks, so the
-	// confinement that actually matters is the Root below.
-	if err := validateWorkspaceFilePath(filePath); err != nil {
+	// Validate the file path. This lexical check rejects the obvious shapes,
+	// including a path with a .git component (as for writes); it cannot see
+	// symlinks, which the walk below handles.
+	if err := validateWorkspaceReadPath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
 	}
 
-	// Check file exists and is not a directory
-	info, err := root.Stat(filePath)
+	// Open the parent one directory at a time (as for writes, creating
+	// nothing) and refuse a symlink as the target (see writeWorkspaceWalkError).
+	parent, base, linfo, err := openWorkspaceReadTarget(root, filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			NotFound(w, "File")
-			return
-		}
-		notAccessible(w, "download", filePath, err)
+		writeWorkspaceWalkError(w, "download", filePath, err)
 		return
 	}
-	if info.IsDir() {
+	defer parent.Close()
+	if linfo.IsDir() {
 		BadRequest(w, "Cannot download a directory")
+		return
+	}
+	if !linfo.Mode().IsRegular() {
+		notAccessible(w, "download", filePath, fmt.Errorf("not a regular file (%v)", linfo.Mode().Type()))
+		return
+	}
+
+	// Open once and serve every mode from this handle: it must be the entry
+	// Lstat saw, so an entry swapped for a symlink in between is refused.
+	f, err := parent.Dir().Open(base)
+	if err != nil {
+		writeWorkspaceWalkError(w, "download", filePath, err)
+		return
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		InternalError(w)
+		return
+	}
+	if !os.SameFile(info, linfo) {
+		writeWorkspaceWalkError(w, "download", filePath, fmt.Errorf("%w: target changed while opening it", errWorkspaceWriteRefused))
 		return
 	}
 
@@ -848,7 +846,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 			return
 		}
 
-		data, readErr := root.ReadFile(filePath)
+		data, readErr := io.ReadAll(f)
 		if readErr != nil {
 			InternalError(w)
 			return
@@ -873,14 +871,6 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 		})
 		return
 	}
-
-	// Open the file
-	f, err := root.Open(filePath)
-	if err != nil {
-		InternalError(w)
-		return
-	}
-	defer func() { _ = f.Close() }()
 
 	// Determine content type from extension, default to octet-stream
 	fileName := filepath.Base(filePath)
@@ -920,6 +910,10 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 		if err != nil {
 			// One unreadable entry should not truncate the whole archive.
 			return nil
+		}
+
+		if skip, err := skipDotGitEntry(d); skip {
+			return err
 		}
 
 		if path == "." || d.IsDir() {
@@ -1137,24 +1131,11 @@ func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Requ
 		// If file doesn't exist (new file creation), skip the check
 	}
 
-	// Create parent directories if needed, confined to the root.
-	if dir := filepath.Dir(filePath); dir != "." {
-		if err := root.MkdirAll(dir, 0755); err != nil {
-			notAccessible(w, "write-mkdir", filePath, err)
-			return
-		}
-	}
-
-	// Write the file
-	if err := root.WriteFile(filePath, []byte(req.Content), 0644); err != nil {
-		notAccessible(w, "write", filePath, err)
-		return
-	}
-
-	// Read back file info for the response
-	info, err := root.Stat(filePath)
+	// Write through the opened parent directory, creating missing parents
+	// (see writeWorkspaceFile).
+	_, info, err := writeWorkspaceFile(root, filePath, strings.NewReader(req.Content))
 	if err != nil {
-		InternalError(w)
+		writeWorkspaceFileError(w, "write", filePath, err)
 		return
 	}
 
@@ -1168,9 +1149,10 @@ func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Requ
 
 // handleProjectWorkspaceDelete deletes a file from a project workspace.
 //
-// Existence is checked with Lstat and the removal is a Root.Remove, both of
-// which act on the named entry itself rather than on what it points to. A
-// symlink is therefore deletable — it shows up in the listing, so refusing to
+// The parent is opened through the per-directory walk
+// (openWorkspaceDeleteTarget), then existence is checked with Lstat and the
+// removal is a Root.Remove in that parent, both of which act on the named
+// entry itself rather than on what it points to. A symlink is therefore deletable — it shows up in the listing, so refusing to
 // delete it would strand it — and deleting it unlinks the link and never the
 // file at the other end, inside or outside the workspace.
 func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Root, filePath string, gate writeGate) {
@@ -1186,9 +1168,18 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Ro
 		return
 	}
 
+	// Open the parent one directory at a time (as for downloads, creating
+	// nothing), so a directory link on the way into .git is refused.
+	dir, base, closeDir, err := openWorkspaceDeleteTarget(root, filePath)
+	if err != nil {
+		writeWorkspaceWalkError(w, "delete", filePath, err)
+		return
+	}
+	defer closeDir()
+
 	// Check the entry exists. Lstat, not Stat: a dangling or outward-pointing
 	// symlink still exists as an entry and is still removable.
-	if _, err := root.Lstat(filePath); err != nil {
+	if _, err := dir.Lstat(base); err != nil {
 		if os.IsNotExist(err) {
 			NotFound(w, "File")
 			return
@@ -1197,8 +1188,8 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Ro
 		return
 	}
 
-	// Remove the file
-	if err := root.Remove(filePath); err != nil {
+	// Remove the entry through the opened parent
+	if err := dir.Remove(base); err != nil {
 		notAccessible(w, "delete", filePath, err)
 		return
 	}
@@ -1661,18 +1652,83 @@ func validateWorkspaceFilePath(path string) error {
 }
 
 // validateWorkspaceWritePath is validateWorkspaceFilePath for the handlers
-// that create, change or remove workspace files (write, upload, delete). It
-// also refuses a path with a .git component under util.IsDotGitComponent.
+// that create, change, remove or download workspace files (write, upload,
+// delete, download). It also refuses a path with a .git component under
+// util.IsDotGitComponent.
 func validateWorkspaceWritePath(path string) error {
 	if err := validateWorkspaceFilePath(path); err != nil {
 		return err
 	}
 	for _, c := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if util.IsDotGitComponent(c) {
-			return fmt.Errorf("paths with a .git component are not allowed")
+			return errDotGitComponent
 		}
 	}
 	return nil
+}
+
+// writeWorkspaceRefusal answers a policy refusal (err wraps
+// errWorkspaceWriteRefused): the .git refusal when the path reaches a .git
+// directory, otherwise a neutral text that neither states the reason nor
+// echoes the path.
+func writeWorkspaceRefusal(w http.ResponseWriter, relPath string, err error) {
+	if errors.Is(err, errWorkspaceThroughDotGit) {
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, errDotGitComponent.Error()))
+		return
+	}
+	BadRequest(w, "Invalid file path: path is not accessible")
+}
+
+// writeWorkspaceWalkError answers a failed download or delete walk: the .git
+// refusal (400) when the path reaches a .git directory, a neutral 400 that
+// does not echo the path for every other refusal (a symlink target, a
+// non-directory on the way, an entry that changed), 404 for a missing entry,
+// and notAccessible otherwise.
+func writeWorkspaceWalkError(w http.ResponseWriter, kind, relPath string, err error) {
+	switch {
+	case errors.Is(err, errWorkspaceWriteRefused):
+		writeWorkspaceRefusal(w, relPath, err)
+	case errors.Is(err, fs.ErrNotExist):
+		NotFound(w, "File")
+	default:
+		notAccessible(w, kind, relPath, err)
+	}
+}
+
+// errDotGitComponent is the refusal of a path with a .git component, also
+// given to a download or delete whose walk reaches a .git directory.
+var errDotGitComponent = errors.New("paths with a .git component are not allowed")
+
+// validateWorkspaceReadPath is validateWorkspaceWritePath for downloads.
+func validateWorkspaceReadPath(path string) error { return validateWorkspaceWritePath(path) }
+
+// skipDotGitEntry reports whether a listing or archive walk leaves out d, an
+// entry named .git under util.IsDotGitComponent (a directory or a gitfile),
+// and the error that tells fs.WalkDir to skip it.
+func skipDotGitEntry(d fs.DirEntry) (bool, error) {
+	if !util.IsDotGitComponent(d.Name()) {
+		return false, nil
+	}
+	if d.IsDir() {
+		return true, fs.SkipDir
+	}
+	return true, nil
+}
+
+// writeWorkspaceFileError answers a failed writeWorkspaceFile with the same
+// split as writeWorkspaceWalkError: the .git refusal when the path reaches a
+// .git directory, the neutral 400 for every other refusal, notAccessible for a
+// path os.Root would not resolve, and 500 otherwise.
+func writeWorkspaceFileError(w http.ResponseWriter, kind, relPath string, err error) {
+	var pathErr *fs.PathError
+	switch {
+	case errors.Is(err, errWorkspaceWriteRefused):
+		writeWorkspaceRefusal(w, relPath, err)
+	case errors.As(err, &pathErr):
+		notAccessible(w, kind, relPath, err)
+	default:
+		InternalError(w)
+	}
 }
 
 // workspaceBodyLimit returns the request body cap for workspace file writes
@@ -1767,7 +1823,7 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	if localFixture {
 		pullResult, err = util.PullSharedWorkspace(workspacePath, cloneURL, "")
 	} else {
-		if refuseErr := s.refuseSSHWithoutProjectSecret(ctx, project, cloneURL); refuseErr != nil {
+		if refuseErr := s.refuseSSHCloneURL(ctx, project, cloneURL); refuseErr != nil {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, refuseErr.Error(), nil)
 			return
 		}

@@ -47,6 +47,7 @@ import {
 } from '../../shared/types.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import {
   READINESS_MARKS,
@@ -2303,6 +2304,7 @@ export class ScionPageProjectDetail extends LitElement {
       if (!response.ok) {
         throw new Error(await lifecycleActionErrorMessage(response, `Failed to ${action} agent`));
       }
+      if (actionUrls[action].endsWith('/start')) void showPendingSecretsStartHint();
 
       this.backgroundRefresh();
     } catch (err) {

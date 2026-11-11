@@ -523,8 +523,8 @@ func TestAgentSecretRead_MixedChainEnforcesRecordedHops(t *testing.T) {
 // TestUserSecretWriters_RecordScopeOwnerAsCreator (T13b): every writer of a
 // user-scope secret records the scope owner as the creator (CreatedBy ==
 // ScopeID), the attribution S7 relies on. The writers are the user secret
-// endpoint, the user env endpoint with secret storage, and the agent
-// secret endpoint (harness credential capture); TestUserSecretWriters_Inventory
+// endpoint, the user env endpoint with secret storage, and the approval of
+// an agent's pending write (harness credential capture); TestUserSecretWriters_Inventory
 // keeps the list complete.
 func TestUserSecretWriters_RecordScopeOwnerAsCreator(t *testing.T) {
 	f := newUserScopeChainFixture(t, "uscw-writers")
@@ -552,11 +552,16 @@ func TestUserSecretWriters_RecordScopeOwnerAsCreator(t *testing.T) {
 		require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
 		assertOwnerCreated(t, "USCW_USER_ENV_SECRET", DevUserID)
 	})
-	t.Run("agent secret endpoint", func(t *testing.T) {
+	t.Run("agent secret endpoint, approved by the owner", func(t *testing.T) {
 		allow := true
 		rec := doRequestWithAgentToken(t, f.Server, http.MethodPut, "/api/v1/agents/"+f.AgentID+"/secrets/USCW_AGENT_SECRET",
 			AgentSetSecretRequest{Value: base64.StdEncoding.EncodeToString([]byte("v")), Scope: store.ScopeUser, AllowProgeny: &allow}, f.Token)
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		var pending AgentPendingSecretResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pending))
+		rec = ownerRequest(t, f.Server, sessionUser(f.UserID), CredentialKindInteractive, http.MethodPost,
+			"/api/v1/pending-secrets/"+pending.PendingID+"/approve", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assertOwnerCreated(t, "USCW_AGENT_SECRET", f.UserID)
 	})
 }

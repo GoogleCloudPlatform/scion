@@ -21,10 +21,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,15 +35,19 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// openSnapshotTestDB opens a file-backed SQLite database with a few rows.
-func openSnapshotTestDB(t *testing.T) *sql.DB {
+// openSnapshotTestDB creates a file-backed SQLite database with a few rows
+// and returns its path. The database stays open, in WAL mode, for the
+// test, as the hub's does, so its -wal and -shm files exist.
+func openSnapshotTestDB(t *testing.T) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hub.db"))
+	file := filepath.Join(t.TempDir(), "hub.db")
+	db, err := sql.Open("sqlite", file)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	for _, q := range []string{
+		"PRAGMA journal_mode = WAL",
 		"CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT)",
 		"INSERT INTO agents VALUES ('a1', 'one'), ('a2', 'two')",
 	} {
@@ -48,7 +55,7 @@ func openSnapshotTestDB(t *testing.T) *sql.DB {
 			t.Fatal(err)
 		}
 	}
-	return db
+	return file
 }
 
 // snapshotTestClock returns a clock that advances one minute per call.
@@ -63,14 +70,14 @@ func snapshotTestClock() func() time.Time {
 func unlimitedFreeSpace(string) (uint64, error) { return 1 << 40, nil }
 
 func TestSQLiteSnapshotter_Snapshot(t *testing.T) {
-	db := openSnapshotTestDB(t)
+	file := openSnapshotTestDB(t)
 	root := t.TempDir()
 	settings := filepath.Join(t.TempDir(), "settings.yaml")
 	if err := os.WriteFile(settings, []byte("server:\n  maintenance:\n    release_channel: nightly\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(root, SnapshotsDirName)
-	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, SettingsPath: settings,
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: dir, SettingsPath: settings,
 		FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock()})
 	if st := s.SnapshotStatus(); !st.Supported || st.Dir != dir {
 		t.Fatalf("status = %+v", st)
@@ -123,7 +130,7 @@ func TestSQLiteSnapshotter_Snapshot(t *testing.T) {
 	}
 
 	t.Run("git build and no settings file", func(t *testing.T) {
-		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, SettingsPath: filepath.Join(root, "missing.yaml"),
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: dir, SettingsPath: filepath.Join(root, "missing.yaml"),
 			FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock()})
 		var log bytes.Buffer
 		path, err := s.Snapshot(context.Background(), "", &log)
@@ -140,7 +147,7 @@ func TestSQLiteSnapshotter_Snapshot(t *testing.T) {
 }
 
 func TestSQLiteSnapshotter_Retention(t *testing.T) {
-	db := openSnapshotTestDB(t)
+	file := openSnapshotTestDB(t)
 	dir := t.TempDir()
 	settings := filepath.Join(t.TempDir(), "settings.yaml")
 	if err := os.WriteFile(settings, []byte("x: 1\n"), 0o600); err != nil {
@@ -152,7 +159,7 @@ func TestSQLiteSnapshotter_Retention(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, SettingsPath: settings,
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: dir, SettingsPath: settings,
 		FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock()})
 	var paths []string
 	for i := 0; i < DefaultSnapshotKeep+2; i++ {
@@ -195,8 +202,13 @@ func TestSQLiteSnapshotter_Retention(t *testing.T) {
 }
 
 func TestSQLiteSnapshotter_DiskCheck(t *testing.T) {
-	db := openSnapshotTestDB(t)
-	size, err := sqliteDatabaseSize(context.Background(), db)
+	file := openSnapshotTestDB(t)
+	src, err := openSnapshotSource(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size, err := sqliteDatabaseSize(context.Background(), src)
+	_ = src.Close()
 	if err != nil || size == 0 {
 		t.Fatalf("size = %d, err = %v", size, err)
 	}
@@ -204,7 +216,7 @@ func TestSQLiteSnapshotter_DiskCheck(t *testing.T) {
 	t.Run("less than twice the database size is refused", func(t *testing.T) {
 		dir := t.TempDir()
 		var asked string
-		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, Now: snapshotTestClock(),
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: dir, Now: snapshotTestClock(),
 			FreeSpace: func(d string) (uint64, error) { asked = d; return 2*size - 1, nil }})
 		_, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "not enough free disk space") {
@@ -219,7 +231,7 @@ func TestSQLiteSnapshotter_DiskCheck(t *testing.T) {
 	})
 
 	t.Run("exactly twice is enough", func(t *testing.T) {
-		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: t.TempDir(), Now: snapshotTestClock(),
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(), Now: snapshotTestClock(),
 			FreeSpace: func(string) (uint64, error) { return 2 * size, nil }})
 		if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
@@ -227,7 +239,7 @@ func TestSQLiteSnapshotter_DiskCheck(t *testing.T) {
 	})
 
 	t.Run("unreadable free space fails closed", func(t *testing.T) {
-		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: t.TempDir(), Now: snapshotTestClock(),
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(), Now: snapshotTestClock(),
 			FreeSpace: func(string) (uint64, error) { return 0, errors.ErrUnsupported }})
 		if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); !errors.Is(err, errors.ErrUnsupported) {
 			t.Fatalf("err = %v", err)
@@ -238,7 +250,7 @@ func TestSQLiteSnapshotter_DiskCheck(t *testing.T) {
 		if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 			t.Skip("free space is read on linux and darwin only")
 		}
-		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: t.TempDir()})
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir()})
 		if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
 		}
@@ -246,10 +258,10 @@ func TestSQLiteSnapshotter_DiskCheck(t *testing.T) {
 }
 
 func TestSQLiteSnapshotter_ExistingPartialFails(t *testing.T) {
-	db := openSnapshotTestDB(t)
+	file := openSnapshotTestDB(t)
 	dir := t.TempDir()
 	at := snapshotTestClock()() // the clock's first reading
-	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, FreeSpace: unlimitedFreeSpace,
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: dir, FreeSpace: unlimitedFreeSpace,
 		Now: func() time.Time { return at }})
 	partial := filepath.Join(dir, "hub-nightly-20261023-"+at.UTC().Format(snapshotTimeFormat)+".db"+snapshotPartialSuffix)
 	if err := os.WriteFile(partial, []byte("x"), 0o600); err != nil {
@@ -269,7 +281,7 @@ func TestSQLiteSnapshotter_ExistingPartialFails(t *testing.T) {
 }
 
 func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
-	db := openSnapshotTestDB(t)
+	file := openSnapshotTestDB(t)
 	dir := t.TempDir()
 	// snapshotTestClock's first reading, which Snapshot takes once for the
 	// stale-partial cutoff and the snapshot name. File times are set
@@ -296,7 +308,7 @@ func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	var staleAtCheck bool
-	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, Now: snapshotTestClock(),
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: dir, Now: snapshotTestClock(),
 		FreeSpace: func(string) (uint64, error) {
 			_, err := os.Stat(stale)
 			staleAtCheck = err == nil
@@ -312,9 +324,162 @@ func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
 	if _, err := os.Stat(fresh); err != nil {
 		t.Fatalf("a partial that is fresh by the injected clock was removed: %v", err)
 	}
-	for _, want := range []string{"Removed a leftover partial snapshot", "Writing a database snapshot of", "busy until it completes"} {
+	for _, want := range []string{"Removed a leftover partial snapshot", "Writing a database snapshot of", "the hub keeps serving requests"} {
 		if !strings.Contains(log.String(), want) {
 			t.Errorf("log lacks %q:\n%s", want, log.String())
+		}
+	}
+}
+
+// TestSQLiteSnapshotter_DoesNotUseOrBlockHubConnection is the regression
+// test of ptone/scion#7360: the snapshot ran VACUUM INTO on the hub's
+// single-connection handle, so every request waited for the copy. The hub
+// database is opened as the hub opens it (cache=shared, WAL, one
+// connection), and that one connection is pinned with an open write
+// transaction for the whole snapshot. The snapshot must complete without
+// it and must not block the writer, which commits afterwards; the
+// uncommitted row must not be in the snapshot. A snapshot connection in
+// the hub's shared cache would fail on the writer's table lock.
+func TestSQLiteSnapshotter_DoesNotUseOrBlockHubConnection(t *testing.T) {
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "hub.db")
+	hubDSN := "file:" + (&url.URL{Path: filepath.ToSlash(file)}).EscapedPath() + "?cache=shared"
+	hub, err := sql.Open("sqlite", hubDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hub.Close() })
+	hub.SetMaxOpenConns(1)
+	const seeded = 2000
+	for _, q := range []string{
+		"PRAGMA journal_mode = WAL",
+		"CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT)",
+		// A few hundred kilobytes, committed, so the -wal and -shm files
+		// exist as on a live hub.
+		"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < " + strconv.Itoa(seeded) + ") " +
+			"INSERT INTO agents SELECT 'a' || i, hex(randomblob(128)) FROM n",
+	} {
+		if _, err := hub.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(file + suffix); err != nil {
+			t.Fatalf("the hub database has no %s file: %v", suffix, err)
+		}
+	}
+
+	// Pin the hub pool's only connection: a request in the middle of a
+	// write transaction.
+	conn, err := hub.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	for _, q := range []string{"BEGIN IMMEDIATE", "INSERT INTO agents VALUES ('pending', 'uncommitted')"} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(),
+		FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock()})
+	snapCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	path, err := s.Snapshot(snapCtx, "nightly-20261023", &bytes.Buffer{})
+	cancel()
+	if err != nil {
+		t.Fatalf("Snapshot while the hub connection is busy: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("the hub's write could not commit after the snapshot: %v", err)
+	}
+	_ = conn.Close()
+
+	snap, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snap.Close() }()
+	var total, pending int
+	if err := snap.QueryRow("SELECT count(*), count(*) FILTER (WHERE id = 'pending') FROM agents").Scan(&total, &pending); err != nil {
+		t.Fatal(err)
+	}
+	if total != seeded || pending != 0 {
+		t.Fatalf("snapshot has %d rows (%d uncommitted), want the %d committed ones only", total, pending, seeded)
+	}
+	if err := hub.QueryRowContext(ctx, "SELECT count(*) FROM agents WHERE id = 'pending'").Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("hub row after commit = %d, err = %v", pending, err)
+	}
+}
+
+// TestSQLiteSnapshotter_ClosesSourceConnection checks that the private
+// source connection is closed when Snapshot returns, on success and on a
+// refusal after it was opened (the disk check).
+func TestSQLiteSnapshotter_ClosesSourceConnection(t *testing.T) {
+	file := openSnapshotTestDB(t)
+	keep := func(held **sql.DB) func(string) (*sql.DB, error) {
+		return func(f string) (*sql.DB, error) {
+			db, err := openSnapshotSource(f)
+			*held = db
+			return db, err
+		}
+	}
+	assertClosed := func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		if db == nil {
+			t.Fatal("the source connection was never opened")
+		}
+		if err := db.Ping(); err == nil || err.Error() != "sql: database is closed" {
+			t.Fatalf("source connection after Snapshot: Ping err = %v, want sql: database is closed", err)
+		}
+	}
+
+	t.Run("success", func(t *testing.T) {
+		var held *sql.DB
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(),
+			FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock(), OpenDB: keep(&held)})
+		if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		assertClosed(t, held)
+	})
+
+	t.Run("disk check refusal", func(t *testing.T) {
+		var held *sql.DB
+		s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(), Now: snapshotTestClock(),
+			FreeSpace: func(string) (uint64, error) { return 0, nil }, OpenDB: keep(&held)})
+		_, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "not enough free disk space") {
+			t.Fatalf("err = %v", err)
+		}
+		assertClosed(t, held)
+	})
+}
+
+// TestSQLiteSnapshotter_LogsNoDSN checks that the server log lines of a
+// snapshot carry its size and outcome but never the source connection's
+// DSN.
+func TestSQLiteSnapshotter_LogsNoDSN(t *testing.T) {
+	file := openSnapshotTestDB(t)
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{File: file, Dir: t.TempDir(),
+		FreeSpace: unlimitedFreeSpace, Now: snapshotTestClock()})
+	if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{"Database snapshot started", "Database snapshot written", "outcome=ok", "bytes=", "duration="} {
+		if !strings.Contains(got, want) {
+			t.Errorf("server log lacks %q:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{"file:", "mode=ro", "cache=private", "busy_timeout"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("server log contains %q:\n%s", banned, got)
 		}
 	}
 }

@@ -271,6 +271,10 @@ type SecretBackend interface {
 
 	// HubID returns the hub instance ID used for hub-scoped secret namespacing.
 	HubID() string
+
+	// PendingHolder holds pending secret values (HoldPending, ReadPending,
+	// DropPending).
+	PendingHolder
 }
 
 // scopePrecedence returns a numeric rank for the given scope string.
@@ -354,4 +358,34 @@ func DeduplicateByTarget(secrets []SecretWithValue) []SecretWithValue {
 		}
 	}
 	return result
+}
+
+// PendingHolder holds the values of pending secrets: user-scope secrets
+// written by an agent that wait for the owner's approval. A held value is
+// never part of Resolve, List, Get or FetchValues; it is read only when the
+// owner approves it.
+type PendingHolder interface {
+	// HoldPending stores value for the pending secret id and returns the
+	// reference to record on the pending row.
+	HoldPending(ctx context.Context, id string, value []byte) (ref string, err error)
+
+	// ReadPending returns the value held under ref.
+	ReadPending(ctx context.Context, ref string) ([]byte, error)
+
+	// DropPending releases the value held under ref. Dropping a value that
+	// is already gone is not an error.
+	DropPending(ctx context.Context, ref string) error
+
+	// ListHeldPending returns the pending values this hub holds outside
+	// the pending rows, with the pending id each was held for and when it
+	// was stored, so values no row references can be released. A backend
+	// that holds values on the rows themselves returns none.
+	ListHeldPending(ctx context.Context) ([]HeldPendingValue, error)
+}
+
+// HeldPendingValue is a pending value held by the secret backend.
+type HeldPendingValue struct {
+	Ref       string    // the reference HoldPending returned
+	PendingID string    // the pending id it was held for
+	Created   time.Time // when the backend stored it
 }

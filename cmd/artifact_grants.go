@@ -43,13 +43,12 @@ var artifactGrantsCmd = &cobra.Command{
 	Long: `List the grants of an artifact, or add, change or remove one.
 
 A grant gives a user, an agent or a project read, write or admin access to
-the artifact; a user can also be given review (publish reviews only).
+the artifact; a user can also be given review (read and publish reviews).
 Only the artifact's owner, or a user it granted admin, can see or change
 its grants. On an artifact owned by an agent, the user who delegated to
 the agent (while they hold a role in its home project) and the home
 project's owners can too, but they cannot give admin or move the
-artifact. The home project's other admins may only add a review grant
-for a user who can already read it. Agents cannot manage grants.
+artifact. Agents cannot manage grants.
 
 Subjects are written user:<id>, agent:<id> or project:<id>. Adding a grant
 for a subject that already has one changes its permission.

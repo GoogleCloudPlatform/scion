@@ -117,10 +117,6 @@ func federatedUserCallerKey(accountID string) string {
 	return federatedUserCallerKeyPrefix + accountID
 }
 
-// agentCallerKeyPrefix starts the task-isolation key of an agent caller
-// (CallerKey).
-const agentCallerKeyPrefix = "agent:"
-
 type callerContextKey struct{}
 
 // WithCallerIdentity injects a CallerIdentity into the context.

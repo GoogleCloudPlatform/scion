@@ -243,6 +243,18 @@ func Spec() []TableFixture {
 				"secret_type": "environment", "created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
+		{Table: "pending_secrets", Rows: []row{
+			{ // an agent-written user secret awaiting the owner's approval
+				"id": "5ec10000-0000-0000-0000-000000000001", "key": "TOOL_AUTH",
+				"secret_type": "file", "target": "~/.config/tool/creds.json",
+				"scope": "user", "scope_id": userID, "allow_progeny": true,
+				"injection_mode": "as_needed", "value_ref": "enc:v1:test-value-1", "value_len": 12,
+				"agent_id": agentID, "agent_slug": "fixture-agent", "project_id": projectID,
+				"project_name": "fixture-project", "created": baseTime, "updated": baseTime,
+				"replaces_secret_id": "5ec00000-0000-0000-0000-000000000001", "replaces_version": 1,
+				"expires_at": baseTime.Add(7 * 24 * time.Hour),
+			},
+		}},
 		{Table: "templates", Rows: []row{
 			{
 				"id": "7e000000-0000-0000-0000-000000000001", "name": "claude", "slug": "claude",
@@ -360,6 +372,7 @@ func Spec() []TableFixture {
 				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
 				"provenance": "direct", "outcome": "answer", "surface": "native",
 				"response_message_id": messageID, "idempotency_key": "web-1", "created_at": baseTime.Add(time.Minute),
+				"batch_id": "ba000000-0000-0000-0000-000000000001", "matched_default": false,
 			},
 		}},
 		{Table: "decision_key_counters", Rows: []row{
