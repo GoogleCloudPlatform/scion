@@ -64,6 +64,12 @@ func (b *LocalBackend) DropPending(context.Context, string) error {
 	return nil
 }
 
+// ListHeldPending implements PendingHolder. The local backend holds every
+// value on its pending row, so nothing is held elsewhere.
+func (b *LocalBackend) ListHeldPending(context.Context) ([]HeldPendingValue, error) {
+	return nil, nil
+}
+
 // pendingSecretNameSegment follows the hub prefix in the Secret Manager
 // name of a held pending value: {secretNamePrefix()}pending-{id}. Approved
 // secret names put their scope there ({secretNamePrefix()}{scope}-...),
@@ -184,4 +190,45 @@ func (b *GCPBackend) DropPending(ctx context.Context, ref string) error {
 		return permErr
 	}
 	return fmt.Errorf("failed to delete a pending value from GCP SM: %w", err)
+}
+
+// ListHeldPending implements PendingHolder: it lists this hub's Secret
+// Manager secrets holding pending values. Only a secret carrying the
+// scion-pending label whose name is this hub's pending name
+// ({secretNamePrefix()}pending-{id}, with a valid id) is returned; every
+// other secret, an approved one or another hub's included, is left out.
+// A client that cannot list returns none.
+func (b *GCPBackend) ListHeldPending(ctx context.Context) ([]HeldPendingValue, error) {
+	lister, ok := b.smClient.(smSecretLister)
+	if !ok {
+		return nil, nil
+	}
+	namePrefix := b.secretNamePrefix() + pendingSecretNameSegment
+	secrets, err := lister.ListSecrets(ctx, &smpb.ListSecretsRequest{
+		Parent: fmt.Sprintf("projects/%s", b.projectID),
+		Filter: fmt.Sprintf("labels.scion-pending=true AND name:%s", namePrefix),
+	})
+	if err != nil {
+		if permErr := b.wrapGCPError(err, "list secrets"); permErr != nil {
+			return nil, permErr
+		}
+		return nil, fmt.Errorf("failed to list pending values in GCP SM: %w", err)
+	}
+	pathPrefix := b.smSecretPath(namePrefix)
+	var out []HeldPendingValue
+	for _, sec := range secrets {
+		if sec.GetLabels()["scion-pending"] != "true" {
+			continue
+		}
+		id, ok := strings.CutPrefix(sec.GetName(), pathPrefix)
+		if !ok || !validPendingID(id) {
+			continue
+		}
+		held := HeldPendingValue{Ref: "gcpsm:" + sec.GetName(), PendingID: id}
+		if ct := sec.GetCreateTime(); ct != nil {
+			held.Created = ct.AsTime()
+		}
+		out = append(out, held)
+	}
+	return out, nil
 }

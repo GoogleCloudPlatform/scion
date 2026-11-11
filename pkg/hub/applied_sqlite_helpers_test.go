@@ -202,6 +202,9 @@ func (b *cleanupTestSecretBackend) ReadPending(context.Context, string) ([]byte,
 }
 
 func (b *cleanupTestSecretBackend) DropPending(context.Context, string) error { return nil }
+func (b *cleanupTestSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
 func (b *cleanupTestSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
 	results := make(map[string]secret.FetchResult, len(metas))
 	for _, meta := range metas {

@@ -670,3 +670,122 @@ func TestPendingSecretStore_RetriesExhaustedIsTransient(t *testing.T) {
 	require.Len(t, list, 1)
 	assert.Equal(t, "K1", list[0].Key)
 }
+
+func TestPendingSecretStore_AgentCap(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	for i := 0; i < store.PendingSecretAgentCap; i++ {
+		_, err := cs.CreateOrReplacePendingSecret(ctx,
+			newPendingSecretInput(fmt.Sprintf("KEY_%d", i), "owner-1", "agent-a", fmt.Sprintf("ref-%d", i)), now)
+		require.NoError(t, err)
+	}
+
+	// One more key from the same agent is over the cap; nothing changes.
+	_, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("KEY_OVER", "owner-1", "agent-a", "ref-over"), now)
+	require.ErrorIs(t, err, store.ErrPendingSecretCap)
+	var capErr *store.PendingSecretCapError
+	require.ErrorAs(t, err, &capErr)
+	assert.Equal(t, store.PendingSecretCapAgent, capErr.Cap)
+	assert.Equal(t, store.PendingSecretAgentCap, capErr.Limit)
+	rows, err := cs.ListPendingSecretsByOwner(ctx, store.ScopeUser, "owner-1")
+	require.NoError(t, err)
+	assert.Len(t, rows, store.PendingSecretAgentCap)
+
+	// A replacement of one of its own keys does not count again.
+	res, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("KEY_3", "owner-1", "agent-a", "ref-3b"), now.Add(time.Minute))
+	require.NoError(t, err)
+	assert.True(t, res.Replaced)
+
+	// Another agent of the same owner has its own allowance.
+	_, err = cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("KEY_B", "owner-1", "agent-b", "ref-b"), now)
+	require.NoError(t, err)
+
+	// Expired rows do not count: once the agent's rows expire it may write again.
+	later := now.Add(store.PendingSecretTTL + time.Second)
+	_, err = cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("KEY_OVER", "owner-1", "agent-a", "ref-over"), later)
+	require.NoError(t, err)
+}
+
+func TestPendingSecretStore_OwnerCap(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Fill the owner's allowance from several agents, each under its own cap.
+	n := 0
+	for a := 0; n < store.PendingSecretOwnerCap; a++ {
+		agent := fmt.Sprintf("agent-%d", a)
+		for i := 0; i < store.PendingSecretAgentCap && n < store.PendingSecretOwnerCap; i++ {
+			_, err := cs.CreateOrReplacePendingSecret(ctx,
+				newPendingSecretInput(fmt.Sprintf("KEY_%d", n), "owner-1", agent, fmt.Sprintf("ref-%d", n)), now)
+			require.NoError(t, err)
+			n++
+		}
+	}
+
+	_, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("KEY_OVER", "owner-1", "agent-new", "ref-over"), now)
+	var capErr *store.PendingSecretCapError
+	require.ErrorAs(t, err, &capErr)
+	assert.Equal(t, store.PendingSecretCapOwner, capErr.Cap)
+	assert.Equal(t, store.PendingSecretOwnerCap, capErr.Limit)
+
+	// A same-agent replacement at the owner cap is accepted.
+	res, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("KEY_0", "owner-1", "agent-0", "ref-0b"), now)
+	require.NoError(t, err)
+	assert.True(t, res.Replaced)
+
+	// Another owner is not affected by this owner's rows.
+	_, err = cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("KEY_OVER", "owner-2", "agent-other", "ref-o2"), now)
+	require.NoError(t, err)
+}
+
+func TestPendingSecretStore_DeleteExpired(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("OLD_1", "owner-1", "agent-a", "ref-old-1"), now)
+	require.NoError(t, err)
+	_, err = cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("OLD_2", "owner-2", "agent-b", "ref-old-2"), now)
+	require.NoError(t, err)
+	fresh, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("FRESH", "owner-1", "agent-a", "ref-fresh"), now.Add(time.Hour))
+	require.NoError(t, err)
+
+	sweepAt := now.Add(store.PendingSecretTTL) // OLD_* expire exactly now; FRESH an hour later
+
+	got, err := cs.DeleteExpiredPendingSecrets(ctx, sweepAt, 1)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "the limit bounds one call")
+
+	got2, err := cs.DeleteExpiredPendingSecrets(ctx, sweepAt, 100)
+	require.NoError(t, err)
+	require.Len(t, got2, 1)
+	refs := []string{got[0].ValueRef, got2[0].ValueRef}
+	assert.ElementsMatch(t, []string{"ref-old-1", "ref-old-2"}, refs, "deleted rows carry their value refs")
+
+	// Idempotent: nothing left to delete.
+	got3, err := cs.DeleteExpiredPendingSecrets(ctx, sweepAt, 100)
+	require.NoError(t, err)
+	assert.Empty(t, got3)
+
+	_, err = cs.GetPendingSecret(ctx, fresh.Secret.ID)
+	require.NoError(t, err, "a live row is kept")
+}
+
+func TestPendingSecretStore_ValueRefsInUse(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err := cs.CreateOrReplacePendingSecret(ctx, newPendingSecretInput("IN_USE", "owner-1", "agent-a", "ref-in-use"), now)
+	require.NoError(t, err)
+
+	got, err := cs.PendingSecretValueRefsInUse(ctx, []string{"ref-in-use", "ref-orphan"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"ref-in-use": true}, got)
+
+	got, err = cs.PendingSecretValueRefsInUse(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}

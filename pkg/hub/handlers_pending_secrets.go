@@ -16,7 +16,9 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -49,6 +51,22 @@ const pendingSecretHeldByOtherAgentMessage = "A pending secret with this name is
 // pending secret.
 const pendingSecretExistingChangedMessage = "The existing secret with this name changed after the agent saved this pending secret. " +
 	"Reject it and have the agent save it again."
+
+// pendingSecretRefusedHeldByOtherAgent is the audit reason of a write
+// refused because another agent's pending secret holds the name. A write
+// over a cap is refused with reason "cap_agent" or "cap_owner".
+const pendingSecretRefusedHeldByOtherAgent = "held_by_other_agent"
+
+// pendingSecretCapMessage is the refusal for a write over a pending secret
+// cap.
+func pendingSecretCapMessage(e *store.PendingSecretCapError) string {
+	if e.Cap == store.PendingSecretCapAgent {
+		return fmt.Sprintf("This agent already has %d secrets awaiting the owner's approval. "+
+			"Ask the owner to approve or reject them before saving more.", e.Limit)
+	}
+	return fmt.Sprintf("The owner already has %d secrets awaiting approval. "+
+		"Ask the owner to approve or reject them before saving more.", e.Limit)
+}
 
 // AgentPendingSecretResponse is the 202 Accepted body of an agent's
 // user-scope secret write.
@@ -107,6 +125,18 @@ type PendingSecretDecisionResponse struct {
 	State string `json:"state"` // "approved" or "rejected"
 }
 
+// RevealPendingSecretResponse is the body of a reveal: the held value of
+// one of the owner's pending secrets, base64-encoded (a file secret may
+// hold any bytes). It is sent with Cache-Control: no-store.
+type RevealPendingSecretResponse struct {
+	ID       string `json:"id"`
+	Key      string `json:"key"`
+	Type     string `json:"type"`
+	Target   string `json:"target"`
+	Value    string `json:"value"`
+	Encoding string `json:"encoding"` // always "base64"
+}
+
 func pendingSecretToView(p store.PendingSecret) PendingSecretView {
 	return PendingSecretView{
 		ID:               p.ID,
@@ -162,6 +192,28 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	refused := &store.PendingSecret{
+		Key:          key,
+		SecretType:   secretType,
+		Target:       target,
+		Scope:        store.ScopeUser,
+		ScopeID:      ownerID,
+		AllowProgeny: allowProgeny,
+		ValueLen:     len(value),
+		AgentID:      agentID,
+		ProjectID:    projectID,
+	}
+
+	// A cheap check of the caps before the value is held, so a write over a
+	// cap stores and releases nothing. The store's check in the write
+	// transaction below is the authoritative one.
+	if rows, err := s.store.ListPendingSecretsByOwner(ctx, store.ScopeUser, ownerID); err == nil {
+		if capErr := pendingSecretCapPrecheck(rows, agentID, key, time.Now()); capErr != nil {
+			s.refusePendingSecretOverCap(w, ctx, refused, capErr)
+			return
+		}
+	}
+
 	pendingID := api.NewUUID()
 	ref, err := s.secretBackend.HoldPending(ctx, pendingID, value)
 	if err != nil {
@@ -189,12 +241,20 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// The held value was never recorded; release it.
 		s.dropPendingValues(ctx, []string{ref})
+		s.auditRefusedPendingWrite(ctx, refused, err)
 		writePendingSecretWriteError(w, key, err)
 		return
 	}
 	// The write has committed: release the values of the rows it removed
 	// (this agent's earlier pending write, or an expired one).
 	s.dropPendingValues(ctx, res.DroppedValueRefs)
+
+	eventType := PendingSecretEventCreate
+	if res.Replaced {
+		eventType = PendingSecretEventReplace
+	}
+	s.auditPendingSecret(ctx, eventType, res.Secret, PendingSecretActorAgent, agentID, "")
+	s.notifyPendingSecret(ctx, res.Secret)
 
 	writeJSON(w, http.StatusAccepted, AgentPendingSecretResponse{
 		Key:              key,
@@ -209,9 +269,11 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 
 // writePendingSecretWriteError answers a failed pending secret write: a
 // name another agent's pending secret holds is a 409 that names neither
-// that agent nor its project, and a write that kept losing to concurrent
-// writes of the same name is a retryable 503.
+// that agent nor its project, a write over a pending secret cap is a 429
+// (secret_pending_cap, details cap and limit), and a write that kept
+// losing to concurrent writes of the same name is a retryable 503.
 func writePendingSecretWriteError(w http.ResponseWriter, key string, err error) {
+	var capErr *store.PendingSecretCapError
 	switch {
 	case errors.Is(err, store.ErrPendingSecretHeldByOtherAgent):
 		writeError(w, http.StatusConflict, ErrCodeSecretPendingHeldByOtherAgent,
@@ -222,9 +284,69 @@ func writePendingSecretWriteError(w http.ResponseWriter, key string, err error) 
 	case errors.Is(err, store.ErrTransient):
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"The save conflicted with a concurrent save of the same name and stored nothing. Retry it.", nil)
+	case errors.As(err, &capErr):
+		writeError(w, http.StatusTooManyRequests, ErrCodeSecretPendingCap,
+			pendingSecretCapMessage(capErr), map[string]interface{}{
+				"key":   key,
+				"scope": store.ScopeUser,
+				"cap":   capErr.Cap,
+				"limit": capErr.Limit,
+			})
 	default:
 		writeErrorFromErr(w, err, "")
 	}
+}
+
+// auditRefusedPendingWrite logs a secret_pending_refused event for a
+// write the store refused because another agent's pending secret holds
+// the name or a cap is reached. Other errors are not refusals and are not
+// logged here.
+func (s *Server) auditRefusedPendingWrite(ctx context.Context, refused *store.PendingSecret, err error) {
+	var capErr *store.PendingSecretCapError
+	switch {
+	case errors.Is(err, store.ErrPendingSecretHeldByOtherAgent):
+		s.auditPendingSecret(ctx, PendingSecretEventRefused, refused,
+			PendingSecretActorAgent, refused.AgentID, pendingSecretRefusedHeldByOtherAgent)
+	case errors.As(err, &capErr):
+		s.auditPendingSecret(ctx, PendingSecretEventRefused, refused,
+			PendingSecretActorAgent, refused.AgentID, "cap_"+capErr.Cap)
+	}
+}
+
+// pendingSecretCapPrecheck returns the cap a new pending secret key by
+// agentID would exceed, judged from the owner's rows, or nil. A live row
+// of the same key by the same agent is a replacement, which never counts
+// again; any other live row of the key is left to the store to decide.
+// The result is advisory: the store checks the caps again in the write
+// transaction.
+func pendingSecretCapPrecheck(rows []store.PendingSecret, agentID, key string, now time.Time) *store.PendingSecretCapError {
+	agentCount, ownerCount := 0, 0
+	for _, row := range rows {
+		if row.Expired(now) {
+			continue
+		}
+		if row.Key == key {
+			return nil
+		}
+		ownerCount++
+		if row.AgentID == agentID {
+			agentCount++
+		}
+	}
+	if agentCount >= store.PendingSecretAgentCap {
+		return &store.PendingSecretCapError{Cap: store.PendingSecretCapAgent, Limit: store.PendingSecretAgentCap}
+	}
+	if ownerCount >= store.PendingSecretOwnerCap {
+		return &store.PendingSecretCapError{Cap: store.PendingSecretCapOwner, Limit: store.PendingSecretOwnerCap}
+	}
+	return nil
+}
+
+// refusePendingSecretOverCap audits and answers a write over a pending
+// secret cap (429 secret_pending_cap).
+func (s *Server) refusePendingSecretOverCap(w http.ResponseWriter, ctx context.Context, refused *store.PendingSecret, capErr *store.PendingSecretCapError) {
+	s.auditRefusedPendingWrite(ctx, refused, capErr)
+	writePendingSecretWriteError(w, refused.Key, capErr)
 }
 
 // pendingSecretProvenanceNames returns the writing agent's slug and its
@@ -298,6 +420,7 @@ func countNonEmpty(refs []string) int {
 //	GET  /api/v1/pending-secrets              list own pending secrets
 //	POST /api/v1/pending-secrets/{id}/approve approve (body {allowProgeny?})
 //	POST /api/v1/pending-secrets/{id}/reject  reject
+//	POST /api/v1/pending-secrets/{id}/reveal  return the held value
 //
 // Only the owning user, on an interactive session or dev credential, is
 // served (resolveEnvSecretAccess for a user-scope write): agents, user
@@ -323,7 +446,7 @@ func (s *Server) handlePendingSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parts := strings.Split(rest, "/")
-	if len(parts) != 2 || parts[0] == "" || (parts[1] != "approve" && parts[1] != "reject") {
+	if len(parts) != 2 || parts[0] == "" || (parts[1] != "approve" && parts[1] != "reject" && parts[1] != "reveal") {
 		NotFound(w, "Pending secret")
 		return
 	}
@@ -343,10 +466,13 @@ func (s *Server) handlePendingSecrets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, action := parts[0], parts[1]
-	if action == "approve" {
+	switch action {
+	case "approve":
 		s.approvePendingSecret(w, r, ownerID, id)
-	} else {
+	case "reject":
 		s.rejectPendingSecret(w, r, ownerID, id)
+	default:
+		s.revealPendingSecret(w, r, ownerID, id)
 	}
 }
 
@@ -508,6 +634,10 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 	// The approved secret is written: release the held value.
 	s.dropPendingValues(ctx, []string{claimed.ValueRef})
 
+	approved := *claimed
+	approved.AllowProgeny = allowProgeny
+	s.auditPendingSecret(ctx, PendingSecretEventApprove, &approved, PendingSecretActorUser, ownerID, "")
+
 	writeJSON(w, http.StatusOK, PendingSecretDecisionResponse{
 		ID:    claimed.ID,
 		Key:   claimed.Key,
@@ -549,10 +679,62 @@ func (s *Server) rejectPendingSecret(w http.ResponseWriter, r *http.Request, own
 		return
 	}
 	s.dropPendingValues(ctx, []string{p.ValueRef})
+	s.auditPendingSecret(ctx, PendingSecretEventReject, p, PendingSecretActorUser, ownerID, "")
 	writeJSON(w, http.StatusOK, PendingSecretDecisionResponse{
 		ID:    p.ID,
 		Key:   p.Key,
 		Scope: store.ScopeUser,
 		State: "rejected",
+	})
+}
+
+// revealPendingSecret returns the held value of one of ownerID's live
+// pending secrets and audits the reveal. It changes nothing; the response
+// is not cached.
+func (s *Server) revealPendingSecret(w http.ResponseWriter, r *http.Request, ownerID, id string) {
+	ctx := r.Context()
+	w.Header().Set("Cache-Control", "no-store")
+	p, ok := s.ownPendingSecret(w, ctx, ownerID, id)
+	if !ok {
+		return
+	}
+	value, err := s.secretBackend.ReadPending(ctx, p.ValueRef)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	s.auditPendingSecret(ctx, PendingSecretEventReveal, p, PendingSecretActorUser, ownerID, "")
+	writeJSON(w, http.StatusOK, RevealPendingSecretResponse{
+		ID:       p.ID,
+		Key:      p.Key,
+		Type:     p.SecretType,
+		Target:   p.Target,
+		Value:    base64.StdEncoding.EncodeToString(value),
+		Encoding: "base64",
+	})
+}
+
+// auditPendingSecret logs a pending secret event for p through the audit
+// logger, if one is configured. reason is set on refused writes only.
+func (s *Server) auditPendingSecret(ctx context.Context, eventType string, p *store.PendingSecret, actorKind, actorID, reason string) {
+	if s.auditLogger == nil || p == nil {
+		return
+	}
+	_ = s.auditLogger.LogPendingSecretEvent(ctx, &PendingSecretEvent{
+		EventType:        eventType,
+		Reason:           reason,
+		PendingID:        p.ID,
+		Key:              p.Key,
+		SecretType:       p.SecretType,
+		Target:           p.Target,
+		Scope:            p.Scope,
+		ScopeID:          p.ScopeID,
+		AgentID:          p.AgentID,
+		ProjectID:        p.ProjectID,
+		ActorKind:        actorKind,
+		ActorID:          actorID,
+		ReplacesSecretID: p.ReplacesSecretID,
+		AllowProgeny:     p.AllowProgeny,
+		Timestamp:        time.Now(),
 	})
 }

@@ -493,7 +493,8 @@ func assertSecretListJSON(t *testing.T, out string) {
 	require.Len(t, items, 2)
 
 	first := items[0].(map[string]interface{})
-	assert.ElementsMatch(t, []string{"key", "type", "allowProgeny", "version", "updated"}, mapKeys(first))
+	assert.ElementsMatch(t, []string{"key", "state", "type", "allowProgeny", "version", "updated"}, mapKeys(first))
+	assert.Equal(t, "approved", first["state"])
 	assert.Equal(t, "API_KEY", first["key"])
 	assert.Equal(t, "environment", first["type"])
 	assert.Equal(t, true, first["allowProgeny"])
@@ -533,7 +534,9 @@ func TestRunSecretList_JSONFlagMetadataOnly(t *testing.T) {
 	assertSecretListJSON(t, out)
 }
 
-func TestRunSecretList_TableOutputUnchanged(t *testing.T) {
+// TestRunSecretList_TableOutput: the user-scope table has a STATE column;
+// a Hub that answers without the merged list shows every secret approved.
+func TestRunSecretList_TableOutput(t *testing.T) {
 	setupSecretListTest(t)
 	outputFormat = ""
 
@@ -544,10 +547,10 @@ func TestRunSecretList_TableOutputUnchanged(t *testing.T) {
 	updated1 := clitime.Format(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), clitime.Full)
 	updated2 := clitime.Format(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), clitime.Full)
 	want := "Secrets (scope: user):\n" +
-		fmt.Sprintf("%-30s  %-12s  %-8s  %-8s  %s\n", "KEY", "TYPE", "PROGENY", "VERSION", "UPDATED") +
-		fmt.Sprintf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-----------------------") +
-		fmt.Sprintf("%-30s  %-12s  %-8s  v%-7d  %s\n", "API_KEY", "environment", "✓", 3, updated1) +
-		fmt.Sprintf("%-30s  %-12s  %-8s  v%-7d  %s\n", "CONFIG", "environment", "-", 1, updated2)
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "KEY", "STATE", "TYPE", "PROGENY", "VERSION", "UPDATED") +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "--------", "------------", "--------", "--------", "-----------------------") +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "API_KEY", "approved", "environment", "✓", "v3", updated1) +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "CONFIG", "approved", "environment", "-", "v1", updated2)
 	assert.Equal(t, want, out)
 	assert.NotContains(t, out, "do-not-print")
 }

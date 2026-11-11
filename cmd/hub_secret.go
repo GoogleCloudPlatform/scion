@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -437,12 +439,16 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 
 // secretListItem is the JSON shape of one row of "scion hub secret list".
 // It carries the same metadata the table shows and never a secret value.
+// State is "approved" or "pending" at user scope and empty at other
+// scopes; a pending row carries its PendingID and no Version.
 type secretListItem struct {
 	Key          string    `json:"key"`
+	State        string    `json:"state,omitempty"`
 	Type         string    `json:"type"`
 	AllowProgeny bool      `json:"allowProgeny"`
 	Version      int       `json:"version"`
 	Updated      time.Time `json:"updated"`
+	PendingID    string    `json:"pendingId,omitempty"`
 }
 
 // secretListOutput is the JSON shape of "scion hub secret list".
@@ -474,12 +480,98 @@ func secretTypeLabel(t string) string {
 	return t
 }
 
+// newSecretListOutputWithPending is the user-scope list output: approved
+// and pending secrets with a state each, in the Hub's order (by key,
+// approved before pending).
+func newSecretListOutputWithPending(items []hubclient.SecretListItem) secretListOutput {
+	out := secretListOutput{Scope: "user", Secrets: make([]secretListItem, 0, len(items))}
+	for _, it := range items {
+		switch {
+		case it.Secret != nil:
+			out.Secrets = append(out.Secrets, secretListItem{
+				Key:          it.Secret.Key,
+				State:        it.State,
+				Type:         secretTypeLabel(it.Secret.SecretType),
+				AllowProgeny: it.Secret.AllowProgeny,
+				Version:      it.Secret.Version,
+				Updated:      it.Secret.Updated,
+			})
+		case it.Pending != nil:
+			out.Secrets = append(out.Secrets, secretListItem{
+				Key:          it.Pending.Key,
+				State:        it.State,
+				Type:         secretTypeLabel(it.Pending.Type),
+				AllowProgeny: it.Pending.AllowProgeny,
+				Updated:      it.Pending.Updated,
+				PendingID:    it.Pending.ID,
+			})
+		}
+	}
+	return out
+}
+
+// runUserSecretList lists the caller's user secrets with a STATE column:
+// approved secrets and the pending secrets agents saved that wait for
+// approval. It returns handled=false when the Hub refuses the merged list
+// (a credential the pending endpoints do not serve), so the caller falls
+// back to the approved list.
+func runUserSecretList(ctx context.Context, client hubclient.Client) (handled bool, err error) {
+	resp, err := client.Secrets().ListWithPending(ctx)
+	if err != nil {
+		if apiclient.IsForbiddenError(err) {
+			return false, nil
+		}
+		return true, fmt.Errorf("failed to list secrets: %w", err)
+	}
+	if resp.Items == nil {
+		// A Hub without the merged list answers with the approved list only.
+		resp.Items = make([]hubclient.SecretListItem, 0, len(resp.Secrets))
+		for i := range resp.Secrets {
+			resp.Items = append(resp.Items, hubclient.SecretListItem{State: "approved", Key: resp.Secrets[i].Key, Secret: &resp.Secrets[i]})
+		}
+	}
+	out := newSecretListOutputWithPending(resp.Items)
+	if wantJSON(secretOutputJSON) {
+		return true, outputJSON(out)
+	}
+	if len(out.Secrets) == 0 {
+		fmt.Println("No secrets found (scope: user)")
+		return true, nil
+	}
+	fmt.Println("Secrets (scope: user):")
+	fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "KEY", "STATE", "TYPE", "PROGENY", "VERSION", "UPDATED")
+	fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "--------", "------------", "--------", "--------", "-----------------------")
+	pending := 0
+	for _, s := range out.Secrets {
+		progenyLabel := "-"
+		if s.AllowProgeny {
+			progenyLabel = "\u2713"
+		}
+		version := fmt.Sprintf("v%d", s.Version)
+		if s.State == "pending" {
+			version = "-"
+			pending++
+		}
+		fmt.Printf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", truncate(terminalText(s.Key), 30), s.State, terminalText(s.Type), progenyLabel, version, clitime.Format(s.Updated, clitime.Full))
+	}
+	if pending > 0 {
+		fmt.Println("\nPending secrets are not delivered until you approve them: scion hub secret pending list")
+	}
+	return true, nil
+}
+
 func runSecretList(cmd *cobra.Command, _ []string) error {
 	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
 	defer cancel()
+
+	if scope == "user" {
+		if handled, err := runUserSecretList(ctx, client); handled {
+			return err
+		}
+	}
 
 	opts := &hubclient.ListSecretOptions{
 		Scope:   scope,

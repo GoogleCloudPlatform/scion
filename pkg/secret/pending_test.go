@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -229,4 +230,43 @@ func TestLocalBackend_PendingRowsNeverDelivered(t *testing.T) {
 	for _, p := range progeny {
 		assert.NotEqual(t, "PENDING_ONLY_KEY", p.Key)
 	}
+}
+
+// TestGCPBackend_ListHeldPending: only this hub's pending values are
+// listed, with their pending id and creation time; approved secrets,
+// another hub's pending values and secrets that only look like pending
+// values are left out.
+func TestGCPBackend_ListHeldPending(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	id := api.NewUUID()
+	ref, err := backend.HoldPending(ctx, id, []byte("test-value-1"))
+	require.NoError(t, err)
+
+	_, _, err = backend.Set(ctx, &SetSecretInput{
+		Name: "API_KEY", Value: "test-value-approved", SecretType: store.SecretTypeEnvironment,
+		Scope: store.ScopeUser, ScopeID: "user-1",
+	})
+	require.NoError(t, err)
+	other := NewGCPBackendWithClient(backend.store, mock, "test-project", "other-hub-id")
+	_, err = other.HoldPending(ctx, api.NewUUID(), []byte("test-value-other"))
+	require.NoError(t, err)
+	// A pending-named secret without the label, and a labelled secret
+	// with an invalid id, are not this hub's held values.
+	unlabelled := "projects/test-project/secrets/" + backend.secretNamePrefix() + "pending-" + api.NewUUID()
+	mock.secrets[unlabelled] = &smpb.Secret{Name: unlabelled}
+	badID := "projects/test-project/secrets/" + backend.secretNamePrefix() + "pending-"
+	mock.secrets[badID] = &smpb.Secret{Name: badID, Labels: map[string]string{"scion-pending": "true"}}
+
+	held, err := backend.ListHeldPending(ctx)
+	require.NoError(t, err)
+	require.Len(t, held, 1)
+	assert.Equal(t, ref, held[0].Ref)
+	assert.Equal(t, id, held[0].PendingID)
+	assert.WithinDuration(t, time.Now(), held[0].Created, time.Minute)
+
+	local, err := (&LocalBackend{}).ListHeldPending(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, local, "the local backend holds values on the rows")
 }

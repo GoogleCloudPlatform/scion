@@ -119,7 +119,7 @@ var requestPathSites = []requestPathSite{
 	{"handlers_github_app.go", "Server.handleGitHubAppInstallationByIDRead", "URL.Path", 1, "routing: selects the association-report sub-route (compared with a constant; not logged or returned)"},
 	{"handlers_groups.go", "Server.handleGroupRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_integrations.go", "Server.handleAdminIntegrationByName", "URL.Path", 1, "routing: extracts ids and sub-routes"},
-	{"handlers_pending_secrets.go", "Server.handlePendingSecrets", "URL.Path", 1, "routing: extracts the pending secret id and the approve or reject sub-route"},
+	{"handlers_pending_secrets.go", "Server.handlePendingSecrets", "URL.Path", 1, "routing: extracts the pending secret id and the approve, reject or reveal sub-route"},
 	{"handlers_principals.go", "Server.handlePrincipalRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_projects_core.go", "Server.handleProjectRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_quota.go", "Server.handleAdminLimitByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},

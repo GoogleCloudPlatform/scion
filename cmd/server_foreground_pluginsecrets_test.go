@@ -52,6 +52,9 @@ func (f *fakeSecretBackend) ReadPending(context.Context, string) ([]byte, error)
 }
 
 func (f *fakeSecretBackend) DropPending(context.Context, string) error { return nil }
+func (f *fakeSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
 
 func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.SecretWithValue, error) {
 	v, ok := f.values[name]

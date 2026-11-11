@@ -113,6 +113,9 @@ func (m *oidcMockSecretBackend) ReadPending(context.Context, string) ([]byte, er
 }
 
 func (m *oidcMockSecretBackend) DropPending(context.Context, string) error { return nil }
+func (m *oidcMockSecretBackend) ListHeldPending(context.Context) ([]secret.HeldPendingValue, error) {
+	return nil, nil
+}
 
 // FetchValues is not exercised by the OIDC key tests in this file; this stub
 // only satisfies secret.SecretBackend and reports every item not found, the

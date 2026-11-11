@@ -506,6 +506,23 @@ func (s *NotificationStore) AcknowledgeNotification(ctx context.Context, id stri
 	return nil
 }
 
+// UpdateNotificationContent implements store.NotificationStore.
+func (s *NotificationStore) UpdateNotificationContent(ctx context.Context, id, message, resourceID string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.Notification.UpdateOneID(uid).
+		SetMessage(message).
+		SetResourceID(resourceID).
+		SetAcknowledged(false).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // AcknowledgeAllNotifications marks all notifications for a subscriber as acknowledged.
 // No error on zero rows affected.
 func (s *NotificationStore) AcknowledgeAllNotifications(ctx context.Context, subscriberType, subscriberID string) error {

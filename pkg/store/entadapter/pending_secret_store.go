@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -142,9 +143,17 @@ func (s *PendingSecretStore) CreateOrReplacePendingSecret(ctx context.Context, p
 }
 
 func createOrReplacePendingSecret(ctx context.Context, c *ent.Client, p *store.PendingSecret, now time.Time) (*store.PendingSecretWriteResult, error) {
-	// Lock order: the policy, then the pending row.
+	// Lock order: the policy, the owner's pending writes, then the
+	// pending row.
 	if err := fencePendingValue(ctx, c, p.ValueRef); err != nil {
 		return nil, err
+	}
+	if isPostgres(c) {
+		// Serialize the owner's pending writes so the caps are checked
+		// and applied atomically. SQLite serializes writers already.
+		if err := lockPendingSecretOwner(ctx, c, p.ScopeID); err != nil {
+			return nil, err
+		}
 	}
 	q := c.PendingSecret.Query().Where(
 		entpendingsecret.KeyEQ(p.Key),
@@ -177,6 +186,16 @@ func createOrReplacePendingSecret(ctx context.Context, c *ent.Client, p *store.P
 			return nil, mapError(err)
 		}
 		res.DroppedValueRefs = append(res.DroppedValueRefs, existing.ValueRef)
+	}
+
+	// A replacement of the same agent's row takes that row's place; any
+	// other write adds a row and must stay within the caps. The row of
+	// this key, if any, is already deleted above, so the counts below
+	// never include it.
+	if !res.Replaced {
+		if err := checkPendingSecretCaps(ctx, c, p, now); err != nil {
+			return nil, err
+		}
 	}
 
 	id := uuid.New()
@@ -228,6 +247,46 @@ func createOrReplacePendingSecret(ctx context.Context, c *ent.Client, p *store.P
 	stored := entPendingSecretToStore(row, true)
 	res.Secret = &stored
 	return res, nil
+}
+
+// lockPendingSecretOwner takes the transaction-scoped per-owner pending
+// secret write lock (store.LockPendingSecretOwnerWrite) on PostgreSQL. It is
+// released when the transaction ends.
+func lockPendingSecretOwner(ctx context.Context, c *ent.Client, scopeID string) error {
+	var res sql.Result
+	if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+		[]any{int32(store.LockPendingSecretOwnerWrite), store.StableProjectHash(scopeID)}, &res); err != nil {
+		return fmt.Errorf("lock pending secret owner: %w", err)
+	}
+	return nil
+}
+
+// checkPendingSecretCaps returns a *store.PendingSecretCapError when one
+// more live pending secret by p.AgentID, or for p's owner, would exceed
+// its cap.
+func checkPendingSecretCaps(ctx context.Context, c *ent.Client, p *store.PendingSecret, now time.Time) error {
+	agentCount, err := c.PendingSecret.Query().Where(
+		entpendingsecret.AgentIDEQ(p.AgentID),
+		entpendingsecret.ExpiresAtGT(now),
+	).Count(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if agentCount >= store.PendingSecretAgentCap {
+		return &store.PendingSecretCapError{Cap: store.PendingSecretCapAgent, Limit: store.PendingSecretAgentCap}
+	}
+	ownerCount, err := c.PendingSecret.Query().Where(
+		entpendingsecret.ScopeEQ(p.Scope),
+		entpendingsecret.ScopeIDEQ(p.ScopeID),
+		entpendingsecret.ExpiresAtGT(now),
+	).Count(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if ownerCount >= store.PendingSecretOwnerCap {
+		return &store.PendingSecretCapError{Cap: store.PendingSecretCapOwner, Limit: store.PendingSecretOwnerCap}
+	}
+	return nil
 }
 
 // GetPendingSecret implements store.PendingSecretStore.
@@ -487,4 +546,66 @@ func (s *PendingSecretStore) ListPendingSecretScopeIDs(ctx context.Context, scop
 		return nil, mapError(err)
 	}
 	return ids, nil
+}
+
+// DeleteExpiredPendingSecrets implements store.PendingSecretStore.
+func (s *PendingSecretStore) DeleteExpiredPendingSecrets(ctx context.Context, now time.Time, limit int) ([]store.PendingSecret, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var out []store.PendingSecret
+	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		q := c.PendingSecret.Query().
+			Where(entpendingsecret.ExpiresAtLTE(now)).
+			Order(ent.Asc(entpendingsecret.FieldExpiresAt)).
+			Limit(limit)
+		if isPostgres(c) {
+			q = q.ForUpdate()
+		}
+		rows, err := q.All(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		out = make([]store.PendingSecret, 0, len(rows))
+		for _, row := range rows {
+			n, err := c.PendingSecret.Delete().Where(
+				entpendingsecret.IDEQ(row.ID),
+				entpendingsecret.ExpiresAtLTE(now),
+			).Exec(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			if n == 1 {
+				out = append(out, entPendingSecretToStore(row, true))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// pendingValueRefBatch bounds the refs one PendingSecretValueRefsInUse
+// query matches.
+const pendingValueRefBatch = 500
+
+// PendingSecretValueRefsInUse implements store.PendingSecretStore.
+func (s *PendingSecretStore) PendingSecretValueRefsInUse(ctx context.Context, refs []string) (map[string]bool, error) {
+	inUse := make(map[string]bool)
+	for start := 0; start < len(refs); start += pendingValueRefBatch {
+		end := min(start+pendingValueRefBatch, len(refs))
+		rows, err := s.client.PendingSecret.Query().
+			Where(entpendingsecret.ValueRefIn(refs[start:end]...)).
+			Select(entpendingsecret.FieldValueRef).
+			Strings(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, ref := range rows {
+			inUse[ref] = true
+		}
+	}
+	return inUse, nil
 }

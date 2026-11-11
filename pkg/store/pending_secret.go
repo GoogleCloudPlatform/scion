@@ -17,6 +17,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -38,6 +39,38 @@ var ErrPendingSecretHeldByOtherAgent = errors.New("a pending secret with this na
 // recorded, the recorded one is gone, or it has another ID or version.
 // Nothing is changed.
 var ErrPendingSecretExistingChanged = errors.New("the existing secret with this name changed after the pending secret was written")
+
+// Pending secret caps. A writing agent holds at most PendingSecretAgentCap
+// live pending secrets, and an owner at most PendingSecretOwnerCap, across
+// all writers. A replacement of the same agent's pending secret of the same
+// key does not count again.
+const (
+	PendingSecretAgentCap = 10
+	PendingSecretOwnerCap = 50
+)
+
+// Values of PendingSecretCapError.Cap.
+const (
+	PendingSecretCapAgent = "agent"
+	PendingSecretCapOwner = "owner"
+)
+
+// ErrPendingSecretCap is matched (errors.Is) by every PendingSecretCapError.
+var ErrPendingSecretCap = errors.New("pending secret cap reached")
+
+// PendingSecretCapError is returned by CreateOrReplacePendingSecret when the
+// write would exceed a cap. Nothing is changed.
+type PendingSecretCapError struct {
+	Cap   string // PendingSecretCapAgent or PendingSecretCapOwner
+	Limit int
+}
+
+func (e *PendingSecretCapError) Error() string {
+	return fmt.Sprintf("pending secret cap reached: at most %d pending secrets per %s", e.Limit, e.Cap)
+}
+
+// Is reports whether target is ErrPendingSecretCap.
+func (e *PendingSecretCapError) Is(target error) bool { return target == ErrPendingSecretCap }
 
 // PendingSecret is a user-scope secret written by an agent that waits for
 // the owning user's approval. It lives in its own table and is never read by
@@ -122,6 +155,11 @@ type PendingSecretStore interface {
 	//     nothing changes;
 	//   - a live row by the same agent (p.AgentID): it is replaced by p under
 	//     a new ID, keeping its Created and ExpiresAt, with Updated = now.
+	// A write that is not a replacement must leave the writing agent with
+	// at most PendingSecretAgentCap and the owner with at most
+	// PendingSecretOwnerCap live pending secrets; otherwise it returns a
+	// *PendingSecretCapError and nothing changes. The caps are checked in
+	// the same transaction as the write, serialized per owner.
 	// A new ID is assigned when p.ID is empty. The input is not modified.
 	// A write that keeps losing races on the unique index (outside an
 	// ambient transaction) returns ErrTransient, never ErrAlreadyExists.
@@ -181,4 +219,14 @@ type PendingSecretStore interface {
 	// ListPendingSecretScopeIDs returns the distinct scope IDs that have
 	// pending secrets in scope.
 	ListPendingSecretScopeIDs(ctx context.Context, scope string) ([]string, error)
+
+	// DeleteExpiredPendingSecrets deletes up to limit pending secrets whose
+	// ExpiresAt is at or before now and returns them, with their ValueRef,
+	// so the caller can release the held values after the delete has
+	// committed. A row deleted concurrently is not returned.
+	DeleteExpiredPendingSecrets(ctx context.Context, now time.Time, limit int) ([]PendingSecret, error)
+
+	// PendingSecretValueRefsInUse returns the subset of refs that some
+	// pending secret's value ref equals.
+	PendingSecretValueRefsInUse(ctx context.Context, refs []string) (map[string]bool, error)
 }

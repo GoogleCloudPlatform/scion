@@ -415,6 +415,11 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		scope = store.ScopeUser
 	}
 
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
+		return
+	}
+
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
@@ -631,6 +636,10 @@ type ListSecretsResponse struct {
 	Secrets []store.Secret `json:"secrets"`
 	Scope   string         `json:"scope"`
 	ScopeID string         `json:"scopeId"`
+	// Items is the merged view of approved and pending user secrets,
+	// present only for scope=user&includePending=true
+	// (listSecretsWithPending).
+	Items []SecretListItem `json:"items,omitempty"`
 }
 
 type SetSecretRequest struct {
@@ -787,6 +796,10 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		scope = store.ScopeUser
 	}
 
+	if s.serveSecretListWithPending(w, r, scope) {
+		return
+	}
+
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
@@ -844,6 +857,11 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 	scope := query.Get("scope")
 	if scope == "" {
 		scope = store.ScopeUser
+	}
+
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
+		return
 	}
 
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
