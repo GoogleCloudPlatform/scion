@@ -591,13 +591,13 @@ func parseConduitTunnelRequest(body []byte) (*conduitTunnelRequest, string, map[
 // authorizeConduitTunnel decides a tunnel request (§3.5) with
 // authorizeConduitUserStream, the decision every re-check of the tunnel's
 // stream repeats: the user's status, ActionTunnel and the kind's action
-// (ActionPortAccess for tcp, ActionAttach for pty and ssh). The tcp
-// target port is left to the caller (DeferTCPTarget), which checks it
-// with authorizeConduitTCPTarget after the agent's state; re-checks
-// include it. It returns the tcp port (0 for other kinds).
-// mintConduitGrant repeats every check, the port included, when it mints;
-// deciding here first keeps a refused caller from learning the agent's
-// state or session.
+// (ActionPortAccess for tcp, ActionAttach for pty and ssh, and that
+// disable_ssh is off for ssh). The tcp target port is left to the caller
+// (DeferTCPTarget), which checks it with authorizeConduitTCPTarget after
+// the agent's state; re-checks include it. It returns the tcp port (0 for
+// other kinds). mintConduitGrant repeats every check, the port included,
+// when it mints; deciding here first keeps a refused caller from learning
+// the agent's state or session.
 //
 // A deny by the user-status rule is the *conduitTunnelError userActive
 // returns; a user lookup that fails wraps errConduitUserStatusUnavailable

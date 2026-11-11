@@ -401,6 +401,10 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		writePortNotExposed(w, r)
 		return
 	}
+	if s.config.ConduitPolicy.PortDenied(exposed.Port) {
+		writePortDenied(w, r)
+		return
+	}
 	// The bare proxy URL (.../proxy, no trailing slash) is answered with a
 	// redirect to .../proxy/, so the page's relative URLs resolve inside
 	// the proxy path. Only GET and HEAD, and only after the checks above,
@@ -452,6 +456,17 @@ func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	NotFound(w, "Port")
+}
+
+// writePortDenied answers a request for a port denied by operator policy:
+// the proxy error page for a browser, else a JSON 403.
+func writePortDenied(w http.ResponseWriter, r *http.Request) {
+	if isBrowserRequest(r) {
+		writeProxyErrorHTML(w, http.StatusForbidden, "Port Not Available",
+			"The operator does not allow access to this port.")
+		return
+	}
+	Forbidden(w)
 }
 
 // portTunnelFailedMessage is the client-facing text for a failed legacy
@@ -526,6 +541,10 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	// a body over the limit; portViewRequestRefused), unless the app
 	// answered (served) or the tunnel could not reach it (offline).
 	transport, outcome = portViewTransportLegacy, portViewRequestRefused
+	if s.config.ConduitPolicy.PortDenied(port) {
+		writePortDenied(w, r)
+		return
+	}
 	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
 	// in external relay mode with enforce, a user request that only the
 	// port-forward tunnel below could serve is refused with the
