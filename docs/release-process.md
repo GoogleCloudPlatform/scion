@@ -84,8 +84,9 @@ immutable identifiers for published builds.
    `bump-preview.sh`.
 5. Once the latest preview is approved, promote it to stable with `promote-stable.sh`. Promotion
    tags the exact tested release-branch commit without a pre-release suffix and, in the same
-   atomic push, creates the next `release/vX.(Y+1)` branch. The next Friday, the weekly preview
-   workflow tags `vX.(Y+1).0-preview.1` on it.
+   atomic push, creates the next `release/vX.(Y+1)` branch. The weekly preview workflow then tags
+   `vX.(Y+1).0-preview.1` on it once a newer nightly passes CI (see
+   [Promote a preview to stable](#promote-a-preview-to-stable)).
 
 ## Operator runbook
 

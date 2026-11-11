@@ -298,7 +298,8 @@ echo "The build-release workflow should now be triggered by the tag push."
 if [ "$NEXT_BRANCH_ENABLED" = true ]; then
   NEXT_PREVIEW="${NEXT_BRANCH#release/}.0-preview.1"
   if [ "$NEWER_NIGHTLY" = true ]; then
-    echo "The weekly preview workflow tags ${NEXT_PREVIEW} on ${NEXT_BRANCH} on Friday."
+    echo "The weekly preview workflow tags ${NEXT_PREVIEW} on ${NEXT_BRANCH} on Friday, once a"
+    echo "nightly newer than ${NEXT_BRANCH} has passed CI."
     echo "To tag it sooner, dispatch build-preview-weekly.yml by hand: a nightly on main is"
     echo "newer than ${NEXT_BRANCH}, and the newest such nightly that passed CI is used."
   else

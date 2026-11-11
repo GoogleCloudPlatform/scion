@@ -155,6 +155,8 @@ want_remote refs/tags/v0.3.0 "$c4"
 want_remote refs/heads/release/v0.4 "$c3"
 want_out "nightly-20261021"
 want_out "$HINT_LATER"
+run_select
+want_sel selected false
 
 # --- Stable commit is the newest nightly: no nightly is newer than the next
 # branch, so the weekly selection tags nothing until the next nightly ---
@@ -258,6 +260,19 @@ want_out "Auto-detected release branch: release/v0.9"
 want_remote refs/tags/v0.9.0 "$c2"
 want_remote refs/heads/release/v0.10 "$c2"
 want_remote refs/heads/release/v0.1 ""
+
+# --- Major version other than 0: release/v1.2 promotes to v1.2.0 and
+# creates release/v1.3 ---
+name=major-one; new_repo "$name"
+g tag v1.2.0-preview.4 "$c2"
+g push -q origin "$c2:refs/heads/release/v1.2" v1.2.0-preview.4
+run
+want_status 0
+want_out "Auto-detected release branch: release/v1.2"
+want_remote refs/tags/v1.2.0 "$c2"
+want_remote refs/heads/release/v1.3 "$c2"
+want_remote refs/tags/v0.3.0 ""
+want_remote refs/heads/release/v0.4 ""
 
 # --- Bad branch names: refused with the release/vX.Y message, also when the
 # branch does not exist ---
