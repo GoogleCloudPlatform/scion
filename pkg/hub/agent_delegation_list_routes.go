@@ -64,7 +64,7 @@ func (s *Server) listProjectAgentsDelegated(w http.ResponseWriter, r *http.Reque
 		if c != nil {
 			c.markComplete()
 		}
-		s.writeAgentList(ctx, w, view, ListAgentsResponse{
+		s.writeAgentList(ctx, w, view, false, ListAgentsResponse{
 			Agents:       []AgentWithCapabilities{},
 			ServerTime:   time.Now().UTC(),
 			Capabilities: &Capabilities{Actions: []string{}},
@@ -101,7 +101,7 @@ func (s *Server) listProjectAgentsDelegated(w http.ResponseWriter, r *http.Reque
 	if c != nil {
 		c.markComplete()
 	}
-	s.writeAgentList(ctx, w, view, ListAgentsResponse{
+	s.writeAgentList(ctx, w, view, false, ListAgentsResponse{
 		Agents:                agents,
 		NextCursor:            result.NextCursor,
 		TotalCount:            result.TotalCount,

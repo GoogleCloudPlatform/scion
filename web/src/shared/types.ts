@@ -940,6 +940,27 @@ export interface AgentUpdateDisposition {
 /** A model size alias (pkg/config KnownModelAliases). */
 export type AgentModelSize = 'small' | 'medium' | 'large' | 'extra-large';
 
+/** The principal an {@link AgentAuthority} cause names. */
+export interface AgentAuthorityPrincipal {
+  /** "user" or "agent". */
+  kind: string;
+  /** Set only for a reader who may read that principal. */
+  id?: string;
+  deleted: boolean;
+}
+
+/**
+ * An agent's authority state (ptone/scion#2143). `orphaned` and `revoked`
+ * agents are denied every request that needs their delegation.
+ */
+export interface AgentAuthority {
+  /** "live", "orphaned", "revoked" or "unrecorded". */
+  state: string;
+  cause?: string;
+  principal?: AgentAuthorityPrincipal;
+  since?: string;
+}
+
 /**
  * Agent information from the Hub API
  */
@@ -1036,6 +1057,11 @@ export interface Agent {
   // sends this key on REST agents and SSE status deltas; an explicit `null`
   // means no delete is active and must clear any earlier value.
   deletion?: DeletionInfo | null;
+
+  // The agent's authority state, computed by the hub at read
+  // (ptone/scion#2143): always on the single-agent GET, and on list items
+  // when the request carries include=authority. Absent means unknown.
+  authority?: AgentAuthority | null;
 
   // Computed by the hub: provisioned but never asked to run
   // (ptone/scion#2929). Absent means false.

@@ -689,9 +689,9 @@ func TestAgentCompactView_NilAgentsMarshalsLikeFullView(t *testing.T) {
 	for _, agents := range [][]AgentWithCapabilities{nil, {}} {
 		resp := ListAgentsResponse{Agents: agents, TotalCount: 0}
 		full := httptest.NewRecorder()
-		(&Server{}).writeAgentList(context.Background(), full, agentListViewFull, resp)
+		(&Server{}).writeAgentList(context.Background(), full, agentListViewFull, false, resp)
 		compact := httptest.NewRecorder()
-		(&Server{}).writeAgentList(context.Background(), compact, agentListViewCompact, resp)
+		(&Server{}).writeAgentList(context.Background(), compact, agentListViewCompact, false, resp)
 		require.Equal(t, http.StatusOK, full.Code)
 		require.Equal(t, http.StatusOK, compact.Code)
 		fullAgents := decodeObject(t, full.Body.Bytes())["agents"]

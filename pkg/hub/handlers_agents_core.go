@@ -400,7 +400,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		s.writeAgentList(ctx, w, p.view, sortedShortCircuitResponse(p))
+		s.writeAgentList(ctx, w, p.view, false, sortedShortCircuitResponse(p))
 	}
 
 	// RS2: Unauthenticated callers get an empty list immediately.
@@ -517,7 +517,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, result.Items)
 
-	s.writeAgentList(ctx, w, legacyAgentListView(query), ListAgentsResponse{
+	s.writeAgentList(ctx, w, legacyAgentListView(query), agentListIncludesAuthority(query), ListAgentsResponse{
 		Agents:                agents,
 		NextCursor:            result.NextCursor,
 		TotalCount:            result.TotalCount,
@@ -4317,6 +4317,15 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 			resp.ResolvedTimezone = &tz.TZ
 			resp.TimezoneSource = &tz.Source
 		}
+	}
+
+	// The authority state is included on the single-agent GET, for the
+	// agent itself too (agent_authority_handlers.go). A request made with
+	// an agent delegated credential gets none, as on the delegated agent
+	// list: its principal visibility would be decided through the
+	// delegated procedure, so the state is left out rather than redacted.
+	if identity := GetIdentityFromContext(ctx); !isDelegatedAgentIdentity(identity) {
+		resp.Authority = s.newAgentAuthorityReader(identity).authority(ctx, agent)
 	}
 
 	resp.AppliedConfig, resp.PendingConfig = s.redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))

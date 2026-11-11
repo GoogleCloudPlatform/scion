@@ -746,6 +746,9 @@ type AgentInfo struct {
 	// GCPIdentity is the GCP identity the Hub applied to the agent. Set
 	// only for agents listed through a Hub; nil when none is recorded.
 	GCPIdentity *AgentGCPIdentity `json:"gcpIdentity,omitempty"`
+	// Authority is the agent's authority state as the Hub computed it.
+	// Set only for agents listed through a Hub that was asked for it.
+	Authority *AgentAuthority `json:"authority,omitempty"`
 	// WorkspacePlacement is where the start that produced this info placed
 	// the agent's workspace: WorkspacePlacementExport or
 	// WorkspacePlacementLocal. Empty when this info did not come from a

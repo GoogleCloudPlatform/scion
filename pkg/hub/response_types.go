@@ -53,6 +53,11 @@ type AgentWithCapabilities struct {
 	// Pointers, so "" still reaches the wire while unset means omitted.
 	ResolvedTimezone *string `json:"resolvedTimezone,omitempty"`
 	TimezoneSource   *string `json:"timezoneSource,omitempty"`
+	// Authority is the agent's authority state (agent_authority_state.go):
+	// set on the single-agent GET, and on full-view list items when the
+	// request carries include=authority; never for a request made with an
+	// agent delegated credential.
+	Authority *api.AgentAuthority `json:"authority,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Agent.
@@ -72,6 +77,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
 		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
+		Authority           *api.AgentAuthority              `json:"authority,omitempty"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
@@ -86,6 +92,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		SSHHostKey:          a.SSHHostKey,
 		ResolvedTimezone:    a.ResolvedTimezone,
 		TimezoneSource:      a.TimezoneSource,
+		Authority:           a.Authority,
 	})
 }
 
@@ -107,6 +114,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
 		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
+		Authority           *api.AgentAuthority              `json:"authority,omitempty"`
 	}
 	var wrapper WrapperFields
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -124,6 +132,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.SSHHostKey = wrapper.SSHHostKey
 	a.ResolvedTimezone = wrapper.ResolvedTimezone
 	a.TimezoneSource = wrapper.TimezoneSource
+	a.Authority = wrapper.Authority
 	return nil
 }
 

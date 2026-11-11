@@ -257,7 +257,7 @@ func TestFetchLookIdentityHeader(t *testing.T) {
 			require.NoError(t, err)
 
 			stdout, stderr := captureStdoutStderr(t, func() {
-				got := fetchLookIdentityHeader(context.Background(), client, client.ProjectAgents("p1"), "p1", "worker")
+				got := fetchLookIdentityHeader(context.Background(), client, client.ProjectAgents("p1"), "p1", "worker", true)
 				assert.Equal(t, tt.want, got)
 			})
 			assert.Empty(t, stdout, "the lookup itself writes nothing")
@@ -275,7 +275,7 @@ func TestFetchLookIdentityHeader_AgentUnreadable(t *testing.T) {
 	require.NoError(t, err)
 
 	stdout, stderr := captureStdoutStderr(t, func() {
-		assert.Equal(t, "", fetchLookIdentityHeader(context.Background(), client, client.ProjectAgents("p1"), "p1", "worker"))
+		assert.Equal(t, "", fetchLookIdentityHeader(context.Background(), client, client.ProjectAgents("p1"), "p1", "worker", true))
 	})
 	assert.Empty(t, stdout)
 	assert.Empty(t, stderr)

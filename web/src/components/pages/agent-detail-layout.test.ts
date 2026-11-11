@@ -164,6 +164,7 @@ describe('agent detail layout', () => {
       expect(badges.map((c) => c.tagName.toLowerCase())).toEqual([
         'scion-status-badge',
         'scion-deletion-badge',
+        'scion-authority-badge',
         'scion-message-mode-badge',
       ]);
       expect(header.querySelector(':scope > sl-icon[slot="icon"]')?.getAttribute('name')).toBe(

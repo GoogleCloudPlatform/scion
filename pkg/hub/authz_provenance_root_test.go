@@ -952,6 +952,28 @@ func TestAllowUnrecordedLegacyCallersPinned(t *testing.T) {
 			t.Errorf("%s calls resolveProvenanceChain with a non-literal-false legacy flag", fn)
 		}
 	}
+	// walkProvenanceChain is called by resolveProvenanceChain (which
+	// forwards its flag) and by the descriptive authority-state resolver,
+	// whose result is never an authority input.
+	walkAllowedTrue := map[string]bool{"agentAuthorityResolver.resolve": true}
+	walkCallers := callsIn(files, "walkProvenanceChain")
+	require.NotEmpty(t, walkCallers, "walkProvenanceChain has production callers")
+	for fn, calls := range walkCallers {
+		for _, call := range calls {
+			require.Len(t, call.Args, 5, fn)
+			if fn == "AuthzService.resolveProvenanceChain" {
+				continue
+			}
+			id, ok := call.Args[2].(*ast.Ident)
+			if ok && id.Name == "false" {
+				continue
+			}
+			if ok && id.Name == "true" && walkAllowedTrue[fn] {
+				continue
+			}
+			t.Errorf("%s calls walkProvenanceChain with a non-literal-false legacy flag", fn)
+		}
+	}
 	for _, f := range files {
 		for _, pos := range allowUnrecordedLegacySetters(f) {
 			t.Errorf("production code sets AllowUnrecordedLegacy at %s", fset.Position(pos))

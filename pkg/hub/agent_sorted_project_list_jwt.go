@@ -177,5 +177,5 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 		c := complete
 		resp.Complete = &c
 	}
-	s.writeAgentList(ctx, w, p.view, resp)
+	s.writeAgentList(ctx, w, p.view, agentListIncludesAuthority(r.URL.Query()), resp)
 }

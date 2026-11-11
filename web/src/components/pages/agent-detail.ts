@@ -75,6 +75,7 @@ import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import '../shared/status-badge.js';
 import '../shared/detail-header.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import '../shared/authority-badge.js';
 import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { showResponseBodyWarnings } from '../../client/response-warnings.js';
@@ -1821,6 +1822,7 @@ export class ScionPageAgentDetail extends LitElement {
         <sl-icon slot="icon" name="cpu"></sl-icon>
         ${agentStatusBadge(agent)}
         <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
+        <scion-authority-badge .authority=${agent.authority}></scion-authority-badge>
         <scion-message-mode-badge
           mode=${agent.messageMode || 'project'}
           size="medium"

@@ -110,6 +110,8 @@ function agent(i) {
     _capabilities: { actions: own ? OWNER_ACTIONS : ['read'] },
     activity: ACTIVITIES[i % ACTIVITIES.length],
     appliedConfig,
+    // Both lists ask for include=authority; every seeded agent's owner is live.
+    authority: { state: 'live' },
     created: iso(BASE_MS - 3600_000 + i * 1000),
     createdBy: creator,
     deletedAt: ZERO_TIME,
@@ -266,7 +268,7 @@ export function buildFixture() {
       status: 200,
       body: { files: [], totalCount: 0, totalSize: 0 },
     },
-    [`${p}/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1`]: {
+    [`${p}/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1&include=authority`]: {
       status: 200,
       body: {
         _capabilities: listCaps,
@@ -284,7 +286,7 @@ export function buildFixture() {
         totalCount: AGENT_COUNT,
       },
     },
-    [`${p}/agents?limit=500`]: {
+    [`${p}/agents?include=authority&limit=500`]: {
       status: 200,
       body: {
         _capabilities: listCaps,

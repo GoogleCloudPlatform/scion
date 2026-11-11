@@ -85,6 +85,12 @@ type Agent struct {
 	// PinnedRuntimeTarget is the agent's pinned placement on a flat Runtime
 	// Broker (read-only; nil for an unpinned agent).
 	PinnedRuntimeTarget *api.PinnedRuntimeTarget `json:"pinnedRuntimeTarget,omitempty"`
+
+	// Authority is the agent's authority state as the Hub computed it at
+	// read: always on a single-agent Get, and on listed agents only when
+	// ListAgentsOptions.IncludeAuthority is set. Nil from Hubs that predate
+	// it.
+	Authority *api.AgentAuthority `json:"authority,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.

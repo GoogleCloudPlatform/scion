@@ -197,6 +197,11 @@ type ListAgentsOptions struct {
 	// all its descendants. Used by CLI --lineage.
 	LineageRootID string
 
+	// IncludeAuthority asks the Hub to include each agent's authority
+	// state (include=authority). It costs the Hub a delegation chain walk
+	// per listed agent.
+	IncludeAuthority bool
+
 	Page apiclient.PageOptions
 }
 
@@ -480,6 +485,9 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		}
 		if opts.LineageRootID != "" {
 			query.Set("lineageRootId", opts.LineageRootID)
+		}
+		if opts.IncludeAuthority {
+			query.Set("include", "authority")
 		}
 		opts.Page.ToQuery(query)
 	}

@@ -47,6 +47,7 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		want   authzop.SessionOnlyReason
 	}{
 		{"own profile update", http.MethodPatch, "/api/v1/users/" + m.adminID, map[string]interface{}{"displayName": "x"}, authzop.ReasonInteractiveState},
+		{"orphaned agents", http.MethodGet, "/api/v1/admin/orphaned-agents", nil, authzop.ReasonGovernancePending},
 		{"revoke sessions", http.MethodPost, "/api/v1/users/" + f.user + "/revoke-sessions", map[string]interface{}{}, authzop.ReasonSessionRecovery},
 		{"terminal workspace read", http.MethodGet, "/api/v1/users/me/terminal-workspace", nil, authzop.ReasonInteractiveState},
 		{"terminal workspace write", http.MethodPut, "/api/v1/users/me/terminal-workspace", map[string]interface{}{"agentIds": []string{}}, authzop.ReasonInteractiveState},

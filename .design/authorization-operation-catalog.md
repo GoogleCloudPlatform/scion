@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 385
+**Operations:** 386
 
 ## Table of Contents
 
@@ -272,6 +272,7 @@
 - [hub.allowlist.read](#huballowlistread) — Read the platform email allow list and its domains. A token needs hub_allow_list:read on the hub boundary; it does not admit the allow-list writes
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list: add and import create invited records (status invited, placeholder role member, no role binding or group membership); delete removes an invited record under the last-project-owner guard and binding cascade of user.admin.delete. The route guard checks hub.allow_list.read, so a token needs hub_allow_list:read and hub_allow_list:update on the hub boundary
 - [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
+- [hub.orphanedagents.read](#huborphanedagentsread) — List the hub's agents whose authority state is orphaned or revoked: the non-deleted agents, paged, filtered by computed state (an operator diagnostic under the permission of the health summary; session only until its token admission is governed)
 - [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 - [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
 - [hub.projectdefaults.read](#hubprojectdefaultsread) — Read project default settings
@@ -10360,6 +10361,39 @@
 ### Tests
 
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.orphanedagents.read
+
+**Domain:** hub
+
+**Description:** List the hub's agents whose authority state is orphaned or revoked: the non-deleted agents, paged, filtered by computed state (an operator diagnostic under the permission of the health summary; session only until its token admission is governed)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/orphaned-agents` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `hub.health.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAdminOrphanedAgents_Access`
 
 ---
 

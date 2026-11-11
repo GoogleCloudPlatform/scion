@@ -125,9 +125,10 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	}
 
 	opts := &hubclient.ListAgentsOptions{
-		IncludeDeleted: listDeleted,
-		Phase:          filterPhase,
-		Labels:         parsedLabels,
+		IncludeDeleted:   listDeleted,
+		Phase:            filterPhase,
+		Labels:           parsedLabels,
+		IncludeAuthority: cliShowsAgentAuthority(resolveMode()),
 	}
 	if listCount > 0 {
 		opts.Page.Limit = listCount
@@ -692,6 +693,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		ProvisionedOnly:   a.ProvisionedOnly,
 		ExitCode:          a.ExitCode,
 		ExitReason:        a.ExitReason,
+		Authority:         a.Authority,
 	}
 
 	// Fall back to AppliedConfig fields if top-level fields are empty
@@ -902,6 +904,7 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 		}
 		phase = haltedPhaseLabel(phase, a.ExitReason)
 		phase = provisionedPhaseLabel(phase, a.ProvisionedOnly)
+		phase = authorityPhaseLabel(phase, a.Authority)
 		containerStatus := a.ContainerStatus
 		if containerStatus == "created" && a.ID == "" {
 			containerStatus = "none"

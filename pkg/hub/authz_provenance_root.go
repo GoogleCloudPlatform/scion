@@ -192,6 +192,53 @@ func checkSchedulerEdge(edge *store.DelegationEdge) error {
 // not apply the local-development enablement check. Lookup errors are
 // returned wrapped.
 func (a *AuthzService) resolveProvenanceChain(ctx context.Context, agent *store.Agent, allowUnrecordedLegacy bool) (RecordedProvenanceRoot, error) {
+	return a.walkProvenanceChain(ctx, agent, allowUnrecordedLegacy, directProvenanceLookups{a: a}, nil)
+}
+
+// provenanceChainLookups are the reads walkProvenanceChain makes.
+// resolveProvenanceChain uses directProvenanceLookups (the store, as
+// always); AgentAuthorityState passes a request-scoped memo.
+type provenanceChainLookups interface {
+	activeProjectEdges(ctx context.Context, agentID, projectID string) ([]*store.DelegationEdge, error)
+	getUser(ctx context.Context, id string) (*store.User, error)
+	getAgent(ctx context.Context, id string) (*store.Agent, error)
+}
+
+// directProvenanceLookups reads every hop from the store.
+type directProvenanceLookups struct{ a *AuthzService }
+
+func (d directProvenanceLookups) activeProjectEdges(ctx context.Context, agentID, projectID string) ([]*store.DelegationEdge, error) {
+	return d.a.activeProjectEdges(ctx, agentID, projectID)
+}
+
+func (d directProvenanceLookups) getUser(ctx context.Context, id string) (*store.User, error) {
+	return d.a.store.GetUser(ctx, id)
+}
+
+func (d directProvenanceLookups) getAgent(ctx context.Context, id string) (*store.Agent, error) {
+	return d.a.store.GetAgent(ctx, id)
+}
+
+// provenanceChainTrace records where walkProvenanceChain stopped: the hop
+// depth, the agent whose edges it was reading, the delegator that hop
+// names (zero before an edge was chosen), whether the edge was the
+// migration sentinel, and whether any hop so far was unrecorded. The
+// errors are unchanged; the trace only lets a caller say which principal
+// an error is about.
+type provenanceChainTrace struct {
+	depth      int
+	delegateID string
+	principal  ProvenancePrincipal
+	sentinel   bool
+	unrecorded bool
+}
+
+// walkProvenanceChain is resolveProvenanceChain with its reads taken from
+// lookups. When trace is not nil it is updated as the walk proceeds.
+func (a *AuthzService) walkProvenanceChain(ctx context.Context, agent *store.Agent, allowUnrecordedLegacy bool, lookups provenanceChainLookups, trace *provenanceChainTrace) (RecordedProvenanceRoot, error) {
+	if trace == nil {
+		trace = &provenanceChainTrace{}
+	}
 	if agent == nil || agent.ID == "" {
 		return RecordedProvenanceRoot{}, fmt.Errorf("%w: no agent", ErrProvenanceRequest)
 	}
@@ -210,8 +257,13 @@ func (a *AuthzService) resolveProvenanceChain(ctx context.Context, agent *store.
 			return RecordedProvenanceRoot{}, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
 		}
 		visited[delegateID] = true
+		// Reset the per-hop fields; unrecorded accumulates across hops.
+		trace.depth = depth
+		trace.delegateID = delegateID
+		trace.principal = ProvenancePrincipal{}
+		trace.sentinel = false
 
-		active, err := a.activeProjectEdges(ctx, delegateID, agent.ProjectID)
+		active, err := lookups.activeProjectEdges(ctx, delegateID, agent.ProjectID)
 		if err != nil {
 			return RecordedProvenanceRoot{}, err
 		}
@@ -222,8 +274,13 @@ func (a *AuthzService) resolveProvenanceChain(ctx context.Context, agent *store.
 			return RecordedProvenanceRoot{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
 		}
 		edge := active[0]
+		trace.principal = ProvenancePrincipal{Kind: edge.DelegatorType, ID: edge.DelegatorID}
 		if isMigrationSentinel(edge) {
+			trace.sentinel = true
 			return RecordedProvenanceRoot{}, fmt.Errorf("%w: migration-provenance edge for agent %s", ErrProvenanceChain, delegateID)
+		}
+		if !edgeProvenanceRecorded(edge) {
+			trace.unrecorded = true
 		}
 		if !allowUnrecordedLegacy && !edgeProvenanceRecorded(edge) {
 			return RecordedProvenanceRoot{}, fmt.Errorf("%w: edge %s", ErrProvenanceUnrecorded, edge.ID)
@@ -252,7 +309,7 @@ func (a *AuthzService) resolveProvenanceChain(ctx context.Context, agent *store.
 		}
 
 		if edge.DelegatorType == store.DelegationPrincipalUser {
-			user, err := a.store.GetUser(ctx, edge.DelegatorID)
+			user, err := lookups.getUser(ctx, edge.DelegatorID)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					return RecordedProvenanceRoot{}, fmt.Errorf("%w: user %s does not exist", ErrProvenanceInactive, edge.DelegatorID)
@@ -267,7 +324,7 @@ func (a *AuthzService) resolveProvenanceChain(ctx context.Context, agent *store.
 			return root, nil
 		}
 
-		parent, err := a.store.GetAgent(ctx, edge.DelegatorID)
+		parent, err := lookups.getAgent(ctx, edge.DelegatorID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return RecordedProvenanceRoot{}, fmt.Errorf("%w: agent %s does not exist", ErrProvenanceInactive, edge.DelegatorID)

@@ -3196,7 +3196,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		scopeCapDone()
 	}
 
-	s.writeAgentList(ctx, w, legacyAgentListView(query), ListAgentsResponse{
+	s.writeAgentList(ctx, w, legacyAgentListView(query), agentListIncludesAuthority(query), ListAgentsResponse{
 		Agents:                agents,
 		NextCursor:            result.NextCursor,
 		TotalCount:            result.TotalCount,
