@@ -251,7 +251,7 @@ See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each 
 
 ### Multiple-Choice Decisions (Experimental)
 
-When the `web.chat_choices` [experiment](/scion/reference/experiments/) is enabled (off by default; refused with `400 experiment_disabled` on sends and `404` on decision routes while off), an agent can send a `choice-prompt` message to a user (`user:<id>` or `@email`) or a conversation (`conv:<id>` or `#<thread>`) using `--choices <json>` or `--choices-file <path|->` (with optional `--update` to replace an earlier version of a decision key):
+When the `web.chat_choices` [experiment](/scion/reference/experiments/) is enabled (off by default; refused with `400 experiment_disabled` on sends and `404` on decision routes while off), an agent can send a `choice-prompt` message to a user (`user:<email>` or `@email`) or a conversation (`conv:<uuid>` or `#<thread>`) using `--choices <json>` or `--choices-file <path|->` (with optional `--update` to replace an earlier version of a decision key):
 
 ```bash
 scion message @alice@example.com "Pick a target:" --choices '[{
