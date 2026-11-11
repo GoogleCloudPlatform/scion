@@ -441,6 +441,14 @@ type AgentAppliedConfig struct {
 	// together with RuntimeTarget.
 	RuntimeTargetCandidate string `json:"runtimeTargetCandidate,omitempty"`
 
+	// NativeCloudRun records the hub's own decision that a dispatch of this
+	// agent runs it on Cloud Run Instances as its own identity
+	// (hub.cloudrun_native_identity). The dispatcher sets it before the
+	// broker call, and only the hub's confirmed stop or delete of the agent
+	// removes it (Store.SetAgentNativeCloudRun). While it is set the hub
+	// issues the agent no GCP token. It is never taken from a client.
+	NativeCloudRun bool `json:"nativeCloudRun,omitempty"`
+
 	// Harness-config info for Runtime Broker hydration. When set, the broker
 	// fetches the harness-config from the Hub's storage backend instead of
 	// requiring it to exist on the broker's local filesystem.
@@ -1534,9 +1542,20 @@ type BrokerProfile struct {
 	MappingsReportedAt *time.Time `json:"mappingsReportedAt,omitempty"`
 	// MappingsReportVersion is the broker's report version
 	// (api.BrokerSAReportVersion); zero from a broker that predates it.
-	// The Hub refuses a dispatch from the report only at that version or
-	// later (ptone/scion#3329 phase 4b).
+	// The Hub refuses a Kubernetes dispatch from the report from version 2
+	// (ptone/scion#3329 phase 4b), and uses a Cloud Run report from
+	// version 3.
 	MappingsReportVersion int `json:"mappingsReportVersion,omitempty"`
+	// CloudRunNativeIdentity is true when the broker reports, for a Cloud
+	// Run profile, that it can run an instance as the identity in its
+	// dispatch (report version 3 or later). ServiceAccountMappings then
+	// lists the accounts it may attach (Source
+	// api.BrokerSASourceCloudRunAllowlist, GSA only).
+	CloudRunNativeIdentity bool `json:"cloudRunNativeIdentity,omitempty"`
+	// CloudRunBlockAccount is true when the broker reports a block service
+	// account configured for this Cloud Run profile. Only presence is
+	// reported, never the account.
+	CloudRunBlockAccount bool `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // BrokerProfileSAMapping is one GCP service account a broker profile can
@@ -2071,8 +2090,9 @@ type TestIdentityDelegation struct {
 	RevokedBy *string
 	// GrantorKind is DelegationGrantorHuman (the API path) or
 	// DelegationGrantorTestInfraOffline (phase DL: written only by the
-	// offline host command, member scope only). An empty value reads as
-	// human (the column default).
+	// offline host command; the member scope, or the hub-admin scope
+	// behind the offline admin delegation setting). An empty value reads
+	// as human (the column default).
 	GrantorKind string
 	// HubID is the hub id an offline delegation is bound to; empty for a
 	// human grantor.
@@ -2120,6 +2140,45 @@ const (
 	// delegations one hub may hold at once (4 x 5 = the hub-wide cap of 20).
 	TestInfraOfflineMaxLiveDelegations = 4
 )
+
+// Bounds of an offline delegation of the hub-admin scope. The offline
+// writer creates one only when the hub's configuration carries
+// server.hub.test_identities.offline_admin_delegations for its hub id, and
+// the hub honours it only while the running hub has that setting on at
+// --test-mode=admin or above. The test super-admin scope is never
+// delegable offline.
+const (
+	// TestInfraOfflineAdminDelegationScope is the hub-admin scope an
+	// offline delegation may hold: test hub-admin issuance only.
+	TestInfraOfflineAdminDelegationScope = "test_identity:issue_admin"
+	// TestInfraOfflineAdminDelegationMaxTTL is the longest lifetime of an
+	// offline hub-admin delegation (the hub-admin delegation maximum age).
+	TestInfraOfflineAdminDelegationMaxTTL = 8 * time.Hour
+	// TestInfraOfflineAdminDelegationDefaultTTL is the default lifetime.
+	TestInfraOfflineAdminDelegationDefaultTTL = 4 * time.Hour
+	// TestInfraOfflineAdminDelegationMaxAdminCap is the largest number of
+	// live test hub-admins one offline hub-admin delegation may hold (the
+	// hub-admin delegation maximum; the hub-wide admin cap applies on top).
+	TestInfraOfflineAdminDelegationMaxAdminCap = 2
+	// TestInfraOfflineAdminDelegationDefaultAdminCap is the default cap.
+	TestInfraOfflineAdminDelegationDefaultAdminCap = 1
+	// TestInfraOfflineMaxLiveAdminDelegations is the most live offline
+	// hub-admin delegations one hub may hold at once. They count toward
+	// TestInfraOfflineMaxLiveDelegations too.
+	TestInfraOfflineMaxLiveAdminDelegations = 1
+)
+
+// IsSuperAdminIssueVariant reports whether s names test super-admin
+// issuance in any spelling: the permission or the scope form (either
+// separator), any letter case, surrounding whitespace, or "super-admin" /
+// "superadmin". Every offline delegation check (the offline writer and the
+// hub) refuses such a value before any other comparison; this is the one
+// shared normaliser.
+func IsSuperAdminIssueVariant(s string) bool {
+	n := strings.ToLower(strings.TrimSpace(s))
+	n = strings.NewReplacer("-", "", "_", "", ".", "", ":", "").Replace(n)
+	return strings.Contains(n, "superadmin")
+}
 
 // testInfraOfflineGrantorNamespace is the UUID namespace of the reserved
 // grantor id of an offline delegation (a fixed, random v4 UUID).
@@ -2552,12 +2611,25 @@ const (
 	// cleaned start of the review's summary note, or is empty when the
 	// review has none.
 	NotificationKindArtifactReviewSummary = "artifact_review_summary"
+	// NotificationKindSecretPending: an agent saved a user-scope secret
+	// that waits for the owner's approval. The owner is the only
+	// recipient; AgentID and ProjectID are the writing agent and its
+	// project. ResourceType is NotificationResourcePendingSecret and
+	// ResourceID the latest pending secret's id. One is stored per owner,
+	// writing agent and clock hour and updated in place by each later write
+	// in that hour, with the count of that agent's pending secrets; a write
+	// that would replace an approved secret is announced separately, at
+	// most once per owner, agent and key per hour. It never carries a
+	// value.
+	NotificationKindSecretPending = "secret_pending"
 )
 
 // Notification.ResourceType values.
 const (
 	// NotificationResourceArtifact: ResourceID is an artifact id.
 	NotificationResourceArtifact = "artifact"
+	// NotificationResourcePendingSecret: ResourceID is a pending secret id.
+	NotificationResourcePendingSecret = "pending_secret"
 )
 
 // Notification.Status values of NotificationKindArtifactGrant rows.
@@ -2574,6 +2646,10 @@ const (
 // NotificationKindArtifactReviewSummary row: a reviewer finalized a review
 // of the user's artifact.
 const NotificationStatusArtifactReviewSubmitted = "ARTIFACT_REVIEW_SUBMITTED"
+
+// NotificationStatusSecretPending is the Status of a
+// NotificationKindSecretPending row.
+const NotificationStatusSecretPending = "SECRET_PENDING"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
@@ -2668,6 +2744,9 @@ const (
 	NotificationReasonSubscriberGone = "subscriber_gone"
 	// NotificationReasonWatchedAgentGone: the watched agent was deleted.
 	NotificationReasonWatchedAgentGone = "watched_agent_gone"
+	// NotificationReasonSubscriberHeld: the subscriber agent is held
+	// (ptone/scion#7145); the notification was dropped, not delivered.
+	NotificationReasonSubscriberHeld = "subscriber_held"
 )
 
 // ValidNotificationReason reports whether reason is a known
@@ -2675,7 +2754,8 @@ const (
 func ValidNotificationReason(reason string) bool {
 	switch reason {
 	case NotificationReasonExpired, NotificationReasonSubscriptionGone,
-		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone:
+		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone,
+		NotificationReasonSubscriberHeld:
 		return true
 	}
 	return false
@@ -3367,9 +3447,9 @@ type GCPIdentityConfig struct {
 	ProjectID           string `json:"projectId,omitempty"`           // Denormalized
 
 	// RequireLocalRuntime marks a "passthrough" mode as granted by the
-	// hub-default rung specifically (hubDefaultRuntimeAllowed,
-	// default_gcp_identity.go), never by an explicit request or a
-	// project-level default. The hub resolves the runtime this agent will
+	// hub-default or project-default rung, both confined by
+	// hubDefaultPassthroughAllowed (default_gcp_identity.go), never by an
+	// explicit request. The hub resolves the runtime this agent will
 	// dispatch under from the broker's own registration data, which can
 	// differ from what the broker resolves at dispatch time against
 	// project-effective settings. The broker re-checks this flag once it
@@ -4328,6 +4408,10 @@ const (
 	ProjectRoleOwner  = "project-owner"
 	ProjectRoleAdmin  = "project-admin"
 	ProjectRoleMember = "project-member"
+	// ProjectRoleViewer is a built-in membership role (ptone/scion#5519):
+	// it reads the project, its agents and its chat, and cannot post
+	// messages, create agents or message them.
+	ProjectRoleViewer = "project-viewer"
 	// ProjectRoleVisitor is the seeded project role for a federated
 	// account granted visitor access to a project. It does not confer
 	// membership (RoleDefinition.ConfersMembership is false), and only
@@ -4357,12 +4441,22 @@ var BuiltInProjectMembershipRoles = map[string]bool{
 	ProjectRoleOwner:  true,
 	ProjectRoleAdmin:  true,
 	ProjectRoleMember: true,
+	ProjectRoleViewer: true,
 }
 
 // IsBuiltInProjectMembershipRole reports whether the given role name is
 // a built-in project membership role.
 func IsBuiltInProjectMembershipRole(roleName string) bool {
 	return BuiltInProjectMembershipRoles[roleName]
+}
+
+// IsBuiltInProjectMembershipRoleDef reports whether rd is a built-in project
+// membership role: a system role definition with one of the built-in names.
+// A custom (non-system) role that holds such a name is not one
+// (ptone/scion#5519). Prefer it to IsBuiltInProjectMembershipRole wherever
+// the definition is at hand.
+func IsBuiltInProjectMembershipRoleDef(rd *RoleDefinition) bool {
+	return rd != nil && rd.System && BuiltInProjectMembershipRoles[rd.Name]
 }
 
 // Agent role definition names (matching existing AgentRole constants)
@@ -4885,6 +4979,9 @@ const (
 	// (ptone/scion#4240) passed its expiry, so it is no longer admitted
 	// anywhere and its agents are held until the expiry reaper purges them.
 	MembershipLossTriggerTestIdentityExpiry MembershipLossTrigger = "test_identity_expiry"
+	// MembershipLossTriggerMemberLeave: the user left the project
+	// (POST /api/v1/projects/{id}/leave, ptone/scion#7494).
+	MembershipLossTriggerMemberLeave MembershipLossTrigger = "member_leave"
 )
 
 // ValidMembershipLossTrigger reports whether t is a recognised trigger.
@@ -4900,7 +4997,8 @@ func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
 		MembershipLossTriggerSystemScopeChange,
 		MembershipLossTriggerRestoreCheck,
 		MembershipLossTriggerReconcile,
-		MembershipLossTriggerTestIdentityExpiry:
+		MembershipLossTriggerTestIdentityExpiry,
+		MembershipLossTriggerMemberLeave:
 		return true
 	}
 	return false

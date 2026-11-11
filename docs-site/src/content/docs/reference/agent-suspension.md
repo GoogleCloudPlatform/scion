@@ -17,7 +17,7 @@ system role that applies to the project. Every way that can happen is
 covered:
 
 - a project member binding is removed, or changed to a role without access;
-- all of a member's project roles are removed;
+- all of a member's project roles are removed (including when a member leaves a project via `POST /api/v1/projects/{id}/leave` or `scion project leave`);
 - a user is removed from a group (or a group is deleted) that gave them
   project access;
 - a project role binding expires;

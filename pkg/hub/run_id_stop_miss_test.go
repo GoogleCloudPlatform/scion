@@ -145,9 +145,20 @@ func TestStopMissLeavesNewerRun_NoWriteNoQuotaNoPublish(t *testing.T) {
 	})
 	t.Run("auto-suspend", func(t *testing.T) {
 		srv, s, broker, a, ep := runSwapQuotaAgent(t, "miss-autosusp")
+		oldJTI, newJTI := "jti-old-"+a.ID, "jti-new-"+a.ID
+		insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, oldJTI, "run-old")
+		insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, newJTI, "run-new")
 		markAgentStalled(t, s, a.ID)
 		srv.autoSuspendStalledAgents(context.Background(), []store.Agent{*a})
 		assertNewerRunUntouched(t, s, broker, a, ep)
+		// Nothing is recorded, so no credential is revoked: the newer run
+		// keeps its own.
+		if cred := getTestAgentCredential(t, s, newJTI); cred.RevokedAt != nil {
+			t.Error("auto-suspend revoked the newer run's credential")
+		}
+		if cred := getTestAgentCredential(t, s, oldJTI); cred.RevokedAt != nil {
+			t.Error("auto-suspend revoked credentials for a suspension it did not record")
+		}
 	})
 	t.Run("queued stop", func(t *testing.T) {
 		srv, s, broker, a, ep := runSwapQuotaAgent(t, "miss-queued")
@@ -298,30 +309,49 @@ func (f *failSuspendWriteStore) UpdateAgentStatus(ctx context.Context, id string
 
 // When the suspended status write fails, the stopped container's
 // credentials are still revoked while the row holds the stopped run, and
-// left alone when the row moved to a newer run.
+// left alone when the row moved to a newer run, on both suspend paths.
 func TestSuspendWriteFailureRevokesOnlyForTheStoppedRun(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		swapRun     bool
-		wantRevoked bool
-	}{
-		{"stopped run still current", false, true},
-		{"row moved to a newer run", true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, s, _, a, _ := runSwapQuotaAgent(t, "suspend-fail-"+map[bool]string{true: "swap", false: "same"}[tc.swapRun])
-			srv.SetDispatcher(&quotaLifecycleDispatcher{})
-			insertTestAgentCredential(t, s, a.ID, a.ProjectID, "jti-"+a.ID)
-			srv.store = &failSuspendWriteStore{Store: s, swapRun: tc.swapRun}
+	for _, path := range []string{"suspend", "auto-suspend"} {
+		for _, tc := range []struct {
+			name        string
+			swapRun     bool
+			wantRevoked bool
+		}{
+			{"stopped run still current", false, true},
+			{"row moved to a newer run", true, false},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				srv, s, _, a, _ := runSwapQuotaAgent(t, "suspend-fail-"+path+"-"+map[bool]string{true: "swap", false: "same"}[tc.swapRun])
+				srv.SetDispatcher(&quotaLifecycleDispatcher{})
+				oldJTI, newJTI := "jti-old-"+a.ID, "jti-new-"+a.ID
+				insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, oldJTI, "run-old")
+				insertRunTestAgentCredential(t, s, a.ID, a.ProjectID, newJTI, "run-new")
+				if path == "auto-suspend" {
+					markAgentStalled(t, s, a.ID)
+				}
+				srv.store = &failSuspendWriteStore{Store: s, swapRun: tc.swapRun}
 
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/suspend", nil)
-			if rec.Code < 400 {
-				t.Fatalf("suspend: status %d, want a failure: %s", rec.Code, rec.Body.String())
-			}
-			cred := getTestAgentCredential(t, s, "jti-"+a.ID)
-			if revoked := cred.RevokedAt != nil; revoked != tc.wantRevoked {
-				t.Errorf("credential revoked = %v, want %v", revoked, tc.wantRevoked)
-			}
-		})
+				switch path {
+				case "suspend":
+					rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/suspend", nil)
+					if rec.Code < 400 {
+						t.Fatalf("suspend: status %d, want a failure: %s", rec.Code, rec.Body.String())
+					}
+				case "auto-suspend":
+					if srv.autoSuspendStalledAgent(context.Background(), srv.GetDispatcher(), a) {
+						t.Fatal("auto-suspend reported the suspension recorded; want the failed write")
+					}
+				}
+				if revoked := getTestAgentCredential(t, s, oldJTI).RevokedAt != nil; revoked != tc.wantRevoked {
+					t.Errorf("stopped run's credential revoked = %v, want %v", revoked, tc.wantRevoked)
+				}
+				// run-new becomes the row's run only in the second row; in
+				// the first it is just another run's credential and goes
+				// with the rest.
+				if revoked := getTestAgentCredential(t, s, newJTI).RevokedAt != nil; revoked != tc.wantRevoked {
+					t.Errorf("run-new credential revoked = %v, want %v", revoked, tc.wantRevoked)
+				}
+			})
+		}
 	}
 }

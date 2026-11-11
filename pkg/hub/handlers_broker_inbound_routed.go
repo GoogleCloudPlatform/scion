@@ -38,7 +38,16 @@ type routedInboundRequest struct {
 	ExternalRef  string                      `json:"external_ref,omitempty"`
 	ParentRef    string                      `json:"parent_ref,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
+
+	// AttachmentIDs is not supported on this route yet; a request naming
+	// any is refused (codeAttachmentsUnsupportedOnRoute) rather than
+	// delivered without them.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
+
+// codeAttachmentsUnsupportedOnRoute is the error code of the 400 for
+// attachment_ids on the routed broker inbound route.
+const codeAttachmentsUnsupportedOnRoute = "attachments_unsupported_on_route"
 
 // routedInboundResponse is returned from POST /api/v1/broker/inbound/routed.
 type routedInboundResponse struct {
@@ -110,6 +119,11 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	}
 
 	// --- Input validation ---
+	if len(req.AttachmentIDs) > 0 {
+		writeError(w, http.StatusBadRequest, codeAttachmentsUnsupportedOnRoute,
+			"attachment_ids are not accepted on this route", nil)
+		return
+	}
 	if req.ProjectID == "" {
 		ValidationError(w, "project_id is required", map[string]interface{}{"field": "project_id"})
 		return
@@ -147,45 +161,14 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	}
 
 	// --- Resolve sender identity ---
-	senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
-	// A hub test identity is reachable only through its own hub-issued
-	// token; this path resolves by email, so it refuses one outright.
-	if emailResolvedPrincipalRefused(senderEmail, nil) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
+	senderIdentity, refusal := s.resolveBrokerInboundSender(r.Context(), req.Message.Sender)
+	if refusal != nil {
+		log.Warn("routed inbound sender refused",
+			"sender", req.Message.Sender, "refusal", brokerRefusalLogText(refusal))
+		refusal.write(w)
 		return
 	}
-	senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
-	if err != nil {
-		log.Warn("Could not resolve sender identity",
-			"sender", req.Message.Sender, "error", err)
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"sender identity could not be resolved",
-				map[string]interface{}{"sender": req.Message.Sender})
-		} else {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"internal error resolving sender identity", nil)
-		}
-		return
-	}
-	// C2a containment: require active status.
-	if senderUser.Status != store.UserStatusActive {
-		log.Warn("routed inbound sender is not active",
-			"sender", req.Message.Sender, "status", senderUser.Status)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"sender identity is not active",
-			map[string]interface{}{"sender": req.Message.Sender, "status": senderUser.Status})
-		return
-	}
-	if emailResolvedPrincipalRefused(senderEmail, senderUser) {
-		log.Warn("routed inbound sender is a test identity", "sender", req.Message.Sender)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
-		return
-	}
-	req.Message.SenderID = senderUser.ID
-	senderIdentity := NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
+	req.Message.SenderID = senderIdentity.ID()
 
 	// --- Strip leading "!" interrupt prefix ---
 	if trimmed := strings.TrimSpace(req.Message.Msg); strings.HasPrefix(trimmed, "!") {

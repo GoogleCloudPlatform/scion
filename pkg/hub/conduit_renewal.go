@@ -129,6 +129,8 @@ func (s *Server) recheckRelayStream(ctx context.Context, peer string, relayGen i
 		OpenJTI:         it.OpenJTI,
 		PrincipalID:     c.ID,
 		RelayHeld:       true,
+		SessionGen:      c.SessionGen,
+		SessionGenSet:   c.AuthType == AuthTypeJWT,
 	})
 	if err == nil {
 		return relay.HubStreamRecheckResult{Renew: true, RenewalGrant: r.Token, AuthzUntil: r.AuthzUntil}

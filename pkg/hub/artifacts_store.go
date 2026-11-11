@@ -60,6 +60,7 @@ func (s *Server) artifactsConfig() opsettings.ArtifactsConfig {
 // every write, so a limit change applies without a restart.
 func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 	c := s.artifactsConfig()
+	e := s.HubEndpoints()
 	return artifacts.Limits{
 		MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles,
 		LinkDefaultTTL:   time.Duration(c.LinkDefaultTTLHours) * time.Hour,
@@ -72,6 +73,8 @@ func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 			FetchTimeout: time.Duration(c.RemoteImageFetchTimeoutS) * time.Second,
 			TotalBudget:  time.Duration(c.RemoteImageTotalBudgetS) * time.Second,
 		},
+		ContentURL:   e.Content,
+		PublicOrigin: e.Public,
 	}
 }
 
@@ -146,7 +149,8 @@ const artifactReapBatch = 500
 // startArtifactReaper runs the artifact maintenance pass
 // (reapArtifactVersions) every artifactReapInterval until ctx ends. It
 // runs whether or not the experiment is on: it only retires abandoned
-// uploads and expired artifacts and reclaims unreferenced blobs.
+// uploads and expired artifacts, deletes idle review session rows and
+// reclaims unreferenced blobs.
 func (s *Server) startArtifactReaper(ctx context.Context) {
 	go func() {
 		// The sponsor backfill runs once at start, so artifacts of agents
@@ -199,8 +203,9 @@ func (s *Server) backfillArtifactSponsors(ctx context.Context, st artifacts.Stor
 // the sponsor backfill runs until it is done (backfillArtifactSponsors),
 // the owner liveness reconciler marks the artifacts of deleted agents and
 // users (and clears the mark of restored ones), and unsent uploads and the
-// attachments of messages that are gone are retired; a failure in any of
-// them is logged once and does not stop the rest of the pass.
+// attachments of messages that are gone are retired. Before them, review
+// session rows idle past ReviewSessionRetention are deleted. A failure in
+// any of them is logged once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
 	// Attachment retention (scratchpad projections, legacy blobs) does not
 	// depend on the artifact store; it paces itself to once an hour.
@@ -217,6 +222,13 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	}
 	if n > 0 {
 		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
+	}
+	// Review sessions are reaped whether or not the open-review check is
+	// on, so turning it off never leaves rows behind.
+	if n, err := st.ReapReviewSessions(ctx, now.Add(-artifacts.ReviewSessionRetention), artifactReapBatch); err != nil {
+		slog.WarnContext(ctx, "artifacts: reaping review sessions failed", "error", err)
+	} else if n > 0 {
+		slog.InfoContext(ctx, "artifacts: reaped idle review sessions", "count", n)
 	}
 	s.backfillArtifactSponsors(ctx, st)
 	s.reconcileArtifactOwners(ctx, st, now)

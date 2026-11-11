@@ -1443,6 +1443,26 @@ STUBERR
         # it prints exactly "SQUASH_UID:SCION_GID" on success.
         echo "${GCLOUD_STUB_SSH_SQUASH_IDS:-997:1001}"
         ;;
+      *"MARKER_OK=false"*"echo skip"*)
+        # Phase 3b's "already built?" check (marker + images). Answers
+        # GCLOUD_STUB_SSH_BUILD_CHECK (skip or build); default build.
+        touch "${GCLOUD_STUB_STATE_DIR}/image-build-checked"
+        echo "${GCLOUD_STUB_SSH_BUILD_CHECK:-build}"
+        ;;
+      "mktemp -d /tmp/scion-imgdriver.XXXXXX")
+        # Phase 3b's private staging directory for the release image driver.
+        echo "${GCLOUD_STUB_SSH_IMGDRIVER_DIR-/tmp/scion-imgdriver.STUB01}"
+        ;;
+      *"sudo install -m 0755 -o root -g root"*"build-release-images.sh"*"sha256sum -c"*)
+        # Phase 3b's driver install and hash check: a sentinel for tests
+        # that stop once the driver is on the VM.
+        touch "${GCLOUD_STUB_STATE_DIR}/image-driver-installed"
+        ;;
+      *"extras/cloudrun-iap-proxy"*)
+        # The IAP proxy image build (after Phase 3b): a sentinel for tests
+        # that check which checkout it builds from.
+        touch "${GCLOUD_STUB_STATE_DIR}/proxy-image-built"
+        ;;
       *"Image build started in background"*)
         # Phase 3b's background image build start (it also mentions the
         # status dir, so it must match before the poll cases below).
@@ -1526,6 +1546,12 @@ STUBERR
   "compute scp "*)
     if [[ "${GCLOUD_STUB_SSH_SUCCEEDS:-false}" != "true" ]]; then
       echo "gcloud-stub: compute scp not simulated (set GCLOUD_STUB_SSH_SUCCEEDS=true to enable)" >&2
+      exit 1
+    fi
+    # GCLOUD_STUB_SCP_FAILS_FOR=TEXT: an scp whose arguments contain TEXT
+    # fails (e.g. the image driver copy).
+    if [[ -n "${GCLOUD_STUB_SCP_FAILS_FOR:-}" && "$*" == *"${GCLOUD_STUB_SCP_FAILS_FOR}"* ]]; then
+      echo "gcloud-stub: simulated scp failure" >&2
       exit 1
     fi
     exit 0

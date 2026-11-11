@@ -147,6 +147,10 @@ const (
 	ReasonCapabilityRequired   = "capability_required"
 	ReasonIdentityNotLocal     = "identity_not_local"
 	ReasonInvalidScope         = "invalid_scope"
+	// ReasonChainUnrecorded: a user-scope read by an agent whose delegation
+	// chain has no recorded provenance (it cannot be fully evaluated).
+	// Re-delegating the agent records the chain.
+	ReasonChainUnrecorded = "chain_unrecorded"
 )
 
 // selectRuntimeMaterial composes checks 7-9 for one candidate key in one

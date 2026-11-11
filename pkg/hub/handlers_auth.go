@@ -345,8 +345,8 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 	)
 	if err != nil {
 		InternalError(w)
@@ -460,8 +460,8 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, clientType,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, clientType,
 	)
 	if err != nil {
 		InternalError(w)
@@ -527,10 +527,9 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// Re-evaluate admin status on token refresh. The stored role is the source
 	// of truth for UI-granted promotions; admin_emails can only add to it.
 	//
-	// storedRole deliberately starts empty rather than at claims.Role: if the
-	// store cannot be read we fall back to config-only evaluation instead of
-	// trusting the token's own role claim, which would let a stale admin claim
-	// renew itself indefinitely through the rotating refresh chain.
+	// storedRole deliberately starts empty rather than at claims.Role, so the
+	// token's own role claim is never trusted: a stale admin claim must not
+	// renew itself through the rotating refresh chain.
 	role := claims.Role
 	storedRole := ""
 	var user *store.User
@@ -547,8 +546,13 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 				"invalid refresh token", nil)
 			return
 		default:
-			slog.Warn("Refresh: user lookup failed, falling back to config-only role",
+			// Without the row the session generation cannot be compared,
+			// so no pair is minted.
+			slog.Error("Refresh rejected: user lookup failed",
 				"email", claims.Email, "error", err)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
+			return
 		}
 	}
 	if user != nil && user.Status == store.UserStatusSuspended {
@@ -565,6 +569,18 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 			"invalid refresh token", nil)
 		return
+	}
+	// The refresh token's session generation must equal the users row's
+	// (any difference refuses; a missing claim reads as 0). With no store
+	// there is no row to compare; the new pair still carries the claim's
+	// generation and the bearer arm checks it on use.
+	if user != nil {
+		if reason := sessionGenerationRefusal(claims.SessionGeneration, user.SessionGeneration); reason != "" {
+			logSessionGenerationRefusal(r.Context(), slog.Default(), "auth_refresh", user.ID, claims.SessionGeneration, user.SessionGeneration, reason)
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+				"invalid refresh token", nil)
+			return
+		}
 	}
 	refreshUserID := ""
 	if user != nil {
@@ -606,8 +622,11 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		userID = user.ID
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		userID, claims.Email, claims.DisplayName, role, claims.ClientType,
+	// The new pair carries the presented refresh token's own session
+	// generation, never a fresh row read, so a refresh cannot move a
+	// credential to a newer generation.
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		userID, claims.Email, claims.DisplayName, role, claims.SessionGeneration, claims.ClientType,
 	)
 	if err != nil {
 		InternalError(w)
@@ -678,6 +697,13 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 			return
 		case testFixtureRejection(u, s.testIdentities.enabled, s.testIdentities.clock()) != "":
 			// Same test-identity rule as the middleware's row block.
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		}
+		// Same session generation rule as the middleware's row block: any
+		// difference between the token's claim and the row is not valid.
+		if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
+			logSessionGenerationRefusal(r.Context(), slog.Default(), "auth_validate", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
 		}
@@ -1379,8 +1405,8 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeCLI,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeCLI,
 	)
 	if err != nil {
 		InternalError(w)
@@ -1606,8 +1632,8 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeCLI,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeCLI,
 	)
 	if err != nil {
 		InternalError(w)

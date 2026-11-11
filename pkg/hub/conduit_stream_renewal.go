@@ -338,6 +338,7 @@ func (s *Server) renewConduitUserStream(ctx context.Context, st *conduitUserStre
 	if st.TargetSessionID != "" {
 		sessionID, streamID = st.TargetSessionID, st.TargetStreamID
 	}
+	gen, genSet := conduitCapturedSessionGeneration(st.Identity)
 	return s.renewConduitStream(ctx, conduitRenewalRequest{
 		LatestGrant:     st.Grant,
 		TargetSessionID: sessionID,
@@ -345,6 +346,8 @@ func (s *Server) renewConduitUserStream(ctx context.Context, st *conduitUserStre
 		OpenJTI:         st.OpenJTI,
 		PrincipalID:     st.UserID,
 		Kind:            st.Kind,
+		SessionGen:      gen,
+		SessionGenSet:   genSet,
 	})
 }
 

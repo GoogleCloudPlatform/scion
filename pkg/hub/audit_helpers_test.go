@@ -106,3 +106,7 @@ func (m *mockAuditLogger) LogAgentSecretReadEvent(_ context.Context, _ *AgentSec
 func (m *mockAuditLogger) LogGCSLinkFetchEvent(_ context.Context, _ *GCSLinkFetchEvent) error {
 	return nil
 }
+
+func (m *mockAuditLogger) LogPendingSecretEvent(context.Context, *PendingSecretEvent) error {
+	return nil
+}

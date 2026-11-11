@@ -89,6 +89,8 @@ func TestServerConfigUpdate_AuthorityKeysRefuseTokens(t *testing.T) {
 		{"default harness config", `{"default_harness_config":"h"}`, []string{"default_harness_config"}},
 		{"default runtime broker", `{"default_runtime_broker":"b"}`, []string{"default_runtime_broker"}},
 		{"public url", `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`, []string{"server.hub.public_url"}},
+		{"content url", `{"server":{"hub":{"content_url":"https://links.example.net"}}}`, []string{"server.hub.content_url"}},
+		{"content url cleared", `{"server":{"hub":{"content_url":""}}}`, []string{"server.hub.content_url"}},
 		{"image registry", `{"image_registry":"registry.example.com"}`, []string{"image_registry"}},
 		{"runtimes", `{"runtimes":{}}`, []string{"runtimes"}},
 		{"profiles", `{"profiles":null}`, []string{"profiles"}},

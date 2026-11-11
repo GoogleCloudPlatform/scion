@@ -415,6 +415,11 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		scope = store.ScopeUser
 	}
 
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
+		return
+	}
+
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
@@ -425,7 +430,7 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
 			// Fallback: check if this key exists as an environment secret
 			meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-			if metaErr == nil && meta.SecretType == "environment" {
+			if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
 				ev := secretMetaToEnvVar(*meta)
 				writeJSON(w, http.StatusOK, &ev)
 				return
@@ -631,6 +636,10 @@ type ListSecretsResponse struct {
 	Secrets []store.Secret `json:"secrets"`
 	Scope   string         `json:"scope"`
 	ScopeID string         `json:"scopeId"`
+	// Items is the merged view of approved and pending user secrets,
+	// present only for scope=user&includePending=true
+	// (listSecretsWithPending).
+	Items []SecretListItem `json:"items,omitempty"`
 }
 
 type SetSecretRequest struct {
@@ -715,7 +724,35 @@ func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.En
 		s.envSecretLog.Warn(warning, "error", err)
 		return envVars
 	}
-	return mergeEnvironmentSecretMetadata(envVars, metas)
+	return mergeEnvironmentSecretMetadata(envVars, withoutAgentHiddenHubSecrets(ctx, filter.Scope, metas))
+}
+
+// agentHiddenHubSecret reports whether a hub-scope secret is hidden from the
+// caller: the caller is an agent and the secret is not one agents may see
+// (secret.HubSecretAgentVisible). Names, values and metadata of a hidden
+// secret are never returned to an agent. Other scopes and non-agent callers
+// are unaffected.
+func agentHiddenHubSecret(ctx context.Context, scope string, m secret.SecretMeta) bool {
+	if scope != store.ScopeHub {
+		return false
+	}
+	if _, isAgent := GetIdentityFromContext(ctx).(AgentIdentity); !isAgent {
+		return false
+	}
+	m.Scope = store.ScopeHub
+	return !secret.HubSecretAgentVisible(m)
+}
+
+// withoutAgentHiddenHubSecrets drops the secrets agentHiddenHubSecret hides.
+func withoutAgentHiddenHubSecrets(ctx context.Context, scope string, metas []secret.SecretMeta) []secret.SecretMeta {
+	out := make([]secret.SecretMeta, 0, len(metas))
+	for _, m := range metas {
+		if agentHiddenHubSecret(ctx, scope, m) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.SecretMeta) []store.EnvVar {
@@ -759,6 +796,10 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		scope = store.ScopeUser
 	}
 
+	if s.serveSecretListWithPending(w, r, scope) {
+		return
+	}
+
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
@@ -774,6 +815,7 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	metas = withoutAgentHiddenHubSecrets(ctx, scope, metas)
 	// Convert to store.Secret for response compatibility
 	secrets := make([]store.Secret, len(metas))
 	for i, m := range metas {
@@ -817,12 +859,21 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 		scope = store.ScopeUser
 	}
 
+	if query.Has("includePending") {
+		BadRequest(w, "includePending is only valid on the secret list (GET /api/v1/secrets)")
+		return
+	}
+
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
 	}
 
 	meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+	if err == nil && agentHiddenHubSecret(ctx, scope, *meta) {
+		// The same response as a key that does not exist.
+		err = store.ErrNotFound
+	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1396,6 +1447,16 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// A user-scope write by an agent waits for the owning user's approval:
+	// it is recorded as a pending secret and never written to the secrets
+	// table here, so force does not apply. An approved secret of the same
+	// name stays in effect until the owner approves the replacement.
+	if scope == store.ScopeUser {
+		allowProgeny := req.AllowProgeny != nil && *req.AllowProgeny
+		s.agentWritePendingUserSecret(w, r, agentID, projectID, scopeID, key, decoded, secretType, target, allowProgeny)
+		return
+	}
+
 	// Check for existing secret when force is not set.
 	// Note: the backend's UpsertSecret has the same check-then-write pattern
 	// internally, so this is consistent with the existing TOCTOU window.
@@ -1419,22 +1480,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		allowProgeny = *req.AllowProgeny
 	}
 
-	// Attribution. A user-scoped secret belongs to the user whose scope it
-	// lives in, even when an agent is what wrote it — which is the normal case
-	// for harness credential capture.
-	//
-	// Two things go wrong if the writing agent is recorded instead. Progeny
-	// lookup matches created_by against the agent's ancestry chain
-	// (ListProgenySecrets -> CreatedByIn), and ancestry entries are bare UUIDs,
-	// so an "agent:<uuid>" value can never match and a captured credential can
-	// never be inherited. Even unprefixed it would only reach descendants of
-	// the one agent that captured it, rather than the owning user's agents.
-	//
-	// The agent is still recorded as the updater, so provenance is not lost.
+	// Attribution: only project-scope writes reach this point. A user-scope
+	// write is attributed when its owner approves it (approvePendingSecret).
 	createdBy := fmt.Sprintf("agent:%s", agentID)
-	if scope == store.ScopeUser && scopeID != "" {
-		createdBy = scopeID
-	}
 
 	input := &secret.SetSecretInput{
 		Name:         key,
@@ -1794,7 +1842,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
 				meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-				if metaErr == nil && meta.SecretType == "environment" {
+				// Defence in depth: this handler serves project and broker
+				// scopes, but the hub-scope agent rule is applied here too.
+				if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
 					ev := secretMetaToEnvVar(*meta)
 					writeJSON(w, http.StatusOK, &ev)
 					return

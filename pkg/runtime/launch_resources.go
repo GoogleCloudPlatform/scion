@@ -41,12 +41,13 @@ var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
 
 // reportContainerCreated reports a Docker or Podman create (design §3.8.4:
 // "a Docker container ID"). The container ID is the handle's UID, the
-// identity DeleteResource removes by. out is the run command's output,
-// which interleaves stdout and stderr, so a warning line may surround the
-// ID: the last line that is a well-formed ID is used. If no line is, no
-// handle is recorded (the launch's cleanup cannot remove this container by
-// ID) and a warning is logged. Run itself still returns the whole trimmed
-// output; only the handle is restricted.
+// identity DeleteResource removes by. out is the run command's standard
+// output; a line other than the ID may surround it: the last line that is
+// a well-formed ID is used. If no line is, no handle is recorded (the
+// launch's cleanup cannot remove this container by ID) and a warning is
+// logged. Docker's Run still returns the whole trimmed output; only the
+// handle is restricted. Podman's Run accepts only a full ID and passes
+// just that.
 func reportContainerCreated(hooks launchHooks, name, out string) {
 	// Report to an observer too (the synchronous path), not only to an
 	// async launch's OnResourceCreated.

@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // recordingHandler is a minimal slog.Handler that captures log records for
@@ -125,6 +126,7 @@ func (m *mockSMClient) CreateSecret(_ context.Context, req *smpb.CreateSecretReq
 		Name:        fullName,
 		Replication: req.Secret.Replication,
 		Labels:      req.Secret.Labels,
+		CreateTime:  timestamppb.Now(),
 	}
 	m.secrets[fullName] = sec
 	return sec, nil
@@ -192,6 +194,20 @@ func (m *mockSMClient) GetSecret(_ context.Context, req *smpb.GetSecretRequest) 
 		return nil, status.Errorf(codes.NotFound, "secret %s not found", req.Name)
 	}
 	return sec, nil
+}
+
+// ListSecrets returns every secret under the request's parent, whatever
+// the filter, so callers must check what they get.
+func (m *mockSMClient) ListSecrets(_ context.Context, req *smpb.ListSecretsRequest) ([]*smpb.Secret, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*smpb.Secret
+	for name, sec := range m.secrets {
+		if strings.HasPrefix(name, req.Parent+"/secrets/") {
+			out = append(out, sec)
+		}
+	}
+	return out, nil
 }
 
 func (m *mockSMClient) Close() error {

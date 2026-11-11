@@ -83,10 +83,19 @@ import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
+import {
+  leaveVisibility,
+  PROJECT_NO_ACCESS_MESSAGE,
+  PROJECT_NO_ACCESS_TITLE,
+} from '../../client/project-leave.js';
+import '../shared/project-leave-dialog.js';
+import type { ProjectLeftDetail, ScionProjectLeaveDialog } from '../shared/project-leave-dialog.js';
+import type { ScionProjectMembersEditor } from '../shared/project-members-editor.js';
 import { visibleInterval } from '../../client/visible-interval.js';
 
 interface ProjectResourceSpec {
@@ -204,6 +213,20 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private error: string | null = null;
+
+  /**
+   * The project answered 404: it is gone, or the user no longer has access
+   * (left it, or was removed). Rendered as a no-access state.
+   */
+  @state()
+  private noAccess = false;
+
+  /**
+   * `?transfer=1`: open the members editor's transfer ownership dialog once
+   * loaded. Cleared after that first open, so it never opens again.
+   */
+  @state()
+  private openTransferOnLoad = false;
 
   @state()
   private deleteLoading = false;
@@ -589,6 +612,14 @@ export class ScionPageProjectSettings extends LitElement {
 
     .danger-section h2 {
       color: var(--sl-color-danger-600, #dc2626);
+    }
+
+    .leave-blocked-reason {
+      color: var(--sl-color-warning-700, #b45309);
+    }
+
+    .delete-area + .delete-area {
+      margin-top: 1rem;
     }
 
     .delete-area {
@@ -1013,9 +1044,18 @@ export class ScionPageProjectSettings extends LitElement {
     // Deep-link a specific Resources tab via ?tab= (e.g. ?tab=templates), used by
     // the resource detail pages' "back" links.
     if (typeof window !== 'undefined') {
-      const tab = new URLSearchParams(window.location.search).get('tab');
+      const params = new URLSearchParams(window.location.search);
+      const tab = params.get('tab');
       if (tab) {
         this.activeResourcesTab = tab;
+      }
+      // The leave dialog's Transfer ownership link from the project page.
+      // Only that param is removed from the URL once read, so a reload or
+      // Back does not open the dialog again.
+      if (params.has('transfer')) {
+        this.openTransferOnLoad = params.get('transfer') === '1';
+        params.delete('transfer');
+        replaceSearch(params);
       }
     }
     void this.loadProject();
@@ -1037,10 +1077,16 @@ export class ScionPageProjectSettings extends LitElement {
   private async loadProject(skipGitHubCheck = false): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.noAccess = false;
 
     try {
       const response = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
+      if (response.status === 404) {
+        this.noAccess = true;
+        this.project = null;
+        return;
+      }
       if (!response.ok) {
         throw new Error(
           await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
@@ -1170,10 +1216,17 @@ export class ScionPageProjectSettings extends LitElement {
       return html`
         <scion-project-members-editor
           projectId=${project.id}
+          projectName=${project.name}
+          currentUserId=${this.pageData?.user?.id ?? ''}
+          ?openTransferOnLoad=${this.openTransferOnLoad}
           ?readOnly=${readOnly}
           compact
           sectionTitle="Members"
           sectionDescription=${description}
+          @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+          @scion-transfer-opened-on-load=${() => {
+            this.openTransferOnLoad = false;
+          }}
         ></scion-project-members-editor>
       `;
     }
@@ -1193,9 +1246,16 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab-panel name="members">
             <scion-project-members-editor
               projectId=${project.id}
+              projectName=${project.name}
+              currentUserId=${this.pageData?.user?.id ?? ''}
+              ?openTransferOnLoad=${this.openTransferOnLoad}
               ?readOnly=${readOnly}
               sectionTitle="Members"
               sectionDescription=${description}
+              @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+              @scion-transfer-opened-on-load=${() => {
+                this.openTransferOnLoad = false;
+              }}
             ></scion-project-members-editor>
           </sl-tab-panel>
           <sl-tab-panel name="visitors">
@@ -2351,33 +2411,14 @@ export class ScionPageProjectSettings extends LitElement {
           `
         : ''}
       ${this.renderSchedulesSection()}
-      ${can(this.project._capabilities, 'delete')
+      ${can(this.project._capabilities, 'delete') ||
+      leaveVisibility(this.project._capabilities).kind !== 'hidden'
         ? html`
             <div class="section danger-section">
               <h2>Danger Zone</h2>
               <p>Irreversible actions that affect this project and its resources.</p>
-
-              <div class="delete-area">
-                <div class="delete-info">
-                  <h3>Delete this project</h3>
-                  <p>
-                    Permanently remove this project and its configuration. A project that still has
-                    agents cannot be deleted; delete its agents first. This action cannot be undone.
-                  </p>
-                </div>
-                <div class="delete-actions">
-                  <sl-button
-                    variant="danger"
-                    size="small"
-                    ?loading=${this.deleteLoading}
-                    ?disabled=${this.deleteLoading}
-                    @click=${(e: MouseEvent) => this.handleDeleteProject(e)}
-                  >
-                    <sl-icon slot="prefix" name="trash"></sl-icon>
-                    Delete Project
-                  </sl-button>
-                </div>
-              </div>
+              ${this.renderLeaveRow()}
+              ${can(this.project._capabilities, 'delete') ? this.renderDeleteRow() : nothing}
             </div>
           `
         : html`
@@ -3161,17 +3202,17 @@ export class ScionPageProjectSettings extends LitElement {
                                     const sa = this.gcpServiceAccounts.find(
                                       (s) => s.id === this.configDefaultGCPIdentitySAID
                                     );
-                                    if (sa && navigator.clipboard) {
-                                      void navigator.clipboard
-                                        .writeText(sa.email)
-                                        .then(() => {
-                                          this.copiedDefaultSAEmail = true;
-                                          setTimeout(() => {
-                                            this.copiedDefaultSAEmail = false;
-                                          }, 1500);
-                                        })
-                                        .catch(() => {});
-                                    }
+                                    if (!sa) return;
+                                    void copyToClipboard(sa.email).then((ok) => {
+                                      if (!ok) {
+                                        showCopyFailedToast();
+                                        return;
+                                      }
+                                      this.copiedDefaultSAEmail = true;
+                                      setTimeout(() => {
+                                        this.copiedDefaultSAEmail = false;
+                                      }, 1500);
+                                    });
                                   }}
                                 ></sl-icon-button>
                               </sl-tooltip>
@@ -3808,7 +3849,115 @@ export class ScionPageProjectSettings extends LitElement {
     `;
   }
 
+  /**
+   * The Danger Zone's Leave this project row (ptone/scion#7494), above
+   * Delete, offered as the project's capabilities say.
+   */
+  private renderLeaveRow(): TemplateResult | typeof nothing {
+    const leave = leaveVisibility(this.project?._capabilities);
+    if (leave.kind === 'hidden') return nothing;
+    return html`
+      <div class="delete-area" data-leave-row>
+        <div class="delete-info">
+          <h3>Leave this project</h3>
+          <p>
+            Remove your own roles in this project. You'll see what leaving changes before you
+            confirm.
+          </p>
+          ${leave.kind === 'blocked'
+            ? html`<p class="leave-blocked-reason" data-leave-blocked>${leave.reason}</p>`
+            : nothing}
+        </div>
+        <div class="delete-actions">
+          <sl-button
+            variant="danger"
+            outline
+            size="small"
+            data-leave-project
+            ?disabled=${leave.kind === 'blocked'}
+            @click=${() => this.openLeaveDialog()}
+          >
+            <sl-icon slot="prefix" name="box-arrow-right"></sl-icon>
+            Leave Project
+          </sl-button>
+        </div>
+      </div>
+      <scion-project-leave-dialog
+        projectId=${this.projectId}
+        projectName=${this.project?.name ?? ''}
+        ?transferAvailable=${can(this.project?._capabilities, 'manage')}
+        @scion-project-left=${(e: CustomEvent<ProjectLeftDetail>) => this.onProjectLeft(e)}
+        @scion-leave-transfer-ownership=${() => void this.openTransferFromLeave()}
+      ></scion-project-leave-dialog>
+    `;
+  }
+
+  private renderDeleteRow(): TemplateResult {
+    return html`
+      <div class="delete-area">
+        <div class="delete-info">
+          <h3>Delete this project</h3>
+          <p>
+            Permanently remove this project and its configuration. A project that still has agents
+            cannot be deleted; delete its agents first. This action cannot be undone.
+          </p>
+        </div>
+        <div class="delete-actions">
+          <sl-button
+            variant="danger"
+            size="small"
+            ?loading=${this.deleteLoading}
+            ?disabled=${this.deleteLoading}
+            @click=${(e: MouseEvent) => this.handleDeleteProject(e)}
+          >
+            <sl-icon slot="prefix" name="trash"></sl-icon>
+            Delete Project
+          </sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private openLeaveDialog(): void {
+    if (leaveVisibility(this.project?._capabilities).kind !== 'enabled') return;
+    const dialog = this.shadowRoot?.querySelector<ScionProjectLeaveDialog>(
+      'scion-project-leave-dialog'
+    );
+    void dialog?.show();
+  }
+
+  /** After a leave that kept access, reload: the capabilities may have changed. */
+  private onProjectLeft(e: CustomEvent<ProjectLeftDetail>): void {
+    if (e.detail.result.remainingAccess !== 'none') void this.loadProject(true);
+  }
+
+  /** The leave dialog's Transfer ownership link: the members editor's transfer dialog. */
+  private async openTransferFromLeave(): Promise<void> {
+    this.activeMembersTab = 'members';
+    // Let the members tab render and become visible before scrolling to it.
+    await this.updateComplete;
+    const editor = this.shadowRoot?.querySelector<ScionProjectMembersEditor>(
+      'scion-project-members-editor'
+    );
+    editor?.scrollIntoView({ block: 'start' });
+    editor?.openTransferOwnership();
+  }
+
   private renderError() {
+    if (this.noAccess) {
+      return html`
+        <a href="/projects" class="back-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          Back to Projects
+        </a>
+
+        <div class="error-state" data-project-no-access>
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <h2>${PROJECT_NO_ACCESS_TITLE}</h2>
+          <p>${PROJECT_NO_ACCESS_MESSAGE}</p>
+        </div>
+      `;
+    }
     return html`
       <a href="/projects/${this.projectId}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>

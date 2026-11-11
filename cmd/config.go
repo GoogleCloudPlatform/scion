@@ -170,10 +170,10 @@ var configSetCmd = &cobra.Command{
 settings (~/.scion/settings.yaml) with --global.
 
 A key the settings file would accept but never read is refused and the file is
-left unchanged: hub.token, hub.apiKey, hub.lastSyncedAt, bucket.* and
-hub_connections.* at either layer, and server.auth.* at the project layer (read
-only from the global settings). The value of a credential-like key (for example
-hub.brokerToken) is masked in the output.
+left unchanged: hub.token, hub.apiKey, hub.lastSyncedAt, bucket.*,
+hub_connections and hub_connections.* at either layer, and server.auth.* at the
+project layer (read only from the global settings). The value of a
+credential-like key (for example hub.brokerToken) is masked in the output.
 
 hub.endpoint is kept in the hub list (~/.scion/context.yaml); config set never
 writes it into a settings file, and the CLI does not read it from one. With
@@ -184,10 +184,12 @@ is named from the host), and makes it the current hub. In a project,
 instead.
 
 image_tag (experimental, hub.image_tag_setting) selects the tag of the bundled
-scion-* agent images: "version" for the hub binary's version, or a literal tag
-such as v0.3.0-preview.5. A value that is not a valid image tag is refused. The
-hub applies it to agent images only while the experiment is on; while it is
-off, the value is ignored and the hub warns at startup.`,
+scion-* agent images: "version" for the hub binary's release version, or a
+literal tag such as v0.3.0-preview.5. A value that is not a valid image tag is
+refused. The hub applies a set value only while the experiment is on; while it
+is off, the value is ignored and the hub warns at startup. Unset, a release
+build of the hub uses its own version (hub.image_tag_version_default, on by
+default); "image_tag latest" opts out.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
@@ -211,7 +213,7 @@ off, the value is ignored and the hub warns at startup.`,
 		if key == configHubEndpointKey {
 			return configSetHubEndpoint(cmd.OutOrStdout(), cmd.ErrOrStderr(), value, layerGlobal, targetPath)
 		}
-		if err := config.ValidateConfigSetKey(key, layerGlobal); err != nil {
+		if err := config.ValidateSettingWrite(key, layerGlobal); err != nil {
 			return err
 		}
 		if err := config.UpdateSetting(targetPath, key, value, configGlobal); err != nil {

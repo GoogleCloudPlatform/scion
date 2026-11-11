@@ -16,9 +16,14 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
@@ -37,7 +42,26 @@ func NewMaintenanceStore(client *ent.Client) *MaintenanceStore {
 
 // abortResult is the result message stamped on operations/runs that were
 // interrupted by a server restart. Kept identical to the SQLite backend.
-const abortResult = `{"error":"aborted: server was restarted while operation was running"}`
+const abortResult = `{"error":"` + abortText + `"}`
+
+// abortText is the error text of an operation or run interrupted by a
+// server restart.
+const abortText = "aborted: server was restarted while operation was running"
+
+// abortTextJSON is abortText as a JSON string.
+var abortTextJSON, _ = json.Marshal(abortText)
+
+// SecretHubIDMigrationKey is the maintenance migration key of the
+// migration of secrets stored in the Hub database into GCP Secret Manager.
+const SecretHubIDMigrationKey = "secret-hub-id-migration"
+
+// secretHubIDMigrationPreDecodeDescription is the description the
+// secret-hub-id-migration row was seeded with before the migration decoded
+// and verified values (ptone/scion#6989). A row that still carries it was
+// seeded by a release whose migration copied stored forms without
+// decoding them; reopenPreDecodeSecretMigration uses it as the one-time
+// marker.
+const secretHubIDMigrationPreDecodeDescription = `Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend.`
 
 // AppliedConfigTZCleanupKey is the maintenance operation key of the
 // applied-config TZ cleanup.
@@ -82,9 +106,9 @@ const ChatRetentionRunKey = "chat-retention-run"
 // Ent schema default (uuid.New) — see SeedMaintenanceOperations.
 var defaultSeedOperations = []store.MaintenanceOperation{
 	{
-		Key:         "secret-hub-id-migration",
+		Key:         SecretHubIDMigrationKey,
 		Title:       "Secret Hub ID Namespace Migration",
-		Description: `Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend.`,
+		Description: `Moves secrets whose value is stored in the Hub database into GCP Secret Manager, under the per-instance hub ID namespace. Each value is decoded with the Hub's local key, written, and read back before the secret is switched to Secret Manager; a secret that is not verified keeps its local copy. Secrets already in Secret Manager are checked, and a value that an earlier run copied in its encoded form is decoded and rewritten; this repair needs the local key that encoded it, so keep that key until the migration completes. A run that leaves any secret undecoded or unverified fails and can be run again. Values are never logged. Supports a dry run. Only needed for GCP Secret Manager backend.`,
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
@@ -261,10 +285,60 @@ func (s *MaintenanceStore) SeedMaintenanceOperations(ctx context.Context) error 
 	// Must stay Exec, never Save: when DO NOTHING skips rows, RETURNING yields
 	// fewer ids than builders and ent assigns them to the nodes by position,
 	// so Save would hand back nodes carrying the wrong ids.
-	return s.client.MaintenanceOperation.CreateBulk(builders...).
+	if err := s.client.MaintenanceOperation.CreateBulk(builders...).
 		OnConflictColumns(maintenanceoperation.FieldKey).
 		DoNothing().
-		Exec(ctx)
+		Exec(ctx); err != nil {
+		return err
+	}
+	return s.reopenPreDecodeSecretMigration(ctx)
+}
+
+// reopenPreDecodeSecretMigration runs once per database, the first time a
+// release with the decoding secret-hub-id-migration starts on it. A row
+// still carrying secretHubIDMigrationPreDecodeDescription gets the current
+// description, and if that earlier migration had completed, the row is
+// also moved back to pending, without the earlier run's start, end,
+// starter and result: the earlier run may have left encoded values
+// in Secret Manager, so the panel must offer the migration (and its dry
+// run) again. Nothing runs automatically. A running or failed row keeps
+// its status. Once the description is replaced the marker is gone, so a
+// later start changes nothing.
+func (s *MaintenanceStore) reopenPreDecodeSecretMigration(ctx context.Context) error {
+	var current string
+	for _, op := range defaultSeedOperations {
+		if op.Key == SecretHubIDMigrationKey {
+			current = op.Description
+		}
+	}
+	if current == "" || current == secretHubIDMigrationPreDecodeDescription {
+		return nil
+	}
+	if _, err := s.client.MaintenanceOperation.Update().
+		Where(
+			maintenanceoperation.KeyEQ(SecretHubIDMigrationKey),
+			maintenanceoperation.DescriptionEQ(secretHubIDMigrationPreDecodeDescription),
+			maintenanceoperation.StatusEQ(store.MaintenanceStatusCompleted),
+		).
+		SetStatus(store.MaintenanceStatusPending).
+		ClearStartedAt().
+		ClearCompletedAt().
+		ClearStartedBy().
+		ClearResult().
+		SetDescription(current).
+		Save(ctx); err != nil {
+		return fmt.Errorf("reopening the secret migration: %w", mapError(err))
+	}
+	if _, err := s.client.MaintenanceOperation.Update().
+		Where(
+			maintenanceoperation.KeyEQ(SecretHubIDMigrationKey),
+			maintenanceoperation.DescriptionEQ(secretHubIDMigrationPreDecodeDescription),
+		).
+		SetDescription(current).
+		Save(ctx); err != nil {
+		return fmt.Errorf("updating the secret migration description: %w", mapError(err))
+	}
+	return nil
 }
 
 // ============================================================================
@@ -440,17 +514,58 @@ func (s *MaintenanceStore) ListMaintenanceRuns(ctx context.Context, operationKey
 // "failed" and resets stalled "running" migrations back to "pending" so they
 // can be retried. Called at server startup to clean up operations interrupted
 // by a restart.
+//
+// A run whose Result is a JSON object keeps its keys (what the run recorded
+// before the restart, for example a checkpoint) and gains "error" (the
+// abort text) and "aborted": true; any other Result is replaced by the
+// abort text alone. Each run is updated on its own, only while it is still
+// running and its Result is the one read, so a Result written in between is
+// never overwritten: the run is then read again and updated once more if it
+// is still running (a run that changes again is left for the next start, with
+// a warning). The returned run count is the number of those updates
+// that matched.
 func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int64, int64, error) {
 	now := time.Now()
 
-	runs, err := s.client.MaintenanceOperationRun.Update().
+	running, err := s.client.MaintenanceOperationRun.Query().
 		Where(maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning)).
-		SetStatus(store.MaintenanceStatusFailed).
-		SetCompletedAt(now).
-		SetResult(abortResult).
-		Save(ctx)
+		Select(maintenanceoperationrun.FieldID, maintenanceoperationrun.FieldResult).
+		All(ctx)
 	if err != nil {
 		return 0, 0, err
+	}
+	var runs int64
+	for _, r := range running {
+		n, err := s.abortRunningRun(ctx, r.ID, r.Result, now)
+		if err != nil {
+			return runs, 0, err
+		}
+		if n == 0 {
+			// The run finished, or its Result changed, after it was read.
+			cur, err := s.client.MaintenanceOperationRun.Query().
+				Where(
+					maintenanceoperationrun.IDEQ(r.ID),
+					maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
+				).
+				Select(maintenanceoperationrun.FieldID, maintenanceoperationrun.FieldResult).
+				Only(ctx)
+			switch {
+			case ent.IsNotFound(err):
+				// No longer running: nothing to abort.
+			case err != nil:
+				return runs, 0, err
+			default:
+				if n, err = s.abortRunningRun(ctx, cur.ID, cur.Result, now); err != nil {
+					return runs, 0, err
+				}
+				if n == 0 {
+					// Changed again after the re-read: left running for the
+					// next start to abort.
+					slog.Warn("maintenance run changed while being aborted; left for the next start", "run_id", r.ID.String())
+				}
+			}
+		}
+		runs += int64(n)
 	}
 
 	migrations, err := s.client.MaintenanceOperation.Update().
@@ -464,8 +579,46 @@ func (s *MaintenanceStore) AbortRunningMaintenanceOps(ctx context.Context) (int6
 		SetResult(abortResult).
 		Save(ctx)
 	if err != nil {
-		return int64(runs), 0, err
+		return runs, 0, err
 	}
 
-	return int64(runs), int64(migrations), nil
+	return runs, int64(migrations), nil
+}
+
+// abortRunningRun marks run id failed with the abort Result built from
+// result, only while the run is still running and its Result is still
+// result. It returns the number of rows updated (0 or 1).
+func (s *MaintenanceStore) abortRunningRun(ctx context.Context, id uuid.UUID, result string, now time.Time) (int, error) {
+	resultIs := maintenanceoperationrun.ResultEQ(result)
+	if result == "" {
+		// An unset Result reads as "" whether the column is NULL or empty.
+		resultIs = maintenanceoperationrun.Or(maintenanceoperationrun.ResultIsNil(), maintenanceoperationrun.ResultEQ(""))
+	}
+	return s.client.MaintenanceOperationRun.Update().
+		Where(
+			maintenanceoperationrun.IDEQ(id),
+			maintenanceoperationrun.StatusEQ(store.MaintenanceStatusRunning),
+			resultIs,
+		).
+		SetStatus(store.MaintenanceStatusFailed).
+		SetCompletedAt(now).
+		SetResult(abortedRunResult(result)).
+		Save(ctx)
+}
+
+// abortedRunResult is the Result of a run aborted by a restart, given the
+// Result it had: a JSON object keeps its keys, with "error" set to the
+// abort text and "aborted" to true; anything else becomes abortResult.
+func abortedRunResult(prev string) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(prev), &obj); err != nil || obj == nil {
+		return abortResult
+	}
+	obj["error"] = abortTextJSON
+	obj["aborted"] = json.RawMessage("true")
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return abortResult
+	}
+	return string(out)
 }

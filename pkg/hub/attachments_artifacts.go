@@ -245,6 +245,13 @@ func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, 
 	}
 	ctx = withStandingMemo(ctx)
 	for _, msgID := range msgIDs {
+		// Once the request context has ended, the remaining messages get
+		// no attachments (refused, as a failed check is) without a check
+		// each; the response of an ended request is not delivered
+		// (ptone/scion#6012).
+		if ctx.Err() != nil {
+			break
+		}
 		list := found[msgID]
 		if len(list) == 0 || !svc.MayReadAttachments(ctx, msgID, list[0].MessageProjectID) {
 			continue

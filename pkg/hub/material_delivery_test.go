@@ -1050,9 +1050,9 @@ func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
 
 	// set stores a file secret through the GCP backend and returns its
 	// record as written, with the gcpsm: ref Set records.
-	set := func(name, scope string) *store.Secret {
+	setAt := func(name, scope, target string) *store.Secret {
 		_, meta, err := gcp.Set(ctx, &secret.SetSecretInput{
-			Name: name, Value: "v-" + name, SecretType: store.SecretTypeFile, Target: "/etc/md/" + strings.ToLower(name),
+			Name: name, Value: "v-" + name, SecretType: store.SecretTypeFile, Target: target,
 			Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAlways, CreatedBy: m.projectOwnerID,
 		})
 		require.NoError(t, err)
@@ -1061,13 +1061,17 @@ func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
 		require.NoError(t, err)
 		return rec
 	}
+	set := func(name, scope string) *store.Secret {
+		return setAt(name, scope, "/etc/md/"+strings.ToLower(name))
+	}
 	repoint := func(rec *store.Secret, ref string) {
 		applied, err := m.store.UpdateSecretRefIfMatches(ctx, rec.Key, rec.Scope, rec.ScopeID, rec.SecretRef, rec.Version, ref)
 		require.NoError(t, err)
 		require.True(t, applied)
 	}
 	project := set("MD_GCP_PREFIXED", store.ScopeProject)
-	hub := set("MD_GCP_LEGACY_EMPTY", store.ScopeHub)
+	// The only hub-scope file secret either path delivers.
+	hub := setAt("scion-telemetry-gcp-credentials", store.ScopeHub, "~/.scion/telemetry-gcp-credentials.json")
 	repoint(hub, "")
 	broker := set("MD_GCP_UNPREFIXED", store.ScopeRuntimeBroker)
 	repoint(broker, smPrefix+"unprefixed-ref")
@@ -1218,12 +1222,26 @@ func TestDispatchDelivery_TestAdminWithheldScopeNotFetched(t *testing.T) {
 	own := userSecret(root, "MD_TA_ROOT_OWNED")
 	other := userSecret(issuer.ID, "MD_TA_ISSUER_OWNED")
 
-	got, _, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agentOwnedBy(root), PurposeRestart), agentOwnedBy(root))
+	// The root's own user scope is delivered only along a delegation chain
+	// recorded to the root, so record the root's principal edge to the
+	// control agent.
+	control := agentOwnedBy(root)
+	hdEdge(t, s, store.DelegationPrincipalUser, root, control.ID, projectID, nil)
+	got, _, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, control, PurposeRestart), control)
 	require.NoError(t, err)
 	require.Len(t, got, 1, "control: the root's own user scope is allowed")
 	assert.Equal(t, "v-MD_TA_ROOT_OWNED", got[0].Value)
 	require.Len(t, rec.fetched, 1)
 	assert.Equal(t, own.ID, rec.fetched[0].ID)
+
+	// Without a delegation chain recorded to the root, the root's own user
+	// scope is withheld as well.
+	rec.fetched = nil
+	unrecorded := agentOwnedBy(root)
+	got, _, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, unrecorded, PurposeRestart), unrecorded)
+	require.NoError(t, err)
+	assert.Empty(t, got, "no recorded chain: the root's own user scope is withheld")
+	assert.Empty(t, rec.fetched, "no recorded chain: the root's own secret value is not fetched")
 
 	rec.fetched = nil
 	withheldAgent := agentOwnedBy(issuer.ID)
@@ -1504,8 +1522,12 @@ func TestDispatchDelivery_LocalSelectionMatchesResolve(t *testing.T) {
 	require.NoError(t, err)
 	old, _, err := m.d.resolveSecrets(ctx, m.agent)
 	require.NoError(t, err)
-	require.Len(t, got, 8)
+	// The hub-scope file secret is not delivered by either path.
+	require.Len(t, got, 7)
 	assert.ElementsMatch(t, old, got)
+	for _, r := range got {
+		assert.NotEqual(t, "md-lp-file-"+store.ScopeHub, r.Name)
+	}
 }
 
 // TestMaterialAssociation_FactDefensiveBranches: the association fact's

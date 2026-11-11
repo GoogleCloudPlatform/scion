@@ -67,7 +67,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	hdEdge(t, f.store, store.DelegationPrincipalUser, owner, uat, alpha, uatEdge)
 
 	// Its child, whose agent edge was recorded without the deliver
-	// permissions (before they were intrinsic): uat_descendant_legacy.
+	// permissions (before they were intrinsic): withheld.
 	uatChild := tid("census-uat-child")
 	hdAgent(t, f.store, uatChild, alpha, []string{owner, uat})
 	hdEdge(t, f.store, store.DelegationPrincipalAgent, uat, uatChild, alpha, withBoundedCeiling("agent.read"))
@@ -104,7 +104,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 		unadopted:    legacyDeliveryCohortUnadoptedEdge,
 		adopted:      legacyDeliveryCohortAdoptedReadOnly,
 		uat:          "delivers",
-		uatChild:     legacyDeliveryCohortUATDescendant,
+		uatChild:     "ancestor_" + string(DenyCauseCeilingEffectExceeded),
 		uatNonMember: launchDeliveryCohortUATRootNotAdmitted,
 		parent:       legacyDeliveryCohortNoEdge,
 		child:        legacyDeliveryCohortNoEdge,
@@ -163,8 +163,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	assert.Equal(t, len(rep.Rows), rep.Agents)
 	assert.Equal(t, rep.Agents-rep.ByCohort["delivers"], rep.StrictWithheld)
 	assert.Equal(t, rep.StrictWithheld, rep.Withheld+rep.Fallback)
-	assert.GreaterOrEqual(t, rep.Fallback, 7, "the six legacy agents above and the token-created agent's child")
-	assert.Equal(t, 1, rep.UATDescendantLegacy)
+	assert.GreaterOrEqual(t, rep.Fallback, 6, "the six legacy agents above")
 	assert.Equal(t, 1, rep.UATRootNotAdmitted)
 	assert.Equal(t, 2, rep.UATCreated, "the two agents whose own edge was recorded from a token")
 	assert.Equal(t, 1, rep.SchedulerUATInitiated)
@@ -213,11 +212,14 @@ func TestLaunchDeliveryCensus_SkipsDeletedAgents(t *testing.T) {
 // TestLaunchDeliveryCensus_EquivalenceWithMain is the census fixture from
 // miller79/scion#199's production verification table (uat:bounded,
 // system_migration:bounded, session:principal), plus descendants of a
-// token-created agent. For every agent the delivered launch item set is the
-// one main delivered (pinned below: every agent received every deliver
+// token-created agent. For the token-created, adopted and session agents
+// the delivered launch item set is the one main delivered (every deliver
 // permission); only the cohort labels change. Equivalence holds for agents
-// whose root user is admitted to the project (the
-// non-admitted case is TestUATIntrinsic_RootNotAdmittedWithheld).
+// whose root user is admitted to the project (the non-admitted case is
+// TestUATIntrinsic_RootNotAdmittedWithheld). Descendants of the
+// token-created agent whose agent edges were recorded without the deliver
+// permissions are withheld; a descendant edge that carries them is
+// delivered.
 func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 	m := newLDFixture(t, "census-eq", ldOptions{noEdge: true})
 	f := m.goldenFixture
@@ -242,16 +244,18 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 	child := agentAt("uat-child", []string{owner, uat}, store.DelegationPrincipalAgent, uat, withBoundedCeiling("agent.read"))
 	grandchild := agentAt("uat-grandchild", []string{owner, uat, child}, store.DelegationPrincipalAgent, child, withBoundedCeiling("agent.read"))
 
-	// main's verdicts, pinned: every agent received every deliver
+	// main's verdicts, pinned: every agent below received every deliver
 	// permission; the cohort a start reported on main, and now.
-	type pinned struct{ mainCohort, p0Cohort string }
+	type pinned struct{ mainCohort, cohort string }
 	want := map[string]pinned{
-		uat:        {"uat_created_no_deliver_mapping", "delivers"},
-		adopted:    {legacyDeliveryCohortAdoptedReadOnly, legacyDeliveryCohortAdoptedReadOnly},
-		session:    {"delivers", "delivers"},
-		child:      {"uat_created_no_deliver_mapping", legacyDeliveryCohortUATDescendant},
-		grandchild: {"uat_created_no_deliver_mapping", legacyDeliveryCohortUATDescendant},
+		uat:     {"uat_created_no_deliver_mapping", "delivers"},
+		adopted: {legacyDeliveryCohortAdoptedReadOnly, legacyDeliveryCohortAdoptedReadOnly},
+		session: {"delivers", "delivers"},
 	}
+	// LEGACY DATA: descendants whose agent edges were recorded before the
+	// deliver permissions were intrinsic to a token hop, so they lack them.
+	// main delivered to them; now every launch purpose withholds.
+	withheld := []string{child, grandchild}
 
 	rep, err := f.authz.LaunchDeliveryCensus(ctx, false)
 	require.NoError(t, err)
@@ -259,14 +263,14 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 	for _, r := range rep.Rows {
 		rows[r.AgentID] = r
 	}
-	require.Len(t, want, 5)
+	require.Len(t, want, 3)
 	for id, p := range want {
 		r, ok := rows[id]
 		require.True(t, ok, id)
 		for _, perm := range LaunchDeliveryCensusPermissions {
 			assert.True(t, r.Verdicts[perm].Allowed, "%s %s: delivered on main, delivered now", id, perm)
 		}
-		assert.Equal(t, p.p0Cohort, r.Cohort, "%s: only the label changes (main: %s)", id, p.mainCohort)
+		assert.Equal(t, p.cohort, r.Cohort, "%s: only the label changes (main: %s)", id, p.mainCohort)
 
 		agent, err := f.store.GetAgent(ctx, id)
 		require.NoError(t, err)
@@ -274,17 +278,36 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "eq-value", env["EQ_ENV"], "%s: the delivered item set is unchanged", id)
 	}
-	// Negative control (LEGACY DATA: a descendant of a token hop whose
-	// child edge narrowed deliver for another reason): below the token
-	// agent, an agent edge recorded since carries deliver, and its child's
-	// edge lacks it. The hop above the narrowing allows the permission, so
-	// the narrowing is real and is denied, as on main.
+	for _, id := range withheld {
+		r, ok := rows[id]
+		require.True(t, ok, id)
+		for _, perm := range LaunchDeliveryCensusPermissions {
+			assert.False(t, r.Verdicts[perm].Allowed, "%s %s: withheld", id, perm)
+			assert.Empty(t, r.Verdicts[perm].LegacyCohort, "%s %s: no fallback cohort", id, perm)
+		}
+		assert.Equal(t, r.StrictCohort, r.Cohort, "%s: the fallback adds nothing", id)
+		agent, err := f.store.GetAgent(ctx, id)
+		require.NoError(t, err)
+		for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
+			env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, purpose), agent)
+			require.NoError(t, err)
+			assert.Empty(t, env["EQ_ENV"], "%s: %s withholds the launch item", id, purpose)
+		}
+	}
+	// Below the token agent, an agent edge recorded since carries deliver
+	// (parentDeliverEligibility): the strict walk delivers. Its child's
+	// edge lacks deliver: the narrowing denies, as on main.
 	carrying := agentAt("carrying", []string{owner, uat}, store.DelegationPrincipalAgent, uat,
 		withBoundedCeiling("agent.read", "secret.deliver", "env_var.deliver", "skill_injection.deliver"))
 	narrowed := agentAt("narrowed", []string{owner, uat, carrying}, store.DelegationPrincipalAgent, carrying, withBoundedCeiling("agent.read"))
-	agent, err := f.store.GetAgent(ctx, narrowed)
+	agent, err := f.store.GetAgent(ctx, carrying)
 	require.NoError(t, err)
 	env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent)
+	require.NoError(t, err)
+	assert.Equal(t, "eq-value", env["EQ_ENV"], "an edge that carries deliver is delivered")
+	agent, err = f.store.GetAgent(ctx, narrowed)
+	require.NoError(t, err)
+	env, _, err = m.d.selectDeliveryEnv(ctx, newDeliverySelector(f.authz, agent, PurposeRestart), agent)
 	require.NoError(t, err)
 	assert.Empty(t, env["EQ_ENV"], "control: a real narrowing still denies")
 }

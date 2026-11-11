@@ -193,6 +193,12 @@ func (s *Server) relayUserIdentity(ctx context.Context, c conduitAdmissionClaims
 		return s.authConfig.currentDevUser(), conduitAuthzAllowed, ""
 	}
 	base := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeAPI))
+	if c.AuthType == AuthTypeJWT {
+		if !conduitSessionGenerationCurrent(u.SessionGeneration, c.SessionGen) {
+			return nil, conduitAuthzDenied, conduitReasonSessionRevoked
+		}
+		return base.WithCapturedSessionGeneration(c.SessionGen), conduitAuthzAllowed, ""
+	}
 	if c.AuthType != AuthTypeUAT {
 		return base, conduitAuthzAllowed, ""
 	}

@@ -595,6 +595,10 @@ func (s *ctxFreeUserScopeListStore) ListSecrets(ctx context.Context, filter stor
 	return s.Store.ListSecrets(context.WithoutCancel(ctx), filter)
 }
 
+func (s *ctxFreeUserScopeListStore) ListPendingSecretScopeIDs(ctx context.Context, scope string) ([]string, error) {
+	return s.Store.ListPendingSecretScopeIDs(context.WithoutCancel(ctx), scope)
+}
+
 // TestSweepOrphanedUserScopedData_ExpiredContextKeepsValues: when the sweep's
 // ctx has ended by the time of the user lookups, the sweep returns the ctx
 // error and removes nothing.

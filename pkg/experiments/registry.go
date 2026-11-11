@@ -181,6 +181,15 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
+// ChatChoices gates agent choice prompts in native web chat (design
+// native-chat choices v4): agent sends carrying decisions, which the hub
+// refuses with experiment_disabled while it is off, the hub's decision and
+// answer routes (404 while off), the decisions and choiceResponse fields of
+// chat history, and the decision cards in the web UI. Stored decisions and
+// answers are kept while it is off, and the markdown fallback in each
+// choice prompt's text stays readable.
+const ChatChoices = "web.chat_choices"
+
 // ChatStarredMessages gates starred messages in native web chat: the
 // message Star/Unstar action, the private starred indicator, the
 // conversation header's starred-message list, the starred-only center and
@@ -388,6 +397,13 @@ const ArtifactSponsorReviewGrant = "hub.artifact_sponsor_review_grant"
 // is left out. It needs hub.artifacts.
 const ArtifactArchive = "hub.artifact_archive"
 
+// ArtifactsOpenReviewCheck gates the open-review check on artifact
+// publishes (ptone/scion#6849): review tabs report that they are open, and
+// a publish that would overtake an open review is refused with 409
+// review_open unless it is forced. While it is off the review-session routes
+// answer 404 and publishing behaves exactly as before.
+const ArtifactsOpenReviewCheck = "hub.artifacts_open_review_check"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -399,19 +415,68 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 
 // ImageTagSetting gates the image_tag setting (ptone/scion#6625), which
 // selects the tag of the bundled scion-* agent images ("version" for the
-// hub binary's own version, or a literal tag) instead of :latest. The hub
-// checks it: while it is off, image_tag is ignored and every image
-// reference is unchanged, a hub save that sets image_tag is refused (412
-// experiment_disabled), and a value from the environment or a settings
-// file is reported with a startup warning. While it is on, the hub applies
-// the tag to the images it sends and checks and sends it with each
-// dispatch, so the Runtime Broker applies it to the images it resolves.
+// hub binary's release version, latest for any non-release build, or a
+// literal tag) instead of :latest. The hub checks it: while it is off,
+// image_tag is ignored and every image reference is unchanged, a hub save
+// that sets image_tag is refused (412 experiment_disabled), and a value
+// from the environment or a settings file other than latest is reported
+// with a startup warning (latest, the opt-out, is logged at Info). While it
+// is on, the hub applies the tag to the images it sends and checks and
+// sends it with each dispatch, so the Runtime Broker applies it to the
+// images it resolves.
 const ImageTagSetting = "hub.image_tag_setting"
+
+// ImageTagVersionDefault gates the version default of image_tag
+// (ptone/scion#6625): while it is on and image_tag is unset, a release
+// build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) applies its
+// own version as the tag of the bundled scion-* agent images, as if
+// image_tag were "version"; any other build leaves images at :latest. It
+// ships on. A set image_tag always wins, and suppresses the default even
+// while hub.image_tag_setting is off. The hub checks it; while it is off,
+// an unset image_tag leaves every image reference unchanged.
+const ImageTagVersionDefault = "hub.image_tag_version_default"
+
+// ProjectSelfLeave gates project self-leave (ptone/scion#7494): POST
+// /api/v1/projects/{id}/leave, with which a user removes their own direct
+// project bindings, and the canLeave and leaveBlockedReason capabilities.
+// The hub checks it on the route; while it is off the route answers 404
+// and the capabilities are left out.
+const ProjectSelfLeave = "hub.project_self_leave"
+
+// WelcomeProject gates the welcome project (ptone/scion#7534): a one-time
+// onboarding step that installs the latest agent-team templates, pinned to
+// commit shas, into a "welcome" project and starts a coordinator that greets
+// its owner. Server layer: the hub refuses the welcome preview, install and
+// skip routes (404) while it is off. Web layer: shows the Welcome project
+// step in the setup wizard.
+const WelcomeProject = "hub.welcome_project"
 
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        ProjectSelfLeave,
+		Title:       "Leave a project",
+		Description: "Lets a user leave a project they were added to directly: POST /api/v1/projects/{id}/leave removes the caller's own direct project roles in one step, and revokes their access tokens limited to that project when they keep no other access. The last usable direct owner and a member only through a group are refused. The user's agents in the project are held by the existing membership check. While off, the route answers 404 and the leave capabilities are not reported.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7494",
+		Owner:       "authz",
+		ReviewBy:    "2027-02-05",
+	},
+	{
+		Name:        WelcomeProject,
+		Title:       "Welcome project",
+		Description: "Adds a Welcome project step to the workstation setup wizard. It downloads the latest agent-team templates and the skills they use, pinned to commit shas and shown before install, installs them into a new \"welcome\" project and starts a coordinator agent that greets the owner once in chat. It runs at most once per hub: Skip, a failure or deleting the project never re-creates it. Server layer: the welcome preview, install and skip routes answer 404 while it is off. Web layer: shows the wizard step.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7534",
+		Owner:       "onboarding",
+		ReviewBy:    "2027-05-08",
+	},
 	{
 		Name:        LifecycleEvents,
 		Title:       "Agent lifecycle events",
@@ -603,6 +668,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-31",
 	},
 	{
+		Name:        ChatChoices,
+		Title:       "Choices in chat",
+		Description: "Lets an agent ask a user to decide between a few options: a choice prompt carries one or more keyed decisions, which web chat shows as cards with one button per choice; a click records the answer and sends it back to the agent. Gates sending choices, which the hub refuses while it is off, the hub's decision and answer routes, which answer 404 while it is off, and the decision fields of chat history (LayerServer), and the cards (LayerWeb). Every choice prompt also carries a markdown copy of its decisions, so other surfaces and clients with it off still show them. Stored decisions and answers are kept while it is off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7514",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-02-05",
+	},
+	{
 		Name:        ChatStarredMessages,
 		Title:       "Starred messages in chat",
 		Description: "Lets each user star chat messages privately and find them again from the conversation header. Gates the Star message action, the starred indicator and the header list (LayerWeb) and the hub's starred-message routes, which answer 404 while it is off (LayerServer). Stars are stored per user and are never shown to anyone else; turning it off keeps them.",
@@ -713,6 +789,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-02-01",
 	},
 	{
+		Name:        ArtifactsOpenReviewCheck,
+		Title:       "Warn publishers about open reviews",
+		Description: "Review mode on the artifact page reports that a review is open, and a publish that would overtake an open review of the current version is refused with 409 review_open, naming the reviewers and their last activity, until the publisher publishes anyway (force). Needs hub.artifacts. While off, the review-session routes answer 404, force is ignored and publishing behaves as before. Do not turn it on, on any hub, before the filter that drops reviewers who lost access to the artifact has landed (ptone/scion#6849).",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6849",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-04",
+	},
+	{
 		Name:        UserDeleteForceCascade,
 		Title:       "Force user delete",
 		Description: "Lets an admin delete a user who has agents: DELETE /api/v1/users/{id}?force=true revokes the user's authority at once (status deleting, role bindings, access tokens, delegations), stops the user's agents through the agent delete, and removes the user once every agent is stopped or removed by an operator. Needs agent.delete on every one of those agents. While off, force is ignored (a user with agents is refused as before) and the deletion resource answers 404; a deletion accepted while it was on runs to completion.",
@@ -772,8 +859,19 @@ var compiled = []Experiment{
 	{
 		Name:        ImageTagSetting,
 		Title:       "Image tag setting",
-		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's version (latest for a development build), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged; a hub save that sets image_tag is refused, and a settings-file or environment value is reported at startup. Maintenance builds and the system image build keep latest. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
+		Description: "Lets the image_tag setting choose the tag of the bundled scion-* agent images whose tag is latest or absent: \"version\" selects the hub binary's release version (latest for any non-release build, nightly included), any other value is a literal tag. Images with another tag, a digest, or a registry host are left alone, except exactly <image_registry>/scion-<name> (latest or untagged), the form the image_registry rewrite produces, which is retagged too. While it is off, image_tag is ignored and image references are unchanged; a hub save that sets image_tag is refused, and a settings-file or environment value is reported at startup. Maintenance builds and the system image build keep latest. Agents need images built for that tag (image-build/README.md, \"Build images for a release\").",
 		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6625",
+		Owner:       "hub",
+		ReviewBy:    "2027-02-05",
+	},
+	{
+		Name:        ImageTagVersionDefault,
+		Title:       "Image tag version default",
+		Description: "When image_tag is unset, a release build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) uses its own version as the tag of the bundled scion-* agent images whose tag is latest or absent, so agents run the images published for that release; development, nightly and other builds keep latest. Any set image_tag wins (image_tag: latest opts out), even while hub.image_tag_setting is off. While it is off, an unset image_tag leaves image references unchanged.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#6625",

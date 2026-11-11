@@ -26,10 +26,8 @@ import (
 // structured entry per decision to the logger set with SetLogger: each
 // lifecycle change it records in artifact_event (and the version changes
 // it does not), each authorization refusal on a
-// management or write route (WARN; a refused POST /{id}/grants from a
-// caller who may read the artifact but not administer it, which
-// putReviewGrant answers, is logged by logReviewGrantRefusal with a review_
-// reason), and each read answered with the 404 of a hidden or missing
+// management or write route (WARN), and each read answered with the 404
+// of a hidden or missing
 // artifact (DEBUG only, to bound volume).
 //
 // An entry carries ids, enums and counts only. It never carries a share
@@ -61,6 +59,9 @@ const (
 	logKeyOwnersChecked   = "owners_checked"
 	logKeyOrphanedCount   = "orphaned_count"
 	logKeyUnorphanedCount = "unorphaned_count"
+	// logKeyNotified is set on a grant entry whose request asked for
+	// notify (Ask for review): whether the subject was told.
+	logKeyNotified = "notified"
 )
 
 // Log outcomes.
@@ -78,6 +79,7 @@ const (
 	logActionVersionCreated   = "version_created"   // pending version appended
 	logActionVersionFinalized = "version_finalized" // version made ready
 	logActionVersionFailed    = "version_failed"    // version could not be recorded or finalized, or was discarded
+	logActionVersionForced    = "version_forced"    // publish version started over open reviews (count only)
 	logActionGrantCreated     = "grant_created"
 	logActionGrantChanged     = "grant_changed"
 	logActionGrantRemoved     = EventGrantRemoved
@@ -100,6 +102,13 @@ const (
 	logActionMove       = "move"
 	logActionShare      = "share"
 )
+
+// logActionReviewEnded is the entry of a caller deleting its own review
+// session row (ptone/scion#6849): the row is kept until the reaper deletes
+// it, at least ReviewSessionRetention after its last beat, so a session
+// that no longer counts as open is logged too. Heartbeats, and a DELETE
+// that finds no row, are not logged.
+const logActionReviewEnded = "review_session_ended"
 
 // Log reasons: why a refusal or a failure happened. Never free text.
 const (
@@ -129,14 +138,19 @@ const (
 	// (ptone/scion#7134) was skipped because the delegating user holds no
 	// active role that reads in the artifact's home project.
 	logReasonSponsorNoRole = "sponsor_no_role_in_home"
+	// Ask for review (ptone/scion#5145): why a grant's notification was not
+	// sent. The grant itself is not refused. notify_failed is logged after
+	// the grant committed, when the notice could not be written.
+	logReasonNotifyRateLimited  = "notify_rate_limited"
+	logReasonNotifyNotPermitted = "notify_not_permitted"
+	logReasonNotifyUnavailable  = "notify_unavailable"
+	logReasonNotifyFailed       = "notify_failed"
 )
 
 // Log authorities: why the actor was allowed. They are the artifact_event
 // authorities of the same name: owner, admin_grant, the steward clauses
 // steward_project_owner and steward_delegator (design D25), and
-// custodian_project_admin. A review grant given on the review-grant path
-// (design D24) is logged with the authority its event records
-// (reviewGrantAuthority). The maintenance pass logs the event authorities
+// custodian_project_admin. The maintenance pass logs the event authorities
 // retention and reconciler. The automatic review grant of a new artifact
 // (ptone/scion#7134) is logged with authority sponsor_review.
 const (
@@ -187,6 +201,8 @@ type logEntry struct {
 	subjectRef  string
 	permission  string
 	count       int
+	// notified, when set, is logged as logKeyNotified.
+	notified *bool
 }
 
 // logDecision writes e for the request r, as its caller.
@@ -251,6 +267,9 @@ func writeDecision(ctx context.Context, l *slog.Logger, level slog.Level, route,
 	if e.count > 0 {
 		attrs = append(attrs, slog.Int(logKeyCount, e.count))
 	}
+	if e.notified != nil {
+		attrs = append(attrs, slog.Bool(logKeyNotified, *e.notified))
+	}
 	l.LogAttrs(ctx, level, "artifacts: "+e.action, attrs...)
 }
 
@@ -301,6 +320,8 @@ func routeTemplate(r *http.Request) string {
 		return base + "/links"
 	case sub[0] == "links" && len(sub) == 2:
 		return base + "/links/{linkId}"
+	case sub[0] == reviewSessionsSegment && len(sub) == 2:
+		return base + "/" + reviewSessionsSegment + "/{sid}"
 	case sub[0] == "versions" && len(sub) == 1:
 		return base + "/versions"
 	case sub[0] == "versions" && len(sub) == 2:
@@ -342,6 +363,12 @@ func (s *Service) adminRefusalReason(ctx context.Context, a *Artifact) string {
 // the caller of r, which acted by authority. A put that changed nothing is
 // not logged, as it records no event.
 func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string) {
+	s.logGrantPutNotify(r, a, g, put, authority, nil)
+}
+
+// logGrantPutNotify is logGrantPut for a request that asked for notify:
+// notified, when not nil, is logged as whether the subject was told.
+func (s *Service) logGrantPutNotify(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string, notified *bool) {
 	var action string
 	switch put {
 	case GrantPutCreated:
@@ -352,7 +379,15 @@ func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantP
 		return
 	}
 	s.logAllowed(r, logEntry{action: action, artifact: a, authority: authority,
-		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission})
+		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission, notified: notified})
+}
+
+// logNotifySkipped writes, at WARN, why the notification a grant request
+// asked for was not sent (a logReasonNotify* reason). It names the subject
+// and the permission, never a message or a title.
+func (s *Service) logNotifySkipped(r *http.Request, a *Artifact, reason, subjectRef, permission string) {
+	s.logDecision(r, slog.LevelWarn, logEntry{action: logActionShare, outcome: logOutcomeRefused, reason: reason,
+		artifact: a, subjectKind: SubjectPrincipal, subjectRef: subjectRef, permission: permission})
 }
 
 // grantForLog returns grant grantID of a, read before it is removed so its
@@ -486,7 +521,9 @@ func (s *Service) logWriteRefusal(r *http.Request, a *Artifact) {
 
 // logVersion writes a version of a created or finalized by the caller of
 // r, which writes it with access: as its owner (authority owner) or
-// through a write or review grant (logged as the grant's permission).
+// through a write or review grant (logged as the grant's permission). It
+// also writes the deletion of the caller's review session row of a
+// (seq 0), with the access the caller deleted it with.
 func (s *Service) logVersion(r *http.Request, action string, a *Artifact, seq int, access writeAccess) {
 	e := logEntry{action: action, artifact: a, seq: seq}
 	switch access {
@@ -509,52 +546,4 @@ func (s *Service) logVersionError(r *http.Request, a *Artifact, seq int, reason 
 		outcome = logOutcomeError
 	}
 	s.logDecision(r, slog.LevelInfo, logEntry{action: logActionVersionFailed, outcome: outcome, reason: reason, artifact: a, seq: seq})
-}
-
-// reviewClauseNote is the context key under which putReviewGrant passes a
-// *string for reviewGrantAuthorized to record the review clause in, from
-// the host's single evaluation.
-type reviewClauseNote struct{}
-
-// reviewClauseUnnamed is the clause recorded for a host that allows a
-// review grant through ReviewGrantAuthority alone, which does not name it.
-const reviewClauseUnnamed = "unnamed"
-
-// reviewGrantProjectAdminAuthority is the authority recorded for a review
-// grant given on the review-grant path (design D24) by an admin of the
-// artifact's home project. Since stewards (design D25), an owner of the
-// home project gives grants as a steward, so this path serves the admins
-// who are not owners. The path is removed with the grant ladder; until
-// then this one constant names their authority.
-const reviewGrantProjectAdminAuthority = AuthorityCustodianProjectAdmin
-
-// reviewGrantDelegatorAuthority is the authority recorded for a review grant
-// given on the review-grant path (design D24) by the owning agent's
-// delegating user. That path serves only callers who are not stewards (a
-// steward is served by the manager path first), so a delegating user here
-// failed the steward check (for example, it holds no role in the
-// artifact's current home project) and is not recorded as one. The path is
-// removed with the grant ladder; until then this one constant names it.
-const reviewGrantDelegatorAuthority = "review_grant"
-
-// reviewGrantUnnamedAuthority is the authority recorded for a review grant
-// allowed by a host that implements ReviewGrantAuthority but not
-// ReviewGrantClauser, which does not name the clause. The hub names it.
-const reviewGrantUnnamedAuthority = "review_grant"
-
-// reviewGrantAuthority is the authority of a review grant allowed by
-// clause, recorded on its event and logged: reviewGrantDelegatorAuthority
-// for the owning agent's delegating user, reviewGrantProjectAdminAuthority
-// for an admin of the home project, and reviewGrantUnnamedAuthority when
-// the host did not name the clause. None is a steward authority, so the
-// write carries no steward precondition (callerActor); PutReviewGrant
-// re-checks the home and owner kind under the artifact's lock itself.
-func reviewGrantAuthority(clause string) string {
-	switch clause {
-	case ReviewClauseProjectAdmin:
-		return reviewGrantProjectAdminAuthority
-	case ReviewClauseDelegatingUser:
-		return reviewGrantDelegatorAuthority
-	}
-	return reviewGrantUnnamedAuthority
 }

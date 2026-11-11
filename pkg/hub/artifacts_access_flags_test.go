@@ -38,8 +38,9 @@ import (
 //     remove a grant, change the expiry (the hub also accepts link
 //     creation from a steward; the web offers it to managers only until
 //     phase 2);
-//   - canManage or canGrantReview: a review grant to a user who can
-//     already read the artifact;
+//   - canShare: a review grant to a user who can already read the artifact
+//     (the review-only path for other callers is removed,
+//     ptone/scion#5145);
 //   - the owning agent is refused on every one of them.
 func TestArtifactAccessFlagsAgreeWithRoutes(t *testing.T) {
 	type caller struct {
@@ -49,15 +50,15 @@ func TestArtifactAccessFlagsAgreeWithRoutes(t *testing.T) {
 		adminGrant bool
 		agent      bool
 		// The flags the hub states for the caller.
-		manage, share, review bool
+		manage, share bool
 	}
 	user := func(pick func(f reviewGrantFixture) string) func(f reviewGrantFixture) Identity {
 		return func(f reviewGrantFixture) Identity { return f.user(pick(f)) }
 	}
 	cases := []caller{
-		{name: "delegating user", identity: user(func(f reviewGrantFixture) string { return f.delegator }), share: true, review: true},
-		{name: "home-project owner", identity: user(func(f reviewGrantFixture) string { return f.owner }), share: true, review: true},
-		{name: "home-project admin", identity: user(func(f reviewGrantFixture) string { return f.admin }), review: true},
+		{name: "delegating user", identity: user(func(f reviewGrantFixture) string { return f.delegator }), share: true},
+		{name: "home-project owner", identity: user(func(f reviewGrantFixture) string { return f.owner }), share: true},
+		{name: "home-project admin", identity: user(func(f reviewGrantFixture) string { return f.admin })},
 		{name: "home-project member", identity: user(func(f reviewGrantFixture) string { return f.member })},
 		{name: "admin grantee", identity: user(func(f reviewGrantFixture) string { return f.member }), adminGrant: true,
 			manage: true, share: true},
@@ -99,7 +100,6 @@ func TestArtifactAccessFlagsAgreeWithRoutes(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			require.Equal(t, tc.manage, resp.CanManage, "canManage")
 			require.Equal(t, tc.share, resp.CanShare, "canShare")
-			require.Equal(t, tc.review, resp.CanGrantReview, "canGrantReview")
 
 			// check asserts a route accepts (one of ok) exactly when want,
 			// and otherwise answers 403.
@@ -130,10 +130,10 @@ func TestArtifactAccessFlagsAgreeWithRoutes(t *testing.T) {
 			createDCUser(t, f.s, tid("af-reviewer"), "af-reviewer@test.com", f.home, store.ProjectRoleMember)
 			review := []byte(`{"subjectKind":"principal","subjectRef":"user:` + tid("af-reviewer") + `","permission":"review"}`)
 			check("POST /grants review", http.MethodPost, path+"/grants", review,
-				resp.CanManage || resp.CanGrantReview, http.StatusCreated, http.StatusOK)
+				resp.CanShare, http.StatusCreated, http.StatusOK)
 
 			if tc.agent {
-				assert.False(t, resp.CanManage || resp.CanShare || resp.CanGrantReview, "an agent holds no access flag")
+				assert.False(t, resp.CanManage || resp.CanShare, "an agent holds no access flag")
 			}
 		})
 	}

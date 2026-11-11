@@ -102,8 +102,9 @@ const standingPermission = "agent.read"
 // still holds it).
 const standingMaxChainDepth = maxDelegationDepth
 
-// standingMemo is a per-request memo of agentStanding results. Only policy
-// results (nil or a standingDenial) are remembered; faults are recomputed.
+// standingMemo is a per-request memo of agentStanding results. Policy
+// results (nil or a standingDenial) and refusals caused by the request
+// context ending are remembered; other faults are recomputed.
 // It lives in the request context and dies with it.
 type standingMemo struct {
 	mu      sync.Mutex
@@ -146,21 +147,37 @@ func (s *Server) agentStanding(ctx context.Context, agentID string) error {
 		memo.mu.Lock()
 		res, ok := memo.results[agentID]
 		memo.mu.Unlock()
-		if ok {
+		// A remembered request-end refusal serves only a ctx that the
+		// request's end stopped too (authzStoppedByRequestEnd). Any other
+		// ctx sharing the memo, live or ended on its own bound (a detached
+		// check), evaluates again, so its own fault keeps its WARN.
+		requestEnd := errors.Is(res, context.Canceled) || errors.Is(res, context.DeadlineExceeded)
+		if ok && (!requestEnd || authzStoppedByRequestEnd(ctx, res)) {
 			return res
 		}
 	}
-	err := s.evaluateAgentStanding(ctx, agentID)
-	if memo != nil && (err == nil || errors.Is(err, errAgentNotInStanding)) {
+	var err error
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// ctx has ended: refuse without a lookup.
+		err = fmt.Errorf("agent standing: %w", ctxErr)
+	} else {
+		err = s.evaluateAgentStanding(ctx, agentID)
+	}
+	stopped := authzStoppedByRequestEnd(ctx, err)
+	// Policy results are remembered for the request, and so is a refusal
+	// caused by the request context ending (ptone/scion#6012); any other
+	// fault is recomputed.
+	if memo != nil && (err == nil || errors.Is(err, errAgentNotInStanding) || stopped) {
 		memo.mu.Lock()
 		memo.results[agentID] = err
 		memo.mu.Unlock()
 	}
 	if err != nil {
-		if errors.Is(err, errAgentNotInStanding) {
+		switch {
+		case errors.Is(err, errAgentNotInStanding):
 			slog.Debug("agent standing refused", "agent_id", agentID, "reason", standingReason(err))
-		} else {
-			slog.Warn("agent standing lookup failed", "agent_id", agentID, "error", err)
+		default:
+			logAuthzCheckFault(ctx, nil, "agent_standing", "agent standing lookup failed", err, "agent_id", agentID)
 		}
 	}
 	return err
@@ -321,27 +338,33 @@ func (s *Server) userAdmittedToProjectOn(ctx context.Context, st store.Store, us
 
 // userAdmittedToProjectAs is userAdmittedToProjectOn for admission adm.
 func (s *Server) userAdmittedToProjectAs(ctx context.Context, st store.Store, user *store.User, projectID string, adm standingAdmission, memo *ProjectAdmissionCache) (bool, error) {
+	res, err := s.userAdmissionAs(ctx, st, user, projectID, adm, memo)
+	if err != nil {
+		return false, err
+	}
+	return res.Admitted, nil
+}
+
+// userAdmissionAs is userAdmittedToProjectAs returning the whole result,
+// with the Source of the evidence that admitted the user.
+func (s *Server) userAdmissionAs(ctx context.Context, st store.Store, user *store.User, projectID string, adm standingAdmission, memo *ProjectAdmissionCache) (ProjectAdmissionResult, error) {
 	// A hub test identity that can no longer authenticate (expired, no
 	// expiry, or the feature off: testFixtureRejection, the auth path's own
 	// rule) is admitted nowhere, so the agents it roots are held
 	// (ptone/scion#4240, Phase 3b).
 	if testFixtureRejection(user, s.testIdentities.enabled, s.testIdentities.clock()) != "" {
-		return false, nil
+		return ProjectAdmissionResult{}, nil
 	}
 	authz := s.authzFor(st)
 	if authz == nil {
-		return false, errors.New("project admission: authz service not available")
+		return ProjectAdmissionResult{}, errors.New("project admission: authz service not available")
 	}
 	pc := PrincipalContext{
 		Kind:     PrincipalKindUser,
 		ID:       user.ID,
 		Identity: NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""),
 	}
-	res, err := authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, adm.permissionID, adm.class, memo)
-	if err != nil {
-		return false, err
-	}
-	return res.Admitted, nil
+	return authz.ProjectAdmissionForClass(maskAuthzInputs(ctx), pc, projectID, adm.permissionID, adm.class, memo)
 }
 
 // resolveChainRoot returns the ID of the user at the root of the agent's

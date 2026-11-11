@@ -121,6 +121,10 @@ jobs:
       # shallow checkout above fetches only the preview tag, so describe
       # returns it; if both tags were ever present and describe picked the
       # nightly, this check fails instead of building a mislabelled image.
+      # build-images.sh also accepts only release tag forms, by the same rule
+      # as hack/version.sh, so the second check fails when hack/version.sh
+      # does not stamp exactly TAG (a tag form outside that rule would build
+      # images whose binaries report "dev").
       - name: Verify checkout is the release tag
         env:
           TAG: ${{ needs.gate.outputs.tag }}
@@ -130,6 +134,14 @@ jobs:
             echo "::error::checkout is at '${described}', not ${TAG}"
             exit 1
           fi
+          ldflags=$(bash hack/version.sh scionpkg)
+          case " ${ldflags} " in
+            *" -X scionpkg.Version=${TAG} "*) ;;
+            *)
+              echo "::error::hack/version.sh does not stamp ${TAG} (not a release tag form?); the images would report 'dev'"
+              exit 1
+              ;;
+          esac
 
       # The runner image ships toolchains this job never uses; the image
       # build needs the disk space.
@@ -171,6 +183,79 @@ jobs:
             --platform all \
             --push
           echo "Pushed ghcr.io/homebrew-scion images tagged ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      # A package that a push creates starts private on ghcr, so the push
+      # succeeds while Homebrew users get 401 on pull. Check every image the
+      # step above pushed, listed by the same catalog (resolve_targets all),
+      # as an anonymous client: this step gets no secret and no GITHUB_TOKEN,
+      # only ghcr's anonymous pull token, which is never printed. Each image's
+      # manifest at the release tag must answer 200. A failure fails the job,
+      # which also stops the formula update.
+      - name: Check images are anonymously pullable
+        timeout-minutes: 10
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          export REPO_ROOT="$PWD"
+          # shellcheck source=image-build/scripts/lib/targets.sh
+          source image-build/scripts/lib/targets.sh
+          catalog=$(resolve_targets all)
+          images=()
+          while IFS= read -r image; do
+            if [ -n "$image" ]; then images+=("$image"); fi
+          done <<< "$catalog"
+          if [ "${#images[@]}" -eq 0 ]; then
+            echo "::error::the image catalog lists no images for --target all"
+            exit 1
+          fi
+          accept="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+          work=$(mktemp -d)
+          failed=0
+          for image in "${images[@]}"; do
+            repo="homebrew-scion/${image}"
+            : > "$work/token.json"
+            where="token"
+            code=$(curl -q -sS --connect-timeout 10 --max-time 30 --retry 2 \
+              -o "$work/token.json" -w '%{http_code}' \
+              "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io") || code=000
+            token=$(sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p' "$work/token.json")
+            if [ "$code" = 200 ] && [ -z "$token" ]; then
+              code="200 without a token"
+            elif [ "$code" = 200 ] && ! [[ "$token" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
+              # curl unescapes the quoted config string below; refuse any
+              # value outside the token charset.
+              code="200 with a malformed token"
+            elif [ "$code" = 200 ]; then
+              where="manifest"
+              # The headers go to curl on stdin, never as arguments.
+              code=$(printf 'header = "Authorization: Bearer %s"\nheader = "Accept: %s"\n' "$token" "$accept" \
+                | curl -q -sS --connect-timeout 10 --max-time 30 --retry 2 -K - \
+                  --head -o /dev/null -w '%{http_code}' \
+                  "https://ghcr.io/v2/${repo}/manifests/${TAG}") || code=000
+            fi
+            case "$code" in
+              200)
+                echo "${image}: HTTP 200, tag ${TAG} found"
+                ;;
+              401|403)
+                echo "::error::${image}: HTTP ${code} (${where}): not anonymously pullable; make the package public in the homebrew-scion organization"
+                failed=1
+                ;;
+              404)
+                echo "::error::${image}: HTTP 404 (${where}): tag ${TAG} not found (or no such package)"
+                failed=1
+                ;;
+              *)
+                echo "::error::${image}: HTTP ${code} (${where}): could not confirm an anonymous pull"
+                failed=1
+                ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::not every image is anonymously pullable at ${TAG}; see docs/release-process.md, Homebrew publishing"
+            exit 1
+          fi
+          echo "All ${#images[@]} images are anonymously pullable at ${TAG}" >> "$GITHUB_STEP_SUMMARY"
 
   # Runs after the images so the formula never points at a release whose
   # images are missing. A failed image build stops it; a skipped one

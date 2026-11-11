@@ -226,6 +226,16 @@ export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
 export const ARTIFACT_MANAGE_ACCESS_FLAG = 'web.artifact_manage_access';
 
 /**
+ * Open review check (ptone/scion#6849): Review mode on the artifact page
+ * reports that a review is open, and an edit publish the hub refuses with
+ * 409 review_open shows a dialog with Wait and Publish anyway. Presentation
+ * only: the hub checks the experiment on the review-session routes and on
+ * each publish that adds a version to an artifact with a published version.
+ * Default OFF.
+ */
+export const ARTIFACTS_OPEN_REVIEW_CHECK_FLAG = 'hub.artifacts_open_review_check';
+
+/**
  * Force user delete (ptone/scion#2143): the admin users page offers to
  * force-delete a user who has agents and shows a deletion in
  * progress. Presentation only: the hub checks the experiment on the force
@@ -241,3 +251,10 @@ export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';
  * marker. Default OFF.
  */
 export const CHAT_RETENTION_FLAG = 'hub.chat_retention';
+
+/**
+ * Welcome project (hub.welcome_project): the Welcome project step of the
+ * workstation setup wizard. Presentation only: the hub checks the
+ * experiment on the welcome preview, install and skip routes. Default OFF.
+ */
+export const WELCOME_PROJECT_FLAG = 'hub.welcome_project';

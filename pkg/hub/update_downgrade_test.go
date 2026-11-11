@@ -146,11 +146,11 @@ func TestExecuteOperation_DowngradeContract(t *testing.T) {
 				risks, _ := e.Error.Details["risks"].([]any)
 				if len(risks) < 5 || e.Error.Details["class"] != tt.class ||
 					e.Error.Details["snapshotPath"] != "/opt/scion/snapshots" ||
-					e.Error.Details["floor"] != version.DowngradeFloor {
+					e.Error.Details["floor"] != downgradeFloor {
 					t.Fatalf("details = %#v", e.Error.Details)
 				}
 			}
-			if tt.code == maintenance.CodeBelowDowngradeFloor && e.Error.Details["floor"] != version.DowngradeFloor {
+			if tt.code == maintenance.CodeBelowDowngradeFloor && e.Error.Details["floor"] != downgradeFloor {
 				t.Fatalf("details = %#v", e.Error.Details)
 			}
 			runs, err := s.ListMaintenanceRuns(context.Background(), "update-binary", 10)
@@ -264,7 +264,7 @@ func TestBuildUpdateStatus_Downgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Downgrade.Floor != version.DowngradeFloor || !resp.Downgrade.SnapshotsSupported {
+	if resp.Downgrade.Floor != downgradeFloor || !resp.Downgrade.SnapshotsSupported {
 		t.Fatalf("downgrade = %+v", resp.Downgrade)
 	}
 
@@ -280,7 +280,7 @@ func TestBuildUpdateStatus_Downgrade(t *testing.T) {
 	srv.config.MaintenanceConfig.DBSnapshotter = nil
 	body := getUpdateStatus(t, srv)
 	dg, ok := body["downgrade"].(map[string]any)
-	if !ok || dg["floor"] != version.DowngradeFloor || dg["snapshotsSupported"] != false {
+	if !ok || dg["floor"] != downgradeFloor || dg["snapshotsSupported"] != false {
 		t.Fatalf("downgrade = %#v", body["downgrade"])
 	}
 }

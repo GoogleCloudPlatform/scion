@@ -291,7 +291,8 @@ func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projec
 }
 
 func TestRunEnvList_BareProjectFlag(t *testing.T) {
-	// Test that bare --project (sentinel value) infers project ID from settings.
+	// Test that bare --project (sentinel value) infers the linked directory
+	// project's hub project ID.
 	orig := saveEnvTestState()
 	defer orig.restore()
 
@@ -308,7 +309,8 @@ func TestRunEnvList_BareProjectFlag(t *testing.T) {
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, server.URL, projectUUID)
-	projectPath = projectDir
+	projectPath = ""
+	t.Chdir(filepath.Dir(projectDir))
 
 	envOutputJSON = false
 	envBrokerScope = ""
@@ -367,7 +369,8 @@ func TestRunEnvList_ProjectByName(t *testing.T) {
 }
 
 func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
-	// Test that resolveEnvScope treats sentinel as "infer from settings".
+	// Test that resolveEnvScope treats sentinel as "infer the project": in
+	// a linked directory project, its hub.projectId.
 	orig := saveEnvTestState()
 	defer orig.restore()
 
@@ -386,15 +389,18 @@ func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, "http://localhost:9999", projectUUID)
-	projectPath = projectDir
+	// The directory project is the walked one: hub env's own --project
+	// flag shadows the root's, so projectPath stays empty.
+	projectPath = ""
+	t.Chdir(filepath.Dir(projectDir))
 
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveEnvScope(testCmd, settings)
+	target, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "project", scope)
-	assert.Equal(t, projectUUID, scopeID, "should infer project ID from settings when bare --project is used")
+	assert.Equal(t, "project", target.scope)
+	assert.Equal(t, projectUUID, target.id, "should infer project ID from settings when bare --project is used")
 }
 
 func TestResolveEnvScope_ExplicitProjectValue(t *testing.T) {
@@ -419,10 +425,10 @@ func TestResolveEnvScope_ExplicitProjectValue(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveEnvScope(testCmd, settings)
+	target, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "project", scope)
-	assert.Equal(t, "hub-local", scopeID, "should pass through the explicit project name for later resolution")
+	assert.Equal(t, "project", target.scope)
+	assert.Equal(t, "hub-local", target.id, "should pass through the explicit project name for later resolution")
 }
 
 func TestResolveEnvScope_ScopeHub(t *testing.T) {
@@ -447,10 +453,10 @@ func TestResolveEnvScope_ScopeHub(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveEnvScope(testCmd, settings)
+	target, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "hub", scope)
-	assert.Equal(t, "", scopeID, "hub scope should return empty scopeID (server resolves it)")
+	assert.Equal(t, "hub", target.scope)
+	assert.Equal(t, "", target.id, "hub scope should return empty scopeID (server resolves it)")
 }
 
 func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
@@ -476,7 +482,7 @@ func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveEnvScope(testCmd, settings)
+	_, err = resolveEnvScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }
@@ -504,7 +510,7 @@ func TestResolveEnvScope_ScopeConflictsWithBroker(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveEnvScope(testCmd, settings)
+	_, err = resolveEnvScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }

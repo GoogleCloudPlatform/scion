@@ -613,6 +613,11 @@ func (s *UserStore) DeleteUser(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	// The user's choice answers keep their name and email snapshots but
+	// lose the user id (design choices v4, O2).
+	if err := clearDecisionAnswerUser(ctx, s.client, uid.String()); err != nil {
+		return err
+	}
 	if err := s.client.User.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
 	}

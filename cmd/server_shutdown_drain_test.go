@@ -173,6 +173,9 @@ func startDrainTestFront(t *testing.T, hubSrv *hub.Server, atWaitEnd func()) *dr
 	web := hub.NewWebServer(hub.WebServerConfig{Host: "127.0.0.1", Port: port})
 	f.web = web
 	if hubSrv != nil {
+		// As production does: the hub is the access settings provider, which
+		// also supplies the content host guard Start requires.
+		web.SetAccessSettingsProvider(hubSrv)
 		web.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupBackgroundResources)
 	}
 	wait := f.brokerStop.beforeHTTPDrain(shutdownClock, brokerStopWaitFallback, plan.brokerContext)

@@ -598,7 +598,7 @@ func fakeContainerCommand(t *testing.T) (command, argsFile string) {
 	dir := t.TempDir()
 	command = filepath.Join(dir, "fake-container-cli")
 	argsFile = filepath.Join(dir, "args")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\necho 0123456789abcdef\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\necho 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
 	require.NoError(t, os.WriteFile(command, []byte(script), 0o755))
 	return command, argsFile
 }

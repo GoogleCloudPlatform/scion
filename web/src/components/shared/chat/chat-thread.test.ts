@@ -213,6 +213,84 @@ describe('scion-chat-thread route-to-agent indicator', () => {
     // m1 has recipient=agent:coder → shows "coder"; m2 has no recipient → empty; m3 is agent → empty
     expect(routed).toEqual(['coder', '', '']);
   });
+
+  /**
+   * The group header ("Me → agent  09:09") names one recipient, so a run of
+   * messages from the same sender only collapses under it while the shown
+   * recipient stays the same; a recipient change starts a new header.
+   */
+  it('starts a new message group when the routed recipient changes', async () => {
+    const own = (id: string, minute: number, recipient?: string): Record<string, string> => ({
+      id,
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      ...(recipient ? { recipient } : {}),
+      msg: id,
+      createdAt: `2026-01-01T00:0${minute}:00Z`,
+    });
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            own('m1', 0, 'agent:alpha'),
+            own('m2', 1, 'agent:beta'),
+            own('m3', 2, 'agent:beta'),
+            // Accepted edge case: an own message to an agent followed by an
+            // own message with no recipient starts a new group. The second
+            // message shows no header (own messages only show one when routed);
+            // only the tighter "grouped" spacing is dropped.
+            own('m4', 3),
+            own('m5', 4),
+            // Back to a routed message after the recipient-less run: its
+            // header must show again, naming the agent.
+            own('m6', 5, 'agent:alpha'),
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.currentUserId = 'user-me';
+    el.members = [
+      { id: 'user-me', kind: 'user', name: 'Me', email: 'me@example.com' },
+      { id: 'agent-a', kind: 'agent', name: 'Alpha', email: 'agent:alpha' },
+      { id: 'agent-b', kind: 'agent', name: 'Beta', email: 'agent:beta' },
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(6);
+    });
+
+    const msgs = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLElement & { showHeader: boolean }>(
+        'scion-chat-message'
+      ) ?? []
+    );
+    expect(msgs.map((m) => m.getAttribute('routedTo'))).toEqual([
+      'alpha',
+      'beta',
+      'beta',
+      '',
+      '',
+      'alpha',
+    ]);
+    // A, then B, then B: two headers, and the B pair shares one. The
+    // recipient-less run after it is its own group (edge case above), and
+    // the routed message after that run shows its header again.
+    expect(msgs.map((m) => m.showHeader)).toEqual([true, true, false, true, false, true]);
+
+    // Only the routed headers render visible "→ agent" text.
+    for (const m of msgs)
+      await (m as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+    const headers = msgs
+      .map((m) => m.shadowRoot?.querySelector('.bubble-header .routed-to')?.textContent?.trim())
+      .filter((t): t is string => !!t);
+    expect(headers).toEqual(['→ alpha', '→ beta', '→ alpha']);
+  });
 });
 
 describe('scion-chat-thread agent recipient reconciliation', () => {

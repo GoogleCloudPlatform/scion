@@ -92,12 +92,16 @@ type LinkInfo struct {
 	CreatedBy string    `json:"createdBy,omitempty"`
 }
 
-// CreateLinkResponse answers POST /{id}/links. URL is the only place the
-// token ever appears; it is not retrievable later.
+// CreateLinkResponse answers POST /{id}/links. URL and ShareURL are the
+// only places the token ever appears; it is not retrievable later.
 type CreateLinkResponse struct {
 	Link LinkInfo `json:"link"`
 	// URL is the hub-relative path of the link.
 	URL string `json:"url"`
+	// ShareURL is the absolute link on the hub's content host, present
+	// only when server.hub.content_url is set and valid. It is built
+	// from that setting alone, never from the request.
+	ShareURL string `json:"shareUrl,omitempty"`
 	// ClampedToArtifactExpiry is true when the link expires earlier than
 	// asked because the artifact itself expires then.
 	ClampedToArtifactExpiry bool `json:"clampedToArtifactExpiry,omitempty"`
@@ -292,15 +296,9 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 
 // adminForbiddenMessage is the text of every 403 for a user that may read
 // an artifact but not administer it. It states the rule, the same for every
-// artifact and every refusal, and never why this caller was refused. One
-// narrow exception (ptone/scion#5119): a caller that holds review-grant
-// authority on an artifact owned by an agent, asking for a well-formed
-// review grant, learns when the user cannot read the artifact
-// (CodeReviewSubjectCannotRead) or already holds a read, write or admin
-// grant (CodeReviewReplacesAccess); see putReviewGrant.
+// artifact and every refusal, and never why this caller was refused.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
-	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
-	"and an admin of the artifact's home project may grant review access"
+	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it"
 
 // agentAdminForbiddenMessage is the same 403's text for an agent, which may
 // never administer an artifact, its own included (sharing is user-only), so
@@ -308,8 +306,7 @@ const adminForbiddenMessage = "only the artifact's owner or a user with an admin
 // It too is the same for every artifact and every refusal.
 const agentAdminForbiddenMessage = "agents cannot share artifacts or change an artifact's grants, share links, expiry or home project; " +
 	"users do that: the artifact's owner when the owner is a user, or a user with an admin grant; " +
-	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
-	"and an admin of the artifact's home project may grant review access"
+	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it"
 
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
 // but not administer it: the agent text for an agent, the user text
@@ -354,10 +351,8 @@ func shareAuthorityOf(authority string) string {
 // grant), CanShare (CanManage or a steward) and ShareAuthority (the steward
 // clause) from adminAuthorityWith, CanRetire from the same authority
 // through retireAuthorityFrom (the delete route's decision),
-// CanPublish and CanReview from canWriteErr (reviewCapability), and
-// CanGrantReview from mayGrantReview (only when CanManage is false), the
-// decisions the management, write and grant routes make for the same
-// request. A failed grants read answers 500 and returns false.
+// and CanPublish and CanReview from canWriteErr (reviewCapability), the
+// decisions the management and write routes make for the same request. A failed grants read answers 500 and returns false.
 //
 // It must run only after readableArtifact: a caller that cannot read the
 // artifact gets the 404 of a missing one and learns none of these. The
@@ -379,7 +374,6 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 		return false
 	}
 	resp.CanPublish, resp.CanReview = reviewCapability(true, access)
-	resp.CanGrantReview = !resp.CanManage && s.mayGrantReview(r.Context(), a)
 	return true
 }
 
@@ -467,8 +461,10 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 	}
 	s.logLink(r, a, logActionLinkCreated, actor)
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	rel := RouteShared + token
 	writeJSON(w, http.StatusCreated, CreateLinkResponse{
-		Link: linkInfo(g), URL: RouteShared + token, ClampedToArtifactExpiry: clamped,
+		Link: linkInfo(g), URL: rel, ShareURL: shareURL(b.currentLimits(r.Context()), rel),
+		ClampedToArtifactExpiry: clamped,
 	})
 }
 

@@ -1354,8 +1354,10 @@ func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, provision.ErrHostCloneURLRefused):
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, provision.ErrHostCloneURLRefused.Error(), nil)
-	case errors.Is(err, errSSHCloneURLNeedsProjectSecret):
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLNeedsProjectSecret.Error(), nil)
+	case errors.Is(err, errSSHCloneURLUnsupported):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLUnsupported.Error(), nil)
+	case errors.Is(err, errSSHCloneURLProjectSecretHTTPSOnly):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLProjectSecretHTTPSOnly.Error(), nil)
 	default:
 		return false
 	}
@@ -1411,8 +1413,8 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneToken == "" {
 		tokenRemote = ""
 	}
-	// An ssh clone URL without a project credential is refused before any
-	// filesystem work.
+	// An ssh clone URL is refused before any filesystem work, with or
+	// without a project credential (which only picks the message).
 	if cloneCfg != nil {
 		if err := sshCloneURLRefused(cloneCfg.URL, cloneToken != ""); err != nil {
 			return err
@@ -1681,7 +1683,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	if localFixture {
 		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, "")
 	} else {
-		if err := s.refuseSSHWithoutProjectSecret(ctx, project, cloneURL); err != nil {
+		if err := s.refuseSSHCloneURL(ctx, project, cloneURL); err != nil {
 			return err
 		}
 		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
@@ -2694,6 +2696,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Project self-leave (ptone/scion#7494).
+	if subPath == "leave" {
+		s.handleProjectLeave(w, r, projectID)
+		return
+	}
+
 	// RS1: Atomic ownership transfer endpoint.
 	if subPath == "transfer-ownership" {
 		s.handleTransferOwnership(w, r, projectID)
@@ -3632,6 +3640,9 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	resp := ProjectWithCapabilities{Project: *project, CloudLogging: s.logQueryService != nil}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, projectResource(project))
+		if user, ok := identity.(UserIdentity); ok && resp.Cap != nil {
+			resp.Cap.CanLeave, resp.Cap.LeaveBlockedReason = s.projectLeaveCapabilities(ctx, user.ID(), project.ID)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -3937,6 +3948,8 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// All effects are best-effort (fire_and_forget, log_and_continue).
 	// Authorization is complete — the service has committed the deletion.
 	deletedProject := result.Project
+	// Release the held values of the project's deleted pending secrets.
+	s.dropPendingValues(ctx, result.PendingSecretValueRefs)
 	s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
 	// The Hub is the only remover of the project's tree on shared project

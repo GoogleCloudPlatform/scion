@@ -118,7 +118,7 @@ func (s *devUserSource) SetIdentity(displayName, email string) {
 // currentDevUser returns the development identity this configuration
 // authenticates dev tokens as: the live one when the server installed a
 // devUserSource, otherwise one built from DevUserCfg.
-func (c AuthConfig) currentDevUser() *DevUser {
+func (c *AuthConfig) currentDevUser() *DevUser {
 	if c.DevUser != nil {
 		return c.DevUser.Load()
 	}

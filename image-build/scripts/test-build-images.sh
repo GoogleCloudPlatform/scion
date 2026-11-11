@@ -763,6 +763,325 @@ check_not_contains "v* first: v* one commit behind HEAD: no VERSION build-arg" "
 check_not_contains "v* first: v* one commit behind HEAD: no warning" "HEAD is exactly on tag" "${OUT}"
 
 # ---------------------------------------------------------------------------
+# VERSION accepts only release tag forms (build-images.sh and hack/version.sh)
+# ---------------------------------------------------------------------------
+
+HACK_VERSION="${HACK_VERSION_UNDER_TEST:-${SCRIPT_DIR}/../../hack/version.sh}"
+PUBLISH_HOMEBREW="${SCRIPT_DIR}/../../.github/workflows/publish-homebrew.yml"
+
+# One rule, textually identical in both scripts.
+rule_of() { sed -n '/^# BEGIN release-tag rule/,/^# END release-tag rule/p' "$1"; }
+rule_bi="$(rule_of "${IMAGE_BUILD_SRC}/scripts/build-images.sh")"
+rule_hv="$(rule_of "${HACK_VERSION}")"
+check_not_contains "release-tag rule: present in build-images.sh" "<empty>" "${rule_bi:-<empty>}"
+check_eq "release-tag rule: hack/version.sh is identical to build-images.sh" "${rule_bi}" "${rule_hv}"
+
+# tagged_repo <name> <tag>: a copy of OFF with <tag> on HEAD.
+tagged_repo() {
+  cp -R "${OFF}" "${TMP}/tag-$1"
+  git -C "${TMP}/tag-$1" tag "$2"
+}
+# run_hv <repo>: hack/version.sh in <repo>; sets HV_OUT, HV_ERR and RC.
+run_hv() {
+  set +e
+  HV_OUT="$(cd "$1" && env -i PATH="${TOOLBIN}" HOME="${TMP}/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    bash "${HACK_VERSION}" scionpkg 2>"${TMP}/hv.err")"
+  RC=$?
+  set -e
+  HV_ERR="$(cat "${TMP}/hv.err")"
+}
+
+n=0
+for t in v1.2.3 v1.2.3-preview.4 v1.2.3-rc.1 v10.0.0 nightly-20261106; do
+  n=$((n + 1))
+  tagged_repo "ok${n}" "${t}"
+  r="${TMP}/tag-ok${n}"
+  run_bi "${r}" --dry-run --target all --tag "${t}"
+  check_contains "release tag ${t}: banner" "Version:  ${t}" "${OUT}"
+  check_contains "release tag ${t}: VERSION build-arg" "--build-arg VERSION=${t}" "$(line_for scion-base)"
+  check_not_contains "release tag ${t}: no warning" "not a release tag form" "${OUT}"
+  run_bi "${r}" --dry-run --target all --builder cloud-build --registry reg.example/x --tag "${t}"
+  check_contains "release tag ${t}: cloud-build _VERSION" "_VERSION=${t}" "${OUT}"
+  run_hv "${r}"
+  check_contains "release tag ${t}: hack/version.sh stamps it" " -X scionpkg.Version=${t}" "${HV_OUT}"
+  check_eq "release tag ${t}: hack/version.sh no warning" "" "${HV_ERR}"
+done
+
+# Rejected: <tag>|<named in the warning: yes or no>. git refuses a space in a
+# tag name, so ';' stands in for other punctuation.
+n=0
+for c in 'v1.2.3,_TAG=x|no' 'v1.2.3;x|no' 'v1.2|yes' 'v1.2.3-beta.1|yes' 'v01.2.3|yes' 'nightly-2026110|yes' 'latest|yes'; do
+  n=$((n + 1))
+  t="${c%|*}"
+  named="${c#*|}"
+  tagged_repo "bad${n}" "${t}"
+  r="${TMP}/tag-bad${n}"
+  if [ "${named}" = "yes" ]; then
+    want_warn="Warning: tag ${t} is not a release tag form; VERSION is left empty and the binaries report \"dev\"."
+  else
+    want_warn="Warning: a tag with unexpected characters is not a release tag form; VERSION is left empty and the binaries report \"dev\"."
+  fi
+  run_bi "${r}" --dry-run --target all
+  check_rc "non-release tag ${t}: exit 0 (not a build failure)" 0 "${RC}"
+  check_contains "non-release tag ${t}: off-tag banner" "Version:  <none" "${OUT}"
+  check_not_contains "non-release tag ${t}: no VERSION build-arg" "VERSION=" "$(line_for scion-base)"
+  check_contains "non-release tag ${t}: warning" "${want_warn}" "${OUT}"
+  check_not_contains "non-release tag ${t}: no HEAD-on-tag warning" "HEAD is exactly on tag" "${OUT}"
+  if [ "${named}" = "no" ]; then
+    check_not_contains "non-release tag ${t}: tag not printed" "${t}" "${OUT}"
+  fi
+  run_bi "${r}" --dry-run --target all --builder cloud-build --registry reg.example/x
+  check_rc "non-release tag ${t}: cloud-build exit 0" 0 "${RC}"
+  check_not_contains "non-release tag ${t}: no _VERSION substitution" "_VERSION=" "${OUT}"
+  check_not_contains "non-release tag ${t}: tag not in the substitutions" "${t}," "${OUT}"
+  run_hv "${r}"
+  check_rc "non-release tag ${t}: hack/version.sh exit 0" 0 "${RC}"
+  check_not_contains "non-release tag ${t}: hack/version.sh stamps no Version" "Version=" "${HV_OUT}"
+  check_contains "non-release tag ${t}: hack/version.sh still stamps Commit" "-X scionpkg.Commit=" "${HV_OUT}"
+  check_eq "non-release tag ${t}: hack/version.sh warning" "${want_warn}" "${HV_ERR}"
+done
+
+# v* first still holds: a valid v* tag wins over a valid nightly (BOTH), and
+# hack/version.sh agrees; off-tag stamps nothing and warns nothing.
+run_hv "${BOTH}"
+check_contains "hack/version.sh: nightly + v* on HEAD: stamps v*" " -X scionpkg.Version=v9.9.9" "${HV_OUT}"
+run_hv "${OFF}"
+check_not_contains "hack/version.sh: off-tag: no Version" "Version=" "${HV_OUT}"
+check_eq "hack/version.sh: off-tag: no warning" "" "${HV_ERR}"
+
+# publish-homebrew.yml's "Verify checkout is the release tag" step, run as
+# written against a checkout of the tag: it passes for a release tag and
+# fails for a tag its gate admits but hack/version.sh does not stamp.
+verify_step="$(awk '
+  /- name: Verify checkout is the release tag/ { on = 1; next }
+  on && /^      - name:/ { exit }
+  on && run { sub(/^          /, ""); print; next }
+  on && /run: \|/ { run = 1 }
+' "${PUBLISH_HOMEBREW}")"
+check_contains "publish-homebrew verify step: extracted" "hack/version.sh" "${verify_step}"
+# run_verify <repo> <tag>: sets OUT and RC.
+run_verify() {
+  mkdir -p "$1/hack"
+  cp "${HACK_VERSION}" "$1/hack/version.sh"
+  set +e
+  OUT="$(cd "$1" && env -i PATH="${TOOLBIN}" HOME="${TMP}/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    TAG="$2" bash -e -c "${verify_step}" 2>&1)"
+  RC=$?
+  set -e
+}
+tagged_repo pv-ok v1.2.3-preview.4
+run_verify "${TMP}/tag-pv-ok" v1.2.3-preview.4
+check_rc "publish-homebrew verify: v1.2.3-preview.4 passes" 0 "${RC}"
+tagged_repo pv-bad v1.2.3-preview.04
+run_verify "${TMP}/tag-pv-bad" v1.2.3-preview.04
+check_rc "publish-homebrew verify: v1.2.3-preview.04 fails" 1 "${RC}"
+check_contains "publish-homebrew verify: v1.2.3-preview.04 message" "::error::hack/version.sh does not stamp v1.2.3-preview.04" "${OUT}"
+
+# publish-homebrew.yml's "Check images are anonymously pullable" step, run as
+# written in a fixture checkout against a stub curl. The stub answers ghcr's
+# token and manifest URLs from files in STUB_GHCR (default: 200, and a token
+# for the token URL) and logs each URL, the method, the timeouts and the -K
+# config it read on stdin. It requires -q first and rejects any other option.
+pull_step="$(awk '
+  /- name: Check images are anonymously pullable/ { on = 1; next }
+  on && /^      - name:/ { exit }
+  on && /^  [^ ]/ { exit }
+  on && run { sub(/^          /, ""); print; next }
+  on && /run: \|/ { run = 1 }
+' "${PUBLISH_HOMEBREW}")"
+check_contains "publish-homebrew pull step: extracted" "resolve_targets all" "${pull_step}"
+check_not_contains "publish-homebrew pull step: no secret" "secrets." "${pull_step}"
+check_not_contains "publish-homebrew pull step: no GITHUB_TOKEN" "GITHUB_TOKEN" "${pull_step}"
+CURLSTUB="${TMP}/stubbin-curl"
+mkdir -p "${CURLSTUB}"
+cat > "${CURLSTUB}/curl" <<'STUB'
+#!/usr/bin/env bash
+if [ "${1:-}" != "-q" ]; then echo "stub curl: -q is not the first argument" >&2; exit 2; fi
+shift
+out="" fmt="" url="" method="GET" ct="" mt="" retry="" cfg="none"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) fmt="$2"; shift 2 ;;
+    -K)
+      if [ "$2" != "-" ]; then echo "stub curl: -K takes only -" >&2; exit 2; fi
+      cfg="$(tr '\n' '|' | sed 's/|$//')"
+      shift 2
+      ;;
+    --head|-I) method="HEAD"; shift ;;
+    --connect-timeout) ct="$2"; shift 2 ;;
+    --max-time) mt="$2"; shift 2 ;;
+    --retry) retry="$2"; shift 2 ;;
+    -sS) shift ;;
+    -*) echo "stub curl: unexpected option $1" >&2; exit 2 ;;
+    *)
+      if [ -n "${url}" ]; then echo "stub curl: a second URL" >&2; exit 2; fi
+      url="$1"
+      shift
+      ;;
+  esac
+done
+echo "${url} method=${method} ct=${ct} mt=${mt} retry=${retry} cfg=${cfg}" >> "${STUB_CURL_LOG}"
+body=""
+case "${url}" in
+  "https://ghcr.io/token?scope=repository:homebrew-scion/"*":pull&service=ghcr.io")
+    img="${url#*homebrew-scion/}"; img="${img%%:*}"; kind="token"
+    body='{"token":"anon-test-token"}'
+    ;;
+  "https://ghcr.io/v2/homebrew-scion/"*"/manifests/"*)
+    img="${url#https://ghcr.io/v2/homebrew-scion/}"; img="${img%%/manifests/*}"; kind="manifest"
+    ;;
+  *) echo "stub curl: unexpected URL" >&2; exit 2 ;;
+esac
+code=200
+if [ -f "${STUB_GHCR}/${kind}.${img}.code" ]; then code="$(cat "${STUB_GHCR}/${kind}.${img}.code")"; fi
+if [ -f "${STUB_GHCR}/${kind}.${img}.body" ]; then body="$(cat "${STUB_GHCR}/${kind}.${img}.body")"; fi
+if [ "${code}" = "fail" ]; then
+  echo "curl: (7) Failed to connect" >&2
+  printf '000'
+  exit 7
+fi
+if [ -n "${out}" ]; then printf '%s' "${body}" > "${out}"; fi
+if [ "${fmt}" = '%{http_code}' ]; then printf '%s' "${code}"; fi
+STUB
+chmod +x "${CURLSTUB}/curl"
+# The catalog's image list for a repository, from targets.sh itself.
+catalog_of() {
+  (REPO_ROOT="$1"; set +eu; source "$1/image-build/scripts/lib/targets.sh"; resolve_targets all)
+}
+# images_queried <prefix>: the image names of the logged URLs with <prefix>.
+images_queried() {
+  sed -n "s|^$1\([^/:]*\).*|\1|p" "${TMP}/curl.log"
+}
+# logged <url-pattern> <sed-expr>: the sed-expr applied to the matching log lines, deduplicated.
+logged() {
+  grep -e "$1" "${TMP}/curl.log" | sed "$2" | LC_ALL=C sort -u
+}
+PULL_TAG="v1.2.3-preview.4"
+PULL_ACCEPT="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+# run_pull <repo> [<file>=<content>...]: fresh STUB_GHCR; sets OUT and RC.
+run_pull() {
+  local repo="$1" kv
+  shift
+  rm -rf "${TMP}/ghcr"
+  mkdir -p "${TMP}/ghcr"
+  for kv in "$@"; do printf '%s' "${kv#*=}" > "${TMP}/ghcr/${kv%%=*}"; done
+  : > "${TMP}/curl.log"
+  : > "${TMP}/summary"
+  set +e
+  OUT="$(cd "${repo}" && env -i PATH="${CURLSTUB}:${TOOLBIN}" HOME="${TMP}/home" TMPDIR="${TMP}" \
+    GITHUB_STEP_SUMMARY="${TMP}/summary" TAG="${PULL_TAG}" \
+    STUB_GHCR="${TMP}/ghcr" STUB_CURL_LOG="${TMP}/curl.log" \
+    bash -e -c "${pull_step}" 2>&1)"
+  RC=$?
+  set -e
+}
+
+want_images="$(catalog_of "${OFF}")"
+check_eq "publish-homebrew pull: fixture catalog" "$(printf '%s\n' core-base scion-base scion-claude scion-codex scion-hub)" "${want_images}"
+
+run_pull "${OFF}"
+check_rc "publish-homebrew pull: all pullable at the tag passes" 0 "${RC}"
+check_eq "publish-homebrew pull: token requested for each catalog image" "${want_images}" \
+  "$(images_queried 'https://ghcr.io/token?scope=repository:homebrew-scion/')"
+check_eq "publish-homebrew pull: each catalog image queried at exactly /manifests/<tag>" \
+  "$(for img in ${want_images}; do echo "https://ghcr.io/v2/homebrew-scion/${img}/manifests/${PULL_TAG}"; done)" \
+  "$(sed -n 's|^\(https://ghcr.io/v2/[^ ]*\) .*|\1|p' "${TMP}/curl.log")"
+check_eq "publish-homebrew pull: manifest requests are HEAD" "method=HEAD" "$(logged '/manifests/' 's/^[^ ]* \(method=[^ ]*\) .*/\1/')"
+check_eq "publish-homebrew pull: every request has connect and total timeouts" "ct=10 mt=30" \
+  "$(logged '^https://' 's/^.* \(ct=[^ ]* mt=[^ ]*\) .*/\1/')"
+check_eq "publish-homebrew pull: manifest config is the anonymous token and the Accept list only" \
+  "header = \"Authorization: Bearer anon-test-token\"|header = \"Accept: ${PULL_ACCEPT}\"" \
+  "$(logged '/manifests/' 's/^.* cfg=//')"
+check_contains "publish-homebrew pull: Accept carries the OCI index type" "application/vnd.oci.image.index.v1+json" \
+  "$(logged '/manifests/' 's/^.* cfg=//')"
+check_contains "publish-homebrew pull: Accept carries the docker manifest list type" "application/vnd.docker.distribution.manifest.list.v2+json" \
+  "$(logged '/manifests/' 's/^.* cfg=//')"
+check_eq "publish-homebrew pull: token request carries no credential" "cfg=none" "$(logged '/token?' 's/^.* \(cfg=.*\)$/\1/')"
+for img in ${want_images}; do
+  check_contains "publish-homebrew pull: ${img} reported" "${img}: HTTP 200, tag ${PULL_TAG} found" "${OUT}"
+done
+check_not_contains "publish-homebrew pull: token never printed" "anon-test-token" "${OUT}"
+check_contains "publish-homebrew pull: summary" "All 5 images are anonymously pullable at ${PULL_TAG}" "$(cat "${TMP}/summary")"
+
+# A harness added to the catalog is checked without editing the workflow.
+cp -R "${OFF}" "${TMP}/pull-extra"
+mkdir -p "${TMP}/pull-extra/harnesses/zeta"
+cp "${OFF}/harnesses/claude/Dockerfile" "${TMP}/pull-extra/harnesses/zeta/Dockerfile"
+run_pull "${TMP}/pull-extra"
+check_rc "publish-homebrew pull: new catalog harness passes" 0 "${RC}"
+check_eq "publish-homebrew pull: new catalog harness is checked" "$(catalog_of "${TMP}/pull-extra")" \
+  "$(images_queried 'https://ghcr.io/v2/homebrew-scion/')"
+check_contains "publish-homebrew pull: new catalog harness reported" "scion-zeta: HTTP 200, tag ${PULL_TAG} found" "${OUT}"
+
+run_pull "${OFF}" manifest.scion-codex.code=401
+check_rc "publish-homebrew pull: one 401 fails" 1 "${RC}"
+check_contains "publish-homebrew pull: 401 message" "::error::scion-codex: HTTP 401 (manifest): not anonymously pullable; make the package public in the homebrew-scion organization" "${OUT}"
+check_contains "publish-homebrew pull: 401 still checks the rest" "scion-hub: HTTP 200, tag ${PULL_TAG} found" "${OUT}"
+check_contains "publish-homebrew pull: 401 final error" "::error::not every image is anonymously pullable at ${PULL_TAG}" "${OUT}"
+check_eq "publish-homebrew pull: 401 writes no success summary" "" "$(cat "${TMP}/summary")"
+
+run_pull "${OFF}" manifest.scion-claude.code=403
+check_rc "publish-homebrew pull: one 403 fails" 1 "${RC}"
+check_contains "publish-homebrew pull: 403 message" "::error::scion-claude: HTTP 403 (manifest): not anonymously pullable" "${OUT}"
+
+run_pull "${OFF}" manifest.scion-hub.code=404
+check_rc "publish-homebrew pull: one 404 fails" 1 "${RC}"
+check_contains "publish-homebrew pull: 404 message" "::error::scion-hub: HTTP 404 (manifest): tag ${PULL_TAG} not found (or no such package)" "${OUT}"
+
+run_pull "${OFF}" token.scion-base.code=401
+check_rc "publish-homebrew pull: token 401 fails" 1 "${RC}"
+check_contains "publish-homebrew pull: token 401 message" "::error::scion-base: HTTP 401 (token): not anonymously pullable" "${OUT}"
+check_not_contains "publish-homebrew pull: token 401 skips the manifest" "/v2/homebrew-scion/scion-base/" "$(cat "${TMP}/curl.log")"
+
+run_pull "${OFF}" 'token.scion-base.body={"errors":[]}'
+check_rc "publish-homebrew pull: 200 without a token fails" 1 "${RC}"
+check_contains "publish-homebrew pull: no token message" "::error::scion-base: HTTP 200 without a token (token): could not confirm an anonymous pull" "${OUT}"
+
+# A token outside the charset never reaches the quoted -K config. The token
+# sed stops at a double quote, so an escaped quote in the body parses as a
+# token ending in a backslash.
+# shellcheck disable=SC2016 # literal token bodies, nothing expands
+for c in 'backslash|{"token":"anon-test-token\\x"}' \
+  'trailing backslash (escaped quote in the body)|{"token":"anon-test-token\"x"}' \
+  'space|{"token":"anon-test-token x"}' 'dollar sign|{"token":"anon-test-token$x"}' \
+  "newline|$(printf '{"token":"anon-test-token"}\n{"token":"x"}')"; do
+  name="${c%%|*}"
+  run_pull "${OFF}" "token.scion-claude.body=${c#*|}"
+  check_rc "publish-homebrew pull: token with a ${name} fails" 1 "${RC}"
+  check_contains "publish-homebrew pull: token with a ${name}: message" "::error::scion-claude: HTTP 200 with a malformed token (token): could not confirm an anonymous pull" "${OUT}"
+  check_not_contains "publish-homebrew pull: token with a ${name}: no manifest request" "/v2/homebrew-scion/scion-claude/" "$(cat "${TMP}/curl.log")"
+  check_not_contains "publish-homebrew pull: token with a ${name}: value not printed" "anon-test-token" "${OUT}"
+  check_contains "publish-homebrew pull: token with a ${name}: the rest still checked" "scion-hub: HTTP 200, tag ${PULL_TAG} found" "${OUT}"
+done
+
+run_pull "${OFF}" manifest.scion-claude.code=fail
+check_rc "publish-homebrew pull: curl failure fails" 1 "${RC}"
+check_contains "publish-homebrew pull: curl failure message" "::error::scion-claude: HTTP 000 (manifest): could not confirm an anonymous pull" "${OUT}"
+check_contains "publish-homebrew pull: curl failure still checks the rest" "scion-hub: HTTP 200, tag ${PULL_TAG} found" "${OUT}"
+check_not_contains "publish-homebrew pull: token never printed on failure" "anon-test-token" "${OUT}"
+
+run_pull "${OFF}" token.scion-codex.code=fail
+check_rc "publish-homebrew pull: token curl failure fails" 1 "${RC}"
+check_contains "publish-homebrew pull: token curl failure message" "::error::scion-codex: HTTP 000 (token): could not confirm an anonymous pull" "${OUT}"
+check_not_contains "publish-homebrew pull: token curl failure skips the manifest" "/v2/homebrew-scion/scion-codex/" "$(cat "${TMP}/curl.log")"
+check_contains "publish-homebrew pull: token curl failure still checks the rest" "scion-hub: HTTP 200, tag ${PULL_TAG} found" "${OUT}"
+
+# A catalog that lists nothing fails with its message; a catalog that fails
+# stops the step. Neither sends a request.
+cp -R "${OFF}" "${TMP}/pull-empty"
+printf 'resolve_targets() { :; }\n' > "${TMP}/pull-empty/image-build/scripts/lib/targets.sh"
+run_pull "${TMP}/pull-empty"
+check_rc "publish-homebrew pull: empty catalog fails" 1 "${RC}"
+check_contains "publish-homebrew pull: empty catalog message" "::error::the image catalog lists no images for --target all" "${OUT}"
+check_eq "publish-homebrew pull: empty catalog sends no request" "" "$(cat "${TMP}/curl.log")"
+cp -R "${OFF}" "${TMP}/pull-broken"
+printf 'resolve_targets() { echo core-base; return 1; }\n' > "${TMP}/pull-broken/image-build/scripts/lib/targets.sh"
+run_pull "${TMP}/pull-broken"
+check_rc "publish-homebrew pull: failing catalog stops the step" 1 "${RC}"
+check_eq "publish-homebrew pull: failing catalog sends no request" "" "$(cat "${TMP}/curl.log")"
+
+# ---------------------------------------------------------------------------
 # BUILD_TIME / SOURCE_DATE_EPOCH from the commit time
 # ---------------------------------------------------------------------------
 

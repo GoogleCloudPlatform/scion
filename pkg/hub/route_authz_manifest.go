@@ -123,6 +123,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/env/":     "authenticated", // Env var by key
 	"/api/v1/secrets":  "authenticated", // List/create secrets
 	"/api/v1/secrets/": "authenticated", // Secret by key
+	// Caller's own pending secrets (agent-written, awaiting approval);
+	// session-only, own user ID only (resolveEnvSecretAccess).
+	"/api/v1/pending-secrets":  "authenticated",
+	"/api/v1/pending-secrets/": "authenticated",
 
 	// ── Usage ──────────────────────────────────────────────────────────
 	"/api/v1/usage/me": "authenticated", // Caller's own quota usage
@@ -166,10 +170,12 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/brokers/":     "authenticated", // Broker by ID routes
 
 	// ── Broker plugin endpoints ────────────────────────────────────────
-	"/api/v1/broker/inbound":        "broker-hmac", // Broker inbound messages — broker HMAC
-	"/api/v1/broker/inbound/routed": "broker-hmac", // Broker inbound routed messages — broker HMAC
-	"/api/v1/broker/callback":       "broker-hmac", // Broker callback delivery — broker HMAC
-	"/api/v1/broker/projects":       "broker-hmac", // Broker project listing — broker HMAC
+	"/api/v1/broker/inbound":                   "broker-hmac", // Broker inbound messages — broker HMAC
+	"/api/v1/broker/inbound/routed":            "broker-hmac", // Broker inbound routed messages — broker HMAC
+	"/api/v1/broker/inbound/attachments":       "broker-hmac", // Broker attachment upload — broker HMAC; sender authorized in handler
+	"/api/v1/broker/inbound/attachments/check": "broker-hmac", // Broker attachment check — broker HMAC; writes nothing
+	"/api/v1/broker/callback":                  "broker-hmac", // Broker callback delivery — broker HMAC
+	"/api/v1/broker/projects":                  "broker-hmac", // Broker project listing — broker HMAC
 
 	// ── Admin system endpoints ─────────────────────────────────────────
 	"/api/v1/admin/maintenance":                  "admin", // Maintenance mode — requires admin role
@@ -268,6 +274,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/user-prefs":            "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":              "authenticated", // Chat presence
 	"/api/v1/chat/search":                "authenticated", // Chat search
+	"/api/v1/decisions/":                 "authenticated", // Choice prompt decisions (read, answer)
+	"/api/v1/choice-prompts/":            "authenticated", // Choice prompt set answers
 	"/api/v1/chat/stars":                 "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
 	"/api/v1/chat/stars/":                "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
 	"/api/v1/chat/starred-conversations": "authenticated", // Caller's conversations with starred messages (the Starred rail); 404 when the experiment is off
@@ -358,6 +366,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/system/apple-dns":            "workstation",       // Apple DNS helper
 	"/api/v1/system/registry":             "workstation",       // System registry
 	"/api/v1/system/workstation-settings": "workstation-admin", // Workstation settings
+	"/api/v1/system/welcome/preview":      "workstation-admin", // Welcome project preview
+	"/api/v1/system/welcome/install":      "workstation-admin", // Welcome project install
+	"/api/v1/system/welcome/skip":         "workstation-admin", // Welcome project skip
 
 	// ── Workstation-only filesystem endpoints ──────────────────────────
 	"/api/v1/system/fs/list":          "workstation", // Filesystem listing

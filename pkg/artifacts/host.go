@@ -183,44 +183,25 @@ type ScopeExplainer interface {
 	MissingScope(ctx context.Context, permission string) string
 }
 
-// ReviewGrantAuthority is an optional extension of Host (design D24,
-// ptone/scion#4014). For an artifact owned by an agent, the agent cannot
-// administer it (sharing is user-only), so without this extension no one
-// but an admin grantee can give a human review access. With it, the
-// service lets two more users give a user a review grant, and nothing else:
-// the owning agent's delegating user and an admin of the artifact's home
-// project. A host without it allows neither (fail closed).
-type ReviewGrantAuthority interface {
-	// MayGrantReview reports whether the caller of ctx, a user, may give a
-	// user a review grant on an artifact owned by agent ownerAgentID and
-	// homed in project homeScope: the caller holds project administration
-	// in homeScope, or is the agent's delegating user. sponsorRef is the
-	// delegating user recorded on the artifact (Artifact.SponsorRef); when
-	// it is set it decides who that is, and the agent's live delegation
-	// chain is consulted only when it is "" (an artifact with nothing
-	// recorded). Any lookup failure answers false.
-	MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool
+// GrantNotifier is an optional extension of Host for Ask for review
+// (ptone/scion#5145): a grant with notify may tell its user subject. A host
+// without it sends nothing, and the response says notifySkipped
+// "unavailable" (fail closed).
+type GrantNotifier interface {
+	// MayNotifyGrant: the whole send authorization, synchronous, writes nothing.
+	// ok=false, err=nil -> "not_permitted"; err != nil -> "unavailable".
+	MayNotifyGrant(ctx context.Context, subjectUserID string) (ok bool, err error)
+	// NotifyGrant: after commit, synchronous, best effort; returns the write error.
+	NotifyGrant(ctx context.Context, n GrantNotice) error
 }
 
-// Review grant clauses, as ReviewGrantClauser names them.
-const (
-	ReviewClauseProjectAdmin   = "project_admin"
-	ReviewClauseDelegatingUser = "delegating_user"
-)
-
-// ReviewGrantClauser is an optional host interface that replaces
-// ReviewGrantAuthority when a host has it (ptone/scion#5120): the service
-// asks it instead of MayGrantReview. It makes the same decision as
-// MayGrantReview, in the same single evaluation, and names the clause that
-// allowed it, so the decision log can record it without asking the host a
-// second question.
-type ReviewGrantClauser interface {
-	// ReviewGrantClause answers like MayGrantReview: ReviewClauseProjectAdmin
-	// when the caller holds project administration in homeScope,
-	// ReviewClauseDelegatingUser when it is the delegating user of agent
-	// ownerAgentID (the recorded sponsorRef when set, else the live chain
-	// root), or "" when MayGrantReview would answer false.
-	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) string
+// GrantNotice describes a committed grant whose subject is to be told. It
+// carries ids and enums only: no title and no free text (K14/K19).
+type GrantNotice struct {
+	ArtifactID, HomeScope, SubjectUserID, Permission string
+	// ActorKind, ActorRef and Authority are the granter's, as its event
+	// records them. The hub refuses ActorKind != user in this phase.
+	ActorKind, ActorRef, Authority string
 }
 
 // PrincipalChecker is an optional extension of Host (ptone/scion#4529).

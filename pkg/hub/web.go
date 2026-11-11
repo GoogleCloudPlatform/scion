@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -237,12 +238,19 @@ type WebServerConfig struct {
 	// happens.
 	ProxyDriverTokenAudience string
 	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
-	// the server proactively closes it so the client can reconnect cleanly.
-	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
+	// the server proactively closes it so the client can reconnect cleanly,
+	// already clamped to the declared platform request timeout
+	// (config.EffectiveSSEMaxAge). Each stream gets a +/-20% jitter on top
+	// (ptone/scion#5230). Defaults to config.SSEDefaultMaxConnectionAge
+	// (10m) when zero or negative.
 	SSEMaxConnectionAge time.Duration
+	// SSEMaxAgeJitter returns the point u in [0, 1) of a stream's maximum
+	// age jitter range (config.JitterLifetime). Nil: math/rand/v2. Tests
+	// pin it.
+	SSEMaxAgeJitter func() float64
 	// SSEHeartbeatInterval is how often the events stream sends a heartbeat
-	// event. Defaults to defaultSSEHeartbeatInterval (30s) when zero or
-	// negative.
+	// event. Defaults to config.SSEDefaultHeartbeatInterval (30s) when zero
+	// or negative.
 	SSEHeartbeatInterval time.Duration
 
 	// PerfTrace turns on performance tracing for the SSE endpoint
@@ -283,6 +291,10 @@ type WebServer struct {
 	hasAssets      bool                        // cached result of asset detection
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
+
+	// contentHostGuard is the mounted hub's content host guard, applied
+	// outermost by buildHandler (SetContentHostGuard), or nil.
+	contentHostGuard func(http.Handler) http.Handler
 
 	// sessionCodecs are sessionStore's codecs, active generation first.
 	sessionCodecs []securecookie.Codec
@@ -1229,7 +1241,11 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 				email, _ := session.Values[sessKeyUserEmail].(string)
 				name, _ := session.Values[sessKeyUserName].(string)
 				role, _ := session.Values[sessKeyUserRole].(string)
-				if tok, _, err := ws.userTokenSvc.GenerateAccessToken(uid, email, name, role, ClientTypeWeb); err == nil {
+				// Carry the session's own generation, never a fresh row
+				// read: a session established before a revocation yields a
+				// token the hub refuses. A cookie without the key reads 0.
+				gen, _ := session.Values[sessKeySessionGeneration].(int64)
+				if tok, _, err := ws.userTokenSvc.MintAccessToken(uid, email, name, role, gen, ClientTypeWeb); err == nil {
 					accessToken = tok
 				} else {
 					ws.logger().Warn("Failed to regenerate Bearer token for cookie-overflow session", "error", err, "user", uid)
@@ -1271,7 +1287,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		if !tokenValid {
 			refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
 			if refreshToken != "" && ws.userTokenSvc != nil {
-				newAccess, newRefresh, expiresIn, err := ws.userTokenSvc.RefreshTokens(refreshToken)
+				newAccess, newRefresh, expiresIn, err := ws.refreshHubTokens(r.Context(), refreshToken)
 				if err == nil {
 					accessToken = newAccess
 					tokenValid = true
@@ -1288,11 +1304,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// If token is still invalid after refresh attempt, the signing
-		// key was likely rotated. Clear the session and force re-login.
-		if !tokenValid {
-			ws.logger().Info("Hub token irrecoverably invalid, clearing session",
-				"user", session.Values[sessKeyUserEmail])
+		// clearSession ends the session and answers the request: a JSON
+		// 401 for a browser, otherwise the request continues without a
+		// token and the hub returns 401.
+		clearSession := func() {
 			for key := range session.Values {
 				delete(session.Values, key)
 			}
@@ -1314,6 +1329,16 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			}
 			// Non-browser: let Hub return 401.
 			next.ServeHTTP(w, r)
+		}
+
+		// If token is still invalid after refresh attempt, the signing key
+		// was likely rotated, or the refresh was refused (account not
+		// active, or the session generation differs from the users row).
+		// Clear the session and force re-login.
+		if !tokenValid {
+			ws.logger().Info("Hub token irrecoverably invalid, clearing session",
+				"user", session.Values[sessKeyUserEmail])
+			clearSession()
 			return
 		}
 
@@ -1322,7 +1347,13 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			if time.Now().UnixMilli() >= expiryMs {
 				refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
 				if refreshToken != "" && ws.userTokenSvc != nil {
-					newAccess, newRefresh, expiresIn, err := ws.userTokenSvc.RefreshTokens(refreshToken)
+					newAccess, newRefresh, expiresIn, err := ws.refreshHubTokens(r.Context(), refreshToken)
+					if errors.Is(err, errHubRefreshRefused) {
+						ws.logger().Info("Hub token refresh refused, clearing session",
+							"user", session.Values[sessKeyUserEmail])
+						clearSession()
+						return
+					}
 					if err == nil {
 						accessToken = newAccess
 						session.Values[sessKeyHubAccessToken] = newAccess
@@ -1358,6 +1389,42 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		r2.Header.Set("Authorization", "Bearer "+accessToken)
 		next.ServeHTTP(w, r2)
 	})
+}
+
+// errHubRefreshRefused is returned by refreshHubTokens when the users row
+// refuses the refresh: the account is not active, or the refresh token's
+// session generation differs from the row's.
+var errHubRefreshRefused = errors.New("hub token refresh refused")
+
+// refreshHubTokens rotates the session's hub token pair from its refresh
+// token. With a store, the users row must be active and its session
+// generation must equal the refresh token's (any difference refuses with
+// errHubRefreshRefused). The row is read only to compare: the new pair
+// carries the presented refresh token's own session generation, never a
+// fresh row read. Without a store (standalone web) nothing is compared and
+// the hub's bearer arm decides on use.
+func (ws *WebServer) refreshHubTokens(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, expiresIn int64, err error) {
+	claims, err := ws.userTokenSvc.ValidateRefreshToken(refreshToken)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("invalid refresh token: %w", err)
+	}
+	if ws.store != nil {
+		u, uErr := checkUserAccount(ctx, ws.store, PrincipalContext{Kind: PrincipalKindUser, ID: claims.UserID})
+		switch refusal := classifyUserAccount(u, uErr); refusal {
+		case accountAllowed:
+		case accountLookupFault:
+			return "", "", 0, fmt.Errorf("hub token refresh: user lookup failed: %w", uErr)
+		default:
+			ws.logger().Warn("Hub token refresh refused: account not active",
+				"user_id", claims.UserID, "reason", accountRefusalReason(refusal))
+			return "", "", 0, errHubRefreshRefused
+		}
+		if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
+			logSessionGenerationRefusal(ctx, ws.logger(), "web_refresh", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
+			return "", "", 0, errHubRefreshRefused
+		}
+	}
+	return ws.userTokenSvc.MintTokenPair(claims.UserID, claims.Email, claims.DisplayName, claims.Role, claims.SessionGeneration, claims.ClientType)
 }
 
 // registerRoutes sets up the web server routes.
@@ -2078,19 +2145,25 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	return true
 }
 
+// sseMaxAge returns the maximum age of one new events stream: the
+// configured age (default config.SSEDefaultMaxConnectionAge) with a
+// per-stream +/-20% jitter, so streams that connected together do not all
+// reconnect together (ptone/scion#5230).
+func (ws *WebServer) sseMaxAge() time.Duration {
+	base := ws.config.SSEMaxConnectionAge
+	if base <= 0 {
+		base = config.SSEDefaultMaxConnectionAge
+	}
+	u := ws.config.SSEMaxAgeJitter
+	if u == nil {
+		u = mathrand.Float64
+	}
+	return config.JitterLifetime(base, 1, u())
+}
+
 // handleSSE serves the Server-Sent Events endpoint. It subscribes to the
 // configured EventPublisher and streams matching events to the browser.
-// defaultSSEMaxConnectionAge is the default maximum lifetime of an SSE
-// connection. Cloud Run hard-kills connections at 3600s (producing
-// FAILED_PRECONDITION / error code 9); closing at 3500s gives the client a
-// clean EOF so it auto-reconnects per the SSE spec.
-const defaultSSEMaxConnectionAge = 3500 * time.Second
-
-// defaultSSEHeartbeatInterval is the default interval between events stream
-// heartbeats. Keep it well below the web client's stale-stream threshold
-// (75s).
-const defaultSSEHeartbeatInterval = 30 * time.Second
-
+//
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if ws.events == nil {
@@ -2157,6 +2230,22 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		defer logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "close"))
 	}
 
+	// Membership changes of the caller (an internal per-user subject, never
+	// written to the client) re-run the subject authorization in the loop,
+	// so a stream does not outlive the access it was opened with
+	// (ptone/scion#7494). Only the caller's own subject is subscribed, and
+	// it is subscribed BEFORE the expansion and authorization below: a
+	// membership change published while the stream is being set up is then
+	// queued and re-checked when the loop starts, instead of being missed.
+	// The deferred unsubscribe releases it on every return, refusals
+	// included.
+	streamUserID := ""
+	if su := getWebSessionUser(r.Context()); su != nil {
+		streamUserID = su.UserID
+	}
+	membershipCh, unsubscribeMembership := subscribeMembershipChanged(ws.events, streamUserID)
+	defer unsubscribeMembership()
+
 	// Expand NATS-style wildcards (e.g. project.>) into specific
 	// resource-scoped subjects before authorization. This ensures the
 	// subscription only covers resources the caller can actually access,
@@ -2191,6 +2280,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		})
 		_, _ = w.Write(body)
 		return
+	}
+	if streamAuthorizedHook != nil {
+		streamAuthorizedHook(streamKindWebEvents)
 	}
 
 	// Disable the server's WriteTimeout for this long-lived SSE connection.
@@ -2239,19 +2331,63 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// Each tick also re-checks a test identity web session.
 	heartbeatInterval := ws.config.SSEHeartbeatInterval
 	if heartbeatInterval <= 0 {
-		heartbeatInterval = defaultSSEHeartbeatInterval
+		heartbeatInterval = config.SSEDefaultHeartbeatInterval
 	}
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 
-	// Proactively close before Cloud Run's 3600s hard kill so the client
-	// gets a clean EOF and auto-reconnects per the SSE spec.
-	maxAge := ws.config.SSEMaxConnectionAge
-	if maxAge == 0 {
-		maxAge = defaultSSEMaxConnectionAge
-	}
+	// Close at the stream's jittered maximum age, before the platform's
+	// request timeout, with a reconnect hint so the client reconnects
+	// cleanly (ptone/scion#5230). The age is recorded on the stream.
+	maxAge := ws.sseMaxAge()
+	stream.SetMaxAge(maxAge)
 	reconnectTimer := time.NewTimer(maxAge)
 	defer reconnectTimer.Stop()
+
+	// recheckMembership handles one membership-changed event; it reports
+	// whether the stream must end (closeReason is then set).
+	recheckMembership := func(evt Event, ok bool) bool {
+		if !ok {
+			// The publisher closed the subscription: end the stream as
+			// for the event subscription, so no change can be missed.
+			closeReason = eventstreams.ClosePublisher
+			return true
+		}
+		if !membershipChangedNames(evt, streamUserID) {
+			return false
+		}
+		// Fail closed: a subject the caller may no longer read, or a
+		// re-check that cannot decide, ends the stream with a reconnect
+		// hint, so the client reconnects and is authorized afresh.
+		if !sseStreamStillAuthorized(ws, r, subjects) {
+			n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
+			flusher.Flush()
+			stream.RecordBytes(n)
+			closeReason = eventstreams.CloseAccessChanged
+			return true
+		}
+		// Still authorized: drop cached per-agent decisions so the message
+		// rules are decided again.
+		viewer = ws.newSSEMessageViewer(r)
+		return false
+	}
+	// drainMembership handles every membership-changed event already
+	// queued, without blocking. The event case runs it before writing, so
+	// a membership change published before an event is re-checked before
+	// that event is written: select picks among ready cases at random, and
+	// would otherwise let the event through first.
+	drainMembership := func() bool {
+		for {
+			select {
+			case evt, ok := <-membershipCh:
+				if recheckMembership(evt, ok) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
 
 	for {
 		select {
@@ -2259,6 +2395,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				// Publisher closed
 				closeReason = eventstreams.ClosePublisher
+				return
+			}
+			if drainMembership() {
 				return
 			}
 			if !viewer.visible(evt) {
@@ -2280,6 +2419,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			stream.RecordEvent(n)
 			if trace != nil {
 				trace.addSSEEvent(time.Since(writeStart))
+			}
+		case evt, ok := <-membershipCh:
+			if recheckMembership(evt, ok) {
+				return
 			}
 		case <-heartbeat.C:
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
@@ -2666,11 +2809,13 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 	// List every project, a page at a time, and keep those the caller can
 	// read. Every page is drained (ptone/scion#1741): a single page would
 	// silently drop the projects beyond the store's page cap. Any list
-	// error fails closed for the whole expansion.
+	// error fails closed for the whole expansion. Summaries carry every
+	// authorization input (ID, owner, labels) without the per-project
+	// computed fields, which this expansion never reads.
 	var result []string
 	opts := store.ListOptions{Limit: sseProjectWildcardPageSize, SkipTotalCount: true}
 	for {
-		page, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, opts)
+		page, err := ws.store.ListProjectSummaries(r.Context(), store.ProjectFilter{}, opts)
 		if err != nil {
 			ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
 			return nil // fail-closed
@@ -2876,6 +3021,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
 				denied = append(denied, sub)
 			}
+		case "hub":
+			// Internal hub events (membershipChangedSubject): never a client
+			// subscription.
+			denied = append(denied, sub)
 		case "admin":
 			// Admin-only namespace. No web client subscribes to this today.
 			if sessionUser.Role != "admin" {
@@ -2980,7 +3129,8 @@ func isProxyRoute(path string) bool {
 //     the agent-facing /api/v1/agent/ endpoints (minted tokens, secret
 //     fetch), agent token refresh, delegation exchange, broker registration,
 //     join and secret rotation, project registration, invite creation, test
-//     identities, and every env or secrets route;
+//     identities, every env or secrets route, and the pending secret
+//     reveal (/api/v1/pending-secrets/{id}/reveal);
 //   - responses with signed object-store or capability URLs: every agent
 //     workspace route (sync-from, sync-to; the status GET is included as a
 //     fail-safe), template, user template, harness-config and skill upload
@@ -3030,6 +3180,10 @@ func isCompressBypassPath(path string) bool {
 	}
 	segs := strings.Split(strings.TrimPrefix(trimmed, api), "/")
 	if isSignedURLPath(segs) {
+		return true
+	}
+	// The pending secret reveal returns a held secret value.
+	if len(segs) == 3 && segs[0] == "pending-secrets" && segs[2] == "reveal" {
 		return true
 	}
 	for i, seg := range segs {
@@ -3156,6 +3310,30 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, dbUserContextKey{}, res.row)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
+			}
+
+			// A session loaded here skips sessionAuthMiddleware's check, so
+			// it follows its user's session generation here, the rule hub
+			// JWTs follow (see sessionGenerationRefusal): when the session's
+			// generation differs from the user row's, the session ends. It
+			// is cleared, no hub token is minted, and the request continues
+			// with no user (a new dev session comes only from a sign-in
+			// link). A session without the key reads 0.
+			if ws.store != nil {
+				if dbUser, err := ws.store.GetUser(r.Context(), uid); err == nil {
+					if stored, _ := session.Values[sessKeySessionGeneration].(int64); stored != dbUser.SessionGeneration {
+						ws.logger().Info("Ending web session", "user_id", uid, "reason", sessionGenerationRefusal(stored, dbUser.SessionGeneration))
+						for key := range session.Values {
+							delete(session.Values, key)
+						}
+						session.Options.MaxAge = -1
+						if err := session.Save(r, w); err != nil {
+							ws.logger().Warn("Failed to clear web session", "error", err)
+						}
+						next.ServeHTTP(w, r)
+						return
+					}
+				}
 			}
 
 			user := &webSessionUser{
@@ -3325,8 +3503,12 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				// calls within this session also reflect the change.
 				if ws.userTokenSvc != nil {
 					name, _ := session.Values[sessKeyUserName].(string)
-					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-						uid, email, name, expectedRole, ClientTypeWeb,
+					// Carry the session's own generation, never a fresh
+					// row read (see the cookie-overflow mint in
+					// sessionToBearerMiddleware).
+					gen, _ := session.Values[sessKeySessionGeneration].(int64)
+					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+						uid, email, name, expectedRole, gen, ClientTypeWeb,
 					)
 					if err == nil {
 						session.Values[sessKeyHubAccessToken] = accessToken
@@ -3536,8 +3718,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
 		if ws.userTokenSvc != nil {
-			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-				user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+				user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 			)
 			if err == nil {
 				session.Values[sessKeyHubAccessToken] = accessToken
@@ -3653,8 +3835,11 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 					return
 				}
 
+				// Any difference refuses, the rule hub JWTs follow (see
+				// sessionGenerationRefusal). A cookie without the key
+				// reads 0.
 				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
-				if dbUser.SessionGeneration > cookieGen {
+				if dbUser.SessionGeneration != cookieGen {
 					// Generation mismatch — force re-login
 					session.Options.MaxAge = -1
 					_ = session.Save(r, w)
@@ -4034,8 +4219,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Generate Hub tokens if token service is available
 	if ws.userTokenSvc != nil {
-		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 		)
 		if err != nil {
 			ws.logger().Warn("Failed to generate Hub tokens", "error", err)
@@ -4399,14 +4584,58 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
-	// Request logging (outermost)
+	// Request logging. A request the mounted hub handler's own
+	// request logger has logged gets no second, web line (ptone/scion#7367);
+	// a request the web chain answers itself is still logged here. A
+	// request the content host guard below refuses never reaches this
+	// logger: the guard logs that refusal itself (logContentHostRefused).
 	if ws.requestLogger != nil {
-		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
+		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold, logging.DeferToNestedRequestLog())(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}
 
+	// Outermost: the mounted hub's content host guard, so a request on
+	// server.hub.content_url reaches neither the web app nor the session
+	// bridge unless it is a share or view read, and never with a
+	// credential. It comes from SetContentHostGuard, or else from the access
+	// settings provider when that is the hub (contentHostGuardSource), so a
+	// combined server that wires the hub as its provider cannot leave it out.
+	if guard := ws.contentHostGuardFor(); guard != nil {
+		handler = guard(handler)
+	}
+
 	return handler
+}
+
+// errContentHostGuardMissing refuses to start a web server that mounts the
+// hub API without the hub's content host guard.
+var errContentHostGuardMissing = errors.New("web server: the hub API is mounted but no content host guard is set (set the hub as the access settings provider, or SetContentHostGuard)")
+
+// contentHostGuardSource is implemented by the hub Server: its content host
+// guard.
+type contentHostGuardSource interface {
+	ContentHostGuard(http.Handler) http.Handler
+}
+
+// contentHostGuardFor returns the guard buildHandler applies outermost: the
+// one SetContentHostGuard set, else the access settings provider's when it
+// is a contentHostGuardSource (the hub), else nil.
+func (ws *WebServer) contentHostGuardFor() func(http.Handler) http.Handler {
+	if ws.contentHostGuard != nil {
+		return ws.contentHostGuard
+	}
+	if src, ok := ws.accessSettings.(contentHostGuardSource); ok {
+		return src.ContentHostGuard
+	}
+	return nil
+}
+
+// SetContentHostGuard sets the middleware buildHandler applies outermost,
+// overriding the access settings provider's (contentHostGuardFor). Call it
+// before Start.
+func (ws *WebServer) SetContentHostGuard(guard func(http.Handler) http.Handler) {
+	ws.contentHostGuard = guard
 }
 
 // Start starts the web frontend HTTP server.
@@ -4416,6 +4645,12 @@ func (ws *WebServer) buildHandler() http.Handler {
 // long-lived SSE streams. When deployed behind a TLS-terminating reverse
 // proxy (e.g. Caddy), the proxy negotiates HTTP/2 with the browser natively.
 func (ws *WebServer) Start(ctx context.Context) error {
+	// A mounted hub API is served only behind the hub's content host guard
+	// (contentHostGuardFor): fail closed rather than serve the web app and
+	// the session bridge unguarded.
+	if ws.hubHandler != nil && ws.contentHostGuardFor() == nil {
+		return errContentHostGuardMissing
+	}
 	handler := ws.buildHandler()
 
 	// Wrap the handler with h2c to support HTTP/2 cleartext upgrades.

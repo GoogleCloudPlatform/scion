@@ -87,13 +87,13 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 		}
 	}
 	sort.SliceStable(roles, func(i, j int) bool {
-		iBuiltIn := store.IsBuiltInProjectMembershipRole(roles[i].Name)
-		jBuiltIn := store.IsBuiltInProjectMembershipRole(roles[j].Name)
+		iBuiltIn := store.IsBuiltInProjectMembershipRoleDef(roles[i])
+		jBuiltIn := store.IsBuiltInProjectMembershipRoleDef(roles[j])
 		if iBuiltIn != jBuiltIn {
 			return iBuiltIn
 		}
 		if iBuiltIn {
-			return projectRoleLevel(roles[i].Name) > projectRoleLevel(roles[j].Name)
+			return projectRoleLevel(builtInRoleName(roles[i])) > projectRoleLevel(builtInRoleName(roles[j]))
 		}
 		if roles[i].Name != roles[j].Name {
 			return roles[i].Name < roles[j].Name
@@ -112,7 +112,7 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 			ID:          rd.ID,
 			Name:        rd.Name,
 			Description: rd.Description,
-			RoleKind:    projectRoleKind(rd.Name),
+			RoleKind:    projectRoleKind(rd),
 			Grantable:   true,
 		}
 		// Every check, for this one role, using the same per-check logic
@@ -120,7 +120,7 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 		// created for a principal. The order is memberRoleDecision's; the
 		// PUT's own stage order lives in SetMemberRoles and is pinned
 		// against this by TestAssignableRoles_ConsistentWithPut.
-		if d, _ := svc.memberRoleDecision(ctx, actor, projectID, authority, planChange{op: MembershipOpAdd, roleName: rd.Name}, rd, memberRoleCheckAll); d != nil {
+		if d, _ := svc.memberRoleDecision(ctx, actor, projectID, authority, planChange{op: MembershipOpAdd, roleName: rd.Name, builtIn: store.IsBuiltInProjectMembershipRoleDef(rd)}, rd, memberRoleCheckAll); d != nil {
 			item.Grantable = false
 			item.Reason = d.Reason
 			item.DenialCode = d.DenialCode
@@ -146,7 +146,7 @@ func (svc *ProjectMembershipService) assignableActorAuthority(ctx context.Contex
 
 	hasCustom := false
 	for _, rd := range roles {
-		if !store.IsBuiltInProjectMembershipRole(rd.Name) {
+		if !store.IsBuiltInProjectMembershipRoleDef(rd) {
 			hasCustom = true
 			break
 		}

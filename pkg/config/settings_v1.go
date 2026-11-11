@@ -708,35 +708,58 @@ func readProjectOwnSettings(projectPath string) ([]byte, bool) {
 // read only from the broker's global settings. Best-effort: an unreadable
 // file returns false.
 func ProjectSettingsHasCloudRunAssignableServiceAccounts(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && len(cr.AssignableServiceAccounts) > 0
+}
+
+// ProjectSettingsHasCloudRunBlockServiceAccount reports whether a project's
+// OWN settings.yaml sets cloudrun.block_service_account on the named
+// runtime entry. Like ProjectSettingsHasCloudRunAssignableServiceAccounts it
+// exists only so a caller can warn that the setting has no effect there:
+// the block account is read only from the broker's global settings.
+// Best-effort: an unreadable file returns false.
+func ProjectSettingsHasCloudRunBlockServiceAccount(projectPath, runtimeEntryName string) bool {
+	cr := projectOwnCloudRunBlock(projectPath, runtimeEntryName)
+	return cr != nil && strings.TrimSpace(cr.BlockServiceAccount) != ""
+}
+
+// projectCloudRunProbe is the part of a runtime entry's cloudrun block that
+// the project-level probes read.
+type projectCloudRunProbe struct {
+	AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
+	BlockServiceAccount       string   `yaml:"block_service_account" json:"block_service_account"`
+}
+
+// projectOwnCloudRunBlock returns the cloudrun block of the named runtime
+// entry in a project's OWN settings file (readProjectOwnSettings), or nil
+// when there is none or the file cannot be read or parsed.
+func projectOwnCloudRunBlock(projectPath, runtimeEntryName string) *projectCloudRunProbe {
 	if runtimeEntryName == "" {
-		return false
+		return nil
 	}
 	raw, ok := readProjectOwnSettings(projectPath)
 	if !ok {
-		return false
+		return nil
 	}
 	var probe struct {
 		Runtimes map[string]struct {
-			CloudRun *struct {
-				AssignableServiceAccounts []string `yaml:"assignable_service_accounts" json:"assignable_service_accounts"`
-			} `yaml:"cloudrun" json:"cloudrun"`
+			CloudRun *projectCloudRunProbe `yaml:"cloudrun" json:"cloudrun"`
 		} `yaml:"runtimes" json:"runtimes"`
 	}
 	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
-		return false
+		return nil
 	}
-	rt, ok := probe.Runtimes[runtimeEntryName]
-	return ok && rt.CloudRun != nil && len(rt.CloudRun.AssignableServiceAccounts) > 0
+	return probe.Runtimes[runtimeEntryName].CloudRun
 }
 
 // CloudRunAssignableServiceAccountWarnings returns a warning for each entry
 // of runtimes.<runtimeEntryName>.cloudrun.assignable_service_accounts in vs
 // that, lower-cased and trimmed, does not match gsaEmailPattern (a Cloud
 // Run instance can only run as a service account), so a typo or a pasted
-// user email is reported where the list is read rather than only as a
-// refused dispatch. Each warning names the entry's position, never its
-// value. Entries are still compared case-insensitively and trimmed where
-// they are used.
+// user email is reported where the list is read. Such an entry still
+// matches an equal assigned value at the broker; the instance create then
+// fails. Each warning names the entry's position, never its value.
+// Entries are compared case-insensitively and trimmed where they are used.
 func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
 	if vs == nil {
 		return nil
@@ -754,6 +777,27 @@ func CloudRunAssignableServiceAccountWarnings(vs *VersionedSettings, runtimeEntr
 		}
 	}
 	return warnings
+}
+
+// CloudRunBlockServiceAccountWarnings returns a warning when
+// runtimes.<runtimeEntryName>.cloudrun.block_service_account in vs is set
+// but, lower-cased and trimmed, does not match gsaEmailPattern. The warning
+// names the setting only, never its value.
+func CloudRunBlockServiceAccountWarnings(vs *VersionedSettings, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	entry, ok := vs.Runtimes[runtimeEntryName]
+	if !ok || entry.CloudRun == nil {
+		return nil
+	}
+	v := strings.ToLower(strings.TrimSpace(entry.CloudRun.BlockServiceAccount))
+	if v == "" || gsaEmailPattern.MatchString(v) {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"runtimes.%s.cloudrun.block_service_account is not a service account email; a Cloud Run instance cannot run as it",
+		runtimeEntryName)}
 }
 
 // gsaEmailPattern matches a syntactically well-formed, lowercase GCP service
@@ -1690,6 +1734,10 @@ type V1TestIdentitiesConfig struct {
 	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
 	// (see TestIdentitiesConfig.AdminWebSessions).
 	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
+	// OfflineAdminDelegations is
+	// server.hub.test_identities.offline_admin_delegations (see
+	// TestIdentitiesConfig.OfflineAdminDelegations).
+	OfflineAdminDelegations string `json:"offline_admin_delegations,omitempty" yaml:"offline_admin_delegations,omitempty" koanf:"offline_admin_delegations"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -1706,6 +1754,16 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// ContentURL is server.hub.content_url (ContentURLKey), the hub's content
+	// host: a second public origin, apart from PublicURL, on which shared
+	// artifacts are served. Empty, the default, serves them on PublicURL.
+	// See ValidateContentURL.
+	ContentURL string `json:"content_url,omitempty" yaml:"content_url,omitempty" koanf:"content_url"`
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// PublicURL's registrable domain, which is refused without it. See
+	// ContentURLHubConflict.
+	ContentURLAllowSameSite *bool `json:"content_url_allow_same_site,omitempty" yaml:"content_url_allow_same_site,omitempty" koanf:"content_url_allow_same_site"`
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
@@ -1740,6 +1798,8 @@ type V1ServerHubConfig struct {
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles *bool `json:"soft_delete_retain_files,omitempty" yaml:"soft_delete_retain_files,omitempty" koanf:"soft_delete_retain_files"`
+	// Chat holds web chat server limits (server.hub.chat).
+	Chat *V1ServerHubChatConfig `json:"chat,omitempty" yaml:"chat,omitempty" koanf:"chat"`
 	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
 	// binding a GCP service account to an agent.
 	// "off" (default) or "enforce".
@@ -1790,6 +1850,14 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// SSE holds the browser events stream settings. Read at startup;
+	// restart required to change.
+	SSE *V1ServerHubSSEConfig `json:"sse,omitempty" yaml:"sse,omitempty" koanf:"sse"`
+	// PlatformRequestTimeout is the request timeout of the platform in
+	// front of the hub (e.g. "900s"; no default, 150s-24h). When set, the
+	// events stream maximum age and the conduit session lifetime cap are
+	// clamped to 0.8 of it. Read at startup.
+	PlatformRequestTimeout string `json:"platform_request_timeout,omitempty" yaml:"platform_request_timeout,omitempty" koanf:"platform_request_timeout"`
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.
 	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
@@ -1804,6 +1872,20 @@ type V1ServerHubObservabilityConfig struct {
 	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
 	// TracingEnabled turns the hub trace exporter on or off.
 	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
+}
+
+// V1ServerHubSSEConfig holds the browser events stream settings of the hub
+// server (server.hub.sse). Validated at startup (HubSSEConfig.Validate); an
+// invalid value is a startup error.
+type V1ServerHubSSEConfig struct {
+	// MaxConnectionAge is the maximum age of an events stream before the
+	// hub sends a reconnect hint and closes it (e.g. "10m"; default "10m",
+	// 1m-24h). Jittered by +/-20% per stream; clamped to 0.8 of
+	// platform_request_timeout when that is set.
+	MaxConnectionAge string `json:"max_connection_age,omitempty" yaml:"max_connection_age,omitempty" koanf:"max_connection_age"`
+	// HeartbeatInterval is the interval between events stream heartbeats
+	// (e.g. "30s"; default "30s", 5s-1m).
+	HeartbeatInterval string `json:"heartbeat_interval,omitempty" yaml:"heartbeat_interval,omitempty" koanf:"heartbeat_interval"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -1915,6 +1997,60 @@ type V1ServerHubConduitConfig struct {
 	// database, returned by the server-config API or logged. Read at
 	// startup.
 	PeerSecret string `json:"peer_secret,omitempty" yaml:"peer_secret,omitempty" koanf:"peer_secret"`
+	// PeerKeyFile is this node's relay-peer private key file (PEM PKCS #8
+	// Ed25519). When set, the node signs relay-peer calls with it; its
+	// instance_id must be set and listed in peers with the matching public
+	// key. Read at startup.
+	PeerKeyFile string `json:"peer_key_file,omitempty" yaml:"peer_key_file,omitempty" koanf:"peer_key_file"`
+	// Peers lists the relay peers enrolled with their own keys. Read at
+	// startup.
+	Peers []V1ServerHubConduitPeer `json:"peers,omitempty" yaml:"peers,omitempty" koanf:"peers"`
+}
+
+// V1ServerHubConduitPeer is one enrolled relay peer
+// (server.hub.conduit.peers).
+type V1ServerHubConduitPeer struct {
+	ID   string                      `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`
+	Role string                      `json:"role,omitempty" yaml:"role,omitempty" koanf:"role"`
+	Keys []V1ServerHubConduitPeerKey `json:"keys,omitempty" yaml:"keys,omitempty" koanf:"keys"`
+}
+
+// V1ServerHubConduitPeerKey is one enrolled public key of a relay peer.
+type V1ServerHubConduitPeerKey struct {
+	KeyID     string `json:"key_id,omitempty" yaml:"key_id,omitempty" koanf:"key_id"`
+	PublicKey string `json:"public_key,omitempty" yaml:"public_key,omitempty" koanf:"public_key"`
+}
+
+// conduitPeersFromV1 converts server.hub.conduit.peers to HubConduitPeer.
+func conduitPeersFromV1(in []V1ServerHubConduitPeer) []HubConduitPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HubConduitPeer, 0, len(in))
+	for _, p := range in {
+		hp := HubConduitPeer{ID: p.ID, Role: p.Role}
+		for _, k := range p.Keys {
+			hp.Keys = append(hp.Keys, HubConduitPeerKey(k))
+		}
+		out = append(out, hp)
+	}
+	return out
+}
+
+// conduitPeersToV1 converts HubConduitPeer to server.hub.conduit.peers.
+func conduitPeersToV1(in []HubConduitPeer) []V1ServerHubConduitPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]V1ServerHubConduitPeer, 0, len(in))
+	for _, p := range in {
+		vp := V1ServerHubConduitPeer{ID: p.ID, Role: p.Role}
+		for _, k := range p.Keys {
+			vp.Keys = append(vp.Keys, V1ServerHubConduitPeerKey(k))
+		}
+		out = append(out, vp)
+	}
+	return out
 }
 
 // V1ServerRelayConfig holds the settings of a separate relay process,
@@ -2687,6 +2823,23 @@ type V1SecretsConfig struct {
 	GCPReplicationLocations []string `json:"gcp_replication_locations,omitempty" yaml:"gcp_replication_locations,omitempty" koanf:"gcp_replication_locations"`
 }
 
+// V1ServerHubChatConfig holds web chat server limits (server.hub.chat).
+type V1ServerHubChatConfig struct {
+	// Search bounds web chat search (server.hub.chat.search).
+	Search *V1ServerHubChatSearchConfig `json:"search,omitempty" yaml:"search,omitempty" koanf:"search"`
+}
+
+// V1ServerHubChatSearchConfig bounds web chat search (ptone/scion#7586).
+// These are operator limits, not user settings.
+type V1ServerHubChatSearchConfig struct {
+	// Timeout bounds one search (e.g. "3s"). Empty means the hub default, 3s.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
+	// MaxConcurrent caps the searches running hub-wide at once. Zero or unset
+	// means the default, 2. On Postgres the hub clamps it to a quarter of the
+	// main pool (at least 1).
+	MaxConcurrent *int `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty" koanf:"max_concurrent"`
+}
+
 // V1CORSConfig holds CORS settings for server endpoints.
 type V1CORSConfig struct {
 	Enabled        bool     `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
@@ -2832,6 +2985,17 @@ type CloudRunConfig struct {
 	// ProjectSettingsHasCloudRunAssignableServiceAccounts). Empty or unset
 	// means no account is attachable, so "assign" is refused.
 	AssignableServiceAccounts []string `json:"assignable_service_accounts,omitempty" yaml:"assignable_service_accounts,omitempty" koanf:"assignable_service_accounts"`
+
+	// BlockServiceAccount is the service account, holding no roles, that
+	// this Runtime Broker runs a Cloud Run instance as for GCP identity mode
+	// "block" (and for an unset mode, which is block on Cloud Run) while the
+	// hub.cloudrun_native_identity experiment is on. It is read from the
+	// broker's global settings only: the same key in a project's own
+	// settings.yaml is ignored (see
+	// ProjectSettingsHasCloudRunBlockServiceAccount). Empty or unset means
+	// such a dispatch is refused; the runtime's own service_account is never
+	// used in its place.
+	BlockServiceAccount string `json:"block_service_account,omitempty" yaml:"block_service_account,omitempty" koanf:"block_service_account"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
@@ -4311,6 +4475,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.PublicURL != "" {
 			gc.Hub.Endpoint = v1.Hub.PublicURL
 		}
+		if v1.Hub.ContentURL != "" {
+			gc.Hub.ContentURL = v1.Hub.ContentURL
+		}
+		if v1.Hub.ContentURLAllowSameSite != nil {
+			gc.Hub.ContentURLAllowSameSite = *v1.Hub.ContentURLAllowSameSite
+		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
@@ -4324,7 +4494,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
+			ti := &TestIdentitiesConfig{
+				AdminWebSessions:        v1.Hub.TestIdentities.AdminWebSessions,
+				OfflineAdminDelegations: v1.Hub.TestIdentities.OfflineAdminDelegations,
+			}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4365,6 +4538,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.SoftDeleteRetainFiles != nil {
 			gc.Hub.SoftDeleteRetainFiles = *v1.Hub.SoftDeleteRetainFiles
+		}
+		if v1.Hub.Chat != nil && v1.Hub.Chat.Search != nil {
+			cs := v1.Hub.Chat.Search
+			gc.Hub.Chat.Search.Timeout = cs.Timeout
+			if cs.MaxConcurrent != nil && *cs.MaxConcurrent > 0 {
+				gc.Hub.Chat.Search.MaxConcurrent = *cs.MaxConcurrent
+			}
 		}
 		if v1.Hub.GCPIAMCheckMode != "" {
 			gc.Hub.GCPIAMCheckMode = v1.Hub.GCPIAMCheckMode
@@ -4444,6 +4624,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InternalTLSKeyFile:    c.InternalTLSKeyFile,
 				InternalTLSCAFile:     c.InternalTLSCAFile,
 				InternalTLSServerName: c.InternalTLSServerName,
+				PeerKeyFile:           c.PeerKeyFile,
+				Peers:                 conduitPeersFromV1(c.Peers),
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4452,6 +4634,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 		}
+		if c := v1.Hub.SSE; c != nil {
+			gc.Hub.SSE = HubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+		}
+		gc.Hub.PlatformRequestTimeout = v1.Hub.PlatformRequestTimeout
 		if o := v1.Hub.Observability; o != nil {
 			gc.Hub.Observability = HubObservabilityConfig{
 				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
@@ -4794,6 +4980,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		HubID:                  gc.Hub.HubID,
 		HubName:                gc.Hub.HubName,
 		PublicURL:              gc.Hub.Endpoint,
+		ContentURL:             gc.Hub.ContentURL,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,
@@ -4810,7 +4997,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
+		ti := &V1TestIdentitiesConfig{
+			AdminWebSessions:        gc.Hub.TestIdentities.AdminWebSessions,
+			OfflineAdminDelegations: gc.Hub.TestIdentities.OfflineAdminDelegations,
+		}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
@@ -4818,6 +5008,14 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.SoftDeleteRetention > 0 {
 		v1Hub.SoftDeleteRetention = gc.Hub.SoftDeleteRetention.String()
+	}
+	if c := gc.Hub.Chat.Search; !c.IsZero() {
+		cs := &V1ServerHubChatSearchConfig{Timeout: c.Timeout}
+		if c.MaxConcurrent > 0 {
+			n := c.MaxConcurrent
+			cs.MaxConcurrent = &n
+		}
+		v1Hub.Chat = &V1ServerHubChatConfig{Search: cs}
 	}
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()
@@ -4848,6 +5046,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InternalTLSKeyFile:    c.InternalTLSKeyFile,
 			InternalTLSCAFile:     c.InternalTLSCAFile,
 			InternalTLSServerName: c.InternalTLSServerName,
+			PeerKeyFile:           c.PeerKeyFile,
+			Peers:                 conduitPeersToV1(c.Peers),
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4856,6 +5056,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 	}
+	if c := gc.Hub.SSE; !c.IsZero() {
+		v1Hub.SSE = &V1ServerHubSSEConfig{MaxConnectionAge: c.MaxConnectionAge, HeartbeatInterval: c.HeartbeatInterval}
+	}
+	v1Hub.PlatformRequestTimeout = gc.Hub.PlatformRequestTimeout
 	if o := gc.Hub.Observability; !o.IsZero() {
 		v1Hub.Observability = &V1ServerHubObservabilityConfig{
 			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
@@ -4873,6 +5077,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.StartCreateUnconfirmedHold > 0 {
 		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
+	}
+	if gc.Hub.ContentURLAllowSameSite {
+		allowSameSite := true
+		v1Hub.ContentURLAllowSameSite = &allowSameSite
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
@@ -5824,13 +6032,6 @@ func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, va
 	if err != nil {
 		return err
 	}
-	if edit.noop {
-		// hub_connections.* is accepted and left unchanged (see
-		// versionedSettingEditFor). Loading still runs the legacy-key
-		// migration and surfaces a malformed file, as before.
-		_, err := loadSingleFileVersioned(lock, dir)
-		return err
-	}
 	err = updateVersionedSettingYAML(lock, dir, settingsPath, edit)
 	if errors.Is(err, errYAMLEditThroughAlias) {
 		slog.Debug("settings: alias, anchor or key the edit cannot match by name on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
@@ -5842,12 +6043,10 @@ func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, va
 
 // versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
 // for one key: set path to value, or delete path when value is nil (an empty
-// string for an omitempty field). noop marks hub_connections.* keys, which
-// are accepted and left unchanged.
+// string for an omitempty field).
 type versionedSettingEdit struct {
 	path  []string
 	value *yamlv3.Node
-	noop  bool
 }
 
 // versionedSettingKey describes where a settable key lives in the v1 file.
@@ -5891,12 +6090,6 @@ func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
 	switch {
 	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
 		k = versionedSettingKey{path: []string{"hub", "project_id"}}
-	case strings.HasPrefix(key, "hub_connections."):
-		// Not written in v1: accepted and left unchanged. "config set"
-		// rejects these keys itself (ValidateConfigSetKey). Keys with no
-		// place in a v1 file at all are rejected before this point
-		// (ValidateSettingWrite).
-		return versionedSettingEdit{noop: true}, nil
 	default:
 		var ok bool
 		if k, ok = versionedSettingKeys[key]; !ok {
@@ -6313,11 +6506,6 @@ func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, va
 		vs.Server.Auth.Username = value
 
 	default:
-		// hub_connections.* keys are left unchanged, as on the YAML path
-		// (versionedSettingEditFor).
-		if strings.HasPrefix(key, "hub_connections.") {
-			return nil
-		}
 		return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 	}
 

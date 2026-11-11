@@ -96,6 +96,9 @@ func TestValidateWorkspaceSource_RejectsScionHomeDir(t *testing.T) {
 		filepath.Join(scionDir, "settings.yaml"),
 		filepath.Join(scionDir, "harness-configs", "claude"),
 		filepath.Join(scionDir, "templates", "default"),
+		// The hub's welcome-project staging dirs (pkg/hub/welcome_stage.go).
+		filepath.Join(scionDir, "welcome-staging"),
+		filepath.Join(scionDir, "welcome-staging", "0123456789abcdef0123456789abcdef"),
 	}
 
 	for _, source := range tests {
@@ -523,6 +526,9 @@ func TestValidateAgentHomeSource_RefusesNearMissHomeShapes(t *testing.T) {
 		filepath.Join(tmpHome, ".scion", "project-configs", "hub-slug__11111111", ".scion"),
 		filepath.Join(tmpHome, ".scion", "project-configs", "hub-slug__11111111", ".scion", "agents", "a"),
 		filepath.Join(tmpHome, ".scion", "projects", "my-project", ".scion", "agents", "a", "home2"),
+		// The hub's welcome-project staging dirs (pkg/hub/welcome_stage.go).
+		filepath.Join(tmpHome, ".scion", "welcome-staging"),
+		filepath.Join(tmpHome, ".scion", "welcome-staging", "0123456789abcdef0123456789abcdef"),
 	}
 
 	for _, source := range tests {

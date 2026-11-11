@@ -92,6 +92,16 @@ type Service struct {
 	limiter     *rateLimiter
 	clientKeyFn func(*http.Request) string
 
+	// notifyLimiter rate-limits the notifications of grants with notify
+	// (Ask for review), per requester and in all (notifyLimiterFor).
+	notifyLimiterOnce sync.Once
+	notifyLimiter     *rateLimiter
+
+	// principalLimiter rate-limits authenticated routes per principal and
+	// route family (principal_limiter.go).
+	principalLimOnce sync.Once
+	principalLimiter *principalLimiter
+
 	fetcherFactory func(RemoteImageLimits) ImageFetcher
 	// fetchFloor overrides the fetch floor in tests; zero means the
 	// fetcher's connect timeout.
@@ -151,6 +161,14 @@ type Limits struct {
 	// that sets a limits getter must fill them in: incomplete or invalid
 	// values turn remote images off.
 	RemoteImages RemoteImageLimits
+	// ContentURL is the hub's content host for share links
+	// (server.hub.content_url, normalized scheme://host[:port]), or "" for
+	// none. When set, a created link also carries ShareURL on it.
+	ContentURL string
+	// PublicOrigin is the hub's configured public URL. The view CSP names
+	// its host on every request that is not on ContentURL; the request's
+	// own Host is never used.
+	PublicOrigin string
 }
 
 // Default limits, used when no limits getter is set or it yields a
@@ -295,6 +313,17 @@ func (s *Service) sharedLimiter() *rateLimiter {
 	return s.limiter
 }
 
+// notifyLimiterFor returns the Ask-for-review notification limiter.
+func (s *Service) notifyLimiterFor() *rateLimiter {
+	s.notifyLimiterOnce.Do(func() {
+		if s.notifyLimiter == nil {
+			s.notifyLimiter = newPeriodLimiter(time.Now, NotifyPerHour, time.Hour, NotifyBurst,
+				NotifyGlobalPerHour, time.Hour, NotifyGlobalBurst, notifyMaxRequesters)
+		}
+	})
+	return s.notifyLimiter
+}
+
 // SetLimits sets the function that yields the current limits. It is called
 // on every write, so limits follow the host's settings without a restart.
 func (s *Service) SetLimits(fn func(context.Context) Limits) {
@@ -388,6 +417,8 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	POST /api/v1/artifacts/{id}/links                       create a share link
 //	GET  /api/v1/artifacts/{id}/links                       the unexpired share links
 //	DELETE /api/v1/artifacts/{id}/links/{linkId}            revoke a share link
+//	PUT  /api/v1/artifacts/{id}/review-sessions/{sid}       heartbeat of an open review tab
+//	DELETE /api/v1/artifacts/{id}/review-sessions/{sid}     the review was closed, or its page left
 //	GET  /api/v1/artifacts/shared/{token}[/files/{path}]    a share-link read (303 to the view route)
 //
 // Everything else answers 404.
@@ -485,6 +516,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleRevokeLink(w, r, id, segs[2])
+	case len(segs) == 3 && segs[1] == reviewSessionsSegment:
+		if r.Method != http.MethodPut && r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w, http.MethodPut, http.MethodDelete)
+			return
+		}
+		s.handleReviewSession(w, r, id, segs[2])
 	case len(segs) == 2 && segs[1] == "versions":
 		switch {
 		case isRead(r.Method):

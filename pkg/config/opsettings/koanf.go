@@ -108,6 +108,13 @@ var layer0Prefixes = []string{
 	// Agent port proxy settings — the response header bound is read into
 	// ServerConfig at startup.
 	"server.hub.port_proxy",
+	// Events stream bounds and the declared platform request timeout — the
+	// web server and the conduit relay read them at startup.
+	"server.hub.sse",
+	"server.hub.platform_request_timeout",
+	// Web chat search limits (timeout, hub-wide cap) — read into
+	// ServerConfig at startup (ptone/scion#7586).
+	"server.hub.chat",
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",
@@ -146,10 +153,12 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.hub.start_create_unconfirmed_hold": "start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"server.hub.public_url":               "public_url",
-		"server.hub.hub_name":                 "hub_name",
-		"image_registry":                      "image_registry",
-		"server.hub.monitoring_dashboard_url": "monitoring_dashboard_url",
+		"server.hub.public_url":                  "public_url",
+		"server.hub.hub_name":                    "hub_name",
+		"server.hub.content_url":                 "content_url",
+		"server.hub.content_url_allow_same_site": "content_url_allow_same_site",
+		"image_registry":                         "image_registry",
+		"server.hub.monitoring_dashboard_url":    "monitoring_dashboard_url",
 	},
 	"github_app": {
 		"server.github_app.app_id":           "app_id",
@@ -210,10 +219,12 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"start_create_unconfirmed_hold": "server.hub.start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"public_url":               "server.hub.public_url",
-		"hub_name":                 "server.hub.hub_name",
-		"image_registry":           "image_registry",
-		"monitoring_dashboard_url": "server.hub.monitoring_dashboard_url",
+		"public_url":                  "server.hub.public_url",
+		"hub_name":                    "server.hub.hub_name",
+		"content_url":                 "server.hub.content_url",
+		"content_url_allow_same_site": "server.hub.content_url_allow_same_site",
+		"image_registry":              "image_registry",
+		"monitoring_dashboard_url":    "server.hub.monitoring_dashboard_url",
 	},
 	"github_app": {
 		"app_id":           "server.github_app.app_id",

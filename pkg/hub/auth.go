@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authctx"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -276,7 +277,14 @@ func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request
 
 // serveAfterAuth unwraps the response normalizer before entering downstream
 // middleware or a handler, so only authentication failures are rewritten.
+// It also carries the request's note of authorization checks stopped by
+// the request context ending, and writes its one summary line (if any)
+// when the handler returns, including on panic.
 func serveAfterAuth(w http.ResponseWriter, next http.Handler, r *http.Request) {
+	if ctx, note := withAuthzStoppedNote(r.Context()); note != nil {
+		r = r.WithContext(ctx)
+		defer note.emit(r)
+	}
 	if normalizer, ok := w.(*constraintAuditAuthFailureWriter); ok {
 		next.ServeHTTP(normalizer.ResponseWriter, r)
 		return
@@ -783,6 +791,15 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				// JWT tokens are self-contained; check current user status
 				// from the store to enforce suspension between token refreshes.
+				//
+				// With no UserStore the row block, and with it the session
+				// generation check below, is skipped and no generation is
+				// recorded in the request context. No store means no
+				// revocation can have been recorded. Serving hubs always have
+				// a store: enforced by TestInitHubServer_RefusesNilStore
+				// (cmd) and TestNew_WiresAuthUserStoreFromStore (pkg/hub).
+				var rowGen int64
+				haveRowGen := false
 				if cfg.UserStore != nil {
 					// The account must be active (checkUserAccount, the rule
 					// decide applies): a suspended account, an account with no
@@ -813,6 +830,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						writeAccountRefusal(w, refusal)
 						return
 					}
+					// The token's session generation must equal the users
+					// row's: any difference refuses (a missing claim reads
+					// as 0). This read of the row must stay authoritative;
+					// see sessionGenerationRefusal before adding a replica
+					// or cache on the user read path.
+					if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
+						logSessionGenerationRefusal(ctx, log, "jwt_auth", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
+						writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+							"invalid access token: session revoked", nil)
+						return
+					}
+					rowGen, haveRowGen = u.SessionGeneration, true
 					// A federated account authenticates only with its
 					// issuer's token (the federated branch above), never
 					// with a hub-issued session or user token.
@@ -876,6 +905,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				ctx = contextWithIdentity(ctx, user)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
 				ctx = contextWithAuthType(ctx, AuthTypeJWT)
+				if haveRowGen {
+					// The users-row generation compared above (equal to the
+					// claim), for consumers that re-check later.
+					ctx = authctx.WithSessionGeneration(ctx, rowGen)
+				}
 				if cfg.Debug {
 					log.Debug("User authenticated", "email", user.Email())
 				}

@@ -18,9 +18,6 @@ package artifacts
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,9 +25,10 @@ import (
 	"time"
 )
 
-// The review grant level (ptone/scion#4538): a review grant lets a user who
-// can already read an artifact append versions of kind review, and nothing
-// else. It is never a read path itself.
+// The review grant level (ptone/scion#4538): a review grant lets a user
+// append versions of kind review, and nothing else beyond read. Since the
+// grant ladder (ptone/scion#5145) it reads too: read ⊂ review ⊂ write ⊂
+// admin.
 
 // rvOnly reads project-1 (the home of a reviewFixture artifact) and holds
 // a review grant on it: a review-only caller.
@@ -201,65 +199,39 @@ func TestReviewLevelNoOtherPowers(t *testing.T) {
 	}
 }
 
-// TestReviewLevelGrantAloneIsNotRead: a review grant with no other read
-// path reads nothing: GET answers the missing-artifact 404, and the list
-// leaves the artifact out.
-func TestReviewLevelGrantAloneIsNotRead(t *testing.T) {
+// TestReviewLevelGrantAloneReads (ladder, K1): a review grant with no
+// other read path reads: GET answers 200 with canReview, and the list
+// includes the artifact.
+func TestReviewLevelGrantAloneReads(t *testing.T) {
 	f := newReviewLevelFixture(t)
 	f.dropRead(rvOnly)
-	missing := f.do(&rvOnly, http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", nil, nil)
 	got := f.do(&rvOnly, http.MethodGet, "/api/v1/artifacts/"+f.id, nil, nil)
-	if response(got) != response(missing) {
-		t.Errorf("GET with a review grant only:\n%s\nwant\n%s", response(got), response(missing))
+	if got.Code != http.StatusOK {
+		t.Fatalf("GET with a review grant only: %d %s", got.Code, got.Body.String())
+	}
+	if resp := decodeInto[ArtifactResponse](t, got); !resp.CanReview || resp.CanPublish {
+		t.Errorf("review grant only: canReview=%v canPublish=%v", resp.CanReview, resp.CanPublish)
 	}
 	list := f.do(&rvOnly, http.MethodGet, "/api/v1/artifacts?mine=1", nil, nil)
-	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), f.id) {
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), f.id) {
 		t.Errorf("list with a review grant only: %d %s", list.Code, list.Body.String())
 	}
 }
 
-// TestReviewLevelLostReadIsMissing: once a review-only caller loses its
-// other read path, every route (GET, start, upload, finalize) answers
-// byte for byte the 404 of a missing artifact, never 403 or review_only,
-// and nothing changes. The read check runs before the write check.
-func TestReviewLevelLostReadIsMissing(t *testing.T) {
+// TestReviewLevelSurvivesLostHomeRead: a review-only caller that loses its
+// home-project read keeps review access through the grant itself (the
+// ladder): a review started before can still be finalized, and an
+// ordinary version is still refused with review_only.
+func TestReviewLevelSurvivesLostHomeRead(t *testing.T) {
 	f := newReviewLevelFixture(t)
 	marked := with(f.v1, "plan.md", reviewMarked)
-	// A review started while the caller could read, with a file left to upload.
-	req := marked.manifest("plan.md")
-	req.Kind = VersionKindReview
-	pend := f.createPending(rvOnly, "/api/v1/artifacts/"+f.id+"/versions", req)
-	// A complete review, ready to finalize.
 	done := f.startReview(rvOnly, marked, "plan.md")
 	f.dropRead(rvOnly)
-
-	const gone = "00000000-0000-4000-8000-000000000001"
-	routes := func(id string, upSeq, finSeq int) []*httptest.ResponseRecorder {
-		return []*httptest.ResponseRecorder{
-			f.do(&rvOnly, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil),
-			f.postJSON(&rvOnly, "/api/v1/artifacts/"+id+"/versions", req),
-			f.put(rvOnly, id, upSeq, "plan.md", marked["plan.md"]),
-			f.do(&rvOnly, http.MethodPost, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d/finalize", id, finSeq),
-				[]byte(fmt.Sprintf(`{"base":%d}`, 1)), nil),
-		}
-	}
-	want := routes(gone, pend.Version.Seq, done)
-	got := routes(f.id, pend.Version.Seq, done)
-	for i, name := range []string{"GET", "start", "upload", "finalize"} {
-		if want[i].Code != http.StatusNotFound || response(got[i]) != response(want[i]) || got[i].Body.String() != want[i].Body.String() {
-			t.Errorf("%s after losing read:\n%s%s\nwant\n%s%s", name, response(got[i]), got[i].Body.String(),
-				response(want[i]), want[i].Body.String())
-		}
-	}
-	if f.current() != 1 || f.state(done) != VersionStatePending {
-		t.Errorf("after the refusals: current %d, review state %s", f.current(), f.state(done))
-	}
-	// Getting the read path back restores review access: nothing was
-	// revoked, the decision is made again on every use.
-	f.host.allow(rvOnly, "project-1", PermissionRead)
 	if r := f.result(f.finalizeReview(rvOnly, done, 1)); r.code != http.StatusOK {
-		t.Errorf("finalize after read returns: %d %s", r.code, r.body)
+		t.Errorf("finalize after losing the home read: %d %s", r.code, r.body)
 	}
+	wantReviewOnly(t, "publish after losing the home read",
+		f.postJSON(&rvOnly, "/api/v1/artifacts/"+f.id+"/versions", f.v1.manifest("plan.md")))
 }
 
 // TestReviewLevelWriteWins: a caller holding a principal review grant and,
@@ -433,180 +405,26 @@ func TestAdminGrantRouteReview(t *testing.T) {
 	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:friend", GrantReview); rec.Code != http.StatusOK {
 		t.Errorf("repeat review: %d %s", rec.Code, rec.Body.String())
 	}
-	// Review never replaces a user's read, write or admin grant: 400 with
-	// its own code, and the grant is unchanged.
+	// The ladder (ptone/scion#5145): review over a read, write or admin
+	// grant is an ordinary level change (200), and the grant becomes review.
 	for _, perm := range []string{GrantRead, GrantWrite, GrantAdmin} {
 		if rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:friend", perm); rec.Code != http.StatusOK {
 			t.Fatalf("review to %s: %d %s", perm, rec.Code, rec.Body.String())
 		}
 		rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:friend", GrantReview)
-		if rec.Code != http.StatusBadRequest || errCode(t, rec) != CodeReviewReplacesAccess {
-			t.Errorf("review over %s: %d %s", perm, rec.Code, rec.Body.String())
+		if rec.Code != http.StatusOK {
+			t.Errorf("review over %s: %d %s, want 200", perm, rec.Code, rec.Body.String())
 		}
-		if g := f.grantOf(id, "user:friend"); g == nil || g.Permission != perm {
+		if g := f.grantOf(id, "user:friend"); g == nil || g.Permission != GrantReview {
 			t.Errorf("grant after review over %s: %+v", perm, g)
 		}
 	}
 }
 
-// TestReviewGrantSubjectCheckFailureIsLoud: when the subject read check
-// cannot be answered, the review grant answers 500 and writes nothing.
-func TestReviewGrantSubjectCheckFailureIsLoud(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	f.host.subjectErr = errors.New("lookup failed")
-	c := captureLog(f, slog.LevelInfo)
-	rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("subject check failing: %d %s", rec.Code, rec.Body.String())
-	}
-	if g := f.grantOf(id, reviewerID); g != nil {
-		t.Errorf("grant written: %+v", g)
-	}
-	if got, raw := c.take(t); len(got) != 0 {
-		t.Errorf("a failed lookup logged as a refusal: %s", raw)
-	}
-}
-
-// countingGrantsStore counts ListGrants calls and fails call number failAt
-// (1-based; 0 never fails).
-type countingGrantsStore struct {
-	Store
-	calls, failAt int
-}
-
-func (s *countingGrantsStore) ListGrants(ctx context.Context, id string) ([]Grant, error) {
-	s.calls++
-	if s.calls == s.failAt {
-		return nil, errors.New("grants unavailable")
-	}
-	return s.Store.ListGrants(ctx, id)
-}
-
-// TestReviewGrantAccessCheckFailureIsLoud: when the grants read of the
-// existing-access check (for a subject that cannot read) fails, the review
-// grant answers 500, writes nothing and logs no refusal.
-func TestReviewGrantAccessCheckFailureIsLoud(t *testing.T) {
-	const stranger = "user:stranger"
-	body := reviewBody(SubjectPrincipal, stranger, GrantReview)
-	// Calibrate: the existing-access check is the last grants read of a
-	// refused request for a subject that cannot read.
-	f, id := newReviewGrantFixture(t)
-	st := &countingGrantsStore{Store: f.store}
-	f.svc.SetStore(st)
-	wantRefusal(t, f.postGrantBody(delegator, id, body), CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
-	last := st.calls
-	if last == 0 {
-		t.Fatal("no grants read")
-	}
-	st.calls, st.failAt = 0, last
-	c := captureLog(f, slog.LevelInfo)
-	rec := f.postGrantBody(delegator, id, body)
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("access check failing: %d %s", rec.Code, rec.Body.String())
-	}
-	if st.calls != last {
-		t.Errorf("grants reads %d, want %d", st.calls, last)
-	}
-	if g := f.grantOf(id, stranger); g != nil {
-		t.Errorf("grant written: %+v", g)
-	}
-	if got, raw := c.take(t); len(got) != 0 {
-		t.Errorf("a failed lookup logged as a refusal: %s", raw)
-	}
-}
-
-// TestReviewGrantNeedsSubjectSupport: a host without ReviewSubjectAuthority
-// gives no review grant through the D24 path (fail closed), with the same
-// 403 as every other refusal.
-func TestReviewGrantNeedsSubjectSupport(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	want := response(f.postGrantBody(member, id, "junk"))
-	svc := NewService(noSubjectHost{f.host})
-	svc.SetStore(f.store)
-	svc.SetBlobStorage(f.blobs, "hub-1")
-	r := withPrincipal(httptest.NewRequest(http.MethodPost, grantsPath(id),
-		strings.NewReader(reviewBody(SubjectPrincipal, reviewerID, GrantReview))), delegator)
-	rec := httptest.NewRecorder()
-	c := &logCapture{}
-	l := slog.New(slog.NewJSONHandler(c, nil))
-	svc.SetLogger(func() *slog.Logger { return l })
-	svc.ServeHTTP(rec, r)
-	if got := response(rec); got != want {
-		t.Errorf("host without the subject check: %s", got)
-	}
-	// One refusal entry, with reason review_subject_unreadable (the subject
-	// check cannot run, so it fails closed), the artifact and the grantee.
-	if got, raw := c.take(t); len(got) != 1 || got[0][logKeyReason] != logReasonReviewSubjectUnreadable ||
-		got[0][logKeyArtifactID] != id || got[0][logKeySubjectRef] != reviewerID {
-		t.Errorf("refusal entries: %s", raw)
-	}
-	if g := f.grantOf(id, reviewerID); g != nil {
-		t.Errorf("grant written: %+v", g)
-	}
-}
-
-// noSubjectHost is the fake host with ReviewGrantAuthority and without
-// ReviewSubjectAuthority.
-type noSubjectHost struct{ Host }
-
-func (h noSubjectHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
-	return h.Host.(ReviewGrantAuthority).MayGrantReview(ctx, ownerAgentID, homeScope, sponsorRef)
-}
-
-// TestReviewSubjectIsGetWithoutOwnGrant: the review-access subject check
-// answers what a real GET by the same user answers once that user's own
-// principal grant is left out (the review grant would take its row).
-// A home member and a member of a project with a scope grant: both allow.
-// An outsider and a user holding only a review grant: both refuse.
-// A user whose only read is a principal read grant: GET allows, the
-// subject check refuses.
-func TestReviewSubjectIsGetWithoutOwnGrant(t *testing.T) {
-	f, id := newReviewGrantFixture(t)
-	f.host.crossScope = true
-	homeMember := principal{PrincipalKindUser, "user-home", ""}
-	readGrantee := principal{PrincipalKindUser, "user-granted", ""}
-	scopeMember := principal{PrincipalKindUser, "user-scope", ""}
-	stranger := principal{PrincipalKindUser, "user-stranger", ""}
-	reviewOnly := principal{PrincipalKindUser, "user-review-only", ""}
-	f.host.allow(homeMember, "project-1", PermissionRead)
-	f.grantPrincipal(id, readGrantee)
-	f.host.allow(scopeMember, "project-2", PermissionRead)
-	insertGrant(f, id, SubjectScope, "project-2", GrantRead, nil)
-	insertGrant(f, id, SubjectPrincipal, PrincipalRef(reviewOnly.kind, reviewOnly.ref), GrantReview, nil)
-	for _, tc := range []struct {
-		p                 principal
-		wantGet, wantSubj bool
-	}{
-		{homeMember, true, true}, {scopeMember, true, true},
-		{stranger, false, false}, {reviewOnly, false, false},
-		{readGrantee, true, false},
-	} {
-		t.Run(tc.p.ref, func(t *testing.T) {
-			get := f.do(&tc.p, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil)
-			reads := get.Code == http.StatusOK
-			if !reads && get.Code != http.StatusNotFound {
-				t.Fatalf("GET: %d", get.Code)
-			}
-			b, _ := f.svc.backend()
-			a, err := f.store.GetArtifact(context.Background(), id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			subject, err := f.svc.reviewSubjectCanRead(context.Background(), b, a, PrincipalRef(tc.p.kind, tc.p.ref))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if reads != tc.wantGet || subject != tc.wantSubj {
-				t.Errorf("GET reads=%v, subject check=%v, want %v %v", reads, subject, tc.wantGet, tc.wantSubj)
-			}
-		})
-	}
-}
-
-// TestWriteDecisionReviewNeedsRead: the write decision itself, not only
-// the routes' read check before it, gives a review grantee review access
-// only while it can read the artifact another way.
-func TestWriteDecisionReviewNeedsRead(t *testing.T) {
+// TestWriteDecisionReviewGrantReads: the write decision gives a review
+// grantee review access through the grant itself, also without another
+// read path (the ladder).
+func TestWriteDecisionReviewGrantReads(t *testing.T) {
 	f := newReviewLevelFixture(t)
 	b, _ := f.svc.backend()
 	a, err := f.store.GetArtifact(context.Background(), f.id)
@@ -618,7 +436,25 @@ func TestWriteDecisionReviewNeedsRead(t *testing.T) {
 		t.Fatalf("reader with a review grant: %v %v", access, err)
 	}
 	f.dropRead(rvOnly)
-	if access, err := f.svc.canWriteErr(ctx, b, a); err != nil || access != accessNone {
-		t.Errorf("review grant without read: %v %v, want accessNone", access, err)
+	if access, err := f.svc.canWriteErr(ctx, b, a); err != nil || access != accessReviewGrant {
+		t.Errorf("review grant without other read: %v %v, want accessReviewGrant", access, err)
+	}
+}
+
+// TestCanWritePermittedErrReviewNeedsReadCredential (K11): the canReadWith
+// re-check in canWritePermittedErr still applies the credential: a review
+// grantee whose credential does not permit artifact.read in the home
+// project gets accessNone, even though its grant reads.
+func TestCanWritePermittedErrReviewNeedsReadCredential(t *testing.T) {
+	f := newReviewLevelFixture(t)
+	b, _ := f.svc.backend()
+	a, err := f.store.GetArtifact(context.Background(), f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.deny(rvOnly, "project-1", PermissionRead)
+	ctx := withPrincipal(httptest.NewRequest(http.MethodGet, "/", nil), rvOnly).Context()
+	if access, err := f.svc.canWritePermittedErr(ctx, b, a, true); err != nil || access != accessNone {
+		t.Errorf("review grant, read not permitted: %v %v, want accessNone", access, err)
 	}
 }

@@ -409,18 +409,19 @@ func (s *Server) emitTestAdminGateStart() error {
 		sources[c.Class] = s.signingKeySource(c.KeyName)
 	}
 	if err := s.testAdminAudit.emit(testAdminAuditEventGateStart, map[string]any{
-		"level":               "WARN",
-		"msg":                 testAdminGateStartMessage(g.superAdmin),
-		"warning":             testModeSecretsWarning,
-		"kinds":               kinds,
-		"hub_id":              g.hubID,
-		"hub_class":           g.hubClass,
-		"marker_created_at":   markerAt,
-		"signing_key_sources": sources,
-		"federation":          "off",
-		"admin_web_sessions":  s.testAdminWeb.on,
-		"test_mode":           string(s.TestModeLevel()),
-		"preconditions":       s.testModePreconditions(),
+		"level":                     "WARN",
+		"msg":                       testAdminGateStartMessage(g.superAdmin),
+		"warning":                   testModeSecretsWarning,
+		"kinds":                     kinds,
+		"hub_id":                    g.hubID,
+		"hub_class":                 g.hubClass,
+		"marker_created_at":         markerAt,
+		"signing_key_sources":       sources,
+		"federation":                "off",
+		"admin_web_sessions":        s.testAdminWeb.on,
+		"offline_admin_delegations": s.offlineAdmin.on,
+		"test_mode":                 string(s.TestModeLevel()),
+		"preconditions":             s.testModePreconditions(),
 	}); err != nil {
 		return fmt.Errorf("test admin tier: startup banner could not be written: %w", err)
 	}

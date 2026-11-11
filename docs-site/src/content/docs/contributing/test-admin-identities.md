@@ -19,7 +19,7 @@ All three commands are for human operators only:
 - They do not run with a hub profile (`--hub-profile` or `SCION_HUB_PROFILE`).
 - They use your own hub sign-in on the hub itself.
 
-A test runner (for example an agent driving journeys on another test hub) does not use these commands. It issues admin test identities through an admin issuer delegation with `scion hub test-identity issue-admin` and a target-hub profile; see [Which command issues admin test identities](/scion/hosted/user/test-identity-target-hubs/#which-command-issues-admin-test-identities).
+A test runner (for example an agent driving journeys on another test hub) does not use these commands. It issues admin test identities through an admin issuer delegation with `scion hub test-identity issue-admin` and a target-hub profile; see [Which command issues admin test identities](/scion/hosted/user/test-identity-target-hubs/#which-command-issues-admin-test-identities). On a systemd test hub that opts in with `server.hub.test_identities.offline_admin_delegations`, an operator on the hub host can create a test hub-admin delegation offline, without a super-admin sign-in; test super-admin delegations always need one. See [Offline hub-admin delegation](/scion/hosted/user/test-identity-target-hubs/#offline-hub-admin-delegation-systemd-test-hubs).
 
 ## Before you start: the hub
 
@@ -66,6 +66,7 @@ scion hub test-identity issue --admin-role hub-admin \
   | `super-admin` | default 10m, at most 15m | default and at most 30m |
 
 - The token is never re-issued. If it is lost, remove the identity with `scion hub test-identity delete <id> --purge` and issue a new one.
+- An agent whose originating user is a test identity with an admin role receives project-scoped secrets and environment variables only in projects where that identity holds active membership beyond `project-viewer`.
 - A plain `scion hub test-identity delete <id>` does not remove an identity with an admin role: the hub answers it as not found, and the CLI's notice points to `delete <id> --purge`.
 
 The hub also limits issuance:

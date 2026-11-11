@@ -25,8 +25,11 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import { showToast } from '../../utils/toast.js';
 import type { ScionTokenList } from './token-list.js';
 import type * as TokenListModule from './token-list.js';
+
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
 let formatEligibilityReason: (reason?: string) => string;
 let relationshipBadgeText: (scope: string) => string;
@@ -1016,5 +1019,82 @@ describe('scion-token-list — hub boundary, purpose and labels (ptone/scion#212
     const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Token Created"]')!;
     dialog.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
     expect((el as any).revealToken).toBe('');
+  });
+});
+
+describe('scion-token-list — copy the revealed token (ptone/scion#7555)', () => {
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+
+  beforeAll(async () => {
+    await import('./token-list.js');
+  });
+
+  afterEach(() => {
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    document.body.innerHTML = '';
+    vi.mocked(showToast).mockClear();
+  });
+
+  /** The private members of the token list that this block drives. */
+  interface TokenListInternals {
+    openCreateDialog(): void;
+    handleBoundaryChange(kind: TokenListModule.TokenBoundaryKind): void;
+    createName: string;
+    createScopes: Set<string>;
+    handleCreate(e: Event): Promise<void>;
+    copyToken(): Promise<void>;
+    revealCopied: boolean;
+  }
+
+  async function revealed(): Promise<TokenListInternals> {
+    const el = await createComponent(baseFetch());
+    const list = el as unknown as TokenListInternals;
+    list.openCreateDialog();
+    list.handleBoundaryChange('hub');
+    list.createName = 'reveal';
+    list.createScopes = new Set(['agent:read']);
+    await list.handleCreate(new Event('submit'));
+    await el.updateComplete;
+    vi.mocked(showToast).mockClear();
+    return list;
+  }
+
+  it('copies the token and marks it copied, with no toast', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const el = await revealed();
+    await el.copyToken();
+    expect(writeText).toHaveBeenCalledWith('scion_pat_x');
+    expect(el.revealCopied).toBe(true);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('selects the token and shows exactly one failure toast when the clipboard is unavailable', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    const el = await revealed();
+    await expect(el.copyToken()).resolves.toBeUndefined();
+    expect(el.revealCopied).toBe(false);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      'Could not copy. The token is selected: press Ctrl/Cmd+C.',
+      'danger'
+    );
+    expect(window.getSelection()?.toString()).toContain('scion_pat_x');
+  });
+
+  it('selects the token and shows exactly one failure toast when the write is rejected', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const el = await revealed();
+    await expect(el.copyToken()).resolves.toBeUndefined();
+    expect(writeText).toHaveBeenCalledWith('scion_pat_x');
+    expect(el.revealCopied).toBe(false);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      'Could not copy. The token is selected: press Ctrl/Cmd+C.',
+      'danger'
+    );
+    expect(window.getSelection()?.toString()).toContain('scion_pat_x');
   });
 });

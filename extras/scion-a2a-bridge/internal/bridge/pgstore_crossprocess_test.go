@@ -1491,9 +1491,12 @@ func TestPostgresTaskStoreBrokerHandlerDedup(t *testing.T) {
 	// Create a minimal Bridge with the real state store.
 	shutdownCtx, shutdownCancel := context.WithCancel(ctx)
 	defer shutdownCancel()
+	// The task is in the admin class; its replies come on the admin's
+	// user topic ("admin").
 	b := &Bridge{
 		store:       pgStore,
 		log:         slog.Default(),
+		config:      &Config{Hub: HubConfig{User: "admin"}},
 		activeTasks: make(map[string]activeTaskEntry),
 		agentTasks:  make(map[string][]string),
 		push:        NewPushDispatcher(pgStore, &Config{}, slog.Default(), shutdownCtx),

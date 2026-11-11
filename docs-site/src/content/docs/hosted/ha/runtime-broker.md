@@ -65,7 +65,7 @@ Before the broker can receive commands, it must be registered with the Hub you a
 scion runtime-broker register
 ```
 
-This command checks that the local broker server is running, then exchanges credentials with the Hub, linking your machine's broker to your Hub user account. The credentials are saved to `~/.scion/hub-credentials/<name>.json`, one file per Hub connection (`--name`, derived from the Hub endpoint by default). List the connections with `scion runtime-broker hubs`.
+This command checks that the local broker server is running, then exchanges credentials with the Hub, linking your machine's broker to your Hub user account. Each Hub connection is saved to `~/.scion/hub-credentials/<name>.json`, one file per connection (`--name`, derived from the Hub endpoint by default; registration does not write `hub_connections` into settings files, and `scion config set` refuses `hub_connections` keys as not writable). List the connections with `scion runtime-broker hubs`.
 
 ### 3. Provide Compute for a Project
 
@@ -117,7 +117,7 @@ scion runtime-broker join --broker-id <broker-id> --token-file /path/to/token
 - The token is read from `--token-file` (`-` reads it from stdin), or else from the `SCION_BROKER_JOIN_TOKEN` environment variable. There is no flag that takes the token on the command line. If the file has any group or other permissions, `join` prints a warning and still uses it.
 - `--broker-id` can also come from `SCION_BROKER_ID`.
 - The broker server does not have to be running yet; `join` only warns if it is not.
-- `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the broker ID and, when unset, `server.broker.hub_endpoint` in global settings (not on a host that runs a workstation Hub), as `register` does.
+- `join` saves the Hub connection to `~/.scion/hub-credentials/<name>.json` and records the broker ID and, when unset, `server.broker.hub_endpoint` in global settings (not on a host that runs a workstation Hub), as `register` does; neither command writes `hub_connections` into settings files.
 - If the host already has credentials for this Hub connection, or its settings name a different broker ID, `join` stops. Pass `--force` to replace them.
 - `--name`, `--transport-mode` and `--transport-audience` work as for `register`.
 

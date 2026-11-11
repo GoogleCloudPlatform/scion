@@ -22,17 +22,50 @@
  *
  * In non-compact mode (profile page), renders a table with an add button.
  * In compact mode (project page), wraps in a section with header/description.
+ *
+ * In user scope the list also carries the user's pending secrets (secrets an
+ * agent saved, waiting for the owner's approval) with a state badge and
+ * Approve, Reject and Reveal actions. A pending value is shown only after
+ * an explicit Reveal and is dropped when the reveal dialog closes.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Secret, SecretType, ResourceScope, InjectionMode } from '../../shared/types.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import {
+  PENDING_EXISTING_CHANGED_CODE,
+  PENDING_SECRETS_API,
+  decodeBase64Text,
+  dispatchPendingSecretsChanged,
+  entryStateLabel,
+  pendingCount,
+  pendingEffectText,
+  pendingOverridesText,
+  pendingReplacesText,
+  pendingWasReplaced,
+  pendingWriterText,
+  secretEntries,
+  valueLengthText,
+  type PendingSecret,
+  type SecretEntry,
+  type SecretListResponse,
+} from '../../client/pending-secrets.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from './confirm-dialog.js';
-import { formatRelative } from '../../utils/time.js';
+import { formatInstant, formatRelative } from '../../utils/time.js';
+
+/** What the user sees when a pending secret expired or was already decided. */
+const PENDING_GONE_MESSAGE =
+  'This pending secret has expired or was already approved or rejected. The list was refreshed.';
+
+/** What the user sees when an approval is refused because the existing secret changed. */
+const PENDING_EXISTING_CHANGED_MESSAGE =
+  'Your existing secret changed since the agent saved this one. ' +
+  'Reject this pending secret and have the agent save it again.';
 
 @customElement('scion-secret-list')
 export class ScionSecretList extends LitElement {
@@ -42,7 +75,7 @@ export class ScionSecretList extends LitElement {
   @property({ type: Boolean }) compact = false;
 
   @state() private loading = true;
-  @state() private secrets: Secret[] = [];
+  @state() private entries: SecretEntry[] = [];
   @state() private error: string | null = null;
 
   // Create/Update dialog
@@ -64,11 +97,99 @@ export class ScionSecretList extends LitElement {
   // Copy-to-clipboard feedback
   @state() private copiedSecretKey: string | null = null;
 
+  // Pending secrets: the id of the one whose request is in flight.
+  @state() private pendingBusyId: string | null = null;
+
+  // Approve dialog
+  @state() private approveEntry: SecretEntry | null = null;
+  @state() private approveAllowProgeny = false;
+  @state() private approveError: string | null = null;
+
+  // Reveal dialog. The value lives only here, only while the dialog is
+  // open; closing the dialog clears it.
+  @state() private revealPending: PendingSecret | null = null;
+  @state() private revealText: string | null = null;
+  @state() private revealIsBase64 = false;
+  @state() private revealError: string | null = null;
+
   static override styles = [
     resourceStyles,
     css`
       sl-textarea.secret-value::part(textarea) {
         -webkit-text-security: disc;
+      }
+
+      .state-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .state-badge.approved {
+        background: var(--sl-color-success-100, #dcfce7);
+        color: var(--sl-color-success-700, #15803d);
+      }
+
+      .state-badge.pending {
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #a16207);
+      }
+
+      .state-expiry {
+        display: block;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.125rem;
+      }
+
+      tr.pending-row td {
+        border-bottom: none;
+      }
+
+      tr.pending-detail-row td {
+        padding-top: 0;
+      }
+
+      .pending-details {
+        margin: 0;
+        padding: 0.5rem 0.75rem;
+        list-style: none;
+        font-size: 0.8125rem;
+        color: var(--scion-text, #1e293b);
+        background: var(--scion-bg-subtle, #f8fafc);
+        border-radius: var(--scion-radius, 0.5rem);
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        overflow-wrap: anywhere;
+      }
+
+      .pending-details .muted {
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .pending-actions {
+        display: inline-flex;
+        gap: 0.25rem;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .reveal-value {
+        margin: 0;
+        padding: 0.75rem;
+        max-height: 16rem;
+        overflow: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.8125rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
       }
     `,
   ];
@@ -84,9 +205,11 @@ export class ScionSecretList extends LitElement {
 
     try {
       const url =
-        this.scope !== 'project'
-          ? `${this.apiBasePath}/secrets?scope=${this.scope}`
-          : `${this.apiBasePath}/secrets`;
+        this.scope === 'user'
+          ? `${this.apiBasePath}/secrets?scope=user&includePending=true`
+          : this.scope !== 'project'
+            ? `${this.apiBasePath}/secrets?scope=${this.scope}`
+            : `${this.apiBasePath}/secrets`;
       const response = await apiFetch(url);
 
       if (!response.ok) {
@@ -95,8 +218,9 @@ export class ScionSecretList extends LitElement {
         );
       }
 
-      const data = (await response.json()) as { secrets?: Secret[] } | Secret[];
-      this.secrets = Array.isArray(data) ? data : data.secrets || [];
+      const data = (await response.json()) as SecretListResponse | Secret[];
+      this.entries = secretEntries(data);
+      if (this.scope === 'user') dispatchPendingSecretsChanged(pendingCount(this.entries));
     } catch (err) {
       console.error('Failed to load secrets:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load secrets';
@@ -264,15 +388,149 @@ export class ScionSecretList extends LitElement {
 
   private async copySecretRef(secret: Secret): Promise<void> {
     if (!secret.secretRef) return;
-    try {
-      await navigator.clipboard.writeText(secret.secretRef);
-      this.copiedSecretKey = secret.key;
-      setTimeout(() => {
-        this.copiedSecretKey = null;
-      }, 1500);
-    } catch {
-      // Silently fail if clipboard is unavailable
+    if (!(await copyToClipboard(secret.secretRef))) {
+      showCopyFailedToast();
+      return;
     }
+    this.copiedSecretKey = secret.key;
+    setTimeout(() => {
+      this.copiedSecretKey = null;
+    }, 1500);
+  }
+
+  // ── Pending secrets ──────────────────────────────────────────────────
+
+  private pendingUrl(p: PendingSecret, action: 'approve' | 'reject' | 'reveal'): string {
+    return `${PENDING_SECRETS_API}/${encodeURIComponent(p.id)}/${action}`;
+  }
+
+  /** A pending secret that is gone (404): tell the user and refresh. */
+  private async handlePendingGone(): Promise<void> {
+    showToast(PENDING_GONE_MESSAGE, 'warning');
+    await this.loadSecrets();
+  }
+
+  private openApproveDialog(entry: SecretEntry): void {
+    if (!entry.pending) return;
+    this.approveEntry = entry;
+    this.approveAllowProgeny = entry.pending.allowProgeny;
+    this.approveError = null;
+  }
+
+  private closeApproveDialog(): void {
+    this.approveEntry = null;
+    this.approveError = null;
+  }
+
+  private async handleApprove(): Promise<void> {
+    const pending = this.approveEntry?.pending;
+    if (!pending) return;
+    this.pendingBusyId = pending.id;
+    this.approveError = null;
+    // The owner may only turn progeny access off, never on.
+    const body = pending.allowProgeny && !this.approveAllowProgeny ? { allowProgeny: false } : {};
+    try {
+      const res = await apiFetch(this.pendingUrl(pending, 'approve'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        suppressAccessDeniedToast: true,
+      });
+      if (res.status === 404) {
+        this.closeApproveDialog();
+        await this.handlePendingGone();
+        return;
+      }
+      if (!res.ok) {
+        const info = await parseApiError(res, `Failed to approve (HTTP ${res.status})`);
+        this.approveError =
+          info.code === PENDING_EXISTING_CHANGED_CODE
+            ? PENDING_EXISTING_CHANGED_MESSAGE
+            : info.message;
+        return;
+      }
+      this.closeApproveDialog();
+      showToast(`Secret "${pending.key}" approved`, 'success');
+      await this.loadSecrets();
+    } catch (err) {
+      this.approveError = err instanceof Error ? err.message : 'Failed to approve';
+    } finally {
+      this.pendingBusyId = null;
+    }
+  }
+
+  private async handleReject(pending: PendingSecret, event?: MouseEvent): Promise<void> {
+    if (
+      !event?.altKey &&
+      !(await showConfirm(
+        `Reject pending secret "${pending.key}"? The value the agent saved is discarded.`
+      ))
+    ) {
+      return;
+    }
+    this.pendingBusyId = pending.id;
+    try {
+      const res = await apiFetch(this.pendingUrl(pending, 'reject'), { method: 'POST' });
+      if (res.status === 404) {
+        await this.handlePendingGone();
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `Failed to reject (HTTP ${res.status})`));
+      }
+      showToast(`Pending secret "${pending.key}" rejected`, 'success');
+      await this.loadSecrets();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to reject');
+    } finally {
+      this.pendingBusyId = null;
+    }
+  }
+
+  /**
+   * Reveals a pending value after the user clicked Reveal. The value is
+   * held in component state only while the dialog is open and is never
+   * logged or stored.
+   */
+  private async handleReveal(pending: PendingSecret): Promise<void> {
+    this.clearReveal();
+    this.revealPending = pending;
+    this.pendingBusyId = pending.id;
+    try {
+      const res = await apiFetch(this.pendingUrl(pending, 'reveal'), { method: 'POST' });
+      if (res.status === 404) {
+        this.closeReveal();
+        await this.handlePendingGone();
+        return;
+      }
+      if (!res.ok) {
+        this.revealError = await extractApiError(res, `Failed to reveal (HTTP ${res.status})`);
+        return;
+      }
+      const data = (await res.json()) as { value?: unknown };
+      // The dialog may have closed while the request ran.
+      if (this.revealPending?.id !== pending.id) return;
+      const b64 = typeof data.value === 'string' ? data.value : '';
+      const text = decodeBase64Text(b64);
+      this.revealIsBase64 = text === null;
+      this.revealText = text ?? b64;
+    } catch {
+      this.revealError = 'Failed to reveal';
+    } finally {
+      // A later Reveal on another row owns the busy state; leave it.
+      if (this.pendingBusyId === pending.id) this.pendingBusyId = null;
+    }
+  }
+
+  private clearReveal(): void {
+    this.revealText = null;
+    this.revealIsBase64 = false;
+    this.revealError = null;
+  }
+
+  private closeReveal(): void {
+    this.clearReveal();
+    this.revealPending = null;
   }
 
   // ── Rendering ────────────────────────────────────────────────────────
@@ -316,7 +574,8 @@ export class ScionSecretList extends LitElement {
           Add Secret
         </sl-button>
       </div>
-      ${this.secrets.length === 0 ? this.renderEmpty() : this.renderTable()} ${this.renderDialog()}
+      ${this.entries.length === 0 ? this.renderEmpty() : this.renderTable()} ${this.renderDialog()}
+      ${this.renderApproveDialog()} ${this.renderRevealDialog()}
     `;
   }
 
@@ -348,7 +607,7 @@ export class ScionSecretList extends LitElement {
                   Retry
                 </sl-button>
               </div>`
-            : this.secrets.length === 0
+            : this.entries.length === 0
               ? this.renderEmpty()
               : this.renderTable()}
       </div>
@@ -363,6 +622,7 @@ export class ScionSecretList extends LitElement {
           <thead>
             <tr>
               <th>Key</th>
+              ${this.scope === 'user' ? html`<th>State</th>` : nothing}
               <th>Type</th>
               <th>Inject</th>
               ${this.scope === 'user' ? html`<th>Progeny</th>` : nothing}
@@ -373,81 +633,275 @@ export class ScionSecretList extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${this.secrets.map((secret) => this.renderRow(secret))}
+            ${this.entries.map((entry) => this.renderEntry(entry))}
           </tbody>
         </table>
       </div>
     `;
   }
 
-  private renderRow(secret: Secret) {
-    const isDeleting = this.deletingKey === secret.key;
+  private renderEntry(entry: SecretEntry): TemplateResult {
+    const columns = this.scope === 'user' ? 9 : 7;
+    return html`
+      ${this.renderRow(entry)}
+      ${entry.pending
+        ? html`<tr class="pending-detail-row">
+            <td colspan=${columns}>${this.renderPendingDetails(entry)}</td>
+          </tr>`
+        : nothing}
+    `;
+  }
+
+  private renderRow(entry: SecretEntry) {
+    const secret = entry.approved;
+    const pending = entry.pending;
+    const isDeleting = this.deletingKey === entry.key;
+    const type = secret?.type ?? pending?.type ?? 'environment';
+    const injectionMode = secret ? secret.injectionMode : pending?.injectionMode;
+    const allowProgeny = secret ? secret.allowProgeny : pending?.allowProgeny;
+    const description = secret ? secret.description : pending?.description;
 
     return html`
-      <tr>
+      <tr class=${pending ? 'pending-row' : ''}>
         <td class="key-cell">
           <div class="key-info">
             <div class="key-icon">
               <sl-icon name="shield-lock"></sl-icon>
             </div>
-            ${secret.key}
+            ${entry.key}
           </div>
         </td>
+        ${this.scope === 'user' ? html`<td>${this.renderState(entry)}</td>` : nothing}
         <td>
-          <span class="type-badge ${secret.type}">${secret.type}</span>
+          <span class="type-badge ${type}">${type}</span>
         </td>
         <td>
-          ${secret.injectionMode === 'as_needed'
+          ${injectionMode === 'as_needed'
             ? html`<span class="badge inject-as-needed">as needed</span>`
             : html`<span class="badge inject-always">always</span>`}
         </td>
         ${this.scope === 'user'
           ? html`<td>
-              ${secret.allowProgeny
+              ${allowProgeny
                 ? html`<sl-icon name="check-lg" title="Progeny can access"></sl-icon>`
-                : '\u2014'}
+                : '—'}
             </td>`
           : nothing}
-        <td class="description-cell hide-mobile">${secret.description || '\u2014'}</td>
-        <td>
-          ${secret.secretRef
-            ? html`<sl-tooltip
-                content=${this.copiedSecretKey === secret.key ? 'Copied!' : secret.secretRef}
-                hoist
-              >
-                <span
-                  class="version-badge version-badge-copyable"
-                  @click=${() => this.copySecretRef(secret)}
-                  title=""
-                  >v${secret.version}</span
-                >
-              </sl-tooltip>`
-            : html`<span class="version-badge">v${secret.version}</span>`}
-        </td>
+        <td class="description-cell hide-mobile">${description || '—'}</td>
+        <td>${secret ? this.renderVersion(secret) : '—'}</td>
         <td class="hide-mobile">
-          <span class="meta-text">${formatRelative(secret.updated)}</span>
+          <span class="meta-text"
+            >${formatRelative(secret ? secret.updated : (pending?.updated ?? ''))}</span
+          >
         </td>
         <td class="actions-cell">
-          <sl-icon-button
-            name="pencil"
-            label="Edit settings"
-            ?disabled=${isDeleting}
-            @click=${() => this.openEditSettingsDialog(secret)}
-          ></sl-icon-button>
-          <sl-icon-button
-            name="arrow-clockwise"
-            label="Update value"
-            ?disabled=${isDeleting}
-            @click=${() => this.openUpdateDialog(secret)}
-          ></sl-icon-button>
-          <sl-icon-button
-            name="trash"
-            label="Delete"
-            ?disabled=${isDeleting}
-            @click=${(e: MouseEvent) => this.handleDelete(secret, e)}
-          ></sl-icon-button>
+          ${pending ? this.renderPendingActions(pending) : nothing}
+          ${secret
+            ? html`
+                <sl-icon-button
+                  name="pencil"
+                  label="Edit settings"
+                  ?disabled=${isDeleting}
+                  @click=${() => this.openEditSettingsDialog(secret)}
+                ></sl-icon-button>
+                <sl-icon-button
+                  name="arrow-clockwise"
+                  label="Update value"
+                  ?disabled=${isDeleting}
+                  @click=${() => this.openUpdateDialog(secret)}
+                ></sl-icon-button>
+                <sl-icon-button
+                  name="trash"
+                  label="Delete"
+                  ?disabled=${isDeleting}
+                  @click=${(e: MouseEvent) => this.handleDelete(secret, e)}
+                ></sl-icon-button>
+              `
+            : nothing}
         </td>
       </tr>
+    `;
+  }
+
+  private renderVersion(secret: Secret): TemplateResult {
+    return secret.secretRef
+      ? html`<sl-tooltip
+          content=${this.copiedSecretKey === secret.key ? 'Copied!' : secret.secretRef}
+          hoist
+        >
+          <span
+            class="version-badge version-badge-copyable"
+            @click=${() => this.copySecretRef(secret)}
+            title=""
+            >v${secret.version}</span
+          >
+        </sl-tooltip>`
+      : html`<span class="version-badge">v${secret.version}</span>`;
+  }
+
+  private renderState(entry: SecretEntry): TemplateResult {
+    const label = entryStateLabel(entry);
+    if (!entry.pending) {
+      return html`<span class="state-badge approved">${label}</span>`;
+    }
+    return html`
+      <span class="state-badge pending">${label}</span>
+      <span class="state-expiry">expires ${formatInstant(entry.pending.expiresAt)}</span>
+    `;
+  }
+
+  private renderPendingActions(pending: PendingSecret): TemplateResult {
+    const busy = this.pendingBusyId !== null;
+    const entry = this.entries.find((e) => e.pending?.id === pending.id);
+    return html`
+      <span class="pending-actions">
+        <sl-button
+          size="small"
+          variant="primary"
+          ?disabled=${busy}
+          @click=${(): void => {
+            if (entry) this.openApproveDialog(entry);
+          }}
+        >
+          Approve
+        </sl-button>
+        <sl-button
+          size="small"
+          variant="default"
+          ?disabled=${busy}
+          @click=${(e: MouseEvent): void => void this.handleReject(pending, e)}
+        >
+          Reject
+        </sl-button>
+        <sl-button
+          size="small"
+          variant="text"
+          ?disabled=${busy}
+          @click=${(): void => void this.handleReveal(pending)}
+        >
+          Reveal
+        </sl-button>
+      </span>
+    `;
+  }
+
+  /**
+   * What the user sees about a pending secret: never its value. With
+   * `allowProgeny` the effect line follows the approve dialog's switch.
+   */
+  private renderPendingDetails(
+    entry: SecretEntry,
+    allowProgeny?: boolean
+  ): TemplateResult | typeof nothing {
+    const p = entry.pending;
+    if (!p) return nothing;
+    const overrides = pendingOverridesText(p);
+    const replaces = pendingReplacesText(p, entry.approved, (iso) => formatInstant(iso));
+    return html`
+      <ul class="pending-details">
+        <li>
+          <span class="muted">Name:</span> ${p.key} &middot;
+          <span class="muted">Type:</span> ${p.type}
+          ${p.target ? html`&middot; <span class="muted">Target:</span> ${p.target}` : nothing}
+          &middot; <span class="muted">Value length:</span> ${valueLengthText(p.valueLen)}
+        </li>
+        <li>${pendingWriterText(p)}</li>
+        <li>
+          Written at
+          ${formatInstant(p.created)}${pendingWasReplaced(p)
+            ? html`, replaced at ${formatInstant(p.updated)}`
+            : nothing},
+          expires at ${formatInstant(p.expiresAt)}
+        </li>
+        <li>${pendingEffectText(p, allowProgeny ?? p.allowProgeny)}</li>
+        ${overrides ? html`<li>${overrides}</li>` : nothing}
+        ${replaces ? html`<li>${replaces}</li>` : nothing}
+      </ul>
+    `;
+  }
+
+  private renderApproveDialog(): TemplateResult {
+    const entry = this.approveEntry;
+    const p = entry?.pending;
+    const busy = !!p && this.pendingBusyId === p.id;
+    return html`
+      <sl-dialog
+        class="approve-dialog"
+        label=${p ? `Approve secret "${p.key}"` : 'Approve secret'}
+        ?open=${!!p}
+        @sl-request-close=${this.closeApproveDialog}
+      >
+        ${entry && p
+          ? html`
+              ${this.renderPendingDetails(entry, this.approveAllowProgeny)}
+              ${p.allowProgeny
+                ? html`
+                    <sl-checkbox
+                      class="approve-progeny"
+                      .checked=${this.approveAllowProgeny}
+                      @sl-change=${(e: Event): void => {
+                        // Untick only: approval can turn progeny access off,
+                        // never on, so the box is disabled once unticked.
+                        this.approveAllowProgeny =
+                          this.approveAllowProgeny && (e.target as HTMLInputElement).checked;
+                      }}
+                      ?disabled=${!this.approveAllowProgeny}
+                    >
+                      Also deliver to agents your agents create
+                    </sl-checkbox>
+                  `
+                : nothing}
+              ${this.approveError
+                ? html`<div class="dialog-error">${this.approveError}</div>`
+                : nothing}
+            `
+          : nothing}
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${busy}
+          @click=${this.closeApproveDialog}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${busy}
+          ?disabled=${busy}
+          @click=${this.handleApprove}
+        >
+          Approve
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderRevealDialog(): TemplateResult {
+    const p = this.revealPending;
+    const loading = !!p && this.pendingBusyId === p.id;
+    return html`
+      <sl-dialog
+        class="reveal-dialog"
+        label=${p ? `Value of pending secret "${p.key}"` : 'Pending secret value'}
+        ?open=${!!p}
+        @sl-request-close=${this.closeReveal}
+      >
+        ${loading ? html`<sl-spinner></sl-spinner>` : nothing}
+        ${this.revealError ? html`<div class="dialog-error">${this.revealError}</div>` : nothing}
+        ${this.revealText !== null
+          ? html`
+              ${this.revealIsBase64
+                ? html`<div class="dialog-hint">
+                    <sl-icon name="info-circle"></sl-icon>
+                    The value is not text; it is shown base64-encoded.
+                  </div>`
+                : nothing}
+              <pre class="reveal-value">${this.revealText}</pre>
+            `
+          : nothing}
+        <sl-button slot="footer" variant="primary" @click=${this.closeReveal}>Close</sl-button>
+      </sl-dialog>
     `;
   }
 

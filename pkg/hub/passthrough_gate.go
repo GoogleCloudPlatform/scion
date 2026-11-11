@@ -34,6 +34,11 @@ const (
 	// SurfacePassthroughPatch is passthrough mode set via PATCH on an
 	// existing agent.
 	SurfacePassthroughPatch = "passthrough-patch"
+
+	// SurfacePassthroughProjectDefault is passthrough mode taken from a
+	// project's default GCP identity: set on the project settings PUT, and
+	// applied on agent create and scheduled dispatch.
+	SurfacePassthroughProjectDefault = "passthrough-project-default"
 )
 
 // isValidServiceAccountEmail validates that an email address looks like a

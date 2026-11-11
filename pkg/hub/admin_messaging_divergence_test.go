@@ -33,6 +33,9 @@ import (
 // counter and puts the previous counter back when the test ends.
 func resetDivergenceMetrics(t *testing.T) {
 	t.Helper()
+	// Let background consistency checks from earlier tests finish before the
+	// counter is swapped, so none of them lands in this test's counter.
+	messaging.ConsistencyCheckRunner.Wait()
 	prev := messaging.DivergenceMetrics
 	t.Cleanup(func() { messaging.DivergenceMetrics = prev })
 	messaging.DivergenceMetrics = &messaging.DivergenceCounter{}
@@ -53,6 +56,10 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	messaging.DivergenceMetrics.IncExplicitRouting() // 3 explicit routes
 	messaging.DivergenceMetrics.IncDerivedRouting()  // 1 derived route
 	messaging.DivergenceMetrics.IncDerivedRouting()  // 2 derived routes
+
+	messaging.DivergenceMetrics.IncConsistencySkipped() // 1 skipped check
+	messaging.DivergenceMetrics.IncConsistencyTimeout() // 1 timed-out check
+	messaging.DivergenceMetrics.IncConsistencyTimeout() // 2 timed-out checks
 
 	srv := &Server{
 		startTime: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
@@ -98,12 +105,18 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	}
 
 	// Consistency check counters should be present (zero at this point since
-	// we only seeded the routing-key counters above).
+	// no check ran; only the skip and timeout counters were seeded above).
 	if resp.ConsistencyChecks != 0 {
 		t.Errorf("expected consistency_checks=0, got %d", resp.ConsistencyChecks)
 	}
 	if resp.ConsistencyMismatches != 0 {
 		t.Errorf("expected consistency_mismatches=0, got %d", resp.ConsistencyMismatches)
+	}
+	if resp.ConsistencySkipped != 1 {
+		t.Errorf("expected consistency_skipped=1, got %d", resp.ConsistencySkipped)
+	}
+	if resp.ConsistencyTimeouts != 2 {
+		t.Errorf("expected consistency_timeouts=2, got %d", resp.ConsistencyTimeouts)
 	}
 
 	// DEF-138: explicit routing counter.

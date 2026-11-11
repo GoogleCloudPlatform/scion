@@ -235,6 +235,10 @@ type HTTPAgentDispatcher struct {
 	// withheld by authorization, per (agent, secret, cause). Set by the
 	// constructors; nil logs every occurrence.
 	withheldWarn *hookRefusalLimiter
+	// ownerChainWarn rate limits the Warn of the owner material chain
+	// rule (start_owner_material_chain.go), per (agent, site, reason). Set
+	// by the constructors; nil logs every line.
+	ownerChainWarn *hookRefusalLimiter
 	// storageLayout is the hub's projectfs Layout source for
 	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
 	storageLayout func() (projectfs.Layout, error)
@@ -264,8 +268,8 @@ type HTTPAgentDispatcher struct {
 	imageRegistryProvider func(brokerID, profile string) string
 
 	// imageTagProvider returns the image_tag the hub applies to an agent
-	// dispatched to a broker with a profile ("" = none, always while
-	// hub.image_tag_setting is off). Read at each dispatch. Nil = none.
+	// dispatched to a broker with a profile ("" = none; see
+	// Server.imageTagStateOf). Read at each dispatch. Nil = none.
 	imageTagProvider func(brokerID, profile string) string
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
@@ -350,11 +354,12 @@ func NewHTTPAgentDispatcher(s store.Store, debug bool, log *slog.Logger) *HTTPAg
 		log = slog.Default()
 	}
 	return &HTTPAgentDispatcher{
-		store:        s,
-		client:       NewHTTPRuntimeBrokerClientWithDebug(debug),
-		debug:        debug,
-		log:          log,
-		withheldWarn: newUserSecretWithheldLimiter(),
+		store:          s,
+		client:         NewHTTPRuntimeBrokerClientWithDebug(debug),
+		debug:          debug,
+		log:            log,
+		withheldWarn:   newUserSecretWithheldLimiter(),
+		ownerChainWarn: newOwnerMaterialChainLimiter(),
 	}
 }
 
@@ -364,11 +369,12 @@ func NewHTTPAgentDispatcherWithClient(s store.Store, client RuntimeBrokerClient,
 		log = slog.Default()
 	}
 	return &HTTPAgentDispatcher{
-		store:        s,
-		client:       client,
-		debug:        debug,
-		log:          log,
-		withheldWarn: newUserSecretWithheldLimiter(),
+		store:          s,
+		client:         client,
+		debug:          debug,
+		log:            log,
+		withheldWarn:   newUserSecretWithheldLimiter(),
+		ownerChainWarn: newOwnerMaterialChainLimiter(),
 	}
 }
 
@@ -682,7 +688,20 @@ func (d *HTTPAgentDispatcher) dispatchStandingError(ctx context.Context, agent *
 // isHashMismatchError reports whether err is a broker hash-mismatch error
 // from resource hydration (template or harness-config).
 func isHashMismatchError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "hash mismatch for file")
+	return err != nil && strings.Contains(brokerErrorMatchText(err), "hash mismatch for file")
+}
+
+// brokerErrorMatchText returns the text a broker error is matched against:
+// err's own text plus, when err carries a broker HTTP error, the broker's
+// body, which brokerStatusError.Error() leaves out. For matching only;
+// never for a response or a stored message.
+func brokerErrorMatchText(err error) string {
+	text := err.Error()
+	var se *brokerStatusError
+	if errors.As(err, &se) {
+		text += " " + se.Body
+	}
+	return text
 }
 
 // repairHashMismatch attempts to sync the affected resource's DB manifest from
@@ -693,7 +712,7 @@ func (d *HTTPAgentDispatcher) repairHashMismatch(ctx context.Context, agent *sto
 		return fmt.Errorf("no applied config")
 	}
 
-	msg := dispatchErr.Error()
+	msg := brokerErrorMatchText(dispatchErr)
 
 	// Route to the correct repairer based on the hydration error prefix.
 	if strings.Contains(msg, "Failed to hydrate template:") {
@@ -967,6 +986,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 				SAEmail:             gcpID.ServiceAccountEmail,
 				ProjectID:           gcpID.ProjectID,
 				RequireLocalRuntime: gcpID.RequireLocalRuntime,
+				// Only this dispatch's own decision (markCloudRunNative),
+				// never a stored or client value.
+				NativeCloudRun: cloudRunNativeFrom(ctx),
 			}
 		}
 		// Only the user's explicit image travels as Config.Image (the
@@ -1187,10 +1209,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			// mirroring the cascade in resolveCloneToken. Users who store
 			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
 			// would otherwise still hit the NoAuth suppression bug (#1165).
-			// This by-name read of the owner's user-scope row does not go
-			// through the start-time user-scope checks in
-			// startSecretResolveOpts; it is tracked separately.
-			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" {
+			// The owner's row is held to the same start-time user-scope
+			// checks as Resolve (startSecretResolveOpts) before its value
+			// is read; a refused row is not used.
+			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
 				ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
 				if err != nil {
 					if d.debug {
@@ -1266,11 +1288,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// above from agent.AppliedConfig.GCPIdentity) is what the broker trusts
 	// first; this env carries the same decision for the case where that
 	// struct is nil. See applyHubGCPMetadataModeEnv.
-	gcpMetadataMode := ""
-	if req.Config != nil && req.Config.GCPIdentity != nil {
-		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
-	}
-	applyHubGCPMetadataModeEnv(req.ResolvedEnv, &req.EnvClassifications, gcpMetadataMode)
+	// The request is sealed here (sealCreateRequest) and again by the send
+	// wrapper, which is the step that guarantees no later merge on any path
+	// reaches the broker.
+	sealCreateRequest(ctx, req)
 
 	// GitHub App token minting: if the project has a GitHub App installation,
 	// always mint an installation token. GitHub App tokens take priority over
@@ -1957,6 +1978,8 @@ func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent,
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
 	defer span.End()
 	span.SetAttributes(
@@ -1978,7 +2001,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
 	// no run and no broker call for a GCP identity the broker's recent,
 	// complete report says is not mapped on the agent's profile.
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
@@ -2019,10 +2043,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	issued = token != ""
 
 	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-		resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+		resp, err := d.sendCreate(ctx, agent, endpoint, req)
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-				resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+				resp, err = d.sendCreate(ctx, agent, endpoint, req)
 			}
 		}
 		return resp, nil, err
@@ -2051,6 +2075,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // agent is provisioned without injected secrets. The broker's provision does
 // not read them, and a later start resolves them again and fails there.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
 }
 
@@ -2074,6 +2100,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // does that separately via DispatchAgentStart. Precondition: the agent's
 // container is already stopped.
 func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "", "")
 }
 
@@ -2109,7 +2137,8 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	}
 
 	// Hub check before dispatch (see DispatchAgentCreate).
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -2157,10 +2186,10 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	// That is conservative: a dial or marshal failure inside the transport
 	// is ambiguous and counts as sent, so a forced move cleans up after it.
 	sent = true
-	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+	resp, envReqs, err := d.sendCreateWithGather(ctx, agent, endpoint, req)
 	if isHashMismatchError(err) {
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			resp, envReqs, err = d.sendCreateWithGather(ctx, agent, endpoint, req)
 		}
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -2221,10 +2250,10 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			req.RequestID = api.NewUUID()
 
 			// Replay the provision request with the resolved env.
-			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			resp2, envReqs2, err2 := d.sendCreateWithGather(ctx, agent, endpoint, req)
 			if isHashMismatchError(err2) {
 				if repairErr := d.repairHashMismatch(ctx, agent, err2); repairErr == nil {
-					resp2, envReqs2, err2 = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+					resp2, envReqs2, err2 = d.sendCreateWithGather(ctx, agent, endpoint, req)
 				}
 			}
 			if err2 != nil {
@@ -2306,6 +2335,8 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 // If the broker returns 202 with env requirements, it returns the requirements
 // as the first value instead of an error.
 func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	dispatchStart := time.Now()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return nil, err
@@ -2317,7 +2348,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	}
 
 	// Hub check before dispatch (see DispatchAgentCreate).
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return nil, err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -2362,14 +2394,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		"broker", agent.RuntimeBrokerID, "buildElapsed", time.Since(dispatchStart).String())
 	brokerCallStart := time.Now()
 	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-		resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		resp, envReqs, err := d.sendCreateWithGather(ctx, agent, endpoint, req)
 		d.log.Info("Dispatcher: broker responded",
 			"agent_id", agent.ID, "agent", agent.Name,
 			"brokerElapsed", time.Since(brokerCallStart).String(),
 			"totalElapsed", time.Since(dispatchStart).String())
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-				resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+				resp, envReqs, err = d.sendCreateWithGather(ctx, agent, endpoint, req)
 			}
 		}
 		return resp, envReqs, err
@@ -2469,6 +2501,8 @@ func (e *ErrEnvStillMissing) Error() string {
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	// Flat placement backstop: the first pass pinned the agent, so this
 	// refuses only a pin corrupted between the two passes.
 	if err := d.placementBackstop(ctx, agent); err != nil {
@@ -2515,7 +2549,8 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	// Hub check before dispatch (see DispatchAgentCreate): the gather pass
 	// can be minutes old, and this pass mints a token and records a run.
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return nil, err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -2572,10 +2607,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	}
 
 	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-		resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		resp, envReqs, err := d.sendCreateWithGather(ctx, agent, endpoint, req)
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-				resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+				resp, envReqs, err = d.sendCreateWithGather(ctx, agent, endpoint, req)
 			}
 		}
 		return resp, envReqs, err
@@ -2624,7 +2659,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			// async launch, the new launch ID).
 			req.RequestID = api.NewUUID()
 			resp2, envReqs2, launch2, err2 := d.dispatchLaunching(ctx, agent, endpoint, req, true, func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-				return d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+				return d.sendCreateWithGather(ctx, agent, endpoint, req)
 			})
 			if err2 != nil {
 				return nil, err2
@@ -2974,6 +3009,11 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 // Absence is not an error: zero rows, a scope that does not apply or has an
 // empty scope ID (envScopesInPrecedenceOrder leaves it out), or an agent
 // without ancestry resolves to empty maps.
+//
+// The owner's user-scope rows not shared with progeny, plain or flagged
+// secret, are held to the owner material chain rule
+// (start_owner_material_chain.go): they are skipped when the agent's
+// recorded chain does not end at their owner.
 func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
@@ -2981,6 +3021,10 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		return result, plain, nil
 	}
 
+	// The owner material chain rule for the owner's rows not shared with
+	// progeny (start_owner_material_chain.go).
+	gate := d.newOwnerMaterialGate(agent)
+	defer gate.flush(ctx, ownerMaterialSiteEnvStorage)
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
@@ -3002,6 +3046,9 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			// other path: never let a stored env var decide a scion
 			// control-plane env var's value.
 			if secret.IsReservedEnvTarget(v.Key) {
+				continue
+			}
+			if !gate.allowEnvRow(ctx, filter, v) {
 				continue
 			}
 			result[v.Key] = v.Value
@@ -3077,6 +3124,14 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// TZ is never an as_needed key: only the agent TZ resolver supplies it.
 	delete(keySet, agentTZEnvKey)
 
+	// The start-time user-scope checks: both passes below apply them to the
+	// owner's rows (startSecretResolveOpts).
+	// One evaluation of the test-admin scope restriction, for both the
+	// start-time checks' keep decision and the restriction itself.
+	ta := d.testAdminScopesFor(ctx, agent)
+	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
+	defer gate.flush(ctx, ownerMaterialSiteAsNeeded)
+
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
@@ -3098,10 +3153,19 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				continue
 			}
 			if _, needed := keySet[v.Key]; needed {
+				if !gate.allowEnvRow(ctx, filter, v) {
+					continue
+				}
 				canonical, isAlt := altToCanonical[v.Key]
 				resultKey := v.Key
 				if isAlt {
 					resultKey = canonical
+				}
+				// The key a value is stored under counts too: an
+				// alternative name must not satisfy a reserved canonical
+				// key (the send seal removes it as well).
+				if secret.IsReservedEnvTarget(resultKey) {
+					continue
 				}
 				currentScopeIdx := slices.Index(envScopePrecedence, filter.Scope)
 				isCanonical := !isAlt
@@ -3123,12 +3187,10 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// 2. Check secrets (all scopes via backend.Resolve).
 	// Only environment-type secrets can be mapped to env key=value pairs.
 	if d.secretBackend != nil {
-		resolveOpts := d.startSecretResolveOpts(ctx, agent)
-
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 		if err == nil {
-			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+			resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 		}
 		if errors.Is(err, secret.ErrResolveDecrypt) {
 			// A stored secret could not be decrypted: never answer the
@@ -3170,6 +3232,10 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 							continue // canonical key already matched; don't overwrite
 						}
 						resultKey = canonical
+					}
+					// As for env vars: never under a reserved canonical key.
+					if secret.IsReservedEnvTarget(resultKey) {
+						continue
 					}
 					if _, alreadySet := result[resultKey]; !alreadySet {
 						result[resultKey] = sv.Value
@@ -3513,43 +3579,10 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// metadata-server sidecar correctly on (re-)start. During the
 	// createAgent path this information travels inside CreateAgentConfig,
 	// but the startAgent/restartAgent path doesn't carry that struct, so we
-	// surface the values through resolvedEnv instead.
-	//
-	// These writes are the last word on the GCP identity env (identity vars
-	// are set after the storage/secrets merge above, at "highest precedence"
-	// per the comment on SCION_AGENT_ID et al.). When the agent has no GCP
-	// identity configured at all, gcpMetadataMode stays empty and
-	// applyHubGCPMetadataModeEnv removes any merged-in mode, so the broker
-	// applies its runtime default rather than a stored value.
-	gcpMetadataMode := ""
-	if agent.AppliedConfig != nil {
-		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
-			gcpMetadataMode = gcpID.MetadataMode
-			if gcpMetadataMode == store.GCPMetadataModeAssign {
-				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
-				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
-				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
-				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
-			}
-			// RequireLocalRuntime doesn't travel inside CreateAgentConfig on
-			// this path either (see above), so surface it the same way: the
-			// broker re-checks a hub-default-granted passthrough against the
-			// runtime it resolves for this (re)start and downgrades to block
-			// itself if that runtime turns out not to be a local container
-			// runtime. Absent when false, matching this env's own convention
-			// — cleared, not just left unset, so that only this grant, not a
-			// value merged in above from stored env or a secret (both fill
-			// absent keys only; resolvedEnv itself is rebuilt fresh on every
-			// dispatch), can set it.
-			if gcpID.RequireLocalRuntime {
-				resolvedEnv["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
-				classifyEnv(&envClassifications, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
-			} else {
-				delete(resolvedEnv, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME")
-			}
-		}
-	}
-	applyHubGCPMetadataModeEnv(resolvedEnv, &envClassifications, gcpMetadataMode)
+	// surface the values through resolvedEnv instead
+	// (sealDispatchMetadataEnv). The send wrapper seals the env again
+	// right before the request goes to the broker.
+	sealDispatchMetadataEnv(ctx, agent, resolvedEnv, &envClassifications)
 
 	// Authorize a fresh agent token for Hub authentication. A denial
 	// stops the start or restart before any broker request. The token is
@@ -3656,6 +3689,8 @@ func (d *HTTPAgentDispatcher) reportSkippedSecrets(ctx context.Context, agent *s
 // (always synchronous); both call dispatchAgentStart directly, so neither is
 // a guarded call site of the other.
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	_, err := d.dispatchAgentStart(ctx, agent, task, resume, StartDispatchOptions{})
 	return err
 }
@@ -3667,6 +3702,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 // and the launch's end settles the start. Otherwise the start is
 // synchronous and the result is nil.
 func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchAgentStart(ctx, agent, task, resume, opts)
 }
 
@@ -3722,7 +3759,8 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
 	// no run and no broker call for a GCP identity the broker's recent,
 	// complete report says is not mapped on the agent's profile.
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
@@ -3914,14 +3952,14 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 			ex.LaunchTimeoutSeconds = f.TimeoutSeconds
 			ex.LaunchKeepaliveSeconds = f.KeepaliveSeconds
 		}
-		resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
+		resp, err := d.sendStart(ctx, agent, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
 				if f != nil {
 					// The repair took time: send the budget left now.
 					ex.LaunchTimeoutSeconds = f.remaining()
 				}
-				resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
+				resp, err = d.sendStart(ctx, agent, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
 			}
 		}
 		return resp, err
@@ -4073,7 +4111,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	// error.
 	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, agent.RunID)
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredStop(ctx, agent)
+		err = d.deferredStop(ctx, agent)
+	}
+	if err == nil {
+		// A confirmed stop: the native instance holds the agent's token
+		// nowhere, so the recorded native decision is removed.
+		d.clearCloudRunNative(ctx, agent)
 	}
 	return err
 }
@@ -4082,6 +4125,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	// Flat placement backstop (see DispatchAgentStart).
 	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
 		return err
@@ -4104,7 +4149,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 
 	// Hub check before dispatch (see DispatchAgentStart).
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	ctx, err = d.gcpIdentityPrecheck(ctx, agent)
+	if err != nil {
 		return err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
@@ -4187,7 +4233,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// secret-bootstrap kind, without which the broker drops it.
 	extras.EnvClassifications = envClassifications
 
-	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
+	resp, err := d.sendRestart(ctx, agent, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// The owning node mints and records its own run ID.
@@ -4320,7 +4366,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	}
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, opts)
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
+		if err := d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
+			return err
+		}
+		d.clearCloudRunNative(ctx, agent)
+		return nil
 	}
 	if err != nil {
 		if refused, ok := deleteRunMismatch(err, agent.RunID); ok {
@@ -4330,7 +4380,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		}
 		return err
 	}
-	return d.deletePreviousRuns(ctx, agent, endpoint, opts)
+	if err := d.deletePreviousRuns(ctx, agent, endpoint, opts); err != nil {
+		return err
+	}
+	// A confirmed delete of every run: the recorded native decision is
+	// removed.
+	d.clearCloudRunNative(ctx, agent)
+	return nil
 }
 
 // deletePreviousRuns deletes the runtime entries of the agent's previous
@@ -4972,28 +5028,51 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 // agent's role. For the same reason the agent's own access constraints
 // (Decide steps 7b and 7c) are not applied here, while the runtime read
 // applies them. The boundary of this check:
-//   - a row not shared with progeny is unchanged. The runtime read never
-//     returns such a row (sharing_disabled), so there is no read to agree
-//     with, and injecting a user's own secrets into that user's agents is
-//     how they reach an agent;
+//   - a row not shared with progeny is not held to it. The runtime read
+//     never returns such a row (sharing_disabled), so there is no read to
+//     agree with, and injecting a user's own secrets into that user's
+//     agents is how they reach an agent (see the chain rule below);
 //   - a chain without recorded provenance is unchanged (the read applies the
 //     progeny rule to it, not the ceiling);
 //   - an agent with no stored ancestry is unchanged;
 //   - a chain lookup error rejects the row (fail closed).
 //
-// So an agent created by a user and re-delegated by another user still
-// receives the owner's rows not shared with progeny at start; that is
-// tracked separately from this check. So is the NoAuth GITHUB_TOKEN
-// fallback in buildCreateRequestFor: it reads the owner's row by name
-// (secretBackend.Get), outside Resolve, and this check does not cover it.
+// A row not shared with progeny is held to the owner material chain rule
+// instead (ownerMaterialGate, start_owner_material_chain.go): it is
+// delivered only when the agent's recorded chain ends at the row's owner
+// and its ancestry starts there, so an agent whose authority was
+// re-recorded to another user no longer receives the owner's own rows.
+// The returned gate counts what that rule withheld or let through as
+// legacy; the caller reports it with gate.flush once the site is done.
+// The NoAuth GITHUB_TOKEN fallback in buildCreateRequestFor, which reads
+// the owner's row by name outside Resolve, applies the same UserScopeCheck.
+//
+// The agent's own access constraints are not applied on the owner path:
+// an access constraint that denies the agent secret.use does not stop
+// start-time injection of its owner's user-scope rows (the runtime read
+// does apply it).
 //
 // A row that is rejected is skipped inside the resolver, so a lower-scope
 // row with the same key stays in effect. Neither check widens anything: a
 // row is delivered only when every decision applied to it allows.
-func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent) *secret.ResolveOpts {
+//
+// ta is the test-admin scope restriction the caller applies, afterwards,
+// to what this check keeps: the single evaluation (testAdminScopesFor) the
+// caller also passes to applyTestAdminSecretScopes or uses for its own
+// withholding (resolveSecrets, resolveAsNeededForKeys and the launch
+// selection). When that restriction withholds the user scope, an unshared
+// owner row is kept for the restriction to drop: its withheld row still
+// masks a lower-scope row of the same name, exactly as without the owner
+// material chain rule, and nothing of the owner's is delivered either way.
+// A row kept this way is not counted by the owner material chain Warn or
+// metric: the restriction drops it and reports the withheld scope itself.
+// A nil ta (the by-name clone-token read, which applies no restriction
+// afterwards) never keeps a row for it.
+func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent, ta *testAdminScopes) (*secret.ResolveOpts, *ownerMaterialGate) {
 	if agent == nil || d.authzService == nil {
-		return nil
+		return nil, nil
 	}
+	gate := d.newOwnerMaterialGate(agent)
 	agentID := agent.ID
 	ancestry := agent.Ancestry
 	// The synthetic identity must carry the agent's real scopes.
@@ -5087,23 +5166,42 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			return decision.Allowed
 		}
 	}
-	if agent.OwnerID != "" && len(ancestry) > 0 {
+	if agent.OwnerID != "" {
 		// The chain verdict is the same for every row, so it is computed
-		// once, on the first shared row.
+		// once, on the first shared row, and shared by the dispatch's other
+		// sites (userSecretChainVerdictFor).
 		var (
 			chainDone       bool
 			chainUnrecorded bool
 			chainErr        bool
+			chain           userSecretChain
 		)
 		opts.UserScopeCheck = func(s secret.SecretMeta) bool {
 			if !s.AllowProgeny {
-				return true
+				// Start-time owner-path injection: an agent-subject access
+				// constraint that denies secret.use does not stop it.
+				if ta.withholdsUser() {
+					// The test-admin restriction drops the row and keeps its
+					// masking (see startSecretResolveOpts).
+					return true
+				}
+				return gate.allow(ctx, ownerMaterialKindSecret, s.ScopeID)
+			}
+			if len(ancestry) == 0 {
+				// No stored ancestry: the parent ceiling has nothing to
+				// hold the shared row to, so the row follows the owner
+				// material chain verdict (erratum 2b section 3a makes no
+				// ancestry exception). Only a recorded chain that ends at
+				// the row's owner keeps it; anything else, including a
+				// lookup error, withholds it.
+				return gate.allowSharedNoAncestry(ctx, ownerMaterialKindSecret, s.ScopeID)
 			}
 			ident := identity()
 			if !chainDone {
-				chain := d.authzService.userSecretChainVerdict(ctx, ident, nil)
-				chainErr = chain.decision.DenyCause == DenyCauseCeilingError
-				chainUnrecorded = !chain.decision.Allowed && chain.unrecorded
+				chain = d.authzService.userSecretChainVerdictFor(ctx, ident)
+				// The views and the census decide shared rows on the
+				// same test (ownerChainCheck.allowsSharedSecret).
+				chainErr, chainUnrecorded = sharedChainWithholds(chain)
 				chainDone = true
 			}
 			switch {
@@ -5111,9 +5209,14 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 				withheld("owner", s, Decision{DenyCause: DenyCauseCeilingError, Reason: "delegation chain could not be evaluated"})
 				return false
 			case chainUnrecorded:
-				return true
+				// Start follows the runtime read, which refuses every
+				// shared owner row to an agent whose chain is not
+				// recorded (chain_unrecorded).
+				return gate.withholdShared(ownerMaterialKindSecret)
 			}
-			ceiling := d.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(s.ID, s.ScopeID))
+			// The row's ceiling reuses the dispatch's chain verdict rather
+			// than walking the chain again.
+			ceiling, _ := d.authzService.evaluateUserSecretParentCeilingWithChain(ctx, ident, userSecretResource(s.ID, s.ScopeID), nil, newPrecomputedUserSecretChain(ident, chain))
 			if ceiling.Allowed && ceiling.legacyFallback != nil {
 				d.authzService.recordLegacyAdoptedFallback(ctx, legacyFallbackPathStart, ceiling.legacyFallback, agentID, s.ScopeID, s.ID, s.Name)
 			}
@@ -5126,7 +5229,7 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			return ceiling.Allowed
 		}
 	}
-	return opts
+	return opts, gate
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them
@@ -5152,13 +5255,17 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	}
 	// The start-time checks on the progeny and owner user-scope paths
 	// (startSecretResolveOpts).
-	resolveOpts := d.startSecretResolveOpts(ctx, agent)
+	// One evaluation of the test-admin scope restriction, for both the
+	// start-time checks' keep decision and the restriction itself.
+	ta := d.testAdminScopesFor(ctx, agent)
+	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
 
 	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+	gate.flush(ctx, ownerMaterialSiteResolveSecrets)
 	if err != nil {
 		return nil, nil, err
 	}
-	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+	resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {

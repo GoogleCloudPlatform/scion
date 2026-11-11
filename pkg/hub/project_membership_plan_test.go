@@ -35,7 +35,9 @@ func planBinding(id, roleDefID string) *store.RoleBinding {
 }
 
 func planRoleDef(id, name string) *store.RoleDefinition {
-	return &store.RoleDefinition{ID: id, Name: name, ScopeType: store.RoleScopeProject}
+	// A built-in name is a seeded system row, as in a real store
+	// (store.IsBuiltInProjectMembershipRoleDef needs System).
+	return &store.RoleDefinition{ID: id, Name: name, ScopeType: store.RoleScopeProject, System: store.IsBuiltInProjectMembershipRole(name)}
 }
 
 func TestPlanRoleSet_Keep(t *testing.T) {
@@ -161,8 +163,8 @@ func TestPlanRoleSet_Changes_BuiltInChangeReportedAsTwoUpdates(t *testing.T) {
 	changes := plan.changes(defs)
 
 	require.Len(t, changes, 2)
-	assert.Equal(t, planChange{op: MembershipOpUpdate, roleName: store.ProjectRoleMember}, changes[0])
-	assert.Equal(t, planChange{op: MembershipOpUpdate, roleName: store.ProjectRoleAdmin}, changes[1])
+	assert.Equal(t, planChange{op: MembershipOpUpdate, roleName: store.ProjectRoleMember, builtIn: true}, changes[0])
+	assert.Equal(t, planChange{op: MembershipOpUpdate, roleName: store.ProjectRoleAdmin, builtIn: true}, changes[1])
 }
 
 func TestPlanRoleSet_Changes_ExcludesKeep(t *testing.T) {

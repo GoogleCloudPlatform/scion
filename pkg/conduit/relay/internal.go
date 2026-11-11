@@ -131,7 +131,17 @@ func (r *Relay) AuthenticatePeer(w http.ResponseWriter, req *http.Request) (peer
 // shape), since the refusal comes before Admit and the ingress may re-pick
 // on that reason (design §3.9 "Relay selection").
 func (r *Relay) AuthenticateIngressPeer(w http.ResponseWriter, req *http.Request) (peer string, ok bool) {
-	return r.authenticatePeer(w, req, WriteNotAdmitting)
+	peer, ok = r.authenticatePeer(w, req, WriteNotAdmitting)
+	if !ok {
+		return "", false
+	}
+	// Only a hub proxies an ingress leg: a peer enrolled as a relay may
+	// not.
+	if err := RequirePeerRole(r.cfg.PeerAuth, peer, PeerRoleHub); err != nil {
+		http.Error(w, "relay-peer is not enrolled as a hub", http.StatusForbidden)
+		return "", false
+	}
+	return peer, true
 }
 
 // WriteNotAdmitting answers 503 with reason relay_not_admitting in the

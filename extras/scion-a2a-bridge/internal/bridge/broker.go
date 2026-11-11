@@ -149,8 +149,8 @@ func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
 // Publish receives a message from the Hub and routes it to the handler.
 func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.log.Debug("received message via broker",
-		"topic", topic,
-		"sender", msg.Sender,
+		"topic_kind", topicKindLabel(topic),
+		"sender_kind", senderKindLabel(msg.Sender),
 		"type", msg.Type,
 	)
 	b.mu.RLock()
@@ -167,7 +167,7 @@ func (b *BrokerServer) Subscribe(pattern string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.subscriptions[pattern] = true
-	b.log.Info("subscribed to pattern", "pattern", pattern)
+	b.log.Info("subscribed to pattern", "pattern_kind", topicKindLabel(pattern))
 	return nil
 }
 
@@ -176,7 +176,7 @@ func (b *BrokerServer) Unsubscribe(pattern string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.subscriptions, pattern)
-	b.log.Info("unsubscribed from pattern", "pattern", pattern)
+	b.log.Info("unsubscribed from pattern", "pattern_kind", topicKindLabel(pattern))
 	return nil
 }
 
@@ -248,18 +248,18 @@ func (b *BrokerServer) SetHostCallbacks(hc plugin.HostCallbacks) {
 			for i := 0; i < 10; i++ {
 				err := hc.RequestSubscription(pattern)
 				if err == nil {
-					b.log.Info("subscribed to deferred pattern", "pattern", pattern)
+					b.log.Info("subscribed to deferred pattern", "pattern_kind", topicKindLabel(pattern))
 					break
 				}
 				if err.Error() == "host callbacks not yet available" {
-					b.log.Debug("host callbacks not ready yet, retrying...", "pattern", pattern, "attempt", i+1)
+					b.log.Debug("host callbacks not ready yet, retrying...", "pattern_kind", topicKindLabel(pattern), "attempt", i+1)
 					select {
 					case <-time.After(time.Second):
 					case <-b.shutdownCtx.Done():
 						return
 					}
 				} else {
-					b.log.Error("failed to request deferred subscription", "pattern", pattern, "error", err)
+					b.log.Error("failed to request deferred subscription", "pattern_kind", topicKindLabel(pattern), "error", err)
 					break
 				}
 			}

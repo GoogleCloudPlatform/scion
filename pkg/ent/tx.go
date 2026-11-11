@@ -72,6 +72,12 @@ type Tx struct {
 	Conversation *ConversationClient
 	// ConversationParticipant is the client for interacting with the ConversationParticipant builders.
 	ConversationParticipant *ConversationParticipantClient
+	// Decision is the client for interacting with the Decision builders.
+	Decision *DecisionClient
+	// DecisionAnswer is the client for interacting with the DecisionAnswer builders.
+	DecisionAnswer *DecisionAnswerClient
+	// DecisionKeyCounter is the client for interacting with the DecisionKeyCounter builders.
+	DecisionKeyCounter *DecisionKeyCounterClient
 	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
 	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
@@ -134,6 +140,8 @@ type Tx struct {
 	Notification *NotificationClient
 	// NotificationSubscription is the client for interacting with the NotificationSubscription builders.
 	NotificationSubscription *NotificationSubscriptionClient
+	// PendingSecret is the client for interacting with the PendingSecret builders.
+	PendingSecret *PendingSecretClient
 	// PolicyBinding is the client for interacting with the PolicyBinding builders.
 	PolicyBinding *PolicyBindingClient
 	// Project is the client for interacting with the Project builders.
@@ -357,6 +365,9 @@ func (tx *Tx) init() {
 	tx.ConduitSession = NewConduitSessionClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)
 	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)
+	tx.Decision = NewDecisionClient(tx.config)
+	tx.DecisionAnswer = NewDecisionAnswerClient(tx.config)
+	tx.DecisionKeyCounter = NewDecisionKeyCounterClient(tx.config)
 	tx.DelegationAdoption = NewDelegationAdoptionClient(tx.config)
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
 	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)
@@ -388,6 +399,7 @@ func (tx *Tx) init() {
 	tx.NonceCache = NewNonceCacheClient(tx.config)
 	tx.Notification = NewNotificationClient(tx.config)
 	tx.NotificationSubscription = NewNotificationSubscriptionClient(tx.config)
+	tx.PendingSecret = NewPendingSecretClient(tx.config)
 	tx.PolicyBinding = NewPolicyBindingClient(tx.config)
 	tx.Project = NewProjectClient(tx.config)
 	tx.ProjectContributor = NewProjectContributorClient(tx.config)

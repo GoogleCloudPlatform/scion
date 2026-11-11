@@ -31,7 +31,7 @@ import (
 // reports it as AgentInfo.RunID.
 
 // fakeContainerCLI writes a fake container CLI that logs the arguments of
-// "run" (and answers with an ID) and prints listOutput for "list"/"ps".
+// "run" (and answers with a full container ID) and prints listOutput for "list"/"ps".
 func fakeContainerCLI(t *testing.T, listOutput string) (cmd, runLog string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -39,10 +39,10 @@ func fakeContainerCLI(t *testing.T, listOutput string) (cmd, runLog string) {
 	runLog = filepath.Join(dir, "run.log")
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1" in
-  run) echo "$@" >> %q; echo cid-123 ;;
+  run) echo "$@" >> %q; echo %s ;;
   ps|list) echo '%s' ;;
 esac
-`, runLog, listOutput)
+`, runLog, mockPodmanID, listOutput)
 	if err := os.WriteFile(cmd, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

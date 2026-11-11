@@ -60,6 +60,8 @@ func newRebuildFixture(t *testing.T, reportCommit string) *rebuildFixture {
 case "$1 $2" in
   "rev-parse HEAD") echo %s ;;
   "rev-parse --abbrev-ref") echo main ;;
+  "check-ref-format --branch") echo "$3" ;;
+  "version ") echo "git version 2.43.0" ;;
 esac
 `, f.calls, testCommit))
 	write("make", fmt.Sprintf("echo \"make $*\" >> '%s'\n", f.calls))
@@ -597,7 +599,8 @@ func TestRebuildServer_SettingsCheckWarnsOnly(t *testing.T) {
 
 // detachedGitStub replaces the fixture's git stub with one that reports a
 // detached HEAD for rev-parse --abbrev-ref (and the fixture commit for
-// rev-parse HEAD), recording every call.
+// rev-parse HEAD), answers the #6987 branch checks as the fixture's stub
+// does, and records every call.
 func detachedGitStub(t *testing.T, f *rebuildFixture) {
 	t.Helper()
 	stubs := filepath.SplitList(os.Getenv("PATH"))[0]
@@ -606,6 +609,8 @@ echo "git $*" >> '%s'
 case "$1 $2" in
   "rev-parse HEAD") echo %s ;;
   "rev-parse --abbrev-ref") echo HEAD ;;
+  "check-ref-format --branch") echo "$3" ;;
+  "version ") echo "git version 2.43.0" ;;
 esac
 `, f.calls, testCommit)
 	if err := os.WriteFile(filepath.Join(stubs, "git"), []byte(script), 0o755); err != nil {
@@ -638,7 +643,9 @@ func TestRebuildServer_DetachedHeadWithoutBranchRefused(t *testing.T) {
 	if err := e2.Run(context.Background(), &bytes.Buffer{}, map[string]string{"branch": "main"}); err != nil {
 		t.Fatalf("Run with branch=main: %v", err)
 	}
-	if !strings.Contains(f.callLog(t), "git reset --hard origin/main") {
+	// The stub reports git 2.43, whose reset does not accept
+	// --end-of-options, so it is not passed (#6987).
+	if !strings.Contains(f.callLog(t), "git reset --hard origin/main\n") {
 		t.Fatalf("branch=main did not reset to origin/main:\n%s", f.callLog(t))
 	}
 }

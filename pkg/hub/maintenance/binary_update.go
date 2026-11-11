@@ -347,7 +347,7 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 		e.snapshots = NewUnsupportedDBSnapshotter("no database snapshotter is configured")
 	}
 	if e.floor == "" {
-		e.floor = version.DowngradeFloor
+		e.floor = defaultDowngradeFloor
 	}
 	e.preflightTimeout = preflightTimeout
 	e.installTimeout = installTimeout
@@ -679,6 +679,17 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 			return e.undoActivation(ctx, logger, target, swap,
 				fmt.Errorf("installing the broker plugins failed, so the hub was not restarted: %w", err))
 		}
+	}
+
+	// The downloads and extracted binaries are no longer needed: Stage
+	// copied the hub binary and the plugin swap its new builds. They are
+	// removed now because the restart below can end this process before the
+	// deferred removal runs (ptone/scion#7177); the defer still covers the
+	// failure paths. The plugin staging keeps old/ for a rollback until the
+	// restart and is marked applied, so the next start removes it.
+	_ = os.RemoveAll(tmpDir)
+	if swap != nil {
+		swap.markApplied(logger)
 	}
 
 	// ── Restart ─────────────────────────────────────────────────────────

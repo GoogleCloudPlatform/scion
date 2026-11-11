@@ -80,6 +80,12 @@ type AuthenticatedUser struct {
 	displayName string
 	role        string
 	clientType  string // "web", "cli", "api"
+
+	// sessionGen is the user's session generation captured when a hub
+	// user token authenticated the request; sessionGenSet reports whether
+	// one was captured.
+	sessionGen    int64
+	sessionGenSet bool
 }
 
 // NewAuthenticatedUser creates a new AuthenticatedUser.
@@ -110,6 +116,20 @@ func (u *AuthenticatedUser) Role() string { return u.role }
 
 // ClientType returns the client type (web, cli, api).
 func (u *AuthenticatedUser) ClientType() string { return u.clientType }
+
+// WithCapturedSessionGeneration returns a copy of u carrying gen, the session
+// generation captured when a hub user token authenticated u.
+func (u *AuthenticatedUser) WithCapturedSessionGeneration(gen int64) *AuthenticatedUser {
+	c := *u
+	c.sessionGen, c.sessionGenSet = gen, true
+	return &c
+}
+
+// CapturedSessionGeneration returns the session generation captured for u, and
+// whether one was captured.
+func (u *AuthenticatedUser) CapturedSessionGeneration() (int64, bool) {
+	return u.sessionGen, u.sessionGenSet
+}
 
 // ScopedUserIdentity wraps a UserIdentity with project and scope constraints.
 // It is produced when authenticating with a User Access Token (UAT).

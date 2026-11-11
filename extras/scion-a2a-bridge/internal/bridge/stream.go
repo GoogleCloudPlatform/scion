@@ -26,7 +26,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // ErrTooManySubscribers is returned when the SSE connection limit is reached.
@@ -298,7 +297,9 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	}
 
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
-	b.registerActiveTaskFor(taskID, aKey, callerIdentityFromContext(ctx))
+	// The message is sent as the bridge admin, so the task is in the admin
+	// class: it takes pushed replies only from the admin topic.
+	b.registerActiveTask(taskID, aKey)
 
 	sessionCleanup, err := b.streams.AcquireSession(taskID)
 	if err != nil {
@@ -339,10 +340,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		pattern := projectkeys.UserTopic(agentCtx.ProjectID, b.config.Hub.User)
-		if err := b.broker.RequestSubscription(pattern); err != nil {
-			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
-		}
+		b.subscribeAdminUserTopics(agentCtx.ProjectID)
 	}
 
 	firstSent := b.beginFirstSend(taskID, launching)

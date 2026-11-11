@@ -249,8 +249,8 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate tokens
-	accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+	accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 	)
 	if err != nil {
 		slog.Error("test-login: failed to generate tokens", "error", err)

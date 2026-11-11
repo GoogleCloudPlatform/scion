@@ -23,9 +23,39 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/principal"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// apiLogDetailCap caps the error text WriteErrorFromErr logs for a 5xx. It
+// equals the hub's upstreamTextMaxBytes (pkg/hub/upstream_text.go); keep the
+// two in step. The error can carry upstream or backend text
+// (ptone/scion#7498).
+const apiLogDetailCap = 512
+
+// renderLogDetail renders error text for the 5xx log: s is sliced to
+// 4*apiLogDetailCap bytes first, so a large error is never fully scanned
+// (every input byte renders to at least one output byte, so the rendered
+// prefix and the cut marker are the same as for the full input; a rune split
+// by the slice renders as U+FFFD and is past the cap anyway), then
+// principal.SanitizeForLog replaces control, format and line separator runes
+// and cuts to apiLogDetailCap.
+func renderLogDetail(s string) string {
+	if limit := 4 * apiLogDetailCap; len(s) > limit {
+		s = s[:limit]
+	}
+	return principal.SanitizeForLog(s, apiLogDetailCap)
+}
+
+// errLogDetail renders err for the 5xx log through renderLogDetail. A nil
+// err, which WriteErrorFromErr maps to the fallback 500, logs as "<nil>".
+func errLogDetail(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return renderLogDetail(err.Error())
+}
 
 // APIError represents a standardized error response.
 type APIError struct {
@@ -321,6 +351,25 @@ const (
 	// reliably and show a specific message (design ptone/scion#2291 §6).
 	ErrCodeSecretScopeRestricted = "secret_scope_restricted"
 
+	// ErrCodeSecretPendingHeldByOtherAgent is returned when an agent writes
+	// a user-scope secret whose name already has a pending secret, written
+	// by another agent, awaiting the owner's decision. Nothing overrides it,
+	// force included; the response does not name the other writer.
+	ErrCodeSecretPendingHeldByOtherAgent = "secret_pending_held_by_other_agent"
+
+	// ErrCodeSecretPendingExistingChanged is returned when the owner
+	// approves a pending secret but the approved secret of the same name is
+	// not the one recorded when the agent wrote the pending secret (one was
+	// created, changed or deleted since). Nothing is written and the
+	// pending secret is kept; the owner rejects it and has the agent save
+	// it again.
+	ErrCodeSecretPendingExistingChanged = "secret_pending_existing_changed"
+
+	// ErrCodeSecretPendingCap is returned (429) when an agent's user-scope
+	// secret write would exceed the pending secret caps: per writing agent
+	// or per owner. Nothing is stored.
+	ErrCodeSecretPendingCap = "secret_pending_cap"
+
 	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
 	// when the desired role set contains an unknown role definition ID, a
 	// non-project-scoped role, or more than one built-in membership role
@@ -526,7 +575,7 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 			"status", statusCode,
 			"code", code,
 			"requestID", requestID,
-			"error", err,
+			"error", errLogDetail(err),
 		)
 	case elevatedClientErrorStatus(statusCode):
 		slog.Info("API client error from Go error",

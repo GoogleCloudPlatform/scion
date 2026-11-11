@@ -88,6 +88,9 @@ type HubServerConfig struct {
 	// When true, the broker skips file cleanup for soft-deleted agents.
 	SoftDeleteRetainFiles bool `json:"softDeleteRetainFiles" yaml:"softDeleteRetainFiles" koanf:"softDeleteRetainFiles"`
 
+	// Chat holds web chat server limits (settings server.hub.chat).
+	Chat HubChatConfig `json:"chat" yaml:"chat" koanf:"chat"`
+
 	// HubID is a unique identifier for this hub instance.
 	// Used to namespace secrets and other hub-scoped resources in shared GCP projects.
 	// Defaults to sha256(hostname)[:12] if not set.
@@ -111,6 +114,16 @@ type HubServerConfig struct {
 	// (ptone/scion#4240, phase X2). Like HubClass it is never writable
 	// through the settings API in any mode.
 	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
+
+	// ContentURL is server.hub.content_url (ContentURLKey): the hub's content
+	// host, a second public origin on which shared artifacts are served.
+	// Empty serves them on the hub endpoint. See ValidateContentURL.
+	ContentURL string `json:"contentUrl,omitempty" yaml:"contentUrl,omitempty" koanf:"contentUrl"`
+
+	// ContentURLAllowSameSite is server.hub.content_url_allow_same_site
+	// (ContentURLAllowSameSiteKey): the override that lets ContentURL be on
+	// the hub endpoint's registrable domain, which is refused without it.
+	ContentURLAllowSameSite bool `json:"contentUrlAllowSameSite,omitempty" yaml:"contentUrlAllowSameSite,omitempty" koanf:"contentUrlAllowSameSite"`
 
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
@@ -211,6 +224,18 @@ type HubServerConfig struct {
 	// PortProxy holds the agent port proxy settings (validated by
 	// HubPortProxyConfig.Validate at startup).
 	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
+
+	// SSE holds the browser events stream settings (validated by
+	// HubSSEConfig.Validate at startup; ptone/scion#5230).
+	SSE HubSSEConfig `json:"sse" yaml:"sse" koanf:"sse"`
+
+	// PlatformRequestTimeout is the request timeout of the platform in
+	// front of the hub, for example the Cloud Run service timeout ("" =
+	// none declared). When set it clamps the events stream maximum age and
+	// the conduit session lifetime cap to PlatformTimeoutShare of it
+	// (validated by ValidatePlatformRequestTimeout at startup;
+	// ptone/scion#5230, ptone/scion#5245).
+	PlatformRequestTimeout string `json:"platformRequestTimeout,omitempty" yaml:"platformRequestTimeout,omitempty" koanf:"platformRequestTimeout"`
 
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.

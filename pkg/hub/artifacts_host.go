@@ -40,10 +40,7 @@ type artifactHost struct {
 	server *Server
 }
 
-var (
-	_ artifacts.Host                 = (*artifactHost)(nil)
-	_ artifacts.ReviewGrantAuthority = (*artifactHost)(nil)
-)
+var _ artifacts.Host = (*artifactHost)(nil)
 
 // newArtifactHost returns the artifacts.Host for s. The authz service is read
 // per call, not captured, so a host built at route registration sees the
@@ -195,71 +192,6 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
 	return decision.Allowed
-}
-
-// MayGrantReview implements artifacts.ReviewGrantAuthority:
-// ReviewGrantClause != "".
-func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
-	return h.ReviewGrantClause(ctx, ownerAgentID, homeScope, sponsorRef) != ""
-}
-
-var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
-
-// ReviewGrantClause implements artifacts.ReviewGrantClauser (and, through
-// MayGrantReview, artifacts.ReviewGrantAuthority; design D24,
-// ptone/scion#4014, ptone/scion#5120): which clause, if any, lets the
-// calling user give a user review access (a review grant)
-// on an artifact owned by agent ownerAgentID and
-// homed in project homeScope. Either is enough:
-//   - the caller holds project.manage on homeScope (project owners and
-//     admins, and super-admins), decided by AuthzService.CheckAccess like any
-//     project administration, so a scoped token's own limits apply;
-//   - the caller is the agent's delegating user. When the artifact records
-//     one (sponsorRef, ptone/scion#6028), that recorded user, while active
-//     and admitted to homeScope (recordedDelegator); the live chain is then
-//     not consulted, so the user recorded at creation keeps the clause after
-//     the agent is deleted or re-delegated, and no one else gains it. When
-//     nothing is recorded (an artifact from before sponsors were recorded),
-//     the user at the root of the agent's delegation chain, resolved now
-//     from the recorded, active edges only (ResolveProvenanceRoot with no
-//     legacy allowance: a revoked, missing, ambiguous or unrecorded edge, a
-//     deleted agent on the chain, or a root user who is inactive or no
-//     longer admitted to the agent's project resolves to no one). The
-//     agent's stored owner or creator links are never consulted.
-//
-// A home project that no longer exists gives no one this authority. The
-// first clause that holds is named: artifacts.ReviewClauseProjectAdmin,
-// checked first, then artifacts.ReviewClauseDelegatingUser. Only users are
-// answered; every other identity, a missing authz service, and every lookup
-// error answer "".
-func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) string {
-	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
-		return ""
-	}
-	userID := artifactCallerUserID(ctx)
-	if userID == "" {
-		return ""
-	}
-	// A deleted home project gives no review authority, as it has no
-	// stewards: a system role would otherwise still pass the admin clause,
-	// and admission the recorded clause, for a project id that no longer
-	// exists. A lookup failure answers "".
-	if exists, err := h.ScopesExist(ctx, []string{homeScope}); err != nil || !exists[homeScope] {
-		return ""
-	}
-	if h.AdministersScope(ctx, homeScope) {
-		return artifacts.ReviewClauseProjectAdmin
-	}
-	if sponsorRef != "" {
-		if h.recordedDelegator(ctx, userID, sponsorRef, homeScope) {
-			return artifacts.ReviewClauseDelegatingUser
-		}
-		return ""
-	}
-	if h.liveDelegator(ctx, userID, ownerAgentID, "review grant") {
-		return artifacts.ReviewClauseDelegatingUser
-	}
-	return ""
 }
 
 var _ artifacts.Stewardship = (*artifactHost)(nil)
@@ -946,8 +878,7 @@ var _ artifacts.ScopeAdministrator = (*artifactHost)(nil)
 // do not hold it), decided by AuthzService.CheckAccess like any
 // project administration, so a scoped token's own limits apply. Only users
 // are answered; every other identity and a missing authz service answer
-// false. It is the first custodian clause of the delete route and the
-// project-admin half of ReviewGrantClause.
+// false. It is the first custodian clause of the delete route.
 func (h *artifactHost) AdministersScope(ctx context.Context, scopeRef string) bool {
 	if h.server == nil || h.server.authzService == nil || scopeRef == "" {
 		return false
@@ -1218,4 +1149,85 @@ func (h *artifactHost) PermitsUploadRead(ctx context.Context) bool {
 		return h.PermitsMessageRead(ctx) && h.server.newSelfScopeCheck(ctx, token, permInboxRead).allows("")
 	}
 	return false
+}
+
+var _ artifacts.FeatureGate = (*artifactHost)(nil)
+
+// FeatureEnabled implements artifacts.FeatureGate with the hub's experiment
+// resolution. It fails closed: a name that is not a registered server-layer
+// experiment answers false, whatever is stored for it.
+func (h *artifactHost) FeatureEnabled(_ context.Context, name string) bool {
+	if h.server == nil {
+		return false
+	}
+	exp, ok := h.server.experimentRegistry().Lookup(name)
+	if !ok || !exp.HasLayer(experiments.LayerServer) {
+		return false
+	}
+	return h.server.experimentEnabled(name)
+}
+
+var _ artifacts.PrincipalNamer = (*artifactHost)(nil)
+
+// PrincipalDisplayNames implements artifacts.PrincipalNamer for the
+// open-review check: a user's display name, or an agent's name. It never
+// answers an email address or an id: a user without a display name, an
+// agent without a name, a ref that is not a known principal and any store
+// error are left out of the answer, and the service names them "a
+// reviewer". It costs at most two store queries.
+func (h *artifactHost) PrincipalDisplayNames(ctx context.Context, refs []string) map[string]string {
+	out := make(map[string]string, len(refs))
+	if h.server == nil || h.server.store == nil || len(refs) == 0 {
+		return out
+	}
+	// The answer is keyed by the refs as given; ids compare in lower case.
+	var agentIDs, userIDs []string
+	agentRefs, userRefs := map[string]string{}, map[string]string{}
+	for _, ref := range refs {
+		kind, id, ok := strings.Cut(ref, ":")
+		if _, err := uuid.Parse(id); !ok || err != nil {
+			continue
+		}
+		switch kind {
+		case artifacts.PrincipalKindAgent:
+			agentIDs = append(agentIDs, id)
+			agentRefs[strings.ToLower(id)] = ref
+		case artifacts.PrincipalKindUser:
+			userIDs = append(userIDs, id)
+			userRefs[strings.ToLower(id)] = ref
+		}
+	}
+	if len(agentIDs) > 0 {
+		res, err := h.server.store.ListAgents(ctx, store.AgentFilter{IDs: agentIDs},
+			store.ListOptions{Limit: len(agentIDs), SkipTotalCount: true})
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: reading reviewer agent names failed", "error", err)
+		} else {
+			for _, a := range res.Items {
+				if name := strings.TrimSpace(a.Name); name != "" && a.DeletedAt.IsZero() {
+					if ref, ok := agentRefs[strings.ToLower(a.ID)]; ok {
+						out[ref] = name
+					}
+				}
+			}
+		}
+	}
+	if len(userIDs) > 0 {
+		users, err := h.server.store.GetUsersByIDs(ctx, userIDs)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: reading reviewer user names failed", "error", err)
+		} else {
+			for _, u := range users {
+				if u == nil {
+					continue
+				}
+				if name := strings.TrimSpace(u.DisplayName); name != "" && !strings.Contains(name, "@") {
+					if ref, ok := userRefs[strings.ToLower(u.ID)]; ok {
+						out[ref] = name
+					}
+				}
+			}
+		}
+	}
+	return out
 }

@@ -15,8 +15,10 @@
 // Package hubtestutil holds generic test helpers for pkg/hub and its
 // subpackages: deterministic test IDs, in-memory SQLite, the TestMain memory
 // and leak guards, hermetic git runners, small fault-injection and buffer
-// types, JSON response decoding, slog capture, koanf builders and small
-// value helpers.
+// types, JSON response decoding, slog capture, koanf builders, small value
+// helpers, authz store seeders (users, role definitions, role bindings and
+// group members), permission-ceiling and provenance values, and a go/ast
+// receiver-name helper.
 //
 // Only test code imports it. It must never import pkg/hub
 // (no_hub_import_test.go enforces this), so that future pkg/hub/<area>
@@ -36,6 +38,10 @@
 // slogcapture.go (family
 // hack/hubshard/extract/families/hubtestutil-wave2.txt; pkg/hub keeps their
 // names through pkg/hub/zz_alias_hubtestutil_wave2_test.go).
+// So did the Server-free authz-family seeders and value helpers in
+// access_sqlite.go and authz_sqlite.go (family
+// hack/hubshard/extract/families/hubtestutil-wave3.txt; pkg/hub keeps their
+// names through pkg/hub/zz_alias_hubtestutil_wave3_test.go).
 //
 // Hand-written: OpenMigratedTestStore (teststore.go), a migrated test store
 // for area packages, and RunTestMain (runtestmain.go and

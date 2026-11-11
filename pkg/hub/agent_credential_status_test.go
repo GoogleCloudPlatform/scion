@@ -365,6 +365,108 @@ func TestAgentRefresh_MarkerAbsent_LegacySuspendedAgentDenied(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "suspended")
 }
 
+// A suspended agent's token with an active credential is not refreshed,
+// as for a legacy token: whether or not the credential marker is set, the
+// refresh answers 403 and leaves the presented credential as it was. The
+// control rows run the same fixture unsuspended, which refreshes with 200.
+func TestAgentRefresh_SuspendedAgentDenied(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		marker    bool
+		suspended bool
+	}{
+		{"marker present", true, true},
+		{"marker absent", false, true},
+		{"control: marker present, not suspended", true, false},
+		{"control: marker absent, not suspended", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, project := setupCredentialTestServer(t)
+			ctx := context.Background()
+
+			agentID := tid("agent-refresh-suspended")
+			agent := createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
+
+			token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+			require.NoError(t, err)
+			claims, err := srv.agentTokenService.ValidateAgentToken(token)
+			require.NoError(t, err)
+			cred, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+			require.NoError(t, err)
+			require.Nil(t, cred.RevokedAt)
+
+			if tc.suspended {
+				agent.Phase = "suspended"
+				require.NoError(t, s.UpdateAgent(ctx, agent))
+			}
+
+			credentialID := ""
+			if tc.marker {
+				credentialID = cred.ID
+			}
+			req := buildAgentRefreshRequest(agentID, claims, credentialID, false)
+			rec := httptest.NewRecorder()
+			srv.handleAgentTokenRefresh(rec, req, agentID)
+
+			if !tc.suspended {
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "suspended")
+
+			got, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+			require.NoError(t, err)
+			assert.Nil(t, got.RevokedAt, "a refused refresh leaves the presented credential as it was")
+		})
+	}
+}
+
+// refreshNilAgentStore answers GetAgent for one agent with no row and no
+// error while its fault switch is armed. No real store does that, but the
+// refresh must not rely on it.
+type refreshNilAgentStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	id    string
+}
+
+func (s *refreshNilAgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fault.Active() && id == s.id {
+		return nil, nil
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// A refresh whose agent lookup returns no agent and no error is refused,
+// not a panic, and leaves the presented credential as it was.
+func TestAgentRefresh_NilAgentLookupRefused(t *testing.T) {
+	agentID := tid("agent-refresh-nil")
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *refreshNilAgentStore {
+		return &refreshNilAgentStore{Store: inner, fault: fault, id: agentID}
+	})
+	srv, s, _, project := setupCredentialTestServerOn(t, srv, s)
+	ctx := context.Background()
+
+	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
+	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	require.NoError(t, err)
+	cred, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+	require.NoError(t, err)
+
+	fault.Arm()
+	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
+	rec := httptest.NewRecorder()
+	require.NotPanics(t, func() { srv.handleAgentTokenRefresh(rec, req, agentID) })
+
+	assert.NotEqual(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	got, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+	require.NoError(t, err)
+	assert.Nil(t, got.RevokedAt, "a refused refresh leaves the presented credential as it was")
+}
+
 func TestAgentRefresh_MarkerAbsent_LegacyDeletedAgentDenied(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 

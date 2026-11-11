@@ -102,6 +102,9 @@ type ConduitRelayOptions struct {
 	// deadline ends by it (server.hub.conduit.lifetime_cap; 0 = the
 	// default, 3500s).
 	LifetimeCap time.Duration
+	// JitterLifetimeCap is relay.Config.JitterLifetimeCap: the
+	// per-session jitter of LifetimeCap (nil: none; ptone/scion#5245).
+	JitterLifetimeCap func(time.Duration) time.Duration
 	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
 	// (0 = use it; negative disables the sweep, for tests).
 	AuthzRecheckInterval time.Duration
@@ -264,6 +267,8 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: opts.JitterLifetimeCap,
 		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
 			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
 		},
@@ -621,7 +626,13 @@ func (s *Server) decideConduitFor(w http.ResponseWriter, r *http.Request, forRel
 	// upgrade. A broker authenticates with HMAC headers in its own handler,
 	// so it is recognized by its broker-id header rather than by a context
 	// identity.
-	identity := GetIdentityFromContext(r.Context())
+	// A hub user token request without a session generation is refused,
+	// never defaulted (conduitCaptureSessionGeneration).
+	identity, ok := conduitCaptureSessionGeneration(r.Context(), GetIdentityFromContext(r.Context()))
+	if !ok {
+		refuseConduitUncapturedSessionGeneration(w)
+		return conduitAdmission{}, false
+	}
 	agentIdent, isAgent := identity.(AgentIdentity)
 	userIdent, isUser := identity.(UserIdentity)
 	switch {

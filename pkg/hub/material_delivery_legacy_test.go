@@ -200,31 +200,6 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 		// permissions are intrinsic to its hop and the strict walk admits it
 		// (TestUATIntrinsic_LaunchMaterialStrictWalk).
 		{
-			// The child of a UAT-created agent, recorded before the deliver
-			// permissions were intrinsic to the token hop: its recorded agent
-			// edge lacks the permission only because its parent could not
-			// pass it down (uat_descendant_legacy, noted at the child's hop).
-			name: "recorded_child_of_uat_created_agent", opts: ldOptions{noEdge: true},
-			after: func(t *testing.T, m *ldFixture) {
-				p := lgParent(t, m, "uat-parent")
-				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgUATCreated)
-				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
-			},
-			wantCohort: legacyDeliveryCohortUATDescendant,
-		},
-		{
-			// Two inheriting hops below the UAT-created agent.
-			name: "recorded_grandchild_of_uat_created_agent", opts: ldOptions{noEdge: true},
-			after: func(t *testing.T, m *ldFixture) {
-				gp := lgParent(t, m, "uat-grandparent")
-				p := lgParent(t, m, "uat-middle")
-				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, gp, m.agent.ProjectID, lgUATCreated)
-				hdEdge(t, m.store, store.DelegationPrincipalAgent, gp, p, m.agent.ProjectID, withBoundedCeiling("agent.read"))
-				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
-			},
-			wantCohort: legacyDeliveryCohortUATDescendant,
-		},
-		{
 			// The agent's own recorded edge passes; its parent's edge is
 			// unrecorded.
 			name: "legacy_ancestor", opts: ldOptions{noEdge: true},
@@ -297,6 +272,28 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 		opts  ldOptions
 		after func(t *testing.T, m *ldFixture)
 	}{
+		{
+			// LEGACY DATA: the child of a UAT-created agent, recorded before
+			// the deliver permissions were intrinsic to the token hop: its
+			// recorded agent edge lacks them, and no fallback serves it.
+			name: "recorded_child_of_uat_created_agent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "uat-parent")
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgUATCreated)
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
+		{
+			// Two such hops below the UAT-created agent.
+			name: "recorded_grandchild_of_uat_created_agent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				gp := lgParent(t, m, "uat-grandparent")
+				p := lgParent(t, m, "uat-middle")
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, gp, m.agent.ProjectID, lgUATCreated)
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, gp, p, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
 		{
 			name: "held_agent_no_edge", opts: ldOptions{noEdge: true},
 			after: func(t *testing.T, m *ldFixture) {
@@ -576,7 +573,7 @@ func TestLegacyDeliveryFallback_Scope(t *testing.T) {
 		assert.False(t, legacyFallbackCauses[c], "cause %q must never take the fallback", c)
 	}
 	for _, p := range LaunchDeliveryCensusPermissions {
-		assert.True(t, uatIntrinsicPermissionSet[p], "%s is intrinsic to a token-recorded hop, so uat_descendant_legacy can reach it", p)
+		assert.True(t, uatIntrinsicPermissionSet[p], "%s is intrinsic to a token-recorded hop", p)
 	}
 }
 

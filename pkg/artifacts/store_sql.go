@@ -42,13 +42,29 @@ const initLockKey int64 = 0x6172746966616374
 // timestamps, so that they sort lexically in time order.
 const sqliteTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
-// migration is one named schema step. Steps run in order, each at most once
-// per database, and are recorded in artifact_migrations.
+// migration is one named step. Steps run in order, each at most once per
+// database, and are recorded in artifact_migrations. A step runs its
+// dialect's DDL, when there is any, and then apply, when set; both run in
+// Init's transaction, so a failure leaves neither the change nor the ledger
+// row.
+//
+// apply may return errMigrationDeferred to put its step off: Init then
+// records no ledger row for it, keeps going with the later steps and
+// succeeds, and the step runs again at the next start. A deferring apply
+// must return before it writes anything, so it leaves nothing behind in
+// the shared transaction. Only a data step whose effect no later step
+// depends on may defer (no schema change); 0014_review_ladder qualifies,
+// since it only rewrites grant permissions.
 type migration struct {
 	name     string
 	sqlite   string
 	postgres string
+	apply    func(ctx context.Context, tx *sql.Tx, s *sqlStore) error
 }
+
+// errMigrationDeferred is returned by a migration's apply to put its step
+// off until the next start (see migration).
+var errMigrationDeferred = errors.New("artifacts: migration deferred")
 
 // migrations is the ordered schema history. Append new steps; never edit or
 // reorder applied ones.
@@ -64,6 +80,8 @@ var migrations = []migration{
 	{name: migrationAttachments, sqlite: sqliteAttachments, postgres: postgresAttachments},
 	{name: migrationAttachmentProject, sqlite: sqliteAttachmentProject, postgres: postgresAttachmentProject},
 	{name: migrationDeliveryRedemptions, sqlite: sqliteDeliveryRedemptions, postgres: postgresDeliveryRedemptions},
+	{name: migrationReviewSessions, sqlite: sqliteReviewSessions, postgres: postgresReviewSessions},
+	{name: migrationReviewLadder, apply: applyReviewLadder},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -206,8 +224,17 @@ func (s *sqlStore) Init(ctx context.Context) error {
 		if s.dialect == dialectPostgres {
 			ddl = m.postgres
 		}
-		if _, err := tx.ExecContext(ctx, ddl); err != nil {
-			return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+		if ddl != "" {
+			if _, err := tx.ExecContext(ctx, ddl); err != nil {
+				return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+			}
+		}
+		if m.apply != nil {
+			if err := m.apply(ctx, tx, s); errors.Is(err, errMigrationDeferred) {
+				continue
+			} else if err != nil {
+				return fmt.Errorf("artifacts: migration %s: %w", m.name, err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, s.rebind("INSERT INTO artifact_migrations (name, applied_at) VALUES (?, ?)"),
 			m.name, s.timeArg(time.Now())); err != nil {
@@ -971,8 +998,9 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 	arm("artifact a", "a.owner_kind = ? AND a.owner_ref = ?", q.PrincipalKind, q.PrincipalRef)
 	if !q.OwnedOnly {
 		now := s.timeArg(q.Now)
-		grantWhere := " AND (g.expires_at IS NULL OR g.expires_at > ?) AND g.permission IN (?, ?, ?)"
-		grantArgs := []any{now, GrantRead, GrantWrite, GrantAdmin}
+		permSQL, permArgs := readGrantFilter("g")
+		grantWhere := " AND (g.expires_at IS NULL OR g.expires_at > ?) AND " + permSQL
+		grantArgs := append([]any{now}, permArgs...)
 		arm("artifact_grant g JOIN artifact a ON a.id = g.artifact_id",
 			"g.subject_kind = ? AND g.subject_ref = ?"+grantWhere,
 			append([]any{SubjectPrincipal, PrincipalRef(q.PrincipalKind, q.PrincipalRef)}, grantArgs...)...)
@@ -990,6 +1018,19 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 	args = append(args, q.Limit)
 
 	return s.rebind(b.String()), args
+}
+
+// readGrantFilter returns the SQL condition, on the grant table aliased
+// alias, that a grant carries a permission in grantsForRead, and its
+// arguments. Both list pushdowns (the grant arms of the candidate query and
+// the "shared with the project" subquery) use it, so the read set the list
+// pushes down to SQL is always the one canReadWith matches in Go.
+func readGrantFilter(alias string) (string, []any) {
+	args := make([]any, len(grantsForRead))
+	for i, p := range grantsForRead {
+		args[i] = p
+	}
+	return alias + ".permission IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(args)), ", ") + ")", args
 }
 
 // candidateColumns is the column list every arm of the candidate query
@@ -1028,9 +1069,10 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	if q.HomeScope != "" {
 		// Shared with the project: an unexpired scope grant to it, found
 		// through the (artifact_id, subject_kind, subject_ref) unique index.
+		permSQL, permArgs := readGrantFilter("sg")
 		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
-			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND sg.permission IN (?, ?, ?))`
-		sharedArgs := []any{SubjectScope, q.HomeScope, now, GrantRead, GrantWrite, GrantAdmin}
+			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND ` + permSQL + `)`
+		sharedArgs := append([]any{SubjectScope, q.HomeScope, now}, permArgs...)
 		switch {
 		case q.ScopeShares && q.SharedOnly:
 			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)

@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -132,7 +131,7 @@ func checkAttachmentFiles(paths []string, toAgent bool, budget *int64) ([]string
 		if err != nil {
 			return nil, fmt.Errorf("attachment %q: %w", p, err)
 		}
-		if isHTMLOrSVG(abs, head) {
+		if messaging.IsHTMLOrSVG(abs, head) {
 			return nil, newUsageError("attachment %q: %s", p, htmlRefusal)
 		}
 		base := strings.ToLower(filepath.Base(abs))
@@ -178,17 +177,6 @@ func readAttachmentHead(path string) ([]byte, error) {
 		return nil, err
 	}
 	return buf[:n], nil
-}
-
-// isHTMLOrSVG reports whether the file is HTML or SVG, by extension or by
-// its first bytes.
-func isHTMLOrSVG(path string, head []byte) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".html", ".htm", ".svg":
-		return true
-	}
-	lower := bytes.ToLower(head)
-	return bytes.Contains(lower, []byte("<html")) || bytes.Contains(lower, []byte("<svg"))
 }
 
 func isMarkdown(path string) bool {

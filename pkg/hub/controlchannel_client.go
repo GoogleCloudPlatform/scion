@@ -21,9 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -411,7 +414,7 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 
 	if resp.StatusCode >= 400 {
 		// Keep the broker's status for the hub handler to relay (#2546 R2).
-		return nil, nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
+		return nil, nil, newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
 	}
 
 	if resp.StatusCode == http.StatusAccepted {
@@ -500,7 +503,7 @@ func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerI
 		return err
 	}
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
-		return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
+		return newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
 	}
 	return nil
 }
@@ -524,7 +527,9 @@ func (c *ControlChannelBrokerClient) ImageStatus(ctx context.Context, brokerID, 
 		return nil, &BrokerUnsupportedError{StatusCode: resp.StatusCode}
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		// A plain error, as before; the body goes to the hub log only.
+		se := newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
+		return nil, errors.New(se.Error())
 	}
 
 	var result BrokerImageStatusResponse
@@ -628,7 +633,7 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
+		return nil, newBrokerStatusError(brokerID, resp.StatusCode, resp.Body, resp.Headers["Retry-After"])
 	}
 
 	return resp, nil
@@ -638,6 +643,12 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 // brokerHTTPError when the broker answers with an HTTP error status, so
 // callers can react to specific codes (e.g. 404 on an idempotent delete)
 // instead of parsing the message. RetryAfter is the broker's Retry-After.
+//
+// Body is the broker's raw answer. It never goes into Error(), because error
+// text is copied into client responses and stored messages: Error() names
+// only the status and, when well formed, the broker's error code. The body
+// reaches the hub log only, rendered by brokerBodyForLog, once, when
+// newBrokerStatusError builds the error; LogValue leaves it out.
 type brokerStatusError struct {
 	StatusCode int
 	Body       string
@@ -645,7 +656,104 @@ type brokerStatusError struct {
 }
 
 func (e *brokerStatusError) Error() string {
-	return fmt.Sprintf("runtime broker returned error %d: %s", e.StatusCode, e.Body)
+	if code := e.brokerErrorCode(); brokerCodePattern.MatchString(code) {
+		return fmt.Sprintf("runtime broker returned error %d (%s)", e.StatusCode, code)
+	}
+	return fmt.Sprintf("runtime broker returned error %d", e.StatusCode)
+}
+
+// LogValue renders the error for the hub log as its text, status, code and
+// body length, without the body: newBrokerStatusError has already logged
+// the body once.
+func (e *brokerStatusError) LogValue() slog.Value {
+	return slog.GroupValue(append([]slog.Attr{slog.String("text", e.Error())},
+		brokerStatusLogAttrs(e.StatusCode, e.Body)...)...)
+}
+
+// brokerErrorGenericMessage is the client-facing text used in place of a
+// broker answer that carries no JSON error message.
+const brokerErrorGenericMessage = "the runtime broker returned an error"
+
+// maxBrokerBodyLogBytes caps how much of a broker's error body is written
+// to the hub log; body_len records the full length.
+const maxBrokerBodyLogBytes = 2 << 10
+
+// newBrokerStatusError builds the error for a broker's HTTP error answer and
+// logs the answer once: the broker id, the status, the broker's error code
+// and the capped, rendered body with its full length. A 404 is logged at
+// debug level (idempotent deletes and not-found probes answer 404 as a
+// matter of course), any other status at warn. Nothing from the request
+// (headers included) is logged.
+func newBrokerStatusError(brokerID string, status int, body []byte, retryAfter string) *brokerStatusError {
+	se := &brokerStatusError{StatusCode: status, Body: string(body), RetryAfter: retryAfter}
+	args := []any{slog.String("broker_id", brokerID)}
+	for _, a := range brokerStatusLogAttrs(status, se.Body) {
+		args = append(args, a)
+	}
+	args = append(args, slog.String("body", brokerBodyForLog(se.Body)))
+	level := slog.LevelWarn
+	if status == http.StatusNotFound {
+		level = slog.LevelDebug
+	}
+	slog.Log(context.Background(), level, "runtime broker returned an error", args...)
+	return se
+}
+
+// brokerStatusLogAttrs returns the log attributes for a broker error answer
+// without its body: status, error code (only when well formed) and the full
+// body length.
+func brokerStatusLogAttrs(status int, body string) []slog.Attr {
+	se := brokerStatusError{StatusCode: status, Body: body}
+	code := se.brokerErrorCode()
+	if !brokerCodePattern.MatchString(code) {
+		code = ""
+	}
+	return []slog.Attr{
+		slog.Int("status", status),
+		slog.String("code", code),
+		slog.Int("body_len", len(body)),
+	}
+}
+
+// brokerBodyForLog renders a broker error body for the hub log: at most
+// maxBrokerBodyLogBytes of it, rendered by renderBrokerText, so the body
+// cannot forge or split log lines.
+func brokerBodyForLog(body string) string {
+	return renderBrokerText(body, maxBrokerBodyLogBytes)
+}
+
+// maxBrokerMessageBytes caps a broker's JSON error message relayed to a
+// client by brokerErrorMessage.
+const maxBrokerMessageBytes = 512
+
+// renderBrokerText renders broker-supplied text with invalid UTF-8, control
+// characters (newlines included) and other non-printable runes replaced by
+// U+FFFD, and returns at most maxBytes of the RESULT, cut on a rune
+// boundary. The budget is on the output because a replaced byte grows to
+// the 3-byte U+FFFD; the input pre-cut (also on a rune boundary) only
+// bounds the work.
+func renderBrokerText(text string, maxBytes int) string {
+	if len(text) > maxBytes {
+		n := maxBytes
+		for n > 0 && !utf8.RuneStart(text[n]) {
+			n--
+		}
+		text = text[:n]
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		i += size
+		if (r == utf8.RuneError && size == 1) || !unicode.IsPrint(r) {
+			r = utf8.RuneError
+		}
+		if b.Len()+utf8.RuneLen(r) > maxBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // isBrokerStatus reports whether err is a broker HTTP error with the given code.
@@ -671,17 +779,32 @@ func isBrokerAgentNotFound(err error) bool {
 }
 
 // brokerErrorMessage returns the message from a broker JSON error body
-// ({"error":{"message":...}}), or the raw body if it is not in that form.
+// ({"error":{"message":...}}), capped at maxBrokerMessageBytes and rendered
+// by renderBrokerText, or brokerErrorGenericMessage when the body is not in
+// that form or its message is empty. The raw body is never returned.
 func (e *brokerStatusError) brokerErrorMessage() string {
+	if msg, ok := e.brokerErrorRawMessage(); ok {
+		return renderBrokerText(msg, maxBrokerMessageBytes)
+	}
+	return brokerErrorGenericMessage
+}
+
+// brokerErrorRawMessage returns the message of a broker JSON error body
+// ({"error":{"message":...}}) as sent, and true, when the body decodes
+// without error and the message is non-empty. It is the one read of the
+// message that both brokerErrorMessage and brokerRecordText use, so the text
+// a relay filter judges and the text it renders come from the same decode.
+// The result is raw broker text: render it before it leaves the hub.
+func (e *brokerStatusError) brokerErrorRawMessage() (string, bool) {
 	var body struct {
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(e.Body), &body); err == nil && body.Error.Message != "" {
-		return body.Error.Message
+		return body.Error.Message, true
 	}
-	return strings.TrimSpace(e.Body)
+	return "", false
 }
 
 // brokerErrorCode returns the machine-readable code from a broker JSON error

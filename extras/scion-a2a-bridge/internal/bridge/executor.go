@@ -155,6 +155,32 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
+		// Reply polling reads the agent's reply from the caller's own
+		// conversation with the agent, with the caller's own credential. It
+		// applies to calls without a caller and to user callers, unless
+		// reply_poll.enabled is false; agent callers wait on the push path.
+		// A federated user's conversation is read with its own credential
+		// through the chat route of its own conversation with the agent
+		// (visitorDMReader), the only conversation read the hub admits for
+		// it; a local caller's through the conversation API.
+		// A conversation key that cannot be derived is the uniform refusal,
+		// before anything is sent.
+		var reader replyReader
+		var visitorReader *visitorDMReader
+		if e.bridge.config.ReplyPoll.IsEnabled() && (caller == nil || !caller.IsAgent()) {
+			if federatedUser {
+				var readerErr error
+				if visitorReader, readerErr = newVisitorDMReader(e.bridge, caller, agentCtx.AgentID); readerErr != nil {
+					e.log.Info("reply preflight refused", "task_id", taskID, "reason", string(pollRefused))
+					yield(failedStatusEvent(execCtx, pollRefused.terminalMessage()), nil)
+					return
+				}
+			} else if convs := writeClient.Conversations(); convs != nil {
+				reader = convs
+			}
+		}
+		polling := reader != nil || visitorReader != nil
+
 		// Translate A2A message parts to Scion format.
 		scionMsg := TranslateA2APartsToScion(execCtx.Message.Parts)
 		scionMsg.Sender = senderLabel
@@ -241,13 +267,46 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
-		// Register active task for broker correlation (local cache). It
-		// records the caller, so that in plugin mode a federated user's
-		// task takes replies only from that account's user topic, and an
-		// agent caller's task none from another user's topic.
+		// One waiting call per caller and agent in this process: a second
+		// concurrent call would read the same conversation. The check comes
+		// before the task is registered, so a refused call never becomes the
+		// newest cache entry for the agent.
+		if polling {
+			waitKey := replyWaitKey(caller, e.bridge.adminTopicUserID(), agentCtx.AgentID)
+			if !e.bridge.acquireReplyWait(waitKey) {
+				e.log.Info("refusing a concurrent call from the same caller to the agent", "task_id", taskID)
+				yield(failedStatusEvent(execCtx, replyMsgBusy), nil)
+				return
+			}
+			defer e.bridge.releaseReplyWait(waitKey)
+		}
+
+		// Register active task for broker correlation (local cache), with
+		// its caller for the push path's user check: a user caller,
+		// including a federated user (its hub account ID), takes pushed
+		// replies only from its own user topic; a call without a caller
+		// and an agent caller only from the admin topic.
 		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 		e.bridge.registerActiveTaskFor(string(taskID), aKey, caller)
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
+
+		var conversationID string
+		if polling {
+			// Preflight: the caller must be able to read its conversation
+			// with the agent. A refusal ends the call before anything is
+			// sent; there is never a fallback to the admin credential.
+			var refusal pollOutcome
+			if visitorReader != nil {
+				refusal = visitorReplyPreflight(ctx, visitorReader)
+			} else {
+				conversationID, refusal = replyPreflight(ctx, reader, agentCtx.AgentID, time.Now())
+			}
+			if msg := refusal.terminalMessage(); msg != "" {
+				e.log.Info("reply preflight refused", "task_id", taskID, "reason", string(refusal))
+				yield(failedStatusEvent(execCtx, msg), nil)
+				return
+			}
+		}
 
 		// Claim execution lease before Hub send to prevent duplicate sends.
 		// The lease tracks which replica is executing this task; if we crash,
@@ -300,8 +359,28 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}()
 		}
 
+		waitOpts := waitOptions{sdkStore: e.bridge.sdkTaskStore}
+		if polling {
+			// Plugin mode: the wait starts after the task's last event, so a
+			// continuation never returns an earlier turn's reply. Standalone
+			// mode keeps the task's durable cursor.
+			if e.bridge.sdkTaskStore == nil {
+				cursor, cursorErr := e.bridge.lastTaskEventID(ctx, string(taskID))
+				if cursorErr != nil {
+					e.log.Error("failed to read the task's event log", "error", cursorErr, "task_id", taskID)
+					yield(failedStatusEvent(execCtx, "Failed to read the task's event log"), nil)
+					return
+				}
+				waitOpts.startCursor = cursor
+			}
+			// Mark the task before the send: a pushed copy of the reply is
+			// dropped while the call's reply poller owns the reply.
+			e.bridge.setTaskPollerLive(string(taskID), true)
+		}
+
 		// Send to Hub using the per-user or admin client.
-		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
+		sendResp, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false)
+		if err != nil {
 			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
 			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to route message to agent"))
 			if federatedUser && isHubRefusal(err) {
@@ -309,6 +388,49 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
 			return
+		}
+
+		// The reply poller is anchored on the message the send returned.
+		var anchorID, sendStatus string
+		if sendResp != nil {
+			anchorID = sendResp.MessageID
+			sendStatus = sendResp.Status
+		}
+		waitCtx := ctx
+		var poller *replyPoller
+		if polling {
+			switch {
+			case anchorID != "":
+				var endWait context.CancelCauseFunc
+				waitCtx, endWait = context.WithCancelCause(ctx)
+				defer endWait(nil)
+				if visitorReader != nil {
+					poller = newVisitorReplyPoller(e.bridge, visitorReader, string(taskID), agentCtx.AgentSlug, agentCtx.AgentID, anchorID, endWait)
+				} else {
+					poller = newReplyPoller(e.bridge, reader, string(taskID), agentCtx.AgentSlug, agentCtx.AgentID, anchorID, conversationID, endWait)
+				}
+				if e.bridge.sdkTaskStore != nil {
+					poller.fence = e.bridge.standaloneAppendFence(string(taskID))
+				}
+				poller.start(ctx)
+				// Stop on every exit path; the normal path stops it before
+				// yielding the final event.
+				defer poller.stop()
+				// Only the poller's events (and a cancel) end the call.
+				waitOpts.acceptEvent = pollOnlyEvent
+			case sendStatus == sendStatusNotPersisted:
+				// The hub delivered the message but did not store it, so the
+				// reply cannot be anchored.
+				e.bridge.setTaskPollerLive(string(taskID), false)
+				e.log.Info("reply poll not started", "task_id", taskID, "reason", string(pollNoAnchor))
+				yield(failedStatusEvent(execCtx, replyMsgNotRecorded), nil)
+				return
+			default:
+				// A hub that does not return the message ID: wait on the push
+				// path as before.
+				e.bridge.setTaskPollerLive(string(taskID), false)
+				e.log.Debug("reply poll not started", "task_id", taskID, "reason", string(pollNoAnchor))
+			}
 		}
 
 		// Emit working status.
@@ -326,12 +448,22 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			timeout = 120 * time.Second
 		}
 
-		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout, e.bridge.sdkTaskStore)
+		ev, err := e.bridge.waitForTaskEvent(waitCtx, string(taskID), timeout, waitOpts)
+		// End the poller and clear the mark before anything is yielded: once
+		// stop returns, no poller event can be appended for this call.
+		if poller != nil {
+			poller.stop()
+			e.bridge.setTaskPollerLive(string(taskID), false)
+		}
 		if err != nil {
+			var ended *replyPollEnded
 			var failMsg *a2a.Message
-			if errors.Is(err, ErrTimeout) {
+			switch {
+			case errors.As(context.Cause(waitCtx), &ended):
+				failMsg = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(ended.Error()))
+			case errors.Is(err, ErrTimeout):
 				failMsg = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(fmt.Sprintf("Timeout waiting for agent response after %v", timeout)))
-			} else {
+			default:
 				failMsg = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Request cancelled"))
 			}
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
@@ -442,6 +574,11 @@ func responseSDKState(state string) a2a.TaskState {
 		return a2a.TaskStateInputRequired
 	}
 	return a2a.TaskStateCompleted
+}
+
+// failedStatusEvent is a failed status update with the given message text.
+func failedStatusEvent(execCtx *a2asrv.ExecutorContext, text string) a2a.Event {
+	return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text)))
 }
 
 // mapBridgeStateToSDK maps bridge task states to SDK task states.

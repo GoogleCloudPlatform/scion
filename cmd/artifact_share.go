@@ -115,6 +115,19 @@ func parseShareTTL(v string) (int, error) {
 	return n, nil
 }
 
+// shareLinkText returns the link to print for a created share link: the
+// hub's absolute shareUrl on its content host when it sent one,
+// otherwise the hub-relative url on hubEndpoint (or as is, without one).
+func shareLinkText(created *hubclient.ArtifactLinkCreated, hubEndpoint string) string {
+	if created.ShareURL != "" {
+		return created.ShareURL
+	}
+	if hubEndpoint != "" {
+		return strings.TrimSuffix(hubEndpoint, "/") + created.URL
+	}
+	return created.URL
+}
+
 // shareArtifact runs scion artifact share.
 func shareArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Writer, hubEndpoint, ref, ttl string, list bool, revoke string) error {
 	id, _, err := artifacts.ParseRef(ref)
@@ -155,11 +168,7 @@ func shareArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Wr
 	if err != nil {
 		return err
 	}
-	link := created.URL
-	if hubEndpoint != "" {
-		link = strings.TrimSuffix(hubEndpoint, "/") + created.URL
-	}
-	_, _ = fmt.Fprintln(out, link)
+	_, _ = fmt.Fprintln(out, shareLinkText(created, hubEndpoint))
 	_, _ = fmt.Fprintf(out, "Expires %s. This link is shown only once; anyone holding it can open the artifact.\n",
 		clitime.Format(created.Link.ExpiresAt, clitime.Minute))
 	if created.ClampedToArtifactExpiry {

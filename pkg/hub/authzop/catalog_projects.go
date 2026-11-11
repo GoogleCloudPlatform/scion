@@ -119,6 +119,47 @@ var projectOperations = []OperationSpec{
 		Bearer:      membershipTokenBearer("TestMembershipToken_GovernanceMatrixApplies"),
 	},
 	{
+		ID:          "project.membership.leave",
+		Domain:      "project.membership",
+		Description: "Leave a project: remove the caller's own direct project roles (ptone/scion#7494)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/leave", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		// Any member holds project.read; the service then requires a
+		// direct binding. A caller who cannot read the project gets the
+		// same 404 as for a missing project.
+		BasePermission: "project.read",
+		// revoke-authority covers the removed bindings and the caller's
+		// project-boundary access tokens, revoked in the same transaction
+		// when the caller keeps no access to the project (R1).
+		Effects:        []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind: DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "self only: removes the caller's own direct user bindings on the project, classified removable by leaveBindingClass (allow-list, fails closed); never another principal, never group, agent or visitor bindings. The governance matrix and the hub-level role-binding override do not apply. Enforced by ProjectMembershipService.LeaveProject.",
+		},
+		AuthorityEval: AuthorityEvalProposedPost,
+		Invariants: []Invariant{
+			{ID: "last-owner-guard", Description: "The last usable direct owner cannot leave", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "constraint-admin-lockout", Description: "A leave cannot leave a scope without a constraint admin", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_leave",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"target_principal_id", "target_roles"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialLastOwner, DenialMembershipGroupDerived, DenialConstraintAdminLockout, DenialCredentialInsufficient, DenialLeaveBindingUnclassified, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestProjectLeave_TokenRefusedSessionOnly"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
 		ID:          "project.membership.list",
 		Domain:      "project.membership",
 		Description: "List project members and their roles",
@@ -1134,7 +1175,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.grant.put",
 		Domain:      "artifact",
-		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile",
+		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; every other caller that can read the artifact is refused with the same 403 before its body is read, and an accepted request can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST"},
 		},
@@ -1144,7 +1185,7 @@ var projectOperations = []OperationSpec{
 		BasePermission:        "artifact.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
+		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds",
 		AuthorityEval:         AuthorityEvalNone,
 		// grant_created and grant_changed are written in the same
 		// transaction as the grant (pkg/artifacts/store_grants.go).
@@ -1155,20 +1196,44 @@ var projectOperations = []OperationSpec{
 			AfterFields:   []string{"grantId", "subjectKind", "subjectRef", "permission", "newPermission"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "review_subject_cannot_read", "review_replaces_access", "steward_action_not_allowed"},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "steward_action_not_allowed"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
-			{Package: "pkg/hub", Function: "TestArtifactCanGrantReviewOnRoutes"},
-			{Package: "pkg/hub", Function: "TestArtifactHostMayGrantReview_ScopedToken"},
 			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
-			{Package: "pkg/artifacts", Function: "TestReviewGrantAllowed"},
-			{Package: "pkg/artifacts", Function: "TestReviewGrantDenied"},
+			{Package: "pkg/artifacts", Function: "TestPutGrantNonAdministratorUniform403"},
 			{Package: "pkg/hub", Function: "TestArtifactStewardOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestStewardBoundedTable"},
 			{Package: "pkg/artifacts", Function: "TestStewardEvents"},
 			{Package: "pkg/artifacts", Function: "TestStoreCreationEvents"},
+			{Package: "pkg/artifacts", Function: "TestMigration0014ReviewLadder"},
+			{Package: "pkg/artifacts", Function: "TestGrantWritesAllowlist"},
+			{Package: "pkg/artifacts", Function: "TestPutGrantEventFaultRollsBack"},
 		},
 		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.grant.notify",
+		Domain:      "artifact",
+		Description: "Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST", Variant: "notify"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.manage",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound, DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsGrantNotifyOnRoutes"},
+			{Package: "pkg/hub", Function: "TestGrantNotifyGate"},
+			{Package: "pkg/hub", Function: "TestArtifactGrantNotifyCatalogEntry"},
+			{Package: "pkg/hub", Function: "TestGrantNotifyTokenOnRoute"},
+			{Package: "pkg/artifacts", Function: "TestGrantNotifyOrder"},
+		},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 	{
 		ID:          "artifact.grant.delete",
@@ -1341,6 +1406,38 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsTwoStepBundleOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestTwoStepWriteAuthorization"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
+		ID:          "artifact.review.session.write",
+		Domain:      "artifact",
+		Description: "Record or end the caller's own review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own; a DELETE that deletes the caller's session row writes a review_session_ended decision-log entry; the Hub keeps the row until the reaper deletes it, at least an hour after its last beat, so this includes a session that no longer counts as open; a DELETE when no such row exists writes none (both answer 204)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact decision log (review_session_ended)",
+			ContextFields: []string{"route", "principal_kind", "principal_id", "project_id"},
+			BeforeFields:  []string{"artifact_id"},
+			Atomic:        false,
+			NonAtomicJustification: "The entry is written after the store deletes the session row, outside its transaction, as for every artifact decision-log entry. " +
+				"The row is the caller's own presence signal: it stops counting as open at most five minutes after its last beat (sooner for an idle or outdated review) and is kept until the reaper deletes it, at least an hour after its last beat, so a lost entry loses no authority or data. " +
+				"The decision log rather than a durable artifact_event record is a deliberate choice for this ephemeral row only; it is not a precedent for an operation that deletes a durable resource",
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "rate_limited", "too_many_review_sessions"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsOpenReviewOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestReviewSessionAuthorization"},
+			{Package: "pkg/artifacts", Function: "TestReviewSessionEndLogged"},
 		},
 		Bearer: artifactVersionBearer,
 	},

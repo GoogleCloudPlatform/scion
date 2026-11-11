@@ -30,15 +30,24 @@ import (
 
 var (
 	brokerConvertPlan     bool
+	brokerConvertApply    bool
+	brokerConvertStatus   bool
+	brokerConvertRollback bool
 	brokerConvertProfiles []string
 	brokerConvertChoices  string
 	brokerConvertSkipHub  bool
 	brokerConvertShowEnv  bool
 )
 
-// errConvertPlanOnly refuses convert without --plan, keeping the command
-// shape free for a later apply mode.
-var errConvertPlanOnly = errors.New("convert currently supports only --plan (read-only)")
+// errConvertOneMode refuses convert without exactly one mode.
+var errConvertOneMode = errors.New("give exactly one of --plan, --apply, --status or --rollback")
+
+// errConvertPlanFlag refuses a --plan-only flag with another mode.
+var errConvertPlanFlag = errors.New("--skip-hub and --show-env-values apply to --plan only")
+
+// errConvertStatusFlag refuses plan inputs with --status or --rollback,
+// which work from the recorded run.
+var errConvertStatusFlag = errors.New("--profiles and --choices apply to --plan and --apply only; --status and --rollback work from the recorded run")
 
 // errShowEnvValuesJSON refuses --show-env-values with JSON output: the JSON
 // plan never carries env values.
@@ -46,14 +55,14 @@ var errShowEnvValuesJSON = errors.New("--show-env-values applies to the human ou
 
 // brokerConvertShort is the command's one-line description, also used in
 // the runtime-broker command list.
-const brokerConvertShort = "Plan a move to flat Runtime Brokers (read-only, experimental)"
+const brokerConvertShort = "Plan, apply or roll back a move to flat Runtime Brokers (experimental)"
 
 // brokerConvertCmd plans the move of this legacy Runtime Broker host to
 // flat Runtime Broker instances. It is read-only: it writes no file (not
 // even a settings migration), registers nothing and sends only GET
 // requests to the Hub.
 var brokerConvertCmd = &cobra.Command{
-	Use:   "convert --plan",
+	Use:   "convert (--plan | --apply | --status | --rollback)",
 	Short: brokerConvertShort,
 	Long: `Plan a move from this host's legacy, profile-based Runtime Broker to flat
 Runtime Broker instances (experimental, like flat Runtime Brokers themselves).
@@ -80,7 +89,45 @@ targets (it carries the instances in their publishable form). Findings are
 printed from their code and settings key path with a fixed text, never with
 a settings value.
 
---plan is required.
+Exactly one mode is required:
+  --plan      print the plan (read-only; described above)
+  --apply     convert this drained legacy host to the plan's flat instance:
+              register it on the Hub, write server.broker.instances to
+              settings.yaml, and link the instance to every project this
+              Runtime Broker provides, re-pointing defaults. The server must
+              be stopped, and no non-terminal agent may be bound to this
+              Runtime Broker. The switch takes effect at the next
+              'scion server start'. Re-running resumes an interrupted apply
+              of the same plan; a changed plan is refused. This release
+              applies a plan with exactly one instance.
+              On a co-located host (the server process runs the Hub and
+              embeds the Runtime Broker) --apply runs in two steps: with the
+              server running it registers the instance and re-points
+              projects; once you stop the server, a second --apply writes
+              the settings. Stopping a co-located server takes the whole
+              Hub down, so plan a maintenance window. After the next start,
+              a third --apply removes the unused instance credentials file.
+              With an external Hub database, the second step needs
+              --single-hub-replica (exactly one Hub process serves it).
+              The mode is read from the saved daemon launch: if neither the
+              server nor the Runtime Broker was ever started through the
+              daemon (foreground only), --apply and --rollback refuse
+              (colocated_mode_unknown) until one of them is.
+  --status    show the recorded run: step states and IDs only (read-only)
+  --rollback  undo an apply: restore defaults, remove the instance links,
+              deregister the instance, remove server.broker.instances and
+              move the instance identity aside. The server must be stopped.
+              On a co-located host it also runs in two steps: the Hub part
+              with the server running, the local part after the stop. Its
+              notes on a row named from an instance identity file appear
+              in the first step's output only.
+
+--apply and --rollback ask for confirmation unless --yes is given. They,
+and --status, print only step states, IDs and fixed texts; no settings
+value is printed. A copy of the settings file as it was before apply, and
+of what apply wrote, is kept owner-only in
+<global>/runtime-brokers/.convert/; both hold settings values: do not
+share them.
 
 Exit status: 0 when the plan has no blocking finding and needs no decision,
 3 when it has a blocking finding or needs an operator decision, 1 on error.
@@ -96,14 +143,24 @@ Examples:
   scion runtime-broker convert --plan --profiles docker,k8s --choices choices.yaml --format json
 
   # The local conversion only, with no Hub requests
-  scion runtime-broker convert --plan --skip-hub`,
+  scion runtime-broker convert --plan --skip-hub
+
+  # Apply the reviewed plan, then check it
+  scion runtime-broker convert --apply --choices choices.yaml
+  scion runtime-broker convert --status
+
+  # Undo the apply
+  scion runtime-broker convert --rollback`,
 	Args: cobra.NoArgs,
 	RunE: runBrokerConvert,
 }
 
 func init() {
 	brokerCmd.AddCommand(brokerConvertCmd)
-	brokerConvertCmd.Flags().BoolVar(&brokerConvertPlan, "plan", false, "Print the plan without changing anything (required)")
+	brokerConvertCmd.Flags().BoolVar(&brokerConvertPlan, "plan", false, "Print the plan without changing anything")
+	brokerConvertCmd.Flags().BoolVar(&brokerConvertApply, "apply", false, "Convert this drained legacy host to the plan's flat instance (the server must be stopped)")
+	brokerConvertCmd.Flags().BoolVar(&brokerConvertStatus, "status", false, "Show the recorded convert run (read-only)")
+	brokerConvertCmd.Flags().BoolVar(&brokerConvertRollback, "rollback", false, "Undo the recorded apply (the server must be stopped)")
 	brokerConvertCmd.Flags().StringSliceVar(&brokerConvertProfiles, "profiles", nil, "Limit the conversion to these profiles (default: all)")
 	brokerConvertCmd.Flags().StringVar(&brokerConvertChoices, "choices", "", "YAML or JSON file of reviewed operator choices (split groups or field choices)")
 	brokerConvertCmd.Flags().BoolVar(&brokerConvertSkipHub, "skip-hub", false, "Plan from the local settings only: no Hub requests, no Hub sections")
@@ -138,8 +195,37 @@ var convertHubClient = func(settings *config.Settings) (hubclient.Client, error)
 }
 
 func runBrokerConvert(cmd *cobra.Command, _ []string) error {
+	modes := 0
+	for _, m := range []bool{brokerConvertPlan, brokerConvertApply, brokerConvertStatus, brokerConvertRollback} {
+		if m {
+			modes++
+		}
+	}
+	if modes != 1 {
+		return errConvertOneMode
+	}
+	if brokerConvertSingleHubReplica && !brokerConvertApply {
+		return errConvertSingleHubFlag
+	}
+	if brokerConvertHostMode != "" {
+		if !brokerConvertApply && !brokerConvertRollback {
+			return errConvertHostModeFlag
+		}
+		if brokerConvertHostMode != brokerconvert.HostModeColocated && brokerConvertHostMode != brokerconvert.HostModeRemote {
+			return errConvertHostModeValue
+		}
+	}
 	if !brokerConvertPlan {
-		return errConvertPlanOnly
+		if brokerConvertSkipHub || brokerConvertShowEnv {
+			return errConvertPlanFlag
+		}
+		if !brokerConvertApply && (len(brokerConvertProfiles) > 0 || brokerConvertChoices != "") {
+			return errConvertStatusFlag
+		}
+		// The write modes and --status keep the no-write guard on for
+		// read paths (isNoWriteCommand; convert-apply design section 3
+		// and erratum E1): their explicit writers do not consult it.
+		return runBrokerConvertWriteModes(cmd)
 	}
 	if brokerConvertShowEnv && isJSONOutput() {
 		return errShowEnvValuesJSON
@@ -180,6 +266,11 @@ func runBrokerConvert(cmd *cobra.Command, _ []string) error {
 		err = brokerconvert.WriteJSON(out, plan)
 	} else {
 		err = brokerconvert.WriteHuman(out, plan, brokerconvert.HumanOptions{ShowEnvValues: brokerConvertShowEnv})
+		if err == nil {
+			if g, gerr := config.GetGlobalDir(); gerr == nil {
+				_, err = fmt.Fprintln(out, planHostModeLine(g))
+			}
+		}
 	}
 	if err != nil {
 		return err

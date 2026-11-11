@@ -256,8 +256,9 @@ func TestCrossNodeDataOps_RelayTypedBrokerError(t *testing.T) {
 }
 
 // The executing node records the broker's HTTP error as the envelope on the
-// failed row, keeps the row's error text unchanged, and records no result
-// for a failure that is not a broker HTTP answer.
+// failed row, records the row's error text as dispatchFailureText (the
+// broker's code and filtered message, never its body), and records no
+// result for a failure that is not a broker HTTP answer.
 func TestReconcile_FailedDispatchRecordsBrokerErrorEnvelope(t *testing.T) {
 	run := func(t *testing.T, ownerErr error) *store.BrokerDispatch {
 		t.Helper()
@@ -275,7 +276,8 @@ func TestReconcile_FailedDispatchRecordsBrokerErrorEnvelope(t *testing.T) {
 
 	t.Run("broker HTTP error", func(t *testing.T) {
 		got := run(t, typedSkillError())
-		assert.Equal(t, "dispatch start: "+typedSkillError().Error(), got.Error, "error text is unchanged")
+		assert.Equal(t, "dispatch start: "+typedSkillError().Error()+": "+brokerErrorGenericMessage, got.Error,
+			"the code is recorded; the message holds a path separator, so the generic text replaces it")
 		var env dispatchFailureEnvelope
 		require.NoError(t, json.Unmarshal([]byte(got.Result), &env), got.Result)
 		require.NotNil(t, env.BrokerError)

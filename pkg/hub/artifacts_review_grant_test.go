@@ -18,17 +18,16 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// Review-grant authority on agent-owned artifacts (design D24,
-// ptone/scion#4014): artifactHost.MayGrantReview.
+// The shared fixture for agent-owned artifact tests: a home project with a
+// delegating user, an owner, an admin and a member, and agents delegated
+// through recorded edges. (The review-only grant path, design D24, it was
+// first written for is removed, ptone/scion#5145.)
 
 type reviewGrantFixture struct {
 	srv                    *Server
@@ -95,189 +94,4 @@ func newReviewGrantFixture(t *testing.T) reviewGrantFixture {
 
 func (f reviewGrantFixture) user(id string) Identity {
 	return NewAuthenticatedUser(id, id+"@test.com", id, "member", "web")
-}
-
-func (f reviewGrantFixture) may(host *artifactHost, identity Identity, agentID, home string) bool {
-	return host.MayGrantReview(contextWithIdentity(context.Background(), identity), agentID, home, "")
-}
-
-// TestArtifactHostMayGrantReview: the delegating user (root of the live
-// recorded chain) and home-project administrators may; nobody else.
-func TestArtifactHostMayGrantReview(t *testing.T) {
-	f := newReviewGrantFixture(t)
-	host := newArtifactHost(f.srv)
-	agentToken := artifactTestAgent(f.agent.ID, f.home, ScopesForRole(AgentRoleFull)...)
-
-	cases := []struct {
-		name     string
-		identity Identity
-		agentID  string
-		home     string
-		want     bool
-	}{
-		{"delegating user", f.user(f.delegator), f.agent.ID, f.home, true},
-		{"delegating user, agent-spawned agent", f.user(f.delegator), f.child.ID, f.home, true},
-		{"delegating user, artifact homed in another project", f.user(f.delegator), f.agent.ID, f.other, true},
-		{"home-project admin", f.user(f.admin), f.agent.ID, f.home, true},
-		{"home-project owner", f.user(f.owner), f.agent.ID, f.home, true},
-		{"home-project admin, agent with no edge", f.user(f.admin), f.noEdge.ID, f.home, true},
-
-		{"owning agent", agentToken, f.agent.ID, f.home, false},
-		{"plain project member", f.user(f.member), f.agent.ID, f.home, false},
-		{"user from another project", f.user(f.outside), f.agent.ID, f.home, false},
-		{"admin of another project", f.user(f.otherAdmin), f.agent.ID, f.home, false},
-		// After a move the home-admin path follows the current home (D24
-		// clarification): the old home's admin is refused, the new one's
-		// admin allowed.
-		{"old-home admin after a move", f.user(f.admin), f.agent.ID, f.other, false},
-		{"new-home admin after a move", f.user(f.otherAdmin), f.agent.ID, f.other, true},
-		// Two users each delegating in the project: each is the
-		// delegating user only of their own chain.
-		{"another user's delegate", f.user(f.member), f.sibling.ID, f.home, true},
-		{"delegating user of a sibling chain", f.user(f.member), f.child.ID, f.home, false},
-		{"first user for the second user's delegate", f.user(f.delegator), f.sibling.ID, f.home, false},
-		{"creator of an agent with no edge", f.user(f.delegator), f.noEdge.ID, f.home, false},
-		{"unknown agent", f.user(f.delegator), tid("rg-missing"), f.home, false},
-		{"empty agent", f.user(f.admin), "", f.home, false},
-		{"empty home", f.user(f.admin), f.agent.ID, "", false},
-		{"no identity", nil, f.agent.ID, f.home, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			if tc.identity != nil {
-				ctx = contextWithIdentity(ctx, tc.identity)
-			}
-			assert.Equal(t, tc.want, host.MayGrantReview(ctx, tc.agentID, tc.home, ""))
-		})
-	}
-}
-
-// TestArtifactHostMayGrantReview_ScopedToken: a scoped user access token is
-// held to its own limits for project administration; the delegating user's
-// token still identifies that user.
-func TestArtifactHostMayGrantReview_ScopedToken(t *testing.T) {
-	f := newReviewGrantFixture(t)
-	host := newArtifactHost(f.srv)
-	adminUser := NewAuthenticatedUser(f.admin, "rg-admin@test.com", "admin", "member", "api")
-	delegatorUser := NewAuthenticatedUser(f.delegator, "rg-delegator@test.com", "delegator", "member", "api")
-
-	assert.False(t, f.may(host, artifactTestUAT(t, adminUser, f.home, "artifact:manage"), f.agent.ID, f.home),
-		"admin token without project:manage")
-	assert.True(t, f.may(host, artifactTestUAT(t, adminUser, f.home, "artifact:manage", "project:manage"), f.agent.ID, f.home),
-		"admin token with project:manage")
-	assert.True(t, f.may(host, artifactTestUAT(t, delegatorUser, f.home, "artifact:manage"), f.agent.ID, f.home),
-		"delegating user's token")
-}
-
-// TestArtifactHostMayGrantReview_ChainLive: the delegating user is resolved
-// at request time, so revoking the delegation, deactivating the user,
-// removing them from the project or failing the lookup takes the authority
-// away, for the agent and for agents below it.
-func TestArtifactHostMayGrantReview_ChainLive(t *testing.T) {
-	t.Run("delegation revoked", func(t *testing.T) {
-		f := newReviewGrantFixture(t)
-		host := newArtifactHost(f.srv)
-		require.True(t, f.may(host, f.user(f.delegator), f.agent.ID, f.home))
-		revokeDelegateEdges(t, f.s, f.agent.ID)
-		assert.False(t, f.may(host, f.user(f.delegator), f.agent.ID, f.home))
-		assert.False(t, f.may(host, f.user(f.delegator), f.child.ID, f.home), "agent below a revoked edge")
-		assert.True(t, f.may(host, f.user(f.admin), f.agent.ID, f.home), "home admin unaffected")
-	})
-	t.Run("delegating user inactive", func(t *testing.T) {
-		f := newReviewGrantFixture(t)
-		host := newArtifactHost(f.srv)
-		setUserStatus(t, f.s, f.delegator, "suspended")
-		assert.False(t, f.may(host, f.user(f.delegator), f.agent.ID, f.home))
-	})
-	t.Run("delegating user left the project", func(t *testing.T) {
-		f := newReviewGrantFixture(t)
-		host := newArtifactHost(f.srv)
-		bindings, err := f.s.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, f.delegator)
-		require.NoError(t, err)
-		for _, b := range bindings {
-			if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.home {
-				require.NoError(t, f.s.DeleteRoleBinding(context.Background(), b.ID))
-			}
-		}
-		assert.False(t, f.may(host, f.user(f.delegator), f.agent.ID, f.home))
-	})
-	t.Run("chain lookup fails", func(t *testing.T) {
-		f := newReviewGrantFixture(t)
-		// The host has a store holding the home project row (so the clause's home-exists check passes) and an
-		// authorization service whose delegation-edge lookup fails. The healthy control shows the same shape of
-		// host answers the delegating user; only the edge lookup fault takes the clause away.
-		healthy := newArtifactHost(&Server{store: f.s, authzService: NewAuthzService(f.s, slog.Default())})
-		require.True(t, f.may(healthy, f.user(f.delegator), f.agent.ID, f.home), "control: healthy edge lookup")
-		faulty := &Server{store: f.s, authzService: NewAuthzService(&faultStore{Store: f.s, edges: true}, slog.Default())}
-		host := newArtifactHost(faulty)
-		assert.False(t, f.may(host, f.user(f.delegator), f.agent.ID, f.home))
-	})
-	t.Run("no authz service", func(t *testing.T) {
-		f := newReviewGrantFixture(t)
-		assert.False(t, f.may(newArtifactHost(&Server{}), f.user(f.admin), f.agent.ID, f.home))
-		assert.False(t, f.may(&artifactHost{}, f.user(f.admin), f.agent.ID, f.home))
-	})
-}
-
-// TestArtifactHostReviewGrantClause: ReviewGrantClause makes MayGrantReview's
-// decision and names its clause, project administration first
-// (ptone/scion#5120).
-func TestArtifactHostReviewGrantClause(t *testing.T) {
-	f := newReviewGrantFixture(t)
-	host := newArtifactHost(f.srv)
-	cases := []struct {
-		name     string
-		identity Identity
-		agentID  string
-		home     string
-		want     string
-	}{
-		{"delegating user", f.user(f.delegator), f.agent.ID, f.home, artifacts.ReviewClauseDelegatingUser},
-		{"delegating user, agent-spawned agent", f.user(f.delegator), f.child.ID, f.home, artifacts.ReviewClauseDelegatingUser},
-		{"home-project admin", f.user(f.admin), f.agent.ID, f.home, artifacts.ReviewClauseProjectAdmin},
-		{"home-project owner", f.user(f.owner), f.agent.ID, f.home, artifacts.ReviewClauseProjectAdmin},
-		{"another user's delegate", f.user(f.member), f.sibling.ID, f.home, artifacts.ReviewClauseDelegatingUser},
-		{"plain project member", f.user(f.member), f.agent.ID, f.home, ""},
-		{"admin of another project", f.user(f.otherAdmin), f.agent.ID, f.home, ""},
-		{"no identity", nil, f.agent.ID, f.home, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			if tc.identity != nil {
-				ctx = contextWithIdentity(ctx, tc.identity)
-			}
-			assert.Equal(t, tc.want, host.ReviewGrantClause(ctx, tc.agentID, tc.home, ""))
-			assert.Equal(t, tc.want != "", host.MayGrantReview(ctx, tc.agentID, tc.home, ""), "MayGrantReview agrees")
-		})
-	}
-}
-
-// TestArtifactHostReviewGrantClauseAuditsOnce: the host evaluates the review
-// rule once. For a delegating user that is exactly one authorization decision,
-// the project.manage deny of AdministersScope on the home project (the
-// provenance resolution records no decision), the same single record the
-// review rule wrote before it named its clause. A second evaluation, or an
-// extra check added for the decision log, would change the count.
-func TestArtifactHostReviewGrantClauseAuditsOnce(t *testing.T) {
-	f := newReviewGrantFixture(t)
-	host := newArtifactHost(f.srv)
-	ctx := contextWithIdentity(context.Background(), f.user(f.delegator))
-	emitter := &recordingDecisionAuditEmitter{}
-	f.srv.authzService.SetDecisionAuditEmitter(emitter)
-	require.Equal(t, artifacts.ReviewClauseDelegatingUser, host.ReviewGrantClause(ctx, f.agent.ID, f.home, ""))
-	require.Len(t, emitter.records, 1, "one decision for a delegating user's review clause")
-	r := emitter.records[0]
-	assert.Equal(t, "deny", r.Result)
-	assert.Equal(t, "project", r.ResourceType)
-	assert.Equal(t, f.home, r.ResourceID)
-	assert.Equal(t, string(ActionManage), r.Permission)
-	assert.Equal(t, f.delegator, r.PrincipalID)
-
-	// MayGrantReview, the same evaluation, records the same one decision.
-	emitter.records = nil
-	require.True(t, host.MayGrantReview(ctx, f.agent.ID, f.home, ""))
-	require.Len(t, emitter.records, 1)
-	assert.Equal(t, "deny", emitter.records[0].Result)
 }

@@ -56,6 +56,9 @@ type bootstrapHubStub struct {
 	finalized  []string          // agent identifiers finalize was called with
 	deleted    []string          // paths of DELETE requests
 	unexpected []string          // requests the stub did not serve
+	// pendingLookups counts the start hint's pending secret lookups; the
+	// stub answers that the user has none.
+	pendingLookups int
 }
 
 func newBootstrapHubStub(t *testing.T, projectID, agentName, agentID string) *bootstrapHubStub {
@@ -158,6 +161,9 @@ func (s *bootstrapHubStub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pending-secrets":
+		s.pendingLookups++
+		_, _ = w.Write([]byte(`{"pendingSecrets":[]}`))
 	default:
 		s.unexpected = append(s.unexpected, r.Method+" "+r.URL.Path)
 		writeStubError(w, http.StatusNotFound, "not_found", "not served by stub")
@@ -214,6 +220,9 @@ func TestStartAgentViaHub_MarkerLayoutBootstrapFinalizesCreatedAgent(t *testing.
 			assert.Equal(t, []string{stub.agentID}, stub.finalized, "finalize identifiers")
 			assert.Empty(t, stub.deleted, "no agent deleted")
 			assert.Empty(t, stub.unexpected, "unexpected requests")
+			// The start hint looks up pending secrets once for a user (none
+			// inside an agent, where the test may run).
+			assert.LessOrEqual(t, stub.pendingLookups, 1, "the start hint looks up pending secrets at most once")
 		})
 	}
 }

@@ -254,8 +254,8 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 	now := s.nowFunc()
 	hubExpiry := now.Add(tokenTTL)
 
-	accessToken, _, err := s.userTokenService.GenerateAccessTokenWithTTL(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeAPI, tokenTTL,
+	accessToken, _, err := s.userTokenService.MintAccessTokenWithTTL(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeAPI, tokenTTL,
 	)
 	if err != nil {
 		s.logger.Error("GE exchange: token generation failed", "error", err)

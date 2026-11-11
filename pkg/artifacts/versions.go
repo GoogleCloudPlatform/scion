@@ -235,6 +235,15 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
 		return
 	}
+	// The open-review check runs after authorization and before the
+	// version number is taken (ptone/scion#6849); reviews are not checked.
+	var warnings []string
+	if versionKind(req.Kind) == VersionKindPublish {
+		var ok bool
+		if warnings, ok = s.checkOpenReviews(w, r, b, a, req.Force); !ok {
+			return
+		}
+	}
 	var current map[string]File
 	if a.CurrentSeq > 0 {
 		if cv, err := b.store.GetVersion(ctx, a.ID, a.CurrentSeq); err == nil {
@@ -268,7 +277,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		return
 	}
 	s.logVersion(r, logActionVersionCreated, a, v.Seq, access)
-	writePending(w, a, v, files)
+	writePending(w, a, v, files, warnings...)
 }
 
 // pendingVersion builds a pending version and its manifest rows. A file
@@ -303,8 +312,8 @@ func versionKind(k string) string {
 	return VersionKindPublish
 }
 
-func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File) {
-	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}}
+func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File, warnings ...string) {
+	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}, Warnings: warnings}
 	// One upload per digest: files with the same bytes share the stored
 	// object, and uploading one marks the others received.
 	seen := map[string]bool{}
@@ -554,11 +563,13 @@ func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (writ
 // just asked it for that scope. It is the one write decision. A write or
 // admin grant wins over a review grant held at the same time.
 //
-// A review grant never makes an artifact readable (it is in no read set),
-// so its holder must read the artifact another way: through the home
-// project or a grant to one of their projects. That is asked again
-// here, on every use, with canReadWith (the one read decision), so losing
-// the other read path ends review access at once, with nothing to revoke.
+// A review grant reads (it is in grantsForRead, ptone/scion#5145), so for a
+// plain review grant the canReadWith re-check below decides nothing about
+// the grant itself. It is kept: at route level it is defence in depth
+// (every route runs readableArtifact first), it still applies the
+// credential's Permits(artifact.read) and the "no finalized version yet"
+// rule, and ptone/scion#5548's bounded review grant, which must not read
+// on its own, depends on it.
 func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (writeAccess, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok {

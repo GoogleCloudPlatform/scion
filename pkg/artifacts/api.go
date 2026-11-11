@@ -97,16 +97,6 @@ type ArtifactResponse struct {
 	// a review grant (ptone/scion#4538). It is false whenever CanPublish is
 	// true, since a publisher may review too.
 	CanReview bool `json:"canReview,omitempty"`
-	// CanGrantReview, on a GET of the artifact or of one of its versions,
-	// is true when the caller may not manage the artifact but may give a
-	// user review access to it (a review grant; design D24,
-	// ptone/scion#4014): the delegating user of the agent that owns it, the
-	// project owners and admins of its home project, and super-admins. It
-	// is false whenever CanManage is true, since a manager grants through
-	// the full sharing routes. It is advisory: the grant itself is decided
-	// under the artifact's lock and can still be refused, for example for an
-	// existing admin grant or a concurrent move.
-	CanGrantReview bool `json:"canGrantReview,omitempty"`
 	// ScopeDeleted, on a GET of the artifact or of one of its versions, is
 	// true when the artifact's home project no longer exists, as on list
 	// rows. It is advisory: when the host cannot tell, it is left unset
@@ -133,6 +123,12 @@ type CreateVersionRequest struct {
 	Note  string `json:"note,omitempty"`
 	// Files is the version's manifest.
 	Files []ManifestFile `json:"files"`
+	// Force skips the open-review check (ptone/scion#6849): without it a
+	// publish while reviews of the current version are open is refused
+	// with 409 review_open. Later steps of the create can still refuse it.
+	// It has no effect on a review, while the experiment is off, or when
+	// nothing is open.
+	Force bool `json:"force,omitempty"`
 }
 
 // FinalizeRequest is the optional JSON body of a finalize request.
@@ -158,6 +154,9 @@ type PendingVersionResponse struct {
 	Artifact ArtifactInfo `json:"artifact"`
 	Version  *VersionInfo `json:"version"`
 	Upload   UploadInfo   `json:"upload"`
+	// Warnings are notes about the create that did not fail it, such as a
+	// publish forced over open reviews.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // UploadInfo tells the publisher what to upload before finalizing.

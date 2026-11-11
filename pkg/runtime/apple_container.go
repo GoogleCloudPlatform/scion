@@ -567,7 +567,7 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 }
 
 func (r *AppleContainerRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return runSimpleCommand(ctx, r.Command, "logs", id)
+	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
 func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
@@ -657,7 +657,7 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
-	out, err := runSimpleCommand(ctx, r.Command, args...)
+	out, err := runCombinedCommand(ctx, r.Command, args...)
 	// A container removed after the lookup above must surface as
 	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
 	return out, appleExecNotFound.classifyExecErr(ctx, err, out, id, r.List)

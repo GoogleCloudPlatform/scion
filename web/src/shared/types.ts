@@ -1727,7 +1727,22 @@ export interface Subscription {
  */
 export interface Capabilities {
   actions: string[];
+  /**
+   * Project self-leave (ptone/scion#7494): on a project's `_capabilities`
+   * only, and only while the hub's project-self-leave experiment is on.
+   * True when a leave would remove at least one of the caller's direct
+   * bindings. Absent means the action is not offered.
+   */
+  canLeave?: boolean;
+  /**
+   * Why a leave is blocked, when `canLeave` is false: a {@link LeaveBlockedReason}
+   * (an unknown value is treated as no reason).
+   */
+  leaveBlockedReason?: string;
 }
+
+/** Values of `leaveBlockedReason` on project and membership capabilities. */
+export type LeaveBlockedReason = 'last_owner' | 'group_derived';
 
 /**
  * Membership-specific capabilities returned in the project members API
@@ -1747,6 +1762,10 @@ export interface MembershipCapabilities {
    * Optional: absent means false.
    */
   canManageCustomRoles?: boolean;
+  /** Project self-leave; same meaning as on {@link Capabilities}. */
+  canLeave?: boolean;
+  /** Why a leave is blocked; same meaning as on {@link Capabilities}. */
+  leaveBlockedReason?: string;
 }
 
 /**

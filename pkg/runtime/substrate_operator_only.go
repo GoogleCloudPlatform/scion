@@ -81,11 +81,22 @@ func substrateProfileInvalid(err error) error {
 // with an error naming the offending profile/runtime, rather than silently
 // falling back to either config.
 //
-// Returns nil when effectiveVS is nil, the effective profile name is
-// empty, or the resolved runtime type is not substrate at all (nothing for
-// this function to enforce). Callers MUST treat a non-nil return as fatal
-// to runtime construction — never log-and-continue with effectiveVS's own
-// config.
+// An empty effective profile name (profileName and ActiveProfile both
+// empty) is checked like any other name: GetRuntime resolves it to the
+// profile stored under the empty key, and so may build a substrate runtime
+// from it, so the operator-only requirement applies to that key too. Do not
+// add an early return for the empty name: it would leave a profile
+// GetRuntime builds unchecked. In co-located mode, once the hub has stored
+// profiles, the settings overlay replaces the profiles map
+// (config.SettingsOverlay.Apply), so a project-stored empty-name profile
+// does not survive there; this check is what covers settings loaded without
+// that replacement (a standalone broker, or a hub with no stored profiles),
+// and is defense in depth otherwise.
+//
+// Returns nil when effectiveVS is nil or the resolved runtime type is not
+// substrate at all (nothing for this function to enforce). Callers MUST
+// treat a non-nil return as fatal to runtime construction — never
+// log-and-continue with effectiveVS's own config.
 func ValidateOperatorOnlySubstrateProfile(effectiveVS *config.VersionedSettings, profileName string) error {
 	if effectiveVS == nil {
 		return nil
@@ -93,9 +104,6 @@ func ValidateOperatorOnlySubstrateProfile(effectiveVS *config.VersionedSettings,
 	effectiveProfile := profileName
 	if effectiveProfile == "" {
 		effectiveProfile = effectiveVS.ActiveProfile
-	}
-	if effectiveProfile == "" {
-		return nil
 	}
 
 	rtConfig, runtimeType, err := effectiveVS.ResolveRuntime(effectiveProfile)
@@ -117,8 +125,12 @@ func ValidateOperatorOnlySubstrateProfile(effectiveVS *config.VersionedSettings,
 		return fmt.Errorf("substrate runtime %q (profile %q): resolving operator settings: %w", runtimeKey, effectiveProfile, gerr)
 	}
 
-	globalRtConfig, globalRuntimeType, gerr := globalVS.ResolveRuntime(effectiveProfile)
-	if gerr != nil || globalRuntimeType != "substrate" || !reflect.DeepEqual(rtConfig, globalRtConfig) {
+	// Look up the same literal profile name in the operator's settings.
+	// ResolveRuntime would replace an empty name with the operator's own
+	// active_profile, comparing against a different profile than the one
+	// GetRuntime resolved.
+	globalRtConfig, globalRuntimeType, ok := resolveProfileRuntimeExact(globalVS, effectiveProfile)
+	if !ok || globalRuntimeType != "substrate" || !reflect.DeepEqual(rtConfig, globalRtConfig) {
 		return fmt.Errorf(
 			"substrate runtime %q (profile %q) is not defined identically in operator (global) settings: "+
 				"project or repo settings may only select an operator-defined substrate profile by name, "+
@@ -127,4 +139,29 @@ func ValidateOperatorOnlySubstrateProfile(effectiveVS *config.VersionedSettings,
 			runtimeKey, effectiveProfile)
 	}
 	return nil
+}
+
+// resolveProfileRuntimeExact returns the runtime config and effective
+// runtime type of the profile stored under exactly profileName in vs, with
+// no active_profile fallback for an empty name. The type is the runtime
+// entry's Type, or its runtimes key when Type is unset, as in
+// config.VersionedSettings.ResolveRuntime. ok is false when vs is nil, the
+// profile is missing, or it names a missing runtime entry.
+func resolveProfileRuntimeExact(vs *config.VersionedSettings, profileName string) (rtConfig config.V1RuntimeConfig, runtimeType string, ok bool) {
+	if vs == nil {
+		return config.V1RuntimeConfig{}, "", false
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return config.V1RuntimeConfig{}, "", false
+	}
+	rtConfig, ok = vs.Runtimes[profile.Runtime]
+	if !ok {
+		return config.V1RuntimeConfig{}, "", false
+	}
+	runtimeType = rtConfig.Type
+	if runtimeType == "" {
+		runtimeType = profile.Runtime
+	}
+	return rtConfig, runtimeType, true
 }

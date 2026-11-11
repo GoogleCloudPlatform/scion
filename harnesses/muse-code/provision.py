@@ -32,6 +32,7 @@ Muse-Code-native concerns handled here:
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -65,18 +66,55 @@ _HOOK_EVENTS = (
     "Stop",
 )
 
+SCION_HOOK_COMMAND = "sciontool hook --dialect=muse-code"
+
+# The key set scion writes on its own hook handlers. muse 1.4.7 rejects the
+# "name" handler key ("unknown handler field name") and skips the handler,
+# which disabled every sciontool hook (ptone/scion#5023); scion-owned handlers
+# carry no keys outside SCION_HANDLER_KEYS.
+SCION_HANDLER_KEYS = frozenset({"type", "command"})
+
 _DEFAULT_HOOK_ENTRY: list[dict[str, Any]] = [
     {
         "matcher": "*",
         "hooks": [
             {
-                "name": "scion-hook",
                 "type": "command",
-                "command": "sciontool hook --dialect=muse-code",
+                "command": SCION_HOOK_COMMAND,
             }
         ],
     }
 ]
+
+
+def _repair_scion_handlers(hooks: dict[str, Any]) -> None:
+    """Strip scion-owned hook handlers of keys outside SCION_HANDLER_KEYS, in place.
+
+    Homes provisioned before ptone/scion#5023 carry a "name" key on every
+    sciontool handler, which muse 1.4.7 skips as an unknown field. A handler
+    whose command is exactly SCION_HOOK_COMMAND is treated as scion-owned and
+    then carries no keys outside SCION_HANDLER_KEYS; all other handlers are
+    left as they are.
+    """
+    if not isinstance(hooks, dict):
+        return
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            handlers = entry.get("hooks")
+            if not isinstance(handlers, list):
+                continue
+            for handler in handlers:
+                if not isinstance(handler, dict):
+                    continue
+                if handler.get("command") != SCION_HOOK_COMMAND:
+                    continue
+                for key in [k for k in handler if k not in SCION_HANDLER_KEYS]:
+                    del handler[key]
+
 
 AUTH = scion_harness.AuthSpec(
     "muse-code",
@@ -385,7 +423,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     hooks = settings.setdefault("hooks", {})
     for event in _HOOK_EVENTS:
         if event not in hooks:
-            hooks[event] = _DEFAULT_HOOK_ENTRY
+            hooks[event] = copy.deepcopy(_DEFAULT_HOOK_ENTRY)
+    _repair_scion_handlers(hooks)
 
     _write_settings(ctx.home, settings)
 

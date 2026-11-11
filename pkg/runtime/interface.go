@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -514,12 +515,17 @@ func (r *SharedDirRealization) Shared() bool {
 // to stop or remove; it is empty for legacy entries created before run IDs
 // existed.
 //
+// StopTimeout bounds how long Stop lets the entry shut down before it is
+// killed; zero means the backend's default (30s on Docker and Podman).
+// Backends without a stop timeout ignore it, and Delete ignores it.
+//
 // The signature change is deliberate (ptone/scion#2550): every backend must
 // decide how it honours RunID, rather than silently falling back to name
 // semantics through an optional side interface.
 type RunRef struct {
-	ID    string
-	RunID string
+	ID          string
+	RunID       string
+	StopTimeout time.Duration
 }
 
 // ErrRunMismatch is returned (wrapped) by a Delete whose RunRef names a run

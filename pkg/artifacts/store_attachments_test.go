@@ -285,8 +285,8 @@ func TestStoreAttachmentRefusals(t *testing.T) {
 			}
 			review := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 				SubjectRef: "user:user-2", Permission: GrantReview, CreatedAt: now}
-			if _, err := st.PutReviewGrant(ctx, review, 10, a.ScopeRef, testActor); !errors.Is(err, ErrAttachmentNotShareable) {
-				t.Errorf("%s: PutReviewGrant = %v, want ErrAttachmentNotShareable", a.ScopeKind, err)
+			if _, err := st.PutGrant(ctx, review, 10, true, testActor); !errors.Is(err, ErrAttachmentNotShareable) {
+				t.Errorf("%s: PutGrant(review) = %v, want ErrAttachmentNotShareable", a.ScopeKind, err)
 			}
 			exp := now.Add(time.Hour)
 			link := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectLink, SubjectRef: "hash-" + a.ID,

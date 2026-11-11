@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -48,9 +49,10 @@ var unlimitedCountFieldKeys = map[string]bool{
 	agentConfigKeyPrefix + "max_model_calls": true,
 }
 
-// errBrokerLookup is returned by agentBrokerStartSupportStrict when reading
-// the agent's broker record fails (a store error, which a retry may fix);
-// the caller answers 503.
+// errBrokerLookup is wrapped, with the store's error, in the error
+// agentBrokerStartSupportStrict returns when reading the agent's broker
+// record fails (a store error, which a retry may fix); the caller answers
+// 503. Match it with errors.Is.
 var errBrokerLookup = errors.New("runtime broker lookup failed")
 
 // unlimitedCountChanges returns the wire keys (config.max_turns,
@@ -75,11 +77,12 @@ func unlimitedCountChanges(req, base *api.ScionConfig) []string {
 	return out
 }
 
-// agentBrokerStartSupportStrict is agentBrokerStartSupport for a decision
-// that must not guess: assigned is false when the agent has no broker or its
-// broker record no longer exists (a retry would not help), and err is
-// errBrokerLookup when reading the record fails, instead of folding both
-// into the zero value.
+// agentBrokerStartSupportStrict reads the agent's broker start support for
+// a decision that must not guess: assigned is false when the agent has no
+// broker or its broker record no longer exists (a retry would not help),
+// and err wraps errBrokerLookup and the store's error when reading the
+// record fails, instead of folding it into the zero value.
+// agentBrokerStartSupport is the same read without assigned.
 func (s *Server) agentBrokerStartSupportStrict(ctx context.Context, agent *store.Agent) (sup brokerStartSupport, assigned bool, err error) {
 	if agent == nil || agent.RuntimeBrokerID == "" || s.store == nil {
 		return brokerStartSupport{}, false, nil
@@ -89,7 +92,7 @@ func (s *Server) agentBrokerStartSupportStrict(ctx context.Context, agent *store
 	case errors.Is(err, store.ErrNotFound), err == nil && broker == nil:
 		return brokerStartSupport{}, false, nil
 	case err != nil:
-		return brokerStartSupport{}, true, errBrokerLookup
+		return brokerStartSupport{}, true, fmt.Errorf("%w: %w", errBrokerLookup, err)
 	}
 	return brokerStartSupportFrom(broker.Capabilities), true, nil
 }

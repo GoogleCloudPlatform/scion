@@ -96,6 +96,15 @@ type Conversation func(*sql.Selector)
 // ConversationParticipant is the predicate function for conversationparticipant builders.
 type ConversationParticipant func(*sql.Selector)
 
+// Decision is the predicate function for decision builders.
+type Decision func(*sql.Selector)
+
+// DecisionAnswer is the predicate function for decisionanswer builders.
+type DecisionAnswer func(*sql.Selector)
+
+// DecisionKeyCounter is the predicate function for decisionkeycounter builders.
+type DecisionKeyCounter func(*sql.Selector)
+
 // DelegationAdoption is the predicate function for delegationadoption builders.
 type DelegationAdoption func(*sql.Selector)
 
@@ -188,6 +197,9 @@ type Notification func(*sql.Selector)
 
 // NotificationSubscription is the predicate function for notificationsubscription builders.
 type NotificationSubscription func(*sql.Selector)
+
+// PendingSecret is the predicate function for pendingsecret builders.
+type PendingSecret func(*sql.Selector)
 
 // PolicyBinding is the predicate function for policybinding builders.
 type PolicyBinding func(*sql.Selector)

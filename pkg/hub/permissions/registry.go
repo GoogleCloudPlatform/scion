@@ -233,28 +233,29 @@ var Registry = []Permission{
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
 	{ID: "project.update", Resource: ResourceProject, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "project:update", Description: "Update projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
 	{ID: "project.delete", Resource: ResourceProject, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
-	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations). Not a read/write alias: it does not include project:read or project:list", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/artifacts_host.go:func (h *artifactHost) ReviewGrantClause", "pkg/hub/artifacts_host.go:func (h *artifactHost) MayGrantReview"}},
+	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations). Not a read/write alias: it does not include project:read or project:list", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/artifacts_host.go:func (h *artifactHost) AdministersScope"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Reserved: "no route checks project.register; project register checks project.create"},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, UATScope: "project:set_messaging_policy", Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
 	{ID: "project.manage_visitors", Resource: ResourceProject, Action: "manage_visitors", CapabilityKind: CapabilityResource, Description: "Grant and revoke project visitor access for federated accounts (project owner/admin, hub admin)", Enforcement: []string{"pkg/hub/handlers_project_visitors.go"}},
-	// project.chat_post covers chat thread sends, scheduled sends and DM
-	// promotion (ptone/scion#5518). These chat writes do not check it yet:
-	// thread create; thread rename, default-agent change and delete;
-	// project attachment upload; message edit and delete; thread posts sent
-	// through the agent message endpoint's thread key. They are tracked in
-	// ptone/scion#5519.
+	// project.chat_post covers chat thread sends, scheduled sends, DM
+	// promotion, project attachment uploads and thread posts a user sends
+	// through the agent message endpoint's thread key, all decided by the
+	// chat resolvers (pkg/hub/chat_access.go, ptone/scion#5518 and #5519).
+	// These chat writes do not check it yet: thread create; thread rename,
+	// default-agent change and delete; message edit and delete. They are
+	// tracked in ptone/scion#5519.
 	// Its UAT selector project:chat_post only keeps the permission in a
 	// token's ceiling, so a token can delegate roles that include it (the
 	// built-in project-member role). A token never posts through it: a send
 	// by token needs inbox:write, and project.chat_post is decided on the
 	// token holder's account (chatPostIdentity).
-	{ID: "project.chat_post", Resource: ResourceProject, Action: "chat_post", CapabilityKind: CapabilityResource, UATScope: "project:chat_post", Description: "Post messages into the project's chat threads (project owner/admin/member, hub admin). Checked on the account: a user access token posts with inbox:write. On a token, project:chat_post only lets the token grant roles that include this permission", Enforcement: []string{"pkg/hub/handlers_chat_send.go:func (s *Server) chatMayPost"}},
+	{ID: "project.chat_post", Resource: ResourceProject, Action: "chat_post", CapabilityKind: CapabilityResource, UATScope: "project:chat_post", Description: "Keep project.chat_post on the token so it can grant roles that include it, such as project-member. It does not post: a token posts in a project's chat threads with inbox:write, and project.chat_post is checked on the account (project owner/admin/member, hub admin)", Enforcement: []string{"pkg/hub/chat_access.go:func (s *Server) chatUserAccess"}},
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},
 	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (adminAuthorityWith)"},
 	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; DELETE on an artifact is gated by artifact.manage (ptone/scion#4529)"},
-	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdministerWith", "pkg/artifacts/links.go:func (s *Service) stewardAuthority", "pkg/artifacts/grants.go:func (s *Service) reviewGrantSubject", "pkg/artifacts/retire.go:func (s *Service) retireAuthority"}},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdministerWith", "pkg/artifacts/links.go:func (s *Service) stewardAuthority", "pkg/artifacts/retire.go:func (s *Service) retireAuthority"}},
 	{ID: "artifact.steward", Resource: ResourceArtifact, Action: ActionSteward, CapabilityKind: CapabilityResource, UATScope: "artifact:steward", Description: "Share and delete artifacts owned by agents in the project (no admin grants, no moves)", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) StewardClause", "pkg/artifacts/links.go:func (s *Service) stewardAuthority"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},

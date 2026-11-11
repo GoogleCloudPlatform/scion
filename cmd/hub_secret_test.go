@@ -237,15 +237,15 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	scope, scopeID, err := resolveSecretScope(testCmd, settings)
+	target, err := resolveSecretScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "hub", scope)
-	assert.Equal(t, "", scopeID, "hub scope should return empty scopeID (server resolves it)")
+	assert.Equal(t, "hub", target.scope)
+	assert.Equal(t, "", target.id, "hub scope should return empty scopeID (server resolves it)")
 }
 
-func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
-	// When --project is set without value and settings.Hub.ProjectID is empty,
-	// it should fall back to settings.ProjectID (the top-level project ID).
+func TestResolveSecretScope_UnlinkedProjectIDIsNotUsed(t *testing.T) {
+	// A bare --project in a directory project that is not linked to a hub
+	// is an error: its own project_id is not a hub project.
 	orig := saveSecretTestState()
 	defer orig.restore()
 
@@ -262,8 +262,13 @@ func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	// setupSecretProject sets project_id but NOT hub.projectId
+	t.Setenv("SCION_HUB_PROJECT_ID", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
 	projectDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
-	projectPath = projectDir
+	projectPath = ""
+	t.Chdir(filepath.Dir(projectDir))
 
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
@@ -271,10 +276,10 @@ func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
 	assert.Empty(t, settings.GetHubProjectID(), "hub project ID should be empty for this test")
 	assert.NotEmpty(t, settings.ProjectID, "top-level project ID should be set")
 
-	scope, scopeID, err := resolveSecretScope(testCmd, settings)
-	assert.NoError(t, err)
-	assert.Equal(t, "project", scope)
-	assert.Equal(t, settings.ProjectID, scopeID, "should fall back to settings.ProjectID")
+	target, err := resolveSecretScope(testCmd, settings)
+	require.Error(t, err, "a local project_id is never used for a project that is not linked to a hub")
+	assert.Equal(t, hubScopeTarget{}, target)
+	assert.Contains(t, err.Error(), "directory project project is not linked to a hub")
 }
 
 func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
@@ -300,7 +305,7 @@ func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveSecretScope(testCmd, settings)
+	_, err = resolveSecretScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }
@@ -328,7 +333,7 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
-	_, _, err = resolveSecretScope(testCmd, settings)
+	_, err = resolveSecretScope(testCmd, settings)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }
@@ -488,7 +493,8 @@ func assertSecretListJSON(t *testing.T, out string) {
 	require.Len(t, items, 2)
 
 	first := items[0].(map[string]interface{})
-	assert.ElementsMatch(t, []string{"key", "type", "allowProgeny", "version", "updated"}, mapKeys(first))
+	assert.ElementsMatch(t, []string{"key", "state", "type", "allowProgeny", "version", "updated"}, mapKeys(first))
+	assert.Equal(t, "approved", first["state"])
 	assert.Equal(t, "API_KEY", first["key"])
 	assert.Equal(t, "environment", first["type"])
 	assert.Equal(t, true, first["allowProgeny"])
@@ -528,7 +534,9 @@ func TestRunSecretList_JSONFlagMetadataOnly(t *testing.T) {
 	assertSecretListJSON(t, out)
 }
 
-func TestRunSecretList_TableOutputUnchanged(t *testing.T) {
+// TestRunSecretList_TableOutput: the user-scope table has a STATE column;
+// a Hub that answers without the merged list shows every secret approved.
+func TestRunSecretList_TableOutput(t *testing.T) {
 	setupSecretListTest(t)
 	outputFormat = ""
 
@@ -539,10 +547,10 @@ func TestRunSecretList_TableOutputUnchanged(t *testing.T) {
 	updated1 := clitime.Format(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), clitime.Full)
 	updated2 := clitime.Format(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), clitime.Full)
 	want := "Secrets (scope: user):\n" +
-		fmt.Sprintf("%-30s  %-12s  %-8s  %-8s  %s\n", "KEY", "TYPE", "PROGENY", "VERSION", "UPDATED") +
-		fmt.Sprintf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-----------------------") +
-		fmt.Sprintf("%-30s  %-12s  %-8s  v%-7d  %s\n", "API_KEY", "environment", "✓", 3, updated1) +
-		fmt.Sprintf("%-30s  %-12s  %-8s  v%-7d  %s\n", "CONFIG", "environment", "-", 1, updated2)
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "KEY", "STATE", "TYPE", "PROGENY", "VERSION", "UPDATED") +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "--------", "------------", "--------", "--------", "-----------------------") +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "API_KEY", "approved", "environment", "✓", "v3", updated1) +
+		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "CONFIG", "approved", "environment", "-", "v1", updated2)
 	assert.Equal(t, want, out)
 	assert.NotContains(t, out, "do-not-print")
 }

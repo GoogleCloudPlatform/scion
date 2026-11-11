@@ -523,6 +523,8 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"default_gcp_identity_service_account_id":  testAdminPolicyDeny,
 	"server.hub.public_url":                    testAdminPolicyDeny,
 	"server.hub.hub_name":                      testAdminPolicyDeny,
+	"server.hub.content_url":                   testAdminPolicyDeny,
+	"server.hub.content_url_allow_same_site":   testAdminPolicyDeny,
 	"image_registry":                           testAdminPolicyDeny,
 	"server.hub.monitoring_dashboard_url":      testAdminPolicyDeny,
 	"server.github_app":                        testAdminPolicyDeny,
@@ -570,6 +572,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ConduitDeliver:               testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.ChatStarredMessages:          testAdminPolicyDeny,
+	experiments.ChatChoices:                  testAdminPolicyDeny,
 	experiments.ChatRetention:                testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
 	experiments.AgentEditHeld:                testAdminPolicyDeny,
@@ -588,6 +591,10 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
 	experiments.ArtifactArchive:              testAdminPolicyDeny,
 	experiments.ImageTagSetting:              testAdminPolicyDeny,
+	experiments.ImageTagVersionDefault:       testAdminPolicyDeny,
+	experiments.ArtifactsOpenReviewCheck:     testAdminPolicyDeny,
+	experiments.ProjectSelfLeave:             testAdminPolicyDeny,
+	experiments.WelcomeProject:               testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -931,27 +938,21 @@ func (d *HTTPAgentDispatcher) testAdminRootScopes(ctx context.Context, agent *st
 	if agent.OwnerID == root {
 		allowed[store.ScopeUser] = true
 	}
-	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.IsMember {
+	// Project-scope secrets are material: the project-viewer role
+	// alone does not admit them (ptone/scion#5519, AdmitsBeyondViewer).
+	if m := checkEffectiveMembership(ctx, d.store, d.authzService, root, agent.ProjectID); m.Err == nil && m.AdmitsBeyondViewer() {
 		allowed[store.ScopeProject] = true
 	}
 	return true, allowed, root
 }
 
-// restrictTestAdminRootedSecrets applies testAdminRootScopes to the secrets
-// secretBackend.Resolve returned (both dispatch paths call it:
-// resolveSecrets for the first pass and resolveAsNeededForKeys for the
-// as_needed pass).
-func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue) []secret.SecretWithValue {
-	if len(resolved) == 0 {
-		return resolved
-	}
-	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
-	return d.applyTestAdminSecretScopes(ctx, agent, resolved, restricted, allowed, root)
-}
-
-// applyTestAdminSecretScopes is restrictTestAdminRootedSecrets with the
-// testAdminRootScopes result supplied by the caller (launch selection
-// decides it once, before it fetches any value): when restricted, it keeps
+// applyTestAdminSecretScopes applies a testAdminRootScopes result, supplied
+// by the caller, to the secrets secretBackend.Resolve returned. Every
+// start-time site evaluates testAdminRootScopes once (testAdminScopesFor)
+// and passes the same result here and to the owner material chain rule's
+// keep decision (resolveSecrets for the first pass, resolveAsNeededForKeys
+// for the as_needed pass; the launch selection applies it before it
+// fetches any value): when restricted, it keeps
 // only secrets of an allowed scope and reports the withheld scopes.
 func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue, restricted bool, allowed map[string]bool, root string) []secret.SecretWithValue {
 	if !restricted || len(resolved) == 0 {

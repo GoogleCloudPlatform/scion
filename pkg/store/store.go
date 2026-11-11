@@ -446,6 +446,9 @@ type Store interface {
 	// Secret operations
 	SecretStore
 
+	// Pending (agent-written, awaiting owner approval) user secrets
+	PendingSecretStore
+
 	// Secret encryption policy and migration records
 	SecretEncryptionStore
 
@@ -567,6 +570,9 @@ type Store interface {
 
 	// Workload-bound issuer delegations (test identities, ptone/scion#4240)
 	TestIdentityDelegationStore
+
+	// Choice prompt decisions and answers (choices, ptone/scion#7514)
+	DecisionStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -892,6 +898,19 @@ type AgentStore interface {
 	// no longer matches, the applied config changed concurrently, or the
 	// agent does not exist.
 	SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (written bool, err error)
+
+	// SetAgentNativeCloudRun sets (native true) or removes (native false)
+	// AgentAppliedConfig.NativeCloudRun in an agent's applied config and
+	// changes nothing else: no other applied-config key, no other column,
+	// and not state_version, so a dispatch can record it before its broker
+	// call without conflicting with its caller's own later write. The read
+	// and write run in one transaction, retried when the applied config
+	// changes concurrently. Returns ErrNotFound when no live row exists.
+	//
+	// It is the only writer of that key: every other write of the applied
+	// config (UpdateAgent, UpdateAgentConfig, CreateAgent and the rest)
+	// keeps the value the row holds, whatever the caller's copy says.
+	SetAgentNativeCloudRun(ctx context.Context, id string, native bool) error
 
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
@@ -2850,6 +2869,13 @@ type UserAccessTokenStore interface {
 	// and returns how many it revoked (ptone/scion#2143).
 	RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error)
 
+	// RevokeUserAccessTokensForUserProject revokes every unrevoked token of
+	// userID whose boundary is the project projectID, and returns the IDs
+	// it revoked. Hub-boundary tokens and tokens bounded to other projects
+	// are not touched. Used by a project leave, in its transaction
+	// (ptone/scion#7494).
+	RevokeUserAccessTokensForUserProject(ctx context.Context, userID, projectID string) ([]string, error)
+
 	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
 	// tokens scoped to projectID. A hub-boundary token belonging to one of the
 	// project's members is never removed by this call, even if that member
@@ -2998,6 +3024,12 @@ type NotificationStore interface {
 	// Returns ErrNotFound if the notification doesn't exist.
 	AcknowledgeNotification(ctx context.Context, id string) error
 
+	// UpdateNotificationContent replaces a notification's Message and
+	// ResourceID and marks it unacknowledged, so an aggregated
+	// notification shows its latest state again. CreatedAt and everything
+	// else are kept. Returns ErrNotFound if the notification doesn't exist.
+	UpdateNotificationContent(ctx context.Context, id, message, resourceID string) error
+
 	// AcknowledgeAllNotifications marks all notifications for a subscriber as acknowledged.
 	// No error on zero rows affected.
 	AcknowledgeAllNotifications(ctx context.Context, subscriberType, subscriberID string) error
@@ -3076,14 +3108,17 @@ type NotificationStore interface {
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
 	//
-	// Notifications whose subscriber agent is suspended are never
-	// returned: they stay pending (parked) and become eligible again when
-	// the agent leaves the suspended phase.
+	// Notifications whose subscriber agent is suspended are not returned:
+	// they stay pending (parked) and become eligible again when the agent
+	// leaves the suspended phase. A subscriber with an active hold
+	// (ptone/scion#7145) is the exception: its notifications are returned
+	// whatever its phase, and in sweep mode whatever its RuntimeBrokerID,
+	// so the dispatcher drops them (failed, NotificationReasonSubscriberHeld).
 	//
 	// If brokerID is empty (sweep mode), a 60s grace period is applied so
 	// the sweep does not race with an in-flight primary dispatch, only
-	// notifications whose subscriber agent has a RuntimeBrokerID are
-	// returned, and a notification whose NextAttemptAt is in the future
+	// notifications whose subscriber agent has a RuntimeBrokerID (or is
+	// held) are returned, and a notification whose NextAttemptAt is in the future
 	// (retry backoff) is left out.
 	//
 	// If brokerID is non-empty (broker-connect fast-path), no grace period
@@ -3431,9 +3466,12 @@ type MaintenanceStore interface {
 	// ListMaintenanceRuns returns runs for a given operation key, ordered by started_at DESC.
 	ListMaintenanceRuns(ctx context.Context, operationKey string, limit int) ([]MaintenanceOperationRun, error)
 
-	// AbortRunningMaintenanceOps transitions any "running" operation runs and
-	// migrations to "failed". Called at server startup to clean up operations
-	// that were interrupted by a restart.
+	// AbortRunningMaintenanceOps transitions any "running" operation runs to
+	// "failed" and resets "running" migrations to "pending". Called at server
+	// startup to clean up operations that were interrupted by a restart. A
+	// run's JSON-object Result keeps its keys and gains "error" and
+	// "aborted": true; any other Result is replaced by the abort error. A
+	// Result written while the abort runs is not overwritten.
 	AbortRunningMaintenanceOps(ctx context.Context) (runs int64, migrations int64, err error)
 }
 
@@ -3532,13 +3570,21 @@ type SkillStore interface {
 	CreateSkillVersion(ctx context.Context, version *SkillVersion) error
 	GetSkillVersion(ctx context.Context, id string) (*SkillVersion, error)
 	GetSkillVersionByNumber(ctx context.Context, skillID, version string) (*SkillVersion, error)
-	ListSkillVersions(ctx context.Context, skillID string, opts ListOptions) (*ListResult[SkillVersion], error)
+	ListSkillVersions(ctx context.Context, skillID string, filter SkillVersionFilter, opts ListOptions) (*ListResult[SkillVersion], error)
 	UpdateSkillVersion(ctx context.Context, version *SkillVersion) error
 	DeleteSkillVersion(ctx context.Context, id string) error
 
 	ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*SkillVersion, error)
 
 	IncrementSkillVersionDownloadCount(ctx context.Context, versionID string) error
+}
+
+// SkillVersionFilter defines criteria for listing a skill's versions.
+type SkillVersionFilter struct {
+	// Statuses, when non-empty, restricts results to versions in one of
+	// these statuses. It is applied in the store query, before LIMIT and
+	// TotalCount. Empty means every status.
+	Statuses []string
 }
 
 // SkillFilter defines criteria for filtering skills.

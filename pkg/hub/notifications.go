@@ -441,6 +441,19 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		return
 	}
 
+	// A held subscriber gets no notice (ptone/scion#7145), whatever its
+	// phase, so this comes before the suspended check: the notification is
+	// dropped, recorded as failed with reason subscriber_held. When the
+	// hold cannot be read nothing is delivered and the notification stays
+	// pending, unclaimed; the dispatch sweep checks it again.
+	switch noticeHoldOf(ctx, nd.store, noticeLogger(nd.messageLog, nd.log), subscriber, heldNoticeNotification) {
+	case noticeHeld:
+		nd.dropHeldNotification(ctx, notif.ID)
+		return
+	case noticeHoldUnknown:
+		return
+	}
+
 	if subscriberSuspended(subscriber) {
 		// No running agent to deliver to: leave the notification pending
 		// with no attempt counted. The dispatch sweep leaves it out while

@@ -537,7 +537,7 @@ func TestBlockingWaitForTaskEvent_ReturnsOnEvent(t *testing.T) {
 	}()
 
 	// Wait for the event (as the blocking SendMessage path would).
-	ev, err := b.waitForTaskEvent(context.Background(), taskID, 2*time.Second)
+	ev, err := b.waitForTaskEvent(context.Background(), taskID, 2*time.Second, waitOptions{})
 	if err != nil {
 		t.Fatalf("waitForTaskEvent: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestBlockingWaitForTaskEvent_TimeoutCleansUp(t *testing.T) {
 	b.registerActiveTask(taskID, aKey)
 
 	// Wait with a very short timeout — no events will arrive.
-	_, err := b.waitForTaskEvent(context.Background(), taskID, 100*time.Millisecond)
+	_, err := b.waitForTaskEvent(context.Background(), taskID, 100*time.Millisecond, waitOptions{})
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -595,7 +595,7 @@ func TestBlockingWaitForTaskEvent_ContextCancel(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second)
+	_, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second, waitOptions{})
 	if err == nil {
 		t.Fatal("expected context canceled error")
 	}
@@ -1293,7 +1293,7 @@ func TestExplicitReplyBecomesTaskResponse(t *testing.T) {
 	// The blocking caller is answered by the explicit reply.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second)
+	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second, waitOptions{})
 	if err != nil {
 		t.Fatalf("waitForTaskEvent: %v", err)
 	}
@@ -1476,7 +1476,7 @@ func TestInputNeededReplyReturnsInputRequiredArtifact(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second)
+	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second, waitOptions{})
 	if err != nil {
 		t.Fatalf("waitForTaskEvent: %v", err)
 	}
@@ -1518,7 +1518,7 @@ func TestInputNeededWithoutLegacyRowIsInputRequired(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second)
+	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second, waitOptions{})
 	if err != nil {
 		t.Fatalf("waitForTaskEvent: %v", err)
 	}

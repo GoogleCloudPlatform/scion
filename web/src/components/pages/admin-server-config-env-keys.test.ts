@@ -190,9 +190,6 @@ function fetchHandler(config: Record<string, unknown>) {
     if (path.includes('/api/v1/admin/messaging')) {
       return jsonResponse({ cross_project_messaging_enabled: false, revision: 1 });
     }
-    if (path.includes('/api/v1/admin/maintenance/check-updates')) {
-      return jsonResponse({ tier: 'source', update_available: false });
-    }
     if (path.includes('/api/v1/github-app/installations')) return jsonResponse([]);
     if (path.includes('/api/v1/github-app')) {
       // The GitHub App endpoint reports the server.github_app settings.

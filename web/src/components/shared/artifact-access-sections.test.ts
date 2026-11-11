@@ -44,14 +44,7 @@ import type {
 function expected(c: AccessCapabilities, stewardCreateLink: boolean): SectionStates {
   const manager = c.canManage;
   const steward = !c.canManage && c.canShare;
-  const reviewOnly = !c.canManage && !c.canShare && c.canGrantReview;
-  const people: PeopleState = manager
-    ? 'edit'
-    : steward
-      ? 'bounded'
-      : reviewOnly
-        ? 'review-only'
-        : 'hidden';
+  const people: PeopleState = manager ? 'edit' : steward ? 'bounded' : 'hidden';
   const links: LinksState = manager
     ? 'edit'
     : steward
@@ -59,10 +52,10 @@ function expected(c: AccessCapabilities, stewardCreateLink: boolean): SectionSta
         ? 'edit'
         : 'revoke-only'
       : 'hidden';
-  // Retention follows canShare alone (section 4.1): editable iff canShare,
-  // read-only iff canGrantReview without canShare. The hub never sends
-  // canManage without canShare, and such a caller gets no editable expiry.
-  const retention: RetentionState = c.canShare ? 'edit' : c.canGrantReview ? 'read-only' : 'hidden';
+  // Retention follows canShare alone (section 4.1): editable iff canShare.
+  // The hub never sends canManage without canShare, and such a caller gets
+  // no editable expiry.
+  const retention: RetentionState = c.canShare ? 'edit' : 'hidden';
   return { people, links, retention };
 }
 
@@ -77,22 +70,15 @@ describe('artifact access sections', () => {
   describe('sectionStates over every flag combination', () => {
     for (const canManage of BOOLS) {
       for (const canShare of BOOLS) {
-        for (const canGrantReview of BOOLS) {
-          for (const shareAuthority of AUTHORITIES) {
-            for (const stewardCreateLink of BOOLS) {
-              const c: AccessCapabilities = {
-                canManage,
-                canShare,
-                canGrantReview,
-                shareAuthority,
-              };
-              it(`${JSON.stringify(c)} stewardCreateLink=${stewardCreateLink}`, () => {
-                expect(sectionStates(c, { stewardCreateLink })).toEqual(
-                  expected(c, stewardCreateLink)
-                );
-                expect(showManageAccess(c)).toBe(canShare || canGrantReview);
-              });
-            }
+        for (const shareAuthority of AUTHORITIES) {
+          for (const stewardCreateLink of BOOLS) {
+            const c: AccessCapabilities = { canManage, canShare, shareAuthority };
+            it(`${JSON.stringify(c)} stewardCreateLink=${stewardCreateLink}`, () => {
+              expect(sectionStates(c, { stewardCreateLink })).toEqual(
+                expected(c, stewardCreateLink)
+              );
+              expect(showManageAccess(c)).toBe(canShare);
+            });
           }
         }
       }
@@ -102,35 +88,21 @@ describe('artifact access sections', () => {
   it('matches the design matrix for each role (phase 1)', () => {
     const p1 = { stewardCreateLink: false };
     // R1, R2 manager.
-    expect(
-      sectionStates(
-        { canManage: true, canShare: true, canGrantReview: false, shareAuthority: '' },
-        p1
-      )
-    ).toEqual({ people: 'edit', links: 'edit', retention: 'edit' });
+    expect(sectionStates({ canManage: true, canShare: true, shareAuthority: '' }, p1)).toEqual({
+      people: 'edit',
+      links: 'edit',
+      retention: 'edit',
+    });
     // R3, R4 steward.
     for (const shareAuthority of ['project_owner', 'delegator'] as const) {
-      expect(
-        sectionStates(
-          { canManage: false, canShare: true, canGrantReview: true, shareAuthority },
-          p1
-        )
-      ).toEqual({ people: 'bounded', links: 'revoke-only', retention: 'edit' });
+      expect(sectionStates({ canManage: false, canShare: true, shareAuthority }, p1)).toEqual({
+        people: 'bounded',
+        links: 'revoke-only',
+        retention: 'edit',
+      });
     }
-    // R5, R6 review only.
-    expect(
-      sectionStates(
-        { canManage: false, canShare: false, canGrantReview: true, shareAuthority: '' },
-        p1
-      )
-    ).toEqual({ people: 'review-only', links: 'hidden', retention: 'read-only' });
-    // R5u, R7, R8: no button, nothing shown.
-    const none: AccessCapabilities = {
-      canManage: false,
-      canShare: false,
-      canGrantReview: false,
-      shareAuthority: '',
-    };
+    // R5, R5u, R6, R7, R8: no button, nothing shown.
+    const none: AccessCapabilities = { canManage: false, canShare: false, shareAuthority: '' };
     expect(showManageAccess(none)).toBe(false);
     expect(sectionStates(none, p1)).toEqual(NO_SECTIONS);
   });
@@ -138,35 +110,23 @@ describe('artifact access sections', () => {
   it('matches the design matrix for each role (phase 2, the dialog option)', () => {
     const p2 = { stewardCreateLink: STEWARD_CREATE_LINK };
     // R1, R2 manager: unchanged.
-    expect(
-      sectionStates(
-        { canManage: true, canShare: true, canGrantReview: false, shareAuthority: '' },
-        p2
-      )
-    ).toEqual({ people: 'edit', links: 'edit', retention: 'edit' });
+    expect(sectionStates({ canManage: true, canShare: true, shareAuthority: '' }, p2)).toEqual({
+      people: 'edit',
+      links: 'edit',
+      retention: 'edit',
+    });
     // R3, R4 steward: Create link added; people stay bounded.
     for (const shareAuthority of ['project_owner', 'delegator'] as const) {
-      expect(
-        sectionStates(
-          { canManage: false, canShare: true, canGrantReview: true, shareAuthority },
-          p2
-        )
-      ).toEqual({ people: 'bounded', links: 'edit', retention: 'edit' });
+      expect(sectionStates({ canManage: false, canShare: true, shareAuthority }, p2)).toEqual({
+        people: 'bounded',
+        links: 'edit',
+        retention: 'edit',
+      });
     }
-    // R5, R6 review only: still no links, so no Create link and no link list.
-    expect(
-      sectionStates(
-        { canManage: false, canShare: false, canGrantReview: true, shareAuthority: '' },
-        p2
-      )
-    ).toEqual({ people: 'review-only', links: 'hidden', retention: 'read-only' });
-    // R5u, R7, R8: nothing.
-    expect(
-      sectionStates(
-        { canManage: false, canShare: false, canGrantReview: false, shareAuthority: '' },
-        p2
-      )
-    ).toEqual(NO_SECTIONS);
+    // R5, R5u, R6, R7, R8: nothing.
+    expect(sectionStates({ canManage: false, canShare: false, shareAuthority: '' }, p2)).toEqual(
+      NO_SECTIONS
+    );
   });
 
   describe('capabilitiesFrom', () => {
@@ -176,7 +136,6 @@ describe('artifact access sections', () => {
       expect(capabilitiesFrom(base)).toEqual({
         canManage: false,
         canShare: false,
-        canGrantReview: false,
         shareAuthority: '',
       });
       expect(capabilitiesFrom(null)).toEqual(capabilitiesFrom(base));
@@ -189,13 +148,11 @@ describe('artifact access sections', () => {
           ...base,
           canManage: true,
           canShare: true,
-          canGrantReview: true,
           shareAuthority: 'delegator',
         })
       ).toEqual({
         canManage: true,
         canShare: true,
-        canGrantReview: true,
         shareAuthority: 'delegator',
       });
       expect(capabilitiesFrom({ ...base, shareAuthority: 'project_owner' }).shareAuthority).toBe(
@@ -214,6 +171,12 @@ describe('artifact access sections', () => {
       const loose = { ...base, canShare: 'yes', canManage: 1 } as unknown as ArtifactResponse;
       expect(capabilitiesFrom(loose)).toEqual(capabilitiesFrom(base));
     });
+
+    it('ignores a canGrantReview flag, which the hub no longer sends', () => {
+      const stale = { ...base, canGrantReview: true } as unknown as ArtifactResponse;
+      expect(capabilitiesFrom(stale)).toEqual(capabilitiesFrom(base));
+      expect(showManageAccess(capabilitiesFrom(stale))).toBe(false);
+    });
   });
 
   describe('needsAccessData', () => {
@@ -231,9 +194,7 @@ describe('artifact access sections', () => {
       expect(needsAccessData(states('hidden', 'revoke-only'))).toBe(true);
     });
 
-    it('loads nothing when only review access or a read-only expiry is shown', () => {
-      expect(needsAccessData(states('review-only'))).toBe(false);
-      expect(needsAccessData(states('review-only', 'hidden', 'read-only'))).toBe(false);
+    it('loads nothing when only the expiry is shown', () => {
       expect(needsAccessData(states('hidden', 'hidden', 'edit'))).toBe(false);
       expect(needsAccessData(NO_SECTIONS)).toBe(false);
     });
@@ -242,11 +203,9 @@ describe('artifact access sections', () => {
   it('keeps the earlier modes as presets', () => {
     expect(MODE_PRESETS).toEqual({
       share: { people: 'edit', links: 'edit', retention: 'edit' },
-      review: { people: 'review-only', links: 'hidden', retention: 'hidden' },
       retention: { people: 'remove-only', links: 'revoke-only', retention: 'edit' },
     });
     expect(needsAccessData(MODE_PRESETS.share)).toBe(true);
-    expect(needsAccessData(MODE_PRESETS.review)).toBe(false);
     expect(needsAccessData(MODE_PRESETS.retention)).toBe(true);
   });
 });

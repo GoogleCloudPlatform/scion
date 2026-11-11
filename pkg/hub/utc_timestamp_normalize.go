@@ -58,6 +58,11 @@ func (e *UTCTimestampNormalizeExecutor) Run(ctx context.Context, logger io.Write
 // again after completing. Each one is idempotent: a second run changes
 // nothing that the first run already fixed.
 //
+//   - secret-hub-id-migration: a run made before values were decoded and
+//     verified may have left encoded values in Secret Manager, so a
+//     completed run must not block the run that checks and repairs them. A
+//     second run verifies the secrets already moved and rewrites none of
+//     them.
 //   - utc-timestamp-normalize: the startup check keeps reporting rows it has
 //     not yet rewritten (rows written by an older binary, restored from a
 //     backup, or written by a later migration), so the remedy it names must
@@ -76,6 +81,7 @@ func (e *UTCTimestampNormalizeExecutor) Run(ctx context.Context, logger io.Write
 //     or kept as <name>.migrated-<ts>), so a second run reports moves=0; a
 //     run that failed for one project is completed by the next.
 var rerunnableMigrations = map[string]bool{
+	entadapter.SecretHubIDMigrationKey:        true,
 	entadapter.UTCTimestampNormalizeKey:       true,
 	entadapter.AppliedConfigTZCleanupKey:      true,
 	entadapter.AutoExposeEnvNormalizeKey:      true,

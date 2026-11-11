@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -221,17 +222,33 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
-	// Run returns the whole trimmed output, as before; only the launch
-	// handle is restricted to a well-formed container ID line.
+	// "podman run -d" prints the full container ID, and only that, on
+	// stdout (runSimpleCommand keeps stderr out of it). Anything else is
+	// not an ID callers may address the container by: refuse it, and
+	// remove what this run may have created, as for a cancelled create.
 	id := strings.TrimSpace(out)
-	reportContainerCreated(hooks, config.Name, out)
+	if !podmanContainerIDPattern.MatchString(id) {
+		err := fmt.Errorf("container run printed no container ID: got %q, want 64 lowercase hex characters", truncateForError(id))
+		// The run exited 0, so a container almost certainly exists: say so
+		// when it could not be removed.
+		if rbErr := rollbackCreate(r.Command, config.Name, config.Labels[api.LabelRunID]); rbErr != nil {
+			return "", fmt.Errorf("%w; a container from this run may still exist: %v", err, rbErr)
+		}
+		return "", err
+	}
+	reportContainerCreated(hooks, config.Name, id)
 	return id, nil
 }
+
+// podmanContainerIDPattern matches the full container ID "podman run -d"
+// prints: 64 lowercase hex characters.
+var podmanContainerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Stop stops the container ref.ID. The engine container ID is already
 // unique per run, so ref.RunID needs no further check here.
 func (r *PodmanRuntime) Stop(ctx context.Context, ref RunRef) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
+	args := append([]string{"stop"}, stopTimeoutArgs(ref)...)
+	out, err := runSimpleCommand(ctx, r.Command, append(args, ref.ID)...)
 	if err != nil && out != "" {
 		// Include podman's stderr output in the error so callers can match
 		// on messages like "not running" (which runSimpleCommand's error
@@ -332,7 +349,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 }
 
 func (r *PodmanRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return runSimpleCommand(ctx, r.Command, "logs", id)
+	return runCombinedCommand(ctx, r.Command, "logs", id)
 }
 
 func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
@@ -431,7 +448,7 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
-	out, err := runSimpleCommand(ctx, r.Command, args...)
+	out, err := runCombinedCommand(ctx, r.Command, args...)
 	// A container removed after the lookup above must surface as
 	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
 	return out, podmanExecNotFound.classifyExecErr(ctx, err, out, id, r.List)

@@ -139,26 +139,61 @@ func TestValidateImageTag(t *testing.T) {
 	}
 }
 
+// TestEffectiveImageTag is the resolution table (ptone/scion#6625): an
+// unset value defaults to a release build's own version and leaves every
+// other build unchanged (images keep :latest); "version" is the release
+// version or latest; an explicit value always wins.
 func TestEffectiveImageTag(t *testing.T) {
 	tests := []struct {
 		setting, version, want string
 		wantErr                bool
 	}{
-		{"", "v1.0.0", "", false},
-		{"  ", "v1.0.0", "", false},
-		{"v0.3.0-preview.5", "dev", "v0.3.0-preview.5", false},
-		{" stable ", "", "stable", false},
-		{"version", "v0.3.0-preview.5", "v0.3.0-preview.5", false},
+		// 1. a release build defaults to its own version
+		{"", "v1.0.0", "v1.0.0", false},
+		{"", "v0.3.0-preview.5", "v0.3.0-preview.5", false},
+		{"", "v0.3.0-rc.1", "v0.3.0-rc.1", false},
+		{"  ", "v1.0.0", "v1.0.0", false},
+		// 2. a dev or unversioned build keeps :latest (no change)
+		{"", "", "", false},
+		{"", "dev", "", false},
+		{"", "v0.3.0-dirty", "", false},
+		{"", "nightly-20261105", "", false},
+		{"", "v0.0.0-20261108002803-39f9e3d31e76", "", false},
+		{"", "v0.3.0+meta", "", false},
+		{"version", "nightly-20261105", "latest", false},
 		{"version", "dev", "latest", false},
 		{"version", "", "latest", false},
 		{"version", "v1+meta", "latest", false},
-		{"bad tag", "v1", "", true},
-		{".hidden", "v1", "", true},
+		// 3. an explicit value always wins
+		{"latest", "v0.3.0", "latest", false},
+		{"v0.2.9", "v0.3.0", "v0.2.9", false},
+		{"v0.3.0-preview.5", "dev", "v0.3.0-preview.5", false},
+		{" stable ", "", "stable", false},
+		{"version", "v0.3.0-preview.5", "v0.3.0-preview.5", false},
+		{"version", "v0.3.0-rc.2", "v0.3.0-rc.2", false},
+		// invalid settings give no tag
+		{"bad tag", "v1.0.0", "", true},
+		{".hidden", "v1.0.0", "", true},
 	}
 	for _, tt := range tests {
 		got, err := EffectiveImageTag(tt.setting, tt.version)
 		if (err != nil) != tt.wantErr || got != tt.want {
 			t.Errorf("EffectiveImageTag(%q, %q) = %q, %v; want %q, error %v", tt.setting, tt.version, got, err, tt.want, tt.wantErr)
+		}
+	}
+}
+
+// TestReleaseImageTag: only the release tag forms are release versions.
+func TestReleaseImageTag(t *testing.T) {
+	for _, v := range []string{"v0.3.0", "v1.2.3", "v0.3.0-preview.5", "v0.3.0-rc.1", "v10.0.0-preview.12"} {
+		if got, ok := ReleaseImageTag(v); !ok || got != v {
+			t.Errorf("ReleaseImageTag(%q) = %q, %v; want %q, true", v, got, ok, v)
+		}
+	}
+	for _, v := range []string{"", "dev", "latest", "nightly-20261105", "0.3.0", "v0.3", "v0.3.0-dirty",
+		"v0.3.0+meta", "v0.3.0-rc1", "v0.3.0-preview", "v01.2.3", "v0.0.0-20261108002803-39f9e3d31e76", " v0.3.0"} {
+		if got, ok := ReleaseImageTag(v); ok || got != "" {
+			t.Errorf("ReleaseImageTag(%q) = %q, %v; want \"\", false", v, got, ok)
 		}
 	}
 }

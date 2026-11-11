@@ -99,6 +99,9 @@ const (
 	ErrCodeRuntimeTargetTypeUnsupported     = apierr.ErrCodeRuntimeTargetTypeUnsupported
 	ErrCodeScopeMismatch                    = apierr.ErrCodeScopeMismatch
 	ErrCodeScopeNotFound                    = apierr.ErrCodeScopeNotFound
+	ErrCodeSecretPendingExistingChanged     = apierr.ErrCodeSecretPendingExistingChanged
+	ErrCodeSecretPendingHeldByOtherAgent    = apierr.ErrCodeSecretPendingHeldByOtherAgent
+	ErrCodeSecretPendingCap                 = apierr.ErrCodeSecretPendingCap
 	ErrCodeSecretScopeRestricted            = apierr.ErrCodeSecretScopeRestricted
 	ErrCodeSecurityReviewRequired           = apierr.ErrCodeSecurityReviewRequired
 	ErrCodeSendInProgress                   = apierr.ErrCodeSendInProgress

@@ -44,6 +44,11 @@ type ProjectService interface {
 	// the hub refuses (409) while the project has agents not yet deleted.
 	Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error
 
+	// Leave removes the caller's own direct roles on the project
+	// (POST /api/v1/projects/{id}/leave). With dryRun the hub computes the
+	// result and changes nothing.
+	Leave(ctx context.Context, projectID string, dryRun bool) (*LeaveProjectResult, error)
+
 	// AssignableRoles lists the project-scoped membership roles with
 	// whether the caller could grant each one through the members PUT
 	// (GET /api/v1/projects/{id}/members/assignable-roles).
@@ -318,6 +323,50 @@ func (s *projectService) Delete(ctx context.Context, projectID string, opts *Del
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// LeaveProjectResult is the response of POST /api/v1/projects/{id}/leave.
+type LeaveProjectResult struct {
+	ProjectID          string                  `json:"projectId"`
+	DryRun             bool                    `json:"dryRun"`
+	RemovedRoles       []string                `json:"removedRoles"`
+	RemainingAccess    string                  `json:"remainingAccess"`
+	Agents             LeaveProjectAgents      `json:"agents"`
+	ProjectBoundTokens LeaveProjectTokenCounts `json:"projectBoundTokens"`
+	WillBeHeld         bool                    `json:"willBeHeld"`
+}
+
+// LeaveProjectAgents lists the agents the caller roots in the project. The
+// hub caps Items; Count is exact and Truncated reports a cut list.
+type LeaveProjectAgents struct {
+	Count     int                     `json:"count"`
+	Truncated bool                    `json:"truncated"`
+	Items     []LeaveProjectAgentItem `json:"items"`
+}
+
+// LeaveProjectAgentItem is one agent of a LeaveProjectResult.
+type LeaveProjectAgentItem struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+}
+
+// LeaveProjectTokenCounts counts the caller's access tokens limited to the
+// project that the leave revoked (dry run: would revoke).
+type LeaveProjectTokenCounts struct {
+	Revoked int `json:"revoked"`
+}
+
+// Leave removes the caller's own direct roles on the project. A caller who
+// is not a direct member of the project, or a project that does not exist,
+// gets the same 404.
+func (s *projectService) Leave(ctx context.Context, projectID string, dryRun bool) (*LeaveProjectResult, error) {
+	body := map[string]bool{"dryRun": dryRun}
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/leave", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[LeaveProjectResult](resp)
 }
 
 // ListAgents returns agents in a project.

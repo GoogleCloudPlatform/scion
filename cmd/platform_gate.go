@@ -91,6 +91,10 @@ var windowsAllowed = map[string]bool{
 	"project.settings.get":   true,
 	"project.settings.set":   true,
 	"project.settings.unset": true,
+	// Leaving a project: Hub API calls only (the dry run, the agent deletes
+	// and the leave), no local writes. The parent 'project' stays gated, as
+	// for project.use.
+	"project.leave": true,
 
 	"config":            true,
 	"config.list":       true,
@@ -115,6 +119,13 @@ var windowsAllowed = map[string]bool{
 	"hub.secret.list":           true,
 	"hub.secret.clear":          true,
 	"hub.secret.update":         true,
+	// Pending user secrets: Hub API calls only, no local writes.
+	"hub.secret.pending":         true,
+	"hub.secret.pending.list":    true,
+	"hub.secret.pending.approve": true,
+	"hub.secret.pending.reject":  true,
+	"hub.secret.pending.show":    true,
+	"hub.secret.pending.reveal":  true,
 	// Hub administrative settings: Hub API calls only; the one local file
 	// access is reading a settings document (hub settings set --file).
 	"hub.settings":               true,

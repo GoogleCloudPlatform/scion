@@ -714,7 +714,13 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
 	TestWebChatStore_Postgres_ThreadMigrationsRunOnce \
 	TestUserPrefsThreadGroupsMarker_Postgres \
-	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB
+	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB \
+	TestChatSearchLiteralWildcards_Postgres \
+	TestChatSearchDeletedAndEdited_Postgres \
+	TestChatSearchDifferential_Postgres \
+	TestChatSearchStatementTimeout_Postgres \
+	TestChatSearchVisibility_Postgres \
+	TestChatSearchStoreTimeoutStopsStatement_Postgres
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
@@ -915,11 +921,12 @@ time-literals:
 check-harness-coverage:
 	@./image-build/scripts/check-harness-coverage.sh
 
-## test-image-scripts: Test the release image driver (build-release-images.sh), the build-images.sh guards and the assert-no-cgo.sh exit contract with stubs; no docker, no network
+## test-image-scripts: Test the release image driver (build-release-images.sh), the build-images.sh guards, the assert-no-cgo.sh exit contract and the Cloud Build digest recorder with stubs; no docker, no network
 test-image-scripts:
 	@bash ./image-build/scripts/test-build-release-images.sh
 	@bash ./image-build/scripts/test-build-images.sh
 	@bash ./image-build/scripts/test-assert-no-cgo.sh
+	@bash ./image-build/scripts/test-buildx-record-digest.sh
 
 ## check-image-go-dirs: Verify every Dockerfile that builds the root Go module copies all of its top-level Go dirs (ptone/scion#5453)
 # NOTE: same caveat as check-authz-guards above -- make collapses the

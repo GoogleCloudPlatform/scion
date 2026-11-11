@@ -158,7 +158,7 @@ func setProjectDefaultGCPMode(t *testing.T, f *bypassAgentsFixture, mode string)
 }
 
 // TestScheduledDispatch_ProjectDefaultWinsOverHubDefault mirrors
-// TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault: a
+// TestHubDefaultGCPIdentity_RefusedProjectPassthroughDoesNotFallThroughToHubDefault: a
 // project default answers the question before the hub default is ever
 // consulted on the scheduled path too, regardless of what the hub default
 // would have produced (here, an unusable SA ID that would fail dispatch if it
@@ -178,8 +178,11 @@ func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
 	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-project-over-hub")
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModePassthrough, got.AppliedConfig.GCPIdentity.MetadataMode,
+	// The project passthrough default is not granted here (the fixture
+	// broker is not the embedded one; see projectDefaultPassthroughAllowed),
+	// and a refused project default leaves the identity unset rather than
+	// falling through to the hub default.
+	assert.Nil(t, got.AppliedConfig.GCPIdentity,
 		"the project default must win, and the hub default's unusable SA must never be looked up")
 }
 
@@ -639,10 +642,13 @@ func TestScheduledDispatch_HubDefaultPassthroughProfileAndSandboxTranslation(t *
 }
 
 // TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType: a
-// project-default passthrough on a scheduled dispatch, on a broker with both
-// a docker and a cloudrun-sandbox profile, is translated to the broker's host
-// service account only when the profile the agent resolves to (here the
-// broker default) is the cloudrun-sandbox one.
+// project-default passthrough on a scheduled dispatch is confined like the
+// hub default. On the embedded broker with both a docker and a
+// cloudrun-sandbox profile, it is granted (pinned, flagged for the broker's
+// runtime re-check) only when the profile the agent resolves to (here the
+// broker default) is the docker one and the schedule's principal has the
+// passthrough authority, which includes a registered host account. Anything
+// else leaves the identity unset, and nothing is translated.
 func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testing.T) {
 	t.Parallel()
 
@@ -652,14 +658,14 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 		translatedKey = "scion.dev/gcp-identity-translated-from"
 	)
 	tests := []struct {
-		name           string
-		brokerDefault  string
-		untranslatable bool // the broker has nothing registered to translate to
-		wantTranslated bool
+		name          string
+		brokerDefault string
+		noHostSA      bool // the broker has no host account registered
+		wantGranted   bool
 	}{
-		{name: "docker broker default stays passthrough", brokerDefault: "local"},
-		{name: "cloudrun-sandbox broker default is translated", brokerDefault: "sandbox", wantTranslated: true},
-		{name: "cloudrun-sandbox broker default the broker cannot translate stays passthrough", brokerDefault: "sandbox", untranslatable: true},
+		{name: "docker broker default is granted", brokerDefault: "local", wantGranted: true},
+		{name: "docker broker default without a host account is not granted", brokerDefault: "local", noHostSA: true},
+		{name: "cloudrun-sandbox broker default is not granted", brokerDefault: "sandbox"},
 	}
 
 	for _, tc := range tests {
@@ -667,6 +673,7 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 			t.Parallel()
 			ctx := context.Background()
 			f := bypassAgentsSetup(t)
+			markBrokerEmbedded(t, f)
 
 			b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
 			require.NoError(t, err)
@@ -677,16 +684,16 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 			b.DefaultProfile = tc.brokerDefault
 			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
 			hostEmail := hostSAEmail
-			if tc.untranslatable {
+			if tc.noHostSA {
 				hostEmail = ""
 			}
 			_, err = f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, hostEmail, hostProjectID)
 			require.NoError(t, err)
-			// Translation needs enforce mode, and the schedule's principal
-			// must pass the passthrough requirements: the fixture broker
-			// has no recorded owner (and UpdateRuntimeBroker does not write
-			// CreatedBy), so the principal is made an admin, and it holds
-			// actAs on the host account.
+			// The schedule's principal must pass the passthrough
+			// requirements: the fixture broker has no recorded owner (and
+			// UpdateRuntimeBroker does not write CreatedBy), so the
+			// principal is made an admin, and it holds actAs on the host
+			// account.
 			grantSuperAdmin(t, f.store, f.owner.ID)
 			enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 			setProjectDefaultGCPMode(t, f, store.GCPMetadataModePassthrough)
@@ -697,36 +704,27 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 			got, err := f.store.GetAgentBySlug(ctx, f.proj.ID, agentName)
 			require.NoError(t, err)
 			require.NotNil(t, got.AppliedConfig)
-			require.NotNil(t, got.AppliedConfig.GCPIdentity)
-			gcp := got.AppliedConfig.GCPIdentity
-
 			assignments, err := f.store.GetActiveAgentServiceAccountAssignments(ctx, got.ID)
 			require.NoError(t, err)
+			assert.Empty(t, assignments)
+			assert.Empty(t, got.Annotations[translatedKey])
 
-			// The profile the mode was decided on is recorded, whichever way
-			// the mode went, so later starts and reincarnations use it.
-			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.Profile)
-			require.NotNil(t, got.AppliedConfig.CreateInputs)
-			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.CreateInputs.Profile)
-
-			if !tc.wantTranslated {
-				assert.Equal(t, store.GCPMetadataModePassthrough, gcp.MetadataMode)
-				assert.False(t, gcp.RequireLocalRuntime,
-					"a project-default passthrough is not flagged for a runtime re-check")
-				assert.Empty(t, gcp.ServiceAccountID)
-				assert.Empty(t, got.Annotations[translatedKey])
-				assert.Empty(t, assignments)
+			if !tc.wantGranted {
+				assert.Nil(t, got.AppliedConfig.GCPIdentity)
 				return
 			}
 
-			assert.Equal(t, store.GCPMetadataModeAssign, gcp.MetadataMode)
-			assert.Equal(t, hostSAEmail, gcp.ServiceAccountEmail)
-			assert.Equal(t, hostProjectID, gcp.ProjectID)
-			require.NotEmpty(t, gcp.ServiceAccountID)
-			assert.Equal(t, "passthrough", got.Annotations[translatedKey])
-			require.Len(t, assignments, 1)
-			assert.Equal(t, gcp.ServiceAccountID, assignments[0].ServiceAccountID)
-			assert.Equal(t, store.SAAssignmentOriginHostPassthroughTranslation, assignments[0].Origin)
+			gcp := got.AppliedConfig.GCPIdentity
+			require.NotNil(t, gcp)
+			assert.Equal(t, store.GCPMetadataModePassthrough, gcp.MetadataMode)
+			assert.True(t, gcp.RequireLocalRuntime,
+				"a project-default passthrough grant asks the broker to re-check the runtime")
+			assert.Empty(t, gcp.ServiceAccountID)
+			// The profile the grant was decided on is recorded, so later
+			// starts and reincarnations use it.
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.Profile)
+			require.NotNil(t, got.AppliedConfig.CreateInputs)
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.CreateInputs.Profile)
 		})
 	}
 }

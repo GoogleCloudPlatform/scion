@@ -541,6 +541,29 @@ func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
+// TestChatChoices_RegisteredDefaultOff pins web.chat_choices (design
+// native-chat choices v4, 4.12): the hub enforces it on sends, routes and
+// history and the web only toggles the cards, so it has both layers, and it
+// ships off.
+func TestChatChoices_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(ChatChoices)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", ChatChoices)
+	}
+	if entry.Name != "web.chat_choices" {
+		t.Errorf("Name = %q, want web.chat_choices", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Owner != "native-chat" || entry.Issue != "ptone/scion#7514" || entry.ReviewBy != "2027-02-05" {
+		t.Errorf("chat choices experiment metadata mismatch: %+v", entry)
+	}
+}
+
 // TestAsyncAgentLaunchExperimentRegistered pins hub.async_agent_launch: it
 // changes what the hub sends to brokers, so it is server-layer only (the
 // web form opts in unconditionally), and it ships on (ptone/scion#6640).
@@ -648,6 +671,28 @@ func TestLifecycleEventsExperimentRegistered(t *testing.T) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#5900" || e.Stage != StageAlpha || e.Owner != "telemetry" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestImageTagVersionDefaultExperimentRegistered pins
+// hub.image_tag_version_default (ptone/scion#6625): server-layer only, and
+// it ships on, so a release build pulls its own version's images.
+func TestImageTagVersionDefaultExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(ImageTagVersionDefault)
+	if !ok {
+		t.Fatalf("%s is not registered", ImageTagVersionDefault)
+	}
+	if ImageTagVersionDefault != "hub.image_tag_version_default" {
+		t.Fatalf("frozen name changed: %q", ImageTagVersionDefault)
+	}
+	if !e.Default {
+		t.Fatal("the image tag version default must default to on")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#6625" || e.Stage != StageAlpha || e.Owner != "hub" {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }

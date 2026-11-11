@@ -120,10 +120,14 @@ def _try_capture_token_file(force: bool, scope: str = "project") -> int | None:
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         print(f"capture-auth: sciontool error: {exc}", file=sys.stderr)
         return _CA_EXIT_ERROR
-    if result.returncode == 0:
-        print(f"capture-auth: AGY_TOKEN: captured from {_AGY_TOKEN_PATH}")
+    outcome = scion_harness.secret_set_outcome(result, scope)
+    if outcome in ("pending", "stored"):
+        print(scion_harness.captured_message("AGY_TOKEN", _AGY_TOKEN_PATH, outcome))
         return _CA_EXIT_OK
-    if "already exists" in result.stderr.lower():
+    if outcome == "held":
+        print(scion_harness.held_message("AGY_TOKEN"))
+        return _CA_EXIT_CONFLICT
+    if outcome == "conflict":
         print('CONFLICT: secret "AGY_TOKEN" already exists (use --force to overwrite)')
         return _CA_EXIT_CONFLICT
     print(f"capture-auth: sciontool failed: {result.stderr.strip()}", file=sys.stderr)
@@ -141,7 +145,8 @@ def main() -> int:
         return rc
 
     # Only fall back to keyring when no credential files were found on disk.
-    # CONFLICT (secret already exists) and ERROR should propagate as-is.
+    # A conflict (an existing project secret, or a name another agent's
+    # pending secret holds) and ERROR should propagate as-is.
     if rc != _CA_EXIT_NO_CREDS:
         return rc
 
@@ -175,10 +180,14 @@ def main() -> int:
         if force:
             cmd.append("--force")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            print("capture-auth: AGY_TOKEN: captured from gnome-keyring")
+        outcome = scion_harness.secret_set_outcome(result, known.scope)
+        if outcome in ("pending", "stored"):
+            print(scion_harness.captured_message("AGY_TOKEN", "gnome-keyring", outcome))
             return _CA_EXIT_OK
-        if "already exists" in result.stderr.lower():
+        if outcome == "held":
+            print(scion_harness.held_message("AGY_TOKEN"))
+            return _CA_EXIT_CONFLICT
+        if outcome == "conflict":
             print('CONFLICT: secret "AGY_TOKEN" already exists (use --force to overwrite)')
             return _CA_EXIT_CONFLICT
         print(f"capture-auth: keyring fallback failed: {result.stderr.strip()}", file=sys.stderr)

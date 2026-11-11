@@ -39,6 +39,7 @@ import { classMap } from 'lit/directives/class-map.js';
 
 import { apiFetch } from '../../client/api.js';
 import type { PermissionId } from '../../shared/access-boundaries.js';
+import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 
 export interface PermissionChangeDetail {
   retainedPermissions: PermissionId[];
@@ -512,15 +513,14 @@ export class ScionMaximumPermissionSelector extends LitElement {
   }
 
   private async copyPermissionId(permissionId: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(permissionId);
-      this.copiedId = permissionId;
-      setTimeout(() => {
-        this.copiedId = null;
-      }, 2000);
-    } catch {
-      // Clipboard not available — silently fail
+    if (!(await copyToClipboard(permissionId))) {
+      showCopyFailedToast();
+      return;
     }
+    this.copiedId = permissionId;
+    setTimeout(() => {
+      this.copiedId = null;
+    }, 2000);
   }
 
   private toggleGroupCollapse(groupName: string): void {

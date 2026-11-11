@@ -35,6 +35,8 @@
     "endpoints": [
       "server.hub.public_url",
       "server.hub.hub_name",
+      "server.hub.content_url",
+      "server.hub.content_url_allow_same_site",
       "image_registry",
       "server.hub.monitoring_dashboard_url"
     ],
@@ -176,6 +178,9 @@
     "server.hub.missing_agent_grace",
     "server.hub.conduit",
     "server.hub.port_proxy",
+    "server.hub.sse",
+    "server.hub.platform_request_timeout",
+    "server.hub.chat",
     "server.relay"
   ],
   "file_keys": [

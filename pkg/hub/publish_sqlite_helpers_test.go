@@ -46,7 +46,7 @@ type createMessageFailStore struct {
 	store.Store
 }
 
-func (s *spyEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef) {
+func (s *spyEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.userMsgs = append(s.userMsgs, msg)

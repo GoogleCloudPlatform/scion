@@ -85,8 +85,10 @@ func TestEventStreamMemoryBaseline(t *testing.T) {
 		require.NoError(t, err)
 		resp, err := client.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		// Listed before the status check, so a refused request still has
+		// its body closed by the deferred cleanup.
 		streams = append(streams, open{resp: resp, r: bufio.NewReader(resp.Body)})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 	}
 	for _, s := range streams {
 		waitForHeartbeat(t, s.r)

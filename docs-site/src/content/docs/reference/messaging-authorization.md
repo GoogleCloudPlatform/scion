@@ -161,7 +161,7 @@ delivery. All gates must pass:
 | Target mode | Target must be `project` or `hub` | `cross_project_target_mode` |
 | Inbound policy | Destination project's `crossProjectInbound` permits sender | `cross_project_inbound_none` |
 | Origin trust | Sender's Hub-attested ancestry is valid | `cross_project_untrusted_origin` |
-| Membership (if `members`) | Origin human is an active member of destination project | `cross_project_origin_not_member` |
+| Membership (if `members`) | Origin human holds active membership in destination project beyond `project-viewer` | `cross_project_origin_not_member` |
 
 A `project`-mode sender cannot send cross-project messages, even to reply
 in an existing cross-project DM.

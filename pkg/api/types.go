@@ -1341,9 +1341,10 @@ type HubAgentDefaults struct {
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`
 	// ImageTag is the tag the hub's image_tag setting selects for the
 	// bundled scion-* images (ptone/scion#6625), already resolved and
-	// expanded by the hub ("version" becomes the hub's version). The hub
-	// sends it only while hub.image_tag_setting is on and the setting is
-	// set. The broker applies it with config.RewriteImageTag and
+	// expanded by the hub ("version", or an unset value on a release build,
+	// becomes the hub's version). The hub sends it only when a tag applies:
+	// a set value while hub.image_tag_setting is on, or the version default
+	// while hub.image_tag_version_default is on. The broker applies it with config.RewriteImageTag and
 	// config.RewriteImageRef to the image it resolves, before the
 	// image_registry rewrite; an absent value leaves the image unchanged,
 	// which is also what a broker that predates the field does.

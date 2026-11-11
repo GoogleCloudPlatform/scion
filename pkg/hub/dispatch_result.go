@@ -92,6 +92,11 @@ type dispatchIdentityNotMapped struct {
 	Profile   string `json:"profile"`
 	Broker    string `json:"broker,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// CloudRun, Agent and Mode carry a Cloud Run refusal
+	// (identityNotMappedPrecheck.CloudRun), which has no Account.
+	CloudRun string `json:"cloudRun,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Mode     string `json:"mode,omitempty"`
 }
 
 // dispatchRuntimeTargetRefusal is the wire form of a *RuntimeTargetRefusal.
@@ -163,6 +168,7 @@ func dispatchFailureResult(execErr error) string {
 	if errors.As(execErr, &precheck) && precheck != nil {
 		env.IdentityNotMapped = &dispatchIdentityNotMapped{
 			Account: precheck.Account, Profile: precheck.Profile, Broker: precheck.Broker, Namespace: precheck.Namespace,
+			CloudRun: precheck.CloudRun, Agent: precheck.Agent, Mode: precheck.Mode,
 		}
 	}
 	if isSecretResolutionError(execErr) {
@@ -199,10 +205,11 @@ func dispatchFailureError(d *store.BrokerDispatch) error {
 			Code: r.Code, Status: r.Status, Message: r.Message, Details: r.Details,
 		})
 	}
-	if env != nil && env.IdentityNotMapped != nil && env.IdentityNotMapped.Account != "" {
+	if env != nil && env.IdentityNotMapped != nil && (env.IdentityNotMapped.Account != "" || env.IdentityNotMapped.CloudRun != "") {
 		r := env.IdentityNotMapped
 		return fmt.Errorf("dispatch %s failed: %w", d.Op, &identityNotMappedPrecheck{
 			Account: r.Account, Profile: r.Profile, Broker: r.Broker, Namespace: r.Namespace,
+			CloudRun: r.CloudRun, Agent: r.Agent, Mode: r.Mode,
 		})
 	}
 	if se := brokerErrorFromEnvelope(env); se != nil {

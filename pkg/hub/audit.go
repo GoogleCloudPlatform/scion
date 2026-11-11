@@ -240,6 +240,7 @@ const (
 	GCSLinkReasonSANotAdmissible    GCSLinkFetchReason = "sa_not_admissible"
 	GCSLinkReasonSALookupFailed     GCSLinkFetchReason = "sa_lookup_failed"
 	GCSLinkReasonSAUseNotAuthorized GCSLinkFetchReason = "sa_use_not_authorized"
+	GCSLinkReasonNativeIdentity     GCSLinkFetchReason = "native_identity"
 	GCSLinkReasonMintFailed         GCSLinkFetchReason = "mint_failed"
 	GCSLinkReasonGCSNotFound        GCSLinkFetchReason = "gcs_not_found"
 	GCSLinkReasonGCSDenied          GCSLinkFetchReason = "gcs_denied"
@@ -284,6 +285,8 @@ type AuditLogger interface {
 	LogLifecycleHookExecutionEvent(ctx context.Context, event *LifecycleHookExecutionEvent) error
 	// LogAgentSecretReadEvent logs an agent secret read event.
 	LogAgentSecretReadEvent(ctx context.Context, event *AgentSecretReadEvent) error
+	// LogPendingSecretEvent logs a pending secret event.
+	LogPendingSecretEvent(ctx context.Context, event *PendingSecretEvent) error
 	// RecordSAAssignment logs a service-account assignment decision or binding
 	// (svc-accnt design §7). Named to match store.SAAssignmentAuditSink, which
 	// this method exists to satisfy: pkg/lifecyclehooks emits these too and
@@ -295,6 +298,51 @@ type AuditLogger interface {
 // If these drift, the lifecycle-hook surface silently loses its audit trail —
 // it would fall back to the nil-sink warning path rather than fail to build.
 var _ store.SAAssignmentAuditSink = AuditLogger(nil)
+
+// ---------------------------------------------------------------------------
+// Pending secret audit events
+// ---------------------------------------------------------------------------
+
+// Pending secret audit event types (PendingSecretEvent.EventType).
+const (
+	PendingSecretEventCreate  = "secret_pending_create"
+	PendingSecretEventReplace = "secret_pending_replace"
+	PendingSecretEventRefused = "secret_pending_refused"
+	PendingSecretEventApprove = "secret_pending_approve"
+	PendingSecretEventReject  = "secret_pending_reject"
+	PendingSecretEventExpire  = "secret_pending_expire"
+	PendingSecretEventReveal  = "secret_pending_reveal"
+)
+
+// Actor kinds of a PendingSecretEvent.
+const (
+	PendingSecretActorAgent  = "agent"
+	PendingSecretActorUser   = "user"
+	PendingSecretActorSystem = "system"
+)
+
+// PendingSecretEvent is an auditable step in the life of a pending secret:
+// an agent's write (create, replace or refused), the owner's decision
+// (approve, reject), a reveal of the held value, or expiry. It carries
+// metadata only, never the value or anything derived from it, its length
+// included.
+type PendingSecretEvent struct {
+	EventType        string    `json:"eventType"`        // a PendingSecretEvent* constant
+	Reason           string    `json:"reason,omitempty"` // refused writes: why
+	PendingID        string    `json:"pendingId,omitempty"`
+	Key              string    `json:"key"`
+	SecretType       string    `json:"secretType,omitempty"`
+	Target           string    `json:"target,omitempty"`
+	Scope            string    `json:"scope"`
+	ScopeID          string    `json:"scopeId"` // the owning user's ID
+	AgentID          string    `json:"agentId"` // the writing agent
+	ProjectID        string    `json:"projectId,omitempty"`
+	ActorKind        string    `json:"actorKind"` // a PendingSecretActor* constant
+	ActorID          string    `json:"actorId,omitempty"`
+	ReplacesSecretID string    `json:"replacesSecretId,omitempty"`
+	AllowProgeny     bool      `json:"allowProgeny"`
+	Timestamp        time.Time `json:"timestamp"`
+}
 
 // LogAuditLogger is a simple implementation that logs to the standard logger.
 type LogAuditLogger struct {
@@ -643,6 +691,48 @@ func (l *LogAuditLogger) LogAgentSecretReadEvent(ctx context.Context, event *Age
 	}
 
 	l.logger().LogAttrs(ctx, level, "agent secret read event", attrs...)
+
+	return nil
+}
+
+// LogPendingSecretEvent logs a pending secret event to the standard logger.
+// A refused write is logged at warning level.
+func (l *LogAuditLogger) LogPendingSecretEvent(ctx context.Context, event *PendingSecretEvent) error {
+	level := slog.LevelInfo
+	if event.EventType == PendingSecretEventRefused {
+		level = slog.LevelWarn
+	}
+	ts := event.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", event.EventType),
+		slog.String("pending_id", event.PendingID),
+		slog.String("key", event.Key),
+		slog.String("secret_type", event.SecretType),
+		slog.String("target", event.Target),
+		slog.String("scope", event.Scope),
+		slog.String("scope_id", event.ScopeID),
+		slog.String("agent_id", event.AgentID),
+		slog.String("project_id", event.ProjectID),
+		slog.String("actor_kind", event.ActorKind),
+		slog.String("actor_id", event.ActorID),
+		slog.Bool("allow_progeny", event.AllowProgeny),
+		slog.Time("timestamp", ts),
+	}
+	if event.ReplacesSecretID != "" {
+		attrs = append(attrs, slog.String("replaces_secret_id", event.ReplacesSecretID))
+	}
+	if event.Reason != "" {
+		attrs = append(attrs, slog.String("reason", event.Reason))
+	}
+	if credAttr, ok := credentialLogAttr(ctx); ok {
+		attrs = append(attrs, credAttr)
+	}
+
+	l.logger().LogAttrs(ctx, level, "pending secret event", attrs...)
 
 	return nil
 }

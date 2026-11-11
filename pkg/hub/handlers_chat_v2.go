@@ -595,9 +595,19 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		mentionKeys = nil
 	}
 
+	// What the caller may do in a thread of this space. Every topic of the
+	// space has the same project, and chatThreadAccess decides a user by
+	// project alone, so it is decided once for the list.
+	threadAccess, err := s.chatThreadAccess(r.Context(), user, chatThreadRef{Project: project})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
 	entries := make([]chatTopicEntry, 0, len(topics))
 	for _, t := range topics {
 		entry := chatTopicEntry{
+			Capabilities:   threadCapabilities(threadAccess),
 			ID:             t.ID,
 			ProjectID:      t.ProjectID,
 			Name:           t.Name,
@@ -696,6 +706,21 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
+		return
+	}
+
+	// What the caller may do: a default agent on create needs
+	// set_default_agent in a thread of the space (chatThreadAccess), decided
+	// first, so a caller who could not set it afterwards cannot set it here;
+	// creating the thread is the space's create_thread action
+	// (chatSpaceAccess). Both are decided after the token checks above and
+	// before the body is validated, so a refused caller learns nothing about
+	// names or agents and nothing is written.
+	if strings.TrimSpace(body.DefaultAgent) != "" &&
+		!s.requireChatThreadAction(w, r, user, chatThreadRef{Project: project}, "Project", ChatActionSetDefaultAgent) {
+		return
+	}
+	if !s.requireChatSpaceAction(w, r, user, project, "Project", ChatActionCreateThread) {
 		return
 	}
 
@@ -843,6 +868,21 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 		return
 	}
 
+	// What the caller may do in the thread (chatThreadAccess): a name needs
+	// rename, a default agent set_default_agent. Decided before the body is
+	// validated, so a refused caller learns nothing about agents or names
+	// and nothing is changed.
+	var patchActions []string
+	if body.Name != nil {
+		patchActions = append(patchActions, ChatActionRename)
+	}
+	if body.DefaultAgent != nil {
+		patchActions = append(patchActions, ChatActionSetDefaultAgent)
+	}
+	if len(patchActions) > 0 && !s.requireChatThreadAction(w, r, user, chatThreadRef{Key: topicID, Project: project}, "Thread", patchActions...) {
+		return
+	}
+
 	updates := TopicUpdate{}
 
 	if body.Name != nil {
@@ -948,6 +988,10 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 		return
 	}
 	if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
+		return
+	}
+	// Deleting the thread is its delete action (chatThreadAccess).
+	if !s.requireChatThreadAction(w, r, user, chatThreadRef{Key: topicID, Project: project}, "Thread", ChatActionDelete) {
 		return
 	}
 
@@ -1084,10 +1128,19 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	ctx := r.Context()
 
-	// A token posts on its holder's behalf only with inbox:write.
-	token, ok := s.requireChatSelector(w, r, permInboxWrite)
-	if !ok {
-		return
+	// A token posts on its holder's behalf only with inbox:write. For a DM
+	// that is checked here, before any lookup. For a topic it is the
+	// token-scope step of chatThreadAccess, inside authorizeChatSend: a
+	// token that may read the topic but not write chat gets 403
+	// chat_post_denied with reason token_scope, and one that may not read
+	// it gets "Thread not found".
+	isDM := strings.HasPrefix(key, "dm:")
+	var token *ScopedUserIdentity
+	if isDM {
+		var ok bool
+		if token, ok = s.requireChatSelector(w, r, permInboxWrite); !ok {
+			return
+		}
 	}
 
 	// --- Authorize ---
@@ -1099,10 +1152,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		serr.write(w)
 		return
 	}
-	// A token also needs inbox:write for the conversation's project: the
-	// topic's project, or the project of the peer agent of a DM. A DM
-	// between users has no project and needs a hub boundary. A refusal is
-	// answered as a missing thread, as authorizeChatSend answers.
+	// A DM token also needs inbox:write for the project of the peer agent;
+	// a DM between users has no project and needs a hub boundary. A refusal
+	// is answered as a missing thread, as authorizeChatSend answers.
 	if token != nil {
 		allowed, err := s.chatTokenMaySend(ctx, token, key, target.ProjectID)
 		if err != nil {
@@ -2746,6 +2798,11 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		return
 	}
 
+	// Then what the caller may do in a topic (edit_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionEditOwn) {
+		return
+	}
+
 	// Check no agent has replied after this message.
 	if hasAgentReplyAfter(ctx, s.store, key, msg.CreatedAt) {
 		writeError(w, http.StatusConflict, "AGENT_REPLIED", "Cannot edit: an agent has replied after this message", nil)
@@ -2860,6 +2917,11 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 
 	// A token is re-checked against the conversation the message is in.
 	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
+		return
+	}
+
+	// Then what the caller may do in a topic (delete_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionDeleteOwn) {
 		return
 	}
 
@@ -2987,10 +3049,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
 	var topic *WebChatTopic
-	// canPost tells the client whether the caller's account may post in a
-	// topic (chatMayPost), so the composer can show a read-only state
-	// before a send. It is left out for a DM.
+	// capabilities tells the client what the caller may do in a topic
+	// (chatThreadAccess), so the composer can show a read-only state before
+	// a send; canPost is its post action, kept as an alias for one release.
+	// Both are left out for a DM.
 	var canPost *bool
+	var capabilities *ChatAccess
 	if isDM {
 		// A DM is the caller's own record: a token needs inbox:read.
 		token, ok := s.requireChatSelector(w, r, permInboxRead)
@@ -3028,8 +3092,27 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			rerr.writeHistory(w)
 			return
 		}
-		allowed := s.chatMayPost(ctx, user, project).Allowed
+		// What the caller may do in the thread (ptone/scion#5519):
+		// authorizeChatThreadRead above decides read and the not-found
+		// answer; chatThreadAccess adds the actions behind _capabilities and
+		// canPost, reusing that read decision (readAllowed) instead of
+		// checking project read again.
+		access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project, readAllowed: true})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !access.Can(ChatActionRead) {
+			// Unreachable today: authorizeChatThreadRead above already
+			// answers a missing authz service as not found. Kept as defence
+			// in depth, so a resolver without a read action still answers
+			// the thread as missing, like any refused read.
+			NotFound(w, "Thread")
+			return
+		}
+		allowed := access.Can(ChatActionPost)
 		canPost = &allowed
+		capabilities = &access
 	}
 
 	// Parse query params.
@@ -3152,6 +3235,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	}
 
 	page := s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost)
+	// What the caller may do in a topic (chatThreadAccess, above); nil for a
+	// DM. The starred-only variant has no composer and carries none.
+	page.Capabilities = capabilities
 	page.Retention = s.chatHistoryRetentionMarker(ctx, result, historyConvID, topic)
 	writeJSON(w, http.StatusOK, page)
 }
@@ -3309,7 +3395,7 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 		}
 	}
 
-	return chatHistoryResponse{
+	resp := chatHistoryResponse{
 		Messages:                    result.Items,
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
@@ -3320,6 +3406,8 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 		MessageExtensions:           messageExtensions,
 		ReplyPreviews:               replyPreviews,
 	}
+	s.addChoiceHistoryViews(ctx, &resp)
+	return resp
 }
 
 // ---------------------------------------------------------------------------
@@ -3833,7 +3921,12 @@ func (s *Server) authorizeConversationAccess(
 		}
 	}
 	ctx := r.Context()
-	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	audience, topic, err := chatKeyReadAudience(ctx, wcs, key)
+	if err != nil {
+		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic lookup failed", key, err)
+		InternalError(w)
+		return false
+	}
 	if audience == chatAudienceParticipants {
 		if !validDMKey(key) {
 			BadRequest(w, "invalid DM key format")
@@ -3853,8 +3946,16 @@ func (s *Server) authorizeConversationAccess(
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
-		NotFound(w, "Thread")
+		// A missing project is answered as a missing thread, so the answer
+		// reveals nothing; any other store error is the generic 500, with
+		// the error in the server log only.
+		if errors.Is(err, store.ErrNotFound) {
+			logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
+			NotFound(w, "Thread")
+			return false
+		}
+		logChatStoreFault(ctx, slog.Default(), "chat conversation: topic project lookup failed", key, err)
+		InternalError(w)
 		return false
 	}
 	// Mute, pin and read state are per-user settings on a conversation the
@@ -4027,11 +4128,11 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// Promotion moves the DM's messages into a new thread of the project,
-	// so the caller's account must be able to post there (chatMayPost).
+	// so the caller must be able to create threads there (chatSpaceAccess).
 	// Checked after the token's own checks, so a token refusal comes first.
-	if decision := s.chatMayPost(ctx, user, project); !decision.Allowed {
-		logAuthzDenial(r, user, projectResource(project), chatPostAction, decision.Reason)
-		chatSendPostDenied().write(w)
+	if access := s.chatSpaceAccess(ctx, user, project); !access.Can(ChatActionCreateThread) {
+		logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+		chatSendPostDenied(access.Reason).write(w)
 		return
 	}
 
@@ -5129,8 +5230,13 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "q is required", nil)
 		return
 	}
-	if len([]rune(query)) < 2 {
+	termLen := len([]rune(query))
+	if termLen < 2 {
 		ValidationError(w, "q must be at least 2 characters", nil)
+		return
+	}
+	if termLen > ChatSearchMaxQueryRunes {
+		ValidationError(w, fmt.Sprintf("q must be at most %d characters", ChatSearchMaxQueryRunes), nil)
 		return
 	}
 
@@ -5141,6 +5247,57 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	if wcs == nil {
 		writeJSON(w, http.StatusOK, chatSearchResponse{Results: []ChatSearchResult{}})
 		return
+	}
+
+	// Gate before cost (design v3 section 9 item 7): after authentication
+	// and the validation of q, before project enumeration and the query.
+	// The caller gets a slot at once or a 429; nothing queues.
+	shape := chatSearchShape{
+		backend:   chatSearchBackend(wcs),
+		path:      "like",
+		scope:     chatSearchScope(q.Get("key"), q.Get("projectId")),
+		termLen:   termLen,
+		hasCursor: q.Get("cursor") != "",
+	}
+	searchStart := time.Now()
+	release, ok := s.chatSearchGateFor(wcs).tryAcquire(user.ID())
+	if !ok {
+		s.recordChatSearchBusy(ctx, shape)
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "SEARCH_BUSY",
+			"Another search is still running. Try again in a moment.", nil)
+		return
+	}
+	defer release()
+
+	// The time limit starts with the gate slot and covers project
+	// enumeration, the store call and the DM post-filters (design v4 6.2,
+	// erratum E1), so a search ends within the limit from the caller's side.
+	// SQLite is interrupted when searchCtx ends; Postgres runs under SET
+	// LOCAL statement_timeout derived from the same deadline.
+	searchCtx, cancel := context.WithTimeout(ctx, s.chatSearchTimeout())
+	defer cancel()
+	// finishCtxErr ends the request when the search's context has ended:
+	// a client that went away gets no body (outcome canceled), and a
+	// passed deadline gets 503 SEARCH_TIMEOUT (outcome timeout). No
+	// deadline path answers 500. It reports whether it ended the request.
+	finishCtxErr := func() bool {
+		switch {
+		case r.Context().Err() != nil:
+			shape.outcome = chatSearchOutcomeCanceled
+		case errors.Is(searchCtx.Err(), context.DeadlineExceeded):
+			shape.outcome = chatSearchOutcomeTimeout
+		default:
+			return false
+		}
+		shape.duration = time.Since(searchStart)
+		s.recordChatSearch(ctx, slog.Default(), shape)
+		if shape.outcome == chatSearchOutcomeTimeout {
+			// No partial results: the whole search is refused.
+			writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
+				"Search took too long. Try a longer phrase or search one space.", nil)
+		}
+		return true
 	}
 
 	// Parse limit.
@@ -5186,13 +5343,19 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			topic, err := wcs.GetTopic(ctx, conversationKey)
+			topic, err := wcs.GetTopic(searchCtx, conversationKey)
 			if err != nil || topic == nil {
+				if finishCtxErr() {
+					return
+				}
 				NotFound(w, "Thread")
 				return
 			}
-			project, err := s.store.GetProject(ctx, topic.ProjectID)
+			project, err := s.store.GetProject(searchCtx, topic.ProjectID)
 			if err != nil {
+				if finishCtxErr() {
+					return
+				}
 				NotFound(w, "Project")
 				return
 			}
@@ -5203,8 +5366,11 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		filter.ConversationKey = conversationKey
 	} else if projectID != "" {
 		// Scope to one project — authorize access.
-		project, err := s.store.GetProject(ctx, projectID)
+		project, err := s.store.GetProject(searchCtx, projectID)
 		if err != nil {
+			if finishCtxErr() {
+				return
+			}
 			NotFound(w, "Project")
 			return
 		}
@@ -5212,10 +5378,14 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.ProjectID = projectID
+		shape.projectCount = 1
 	} else {
 		// Search all visible projects. Filter by user's accessible projects.
-		allProjects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+		allProjects, err := s.store.ListProjects(searchCtx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
 		if err != nil {
+			if finishCtxErr() {
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 			return
 		}
@@ -5225,7 +5395,12 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		for i := range allProjects.Items {
 			resources[i] = projectResource(&allProjects.Items[i])
 		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
+		caps := s.authzService.ComputeCapabilitiesBatch(searchCtx, identity, resources, "project")
+		// A capability batch cut short by the deadline is not a smaller
+		// visible set: the search ends as a timeout.
+		if finishCtxErr() {
+			return
+		}
 
 		var visibleIDs []string
 		for i, p := range allProjects.Items {
@@ -5238,14 +5413,33 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.ProjectIDs = visibleIDs
+		shape.projectCount = len(visibleIDs)
 	}
 
-	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
-	if errors.Is(err, ErrInvalidSearchCursor) {
-		writeInvalidCursor(w)
-		return
-	}
+	results, nextCursor, err := wcs.SearchChatMessages(searchCtx, filter)
 	if err != nil {
+		if errors.Is(err, ErrInvalidSearchCursor) {
+			// A client error that ran no query: no metric sample and no
+			// slow line, so it cannot drown the 6.5 signal (round-2 R2-02).
+			writeInvalidCursor(w)
+			return
+		}
+		if finishCtxErr() {
+			return
+		}
+		if isChatSearchTimeout(err) {
+			// Postgres statement_timeout (57014) can fire just before the
+			// context deadline does.
+			shape.outcome = chatSearchOutcomeTimeout
+			shape.duration = time.Since(searchStart)
+			s.recordChatSearch(ctx, slog.Default(), shape)
+			writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
+				"Search took too long. Try a longer phrase or search one space.", nil)
+			return
+		}
+		shape.outcome = chatSearchOutcomeError
+		shape.duration = time.Since(searchStart)
+		s.recordChatSearch(ctx, slog.Default(), shape)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
 		return
 	}
@@ -5254,23 +5448,35 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	// token may read that DM under inbox:read; with no inbox:read it keeps
 	// none.
 	if token := chatToken(ctx); token != nil && filter.ConversationKey == "" {
-		check := s.newSelfScopeCheck(ctx, token, permInboxRead)
+		check := s.newSelfScopeCheck(searchCtx, token, permInboxRead)
 		kept := results[:0]
 		for _, res := range results {
-			if strings.HasPrefix(res.ConversationKey, "dm:") && !s.chatTokenDMVisible(ctx, token, check, res.ConversationKey) {
+			if strings.HasPrefix(res.ConversationKey, "dm:") && !s.chatTokenDMVisible(searchCtx, token, check, res.ConversationKey) {
 				continue
 			}
 			kept = append(kept, res)
 		}
 		results = kept
 	}
+	// The DM post-filters are inside the limit: a filter cut short by the
+	// deadline must not decide visibility, so the search ends as a timeout.
+	if finishCtxErr() {
+		return
+	}
 
-	// Enrich results with thread/DM names.
-	s.enrichSearchResults(ctx, wcs, results)
+	// Enrich results with thread/DM names. Best-effort under the same
+	// context: if the deadline passes here, the results the caller may see
+	// go back with whatever names resolved (design v4 erratum E1).
+	s.enrichSearchResults(searchCtx, wcs, results)
 
 	if results == nil {
 		results = []ChatSearchResult{}
 	}
+
+	shape.outcome = chatSearchOutcomeOK
+	shape.results = len(results)
+	shape.duration = time.Since(searchStart)
+	s.recordChatSearch(ctx, slog.Default(), shape)
 
 	writeJSON(w, http.StatusOK, chatSearchResponse{
 		Results:    results,
@@ -5847,6 +6053,19 @@ type chatTopicEntry struct {
 	// HasUnreadMention is true when an unread message (after the caller's
 	// read watermark) in this thread mentions the caller.
 	HasUnreadMention bool `json:"hasUnreadMention"`
+	// Capabilities lists what the caller may do in this thread
+	// (chatThreadAccess).
+	Capabilities *ChatAccess `json:"_capabilities,omitempty"`
+}
+
+// threadCapabilities returns a copy of access for one thread entry, or nil
+// when it allows nothing (the entry then carries no _capabilities).
+func threadCapabilities(access ChatAccess) *ChatAccess {
+	if len(access.Actions) == 0 {
+		return nil
+	}
+	c := ChatAccess{Actions: slices.Clone(access.Actions), Reason: access.Reason}
+	return &c
 }
 
 type chatMessageResponse struct {
@@ -5882,9 +6101,13 @@ type chatHistoryResponse struct {
 	// TotalCount is 0 on an ordinary history page, which skips the count.
 	// The starred-only variant (handleStarredHistory) reports its matches.
 	TotalCount int `json:"totalCount"`
-	// CanPost reports, for a topic, whether the caller's account may post
-	// in it (project.chat_post). Omitted for a DM.
-	CanPost            *bool                      `json:"canPost,omitempty"`
+	// CanPost reports, for a topic, whether the caller may post in it: the
+	// post action of Capabilities, kept as an alias for one release
+	// (ptone/scion#5519). Omitted for a DM.
+	CanPost *bool `json:"canPost,omitempty"`
+	// Capabilities lists what the caller may do in a topic
+	// (chatThreadAccess). Omitted for a DM.
+	Capabilities       *ChatAccess                `json:"_capabilities,omitempty"`
 	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
 	// MessageArtifacts are artifact references keyed by message ID, as the
 	// viewer sees them (ptone/scion#3224).
@@ -5900,6 +6123,19 @@ type chatHistoryResponse struct {
 	// of the hub's chat retention policy (hub.chat_retention). Set only on
 	// the oldest page (no nextCursor); see chatHistoryRetentionMarker.
 	Retention *chatHistoryRetention `json:"retention,omitempty"`
+
+	// MessageDecisions and MessageChoiceIntros (choice-prompt rows) and
+	// MessageChoiceResponses (choice-response rows) are keyed by message
+	// ID, set only while web.chat_choices is on (design choices v4, 4.4).
+	// The intro is the agent's body without the markdown fallback.
+	MessageDecisions       map[string][]DecisionView     `json:"messageDecisions,omitempty"`
+	MessageChoiceIntros    map[string]string             `json:"messageChoiceIntros,omitempty"`
+	MessageChoiceResponses map[string]ChoiceResponseView `json:"messageChoiceResponses,omitempty"`
+	// MessageChoiceAnswerModes (choice-prompt rows: "single" or "set") and
+	// MessageChoiceResponseSets (the response rows of set submits) are set
+	// under the same rule (design choices v5, 5.1 and 5.2).
+	MessageChoiceAnswerModes  map[string]string                `json:"messageChoiceAnswerModes,omitempty"`
+	MessageChoiceResponseSets map[string]ChoiceResponseSetView `json:"messageChoiceResponseSets,omitempty"`
 }
 
 // chatHistoryRetention is the history page's retention marker: messages
@@ -6091,9 +6327,14 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	// through the messages that reference it.
 	projectID := r.FormValue("project_id")
 
-	// Authorize: user must have read access to the project (same as sending
-	// messages). A project-less upload is a profile write: it needs no
-	// project access, and it is refused to a federated caller.
+	// Authorize: an upload to a space is a chat write, decided as for a
+	// send: read access to the project, then the token's inbox:write for
+	// it, then the post action of a thread of the project
+	// (chatThreadAccess). A reader who may not post gets 403
+	// chat_post_denied. A project-less upload is a profile
+	// write: it needs no project access, and it is refused to a federated
+	// caller; it binds to a conversation only through a send, which makes
+	// the send's decision.
 	if projectID != "" {
 		project, err := s.store.GetProject(ctx, projectID)
 		if err != nil {
@@ -6104,6 +6345,16 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
+			return
+		}
+		access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Project: project})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !access.Can(ChatActionPost) {
+			logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
+			chatSendPostDenied(access.Reason).write(w)
 			return
 		}
 	} else if !requireProfileWriter(w, r) {

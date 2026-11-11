@@ -169,7 +169,7 @@ On those runtimes, GCP export needs one of:
 - **A registered service account assigned to the agent.** Register it with `scion project service-accounts add <email> --gcp-project <id>` (or `mint`), check it with `scion project service-accounts verify <id>`, and start the agent with `--service-account <id>`. This sets mode `assign`, and the metadata server returns tokens for that account. The account needs the roles in [IAM Permissions](#3-iam-permissions). See [`scion project service-accounts`](/scion/reference/cli/) in the CLI reference.
 - **The telemetry credentials secret**, a GCP service account key file, described below.
 
-To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` and no key file at `~/.scion/telemetry-gcp-credentials.json` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200`.
+To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` and no key file at `~/.scion/telemetry-gcp-credentials.json` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200` (once `sciontool init` has dropped `CAP_NET_ADMIN`, `sciontool metadata status` reports the `iptables` rule check as not verifiable).
 
 Scion uses a **well-known secret** to provision the key file into every agent container automatically.
 
@@ -179,6 +179,8 @@ Scion uses a **well-known secret** to provision the key file into every agent co
 | **Secret type** | `file` |
 | **Target path** | `~/.scion/telemetry-gcp-credentials.json` |
 | **Env var set by broker** | `SCION_OTEL_GCP_CREDENTIALS` |
+
+At Hub scope, the Hub delivers this secret to agents only with exactly this name and type and a target path whose last two parts are `.scion/telemetry-gcp-credentials.json`, and it does not list it to agents; see [Hub-Scoped Secrets](/scion/hosted/user/secrets/#hub-scoped-secrets).
 
 Register the secret once via the Hub:
 

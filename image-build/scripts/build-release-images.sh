@@ -21,7 +21,8 @@
 # the flags every supported tag understands.
 #
 # This file is deliberately standalone: it sources nothing, it runs under
-# bash 3.2 (macOS /bin/bash), and it needs only git and docker or podman, so
+# bash 3.2 (macOS /bin/bash), and it needs only git and docker or podman (plus gcloud and base64 for
+# --channel-tag with --builder cloud-build), so
 # it can be fetched and run as a single file:
 #
 #   curl -fsSLO https://raw.githubusercontent.com/GoogleCloudPlatform/scion/main/image-build/scripts/build-release-images.sh
@@ -81,10 +82,46 @@ Options:
                         build: tag :latest after the build has finished.
   --force-latest        Allow --also-tag latest to move :latest in a registry.
   --channel-tag preview|stable
-                        Move a channel tag on the pushed images. The value is
-                        validated, but the behaviour is NOT YET IMPLEMENTED
-                        (Phase 5): passing it exits with an error before
-                        anything is cloned or built.
+                        After a pushed build, also point :preview or :stable
+                        at exactly the images just built: each channel tag
+                        gets the registry digest of that image's :<version>.
+                        :latest is never touched by this flag, and it does
+                        not combine with --also-tag latest. It needs a
+                        registry path <host>[:<port>]/<path> and pushed
+                        images, and the release tag must
+                        match the channel: preview needs vX.Y.Z-preview.N or
+                        vX.Y.Z-rc.N, stable needs vX.Y.Z. Nightly tags
+                        and --ref builds are refused. These checks run before
+                        anything is cloned or built. Every image's digest is
+                        verified, and each channel tag's current digest is
+                        recorded, before the first channel tag moves. If a
+                        move or read-back fails part-way, the run stops, lists
+                        the tags moved so far, and writes the commands that
+                        point them back to <src-dir>/channel-recovery.XXXXXX
+                        (never run by the driver); no build-manifest.json is
+                        written then. A podman run needs skopeo, and reads
+                        every registry digest with it.
+                        With --builder cloud-build (Artifact Registry only:
+                        <location>-docker.pkg.dev/<project>/<repository>,
+                        where <location> is us, europe, asia or a region such
+                        as us-central1) the driver waits for the submitted
+                        builds with gcloud. It takes each digest from the
+                        builds' own results (results.images, or
+                        "<ref> sha256:<hex>" lines in results.buildStepOutputs)
+                        and requires :<version> to point to that same digest.
+                        It then runs gcloud artifacts docker tags add
+                        <image>@<digest> <image>:<channel>. A build that lists
+                        neither result stops the run, and no channel tag
+                        moves.
+  --build-timeout <s>   Cloud Build wait: at most this many seconds per
+                        build (default 14400).
+  --wait-timeout <s>    Cloud Build wait: at most this many seconds in total
+                        (default 21600). A timeout, or a build that ends in
+                        any state other than SUCCESS, stops the run, and no
+                        channel tag moves. Both count poll intervals (30s)
+                        only, so the real wait is never shorter than stated
+                        and can be longer; a gcloud call that hangs is not
+                        bounded by them.
   -h, --help            Show this help.
 
 Passthrough (after --), forwarded to the tag's build-images.sh. Only the flag
@@ -152,6 +189,8 @@ SRC_DIR=""
 ALSO_TAG=""
 FORCE_LATEST="false"
 CHANNEL_TAG=""
+BUILD_TIMEOUT=""
+WAIT_TIMEOUT=""
 PASSTHROUGH=()
 
 need_val() {
@@ -170,6 +209,8 @@ while [ $# -gt 0 ]; do
     --also-tag) need_val "$1" $#; ALSO_TAG="$2"; shift 2 ;;
     --force-latest) FORCE_LATEST="true"; shift ;;
     --channel-tag) need_val "$1" $#; CHANNEL_TAG="$2"; shift 2 ;;
+    --build-timeout) need_val "$1" $#; BUILD_TIMEOUT="$2"; shift 2 ;;
+    --wait-timeout) need_val "$1" $#; WAIT_TIMEOUT="$2"; shift 2 ;;
     --) shift; PASSTHROUGH=("$@"); break ;;
     -*) usage_err "unknown option: $1 (build-images.sh flags go after --)" ;;
     *)
@@ -191,9 +232,14 @@ if [ "${FORCE_LATEST}" = "true" ] && [ "${ALSO_TAG}" != "latest" ]; then
 fi
 if [ -n "${CHANNEL_TAG}" ]; then
   case "${CHANNEL_TAG}" in
-    preview|stable) die "--channel-tag ${CHANNEL_TAG}: not yet implemented (it lands with registry publishing, Phase 5)" ;;
+    preview|stable) ;;
     *) usage_err "--channel-tag must be 'preview' or 'stable' (got '${CHANNEL_TAG}')" ;;
   esac
+  # --channel-tag never touches :latest, so it does not combine with a flag
+  # that moves :latest.
+  if [ -n "${ALSO_TAG}" ]; then
+    usage_err "--channel-tag does not combine with --also-tag latest (or --force-latest): a channel run never moves :latest"
+  fi
 fi
 if [ -z "${REPO}" ]; then
   usage_err "--repo must not be empty"
@@ -270,8 +316,7 @@ esac
 # Every supported tag's cloud-build builder runs `gcloud builds submit --async`
 # and returns at once: when build-images.sh exits, the images do not exist yet.
 # The driver therefore treats cloud-build as submit-only: no :latest move, no
-# digest lookup, and a manifest marked "submitted". (Phase 5's --channel-tag
-# on cloud-build needs to wait for the build first; this is its seam.)
+# digest lookup, no channel tag, and a manifest marked "submitted".
 SUBMITTED="false"
 if [ "${P_BUILDER}" = "cloud-build" ] && [ "${P_DRY_RUN}" != "true" ]; then
   SUBMITTED="true"
@@ -280,6 +325,60 @@ if [ "${ALSO_TAG}" = "latest" ] && [ "${P_BUILDER}" = "cloud-build" ]; then
   usage_err "--also-tag latest does not work with --builder cloud-build: the build is submitted asynchronously, so :latest can only be moved after it has finished (e.g. docker buildx imagetools create -t <registry>/<image>:latest <registry>/<image>:<version>)"
 fi
 
+# --channel-tag moves a tag in a registry, to the digests this run pushed.
+# With --builder cloud-build the driver waits for the submitted builds
+# (CB_WAIT) and takes each digest from the build's own results; that path
+# tags with gcloud, so it is limited to Artifact Registry.
+# The host is exactly <location>-docker.pkg.dev, where <location> follows the
+# Artifact Registry grammar: a multi-region (us, europe, asia) or a region
+# such as us-central1 or northamerica-northeast2 (one hyphen, then 1-2 digits).
+AR_RE='^(us|europe|asia|[a-z]+-[a-z]+[0-9]{1,2})-docker\.pkg\.dev/[a-z][a-z0-9-]*[a-z0-9]/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$'
+CB_WAIT="false"
+CB_POLL=30
+# Refs a channel run moves, reads and writes into recovery commands are built
+# only from a registry and image names in this reference grammar: path
+# components are lowercase alphanumeric runs joined by the OCI separators
+# ".", "_", "__" or one or more "-".
+REGISTRY_RE='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)+$'
+IMAGE_NAME_RE='^[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*$'
+if [ -n "${CHANNEL_TAG}" ]; then
+  if [ -z "${EFF_REGISTRY}" ]; then
+    usage_err "--channel-tag ${CHANNEL_TAG} needs a registry (-- --registry <path> --push): a channel tag is only moved in a registry"
+  fi
+  if [ "${P_BUILDER}" = "cloud-build" ]; then
+    if ! [[ "${EFF_REGISTRY}" =~ ${AR_RE} ]]; then
+      usage_err "--channel-tag with --builder cloud-build needs an Artifact Registry path <location>-docker.pkg.dev/<project>/<repository> (got '${EFF_REGISTRY}')"
+    fi
+    if [ "${P_DRY_RUN}" != "true" ]; then
+      CB_WAIT="true"
+      SUBMITTED="false"
+      command -v gcloud >/dev/null 2>&1 \
+        || die "--channel-tag with --builder cloud-build needs gcloud on PATH (to wait for the build and to move the tag)"
+      command -v base64 >/dev/null 2>&1 \
+        || die "--channel-tag with --builder cloud-build needs base64 on PATH (to read build step outputs)"
+    fi
+  fi
+  if ! [[ "${EFF_REGISTRY}" =~ ${REGISTRY_RE} ]]; then
+    usage_err "--channel-tag ${CHANNEL_TAG}: the registry path '${EFF_REGISTRY}' is not a plain <host>[:<port>]/<path>"
+  fi
+  if [ "${PUSHED}" != "true" ]; then
+    usage_err "--channel-tag ${CHANNEL_TAG} needs pushed images (-- --push, or --platform all): this build stays local"
+  fi
+fi
+if [ -n "${BUILD_TIMEOUT}${WAIT_TIMEOUT}" ] \
+  && { [ -z "${CHANNEL_TAG}" ] || [ "${P_BUILDER}" != "cloud-build" ]; }; then
+  usage_err "--build-timeout and --wait-timeout only apply to --channel-tag with --builder cloud-build"
+fi
+for v in "${BUILD_TIMEOUT}" "${WAIT_TIMEOUT}"; do
+  if [ -n "${v}" ] && ! [[ "${v}" =~ ^[1-9][0-9]{0,5}$ ]]; then
+    usage_err "--build-timeout and --wait-timeout take a number of seconds from 1 to 999999 (got '${v}')"
+  fi
+done
+# Defaults: the longest per-build timeout in the cloudbuild configs is 4h
+# (cloudbuild.yaml, cloudbuild-thick.yaml); a run waits at most 6h in total.
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-14400}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-21600}"
+
 if [ "${ALSO_TAG}" = "latest" ] && [ -n "${EFF_REGISTRY}" ] && [ "${FORCE_LATEST}" != "true" ]; then
   die "--also-tag latest with a registry (${EFF_REGISTRY}) would move that registry's :latest; add --force-latest if that is intended"
 fi
@@ -287,6 +386,12 @@ fi
 CTR="docker"
 if [ "${P_BUILDER}" = "local-podman" ]; then
   CTR="podman"
+fi
+# A podman channel run reads each channel tag's current digest with skopeo:
+# podman itself can only read a registry digest by pushing.
+if [ -n "${CHANNEL_TAG}" ] && [ "${CTR}" = "podman" ] && [ "${P_DRY_RUN}" != "true" ] \
+  && ! command -v skopeo >/dev/null 2>&1; then
+  die "--channel-tag with --builder local-podman needs skopeo on PATH (to read each channel tag's current digest)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -316,6 +421,26 @@ else
     die "the scion binary on PATH reports version '${VERSION:-<missing>}', which is not a release; pass a version (e.g. ${PROG} v0.3.0-preview.5) or --ref <git-ref>"
   fi
   note "using the version of the scion binary on PATH: ${VERSION}"
+fi
+
+# --channel-tag: the release tag must match the channel. preview follows the
+# preview channel (preview and rc releases); stable takes only vX.Y.Z. Nightly
+# builds get no channel tag; --ref builds have no release tag.
+STABLE_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+PREVIEW_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|rc)\.(0|[1-9][0-9]*)$'
+if [ -n "${CHANNEL_TAG}" ]; then
+  if [ "${MODE}" = "ref" ]; then
+    usage_err "--channel-tag ${CHANNEL_TAG} needs a release tag; a --ref build has none"
+  fi
+  case "${VERSION}" in
+    nightly-*) usage_err "--channel-tag ${CHANNEL_TAG}: nightly builds never get a channel tag (got '${VERSION}')" ;;
+  esac
+  if [ "${CHANNEL_TAG}" = "stable" ] && ! [[ "${VERSION}" =~ ${STABLE_RE} ]]; then
+    usage_err "--channel-tag stable needs a stable release tag vX.Y.Z (got '${VERSION}')"
+  fi
+  if [ "${CHANNEL_TAG}" = "preview" ] && ! [[ "${VERSION}" =~ ${PREVIEW_RE} ]]; then
+    usage_err "--channel-tag preview needs a preview-channel tag vX.Y.Z-preview.N or vX.Y.Z-rc.N (got '${VERSION}')"
+  fi
 fi
 
 EXPECT_SHA=""
@@ -393,13 +518,14 @@ check_tree() {
     fi
   fi
   # Modified or untracked files would enter the build context unchecked
-  # (scion-base compiles the tree). The driver's own build-manifest.json is
-  # the one expected untracked file; ignored files are not listed.
+  # (scion-base compiles the tree). The driver's own build-manifest.json and
+  # channel-recovery.XXXXXX files are the expected untracked files; ignored
+  # files are not listed.
   local st_raw st n
   if ! st_raw="$(git -C "${d}" status --porcelain --untracked-files=normal 2>/dev/null)"; then
     echo "git status failed in the checkout, so it cannot be checked for modified or untracked files"; return 1
   fi
-  st="$(printf '%s\n' "${st_raw}" | grep -vxF '?? build-manifest.json' || true)"
+  st="$(printf '%s\n' "${st_raw}" | grep -vxE '\?\? (build-manifest\.json|channel-recovery\.[A-Za-z0-9]{6})' || true)"
   if [ -n "${st}" ]; then
     n="$(printf '%s\n' "${st}" | grep -c . || true)"
     echo "the checkout has modified or untracked files: $(printf '%s\n' "${st}" | head -n 10 | cut -c4- | tr '\n' ' ')$([ "${n}" -gt 10 ] && echo "(and $((n - 10)) more)")"
@@ -500,6 +626,20 @@ tree_has_step_targets() {
   # shellcheck disable=SC2016 # a literal line of targets.sh, not an expansion
   grep -qF 'for _id in "${ALL_STEP_IDS[@]}"' "${root}/image-build/scripts/lib/targets.sh" 2>/dev/null
 }
+# tree_stamps_version <root> <version>: the tree's own hack/version.sh, run
+# in the tree, stamps exactly <version>. hack/version.sh and build-images.sh
+# derive VERSION by the same rule (from v0.3.0-preview.4 on, and with the
+# same release tag forms in later trees), so a tag that rule does not accept
+# would give images whose binaries report "dev". The driver fails instead.
+tree_stamps_version() {
+  local root="${1:?}" want="${2:?}" ldflags
+  [ -f "${root}/hack/version.sh" ] || return 1
+  ldflags="$(cd "${root}" && bash ./hack/version.sh scionpkg)" || return 1
+  case " ${ldflags} " in
+    *" -X scionpkg.Version=${want} "*) return 0 ;;
+  esac
+  return 1
+}
 
 case "${P_TARGET}" in
   core-base|thick-prep|scion-base|harnesses|hub|omni|common|all|thick) ;;
@@ -514,6 +654,9 @@ VERSION_STAMPED="false"
 if [ "${MODE}" = "tag" ]; then
   if tree_is_stamped "${SRC_DIR}"; then
     VERSION_STAMPED="true"
+    if ! tree_stamps_version "${SRC_DIR}" "${VERSION}"; then
+      die "the tree at ${VERSION} would not stamp '${VERSION}' into its binaries: its hack/version.sh does not accept it as a release tag (or is missing), so the images would report 'dev'"
+    fi
   else
     warn "${VERSION} predates version stamping (needs v0.3.0-preview.4 or later): the images are tagged :${VERSION}, but the scion and sciontool binaries inside report 'dev'"
   fi
@@ -593,9 +736,17 @@ note "running ${BUILD_SCRIPT} --target ${P_TARGET} --tag ${IMAGE_TAG} ${FORWARD[
 # not change targets or bases (SCION_IMAGE_REGISTRY, mirrored by the driver;
 # GCLOUD_PROJECT for cloud-build; NPM_REGISTRY/PIP_INDEX_URL and
 # NPM_CONFIG_FILE/PIP_CONFIG_FILE package mirrors and credentials; TMPDIR).
-env -u THICK_BUILD -u OMNI_BUILD \
-  bash "${BUILD_SCRIPT}" --target "${P_TARGET}" --tag "${IMAGE_TAG}" ${FORWARD[@]+"${FORWARD[@]}"} | tee "${BUILD_LOG}" \
-  || die "build-images.sh failed"
+# When waiting for Cloud Build, stderr is logged too: gcloud prints the
+# "Created [.../builds/<id>]." line of each submitted build there.
+if [ "${CB_WAIT}" = "true" ]; then
+  env -u THICK_BUILD -u OMNI_BUILD \
+    bash "${BUILD_SCRIPT}" --target "${P_TARGET}" --tag "${IMAGE_TAG}" ${FORWARD[@]+"${FORWARD[@]}"} 2>&1 | tee "${BUILD_LOG}" \
+    || die "build-images.sh failed"
+else
+  env -u THICK_BUILD -u OMNI_BUILD \
+    bash "${BUILD_SCRIPT}" --target "${P_TARGET}" --tag "${IMAGE_TAG}" ${FORWARD[@]+"${FORWARD[@]}"} | tee "${BUILD_LOG}" \
+    || die "build-images.sh failed"
+fi
 
 if [ "${P_DRY_RUN}" = "true" ]; then
   note "dry run: no images tagged, no build-manifest.json written"
@@ -617,6 +768,160 @@ for w in ${STEP_WORDS[@]+"${STEP_WORDS[@]}"}; do
 done
 if [ ${#IMAGES[@]} -eq 0 ]; then
   warn "could not read the step list from build-images.sh output; the summary and manifest list no images"
+fi
+
+# ---------------------------------------------------------------------------
+# --channel-tag with --builder cloud-build: wait, then read the build results
+# ---------------------------------------------------------------------------
+
+# Nothing here moves a tag. It ends with CB_DIGESTS (parallel to IMAGES): the
+# digest each image's :<version> got in this run's builds, taken from the
+# builds' own results (results.images, or "<ref> <digest>" lines in
+# results.buildStepOutputs), never from a tag that could have moved since.
+DIGEST_RE='^sha256:[0-9a-f]{64}$'
+CB_CREATED_RE='^Created \[https://cloudbuild\.googleapis\.com/v1/projects/([a-z][a-z0-9-]{4,28}[a-z0-9])/locations/([a-z][a-z0-9-]*[a-z0-9])/builds/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]\.$'
+CB_DIGESTS=()
+if [ "${CB_WAIT}" = "true" ]; then
+  stop_cb() { die "--channel-tag ${CHANNEL_TAG}: $*; no channel tag was moved"; }
+  if [ ${#IMAGES[@]} -eq 0 ]; then
+    stop_cb "no image list from build-images.sh"
+  fi
+  CB_IDS=(); CB_PROJECTS=(); CB_LOCS=()
+  while IFS= read -r line; do
+    case "${line}" in
+      'Created [https://cloudbuild.googleapis.com/'*)
+        if [[ "${line}" =~ ${CB_CREATED_RE} ]]; then
+          CB_PROJECTS+=("${BASH_REMATCH[1]}")
+          CB_LOCS+=("${BASH_REMATCH[2]}")
+          CB_IDS+=("${BASH_REMATCH[3]}")
+        else
+          stop_cb "unexpected Cloud Build reference in the build output: $(printf '%s' "${line}" | cut -c1-200)"
+        fi
+        ;;
+    esac
+  done < "${BUILD_LOG}"
+  if [ ${#CB_IDS[@]} -eq 0 ]; then
+    stop_cb "no 'Created [https://cloudbuild.googleapis.com/.../builds/<id>].' line in the build output"
+  fi
+
+  # Bounded wait: each build gets --build-timeout seconds, all of them
+  # together --wait-timeout. The clock advances by the poll interval only, so
+  # the real time waited is never shorter than stated and can be longer (each
+  # describe call adds to it; a describe call that hangs is not bounded).
+  total=0
+  k=0
+  for id in "${CB_IDS[@]}"; do
+    waited=0
+    errs=0
+    while :; do
+      if cb_status="$(gcloud builds describe "${id}" --project="${CB_PROJECTS[$k]}" --region="${CB_LOCS[$k]}" --format='value(status)')"; then
+        errs=0
+        case "${cb_status}" in
+          SUCCESS) note "Cloud Build ${id}: SUCCESS"; break ;;
+          QUEUED|PENDING|WORKING|STATUS_UNKNOWN) ;;
+          *) stop_cb "Cloud Build ${id} ended with status '${cb_status:-<empty>}'" ;;
+        esac
+      else
+        errs=$((errs + 1))
+        if [ "${errs}" -ge 3 ]; then
+          stop_cb "gcloud builds describe ${id} failed 3 times in a row"
+        fi
+      fi
+      if [ "${waited}" -ge "${BUILD_TIMEOUT}" ]; then
+        stop_cb "Cloud Build ${id} has not finished after ${BUILD_TIMEOUT}s (--build-timeout)"
+      fi
+      if [ "${total}" -ge "${WAIT_TIMEOUT}" ]; then
+        stop_cb "the Cloud Build wait passed ${WAIT_TIMEOUT}s (--wait-timeout)"
+      fi
+      sleep "${CB_POLL}"
+      waited=$((waited + CB_POLL))
+      total=$((total + CB_POLL))
+    done
+    k=$((k + 1))
+  done
+
+  # The refs this run must have a digest for, in IMAGES order.
+  WANTS=()
+  for name in "${IMAGES[@]}"; do
+    WANTS+=("${IMG_PREFIX}${name}:${IMAGE_TAG}")
+  done
+  # want_index <ref>: prints the index of ref in WANTS, or returns 1.
+  want_index() {
+    local w n=0
+    for w in "${WANTS[@]}"; do
+      if [ "${w}" = "$1" ]; then echo "${n}"; return 0; fi
+      n=$((n + 1))
+    done
+    return 1
+  }
+  # Two sources, both the builds' own results:
+  #  - results.images: "<ref><TAB><digest>" pairs. It also lists refs this
+  #    run does not need (e.g. :<short-sha>); those are ignored.
+  #  - results.buildStepOutputs: base64 per step; each non-empty decoded line
+  #    must be "<ref> sha256:<64 hex>" for a ref in WANTS, at most once over
+  #    all steps and builds. Any other line stops the run.
+  IMG_DIGESTS=(); STEP_DIGESTS=()
+  for w in "${WANTS[@]}"; do IMG_DIGESTS+=(""); STEP_DIGESTS+=(""); done
+  tab=$'\t'
+  k=0
+  for id in "${CB_IDS[@]}"; do
+    cb_where=(--project="${CB_PROJECTS[$k]}" --region="${CB_LOCS[$k]}")
+    out="$(gcloud builds describe "${id}" "${cb_where[@]}" --flatten='results.images[]' --format='value(results.images.name,results.images.digest)')" \
+      || stop_cb "could not read results.images of Cloud Build ${id}"
+    while IFS="${tab}" read -r rname rdig; do
+      j="$(want_index "${rname}")" || continue
+      if [ -n "${IMG_DIGESTS[$j]}" ] && [ "${IMG_DIGESTS[$j]}" != "${rdig}" ]; then
+        stop_cb "results.images report two different digests for ${rname}"
+      fi
+      IMG_DIGESTS[j]="${rdig}"
+    done <<< "${out}"
+    out="$(gcloud builds describe "${id}" "${cb_where[@]}" --format='value(results.buildStepOutputs)')" \
+      || stop_cb "could not read results.buildStepOutputs of Cloud Build ${id}"
+    # value() joins list items with ';', which base64 never contains.
+    b64s=()
+    IFS=';' read -r -a b64s <<< "${out}" || true
+    for b in ${b64s[@]+"${b64s[@]}"}; do
+      [ -n "${b}" ] || continue
+      if ! [[ "${b}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+        stop_cb "a build step output of Cloud Build ${id} is not base64"
+      fi
+      dec="$(printf '%s' "${b}" | base64 --decode)" || stop_cb "a build step output of Cloud Build ${id} does not decode"
+      while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        if ! [[ "${line}" =~ ^([^[:space:]]+)\ (sha256:[0-9a-f]{64})$ ]]; then
+          stop_cb "a build step output line of Cloud Build ${id} is not '<registry>/<image>:<tag> sha256:<64 hex>'"
+        fi
+        rname="${BASH_REMATCH[1]}"; rdig="${BASH_REMATCH[2]}"
+        j="$(want_index "${rname}")" \
+          || stop_cb "a build step output of Cloud Build ${id} names ${rname}, which this run did not build"
+        if [ -n "${STEP_DIGESTS[$j]}" ]; then
+          stop_cb "the build step outputs name ${rname} more than once"
+        fi
+        STEP_DIGESTS[j]="${rdig}"
+      done <<< "${dec}"
+    done
+    k=$((k + 1))
+  done
+
+  # Exactly one digest per image, well formed; the two sources must agree.
+  j=0
+  for w in "${WANTS[@]}"; do
+    found="${STEP_DIGESTS[$j]}"
+    if [ -n "${IMG_DIGESTS[$j]}" ]; then
+      if [ -n "${found}" ] && [ "${found}" != "${IMG_DIGESTS[$j]}" ]; then
+        stop_cb "results.images and results.buildStepOutputs give different digests for ${w}"
+      fi
+      found="${IMG_DIGESTS[$j]}"
+    fi
+    if [ -z "${found}" ]; then
+      stop_cb "no build-result digest for ${w} (neither results.images nor results.buildStepOutputs of build(s) ${CB_IDS[*]} names it)"
+    fi
+    if ! [[ "${found}" =~ ${DIGEST_RE} ]]; then
+      stop_cb "the build-result digest for ${w} is not sha256:<64 hex>"
+    fi
+    CB_DIGESTS+=("${found}")
+    j=$((j + 1))
+  done
 fi
 
 # ---------------------------------------------------------------------------
@@ -654,11 +959,12 @@ image_digest() {
       # The local podman digest can differ from the registry's (push may
       # recompress). Ask the registry: skopeo when it is installed, otherwise
       # re-push the same ref with --digestfile (no layers are uploaded again;
-      # podman reports the manifest digest the tag now points to).
+      # podman reports the manifest digest the tag now points to). A channel
+      # run requires skopeo and reads with it only, never by pushing.
       if command -v skopeo >/dev/null 2>&1; then
         out="$(skopeo inspect --format '{{.Digest}}' "docker://${ref}" 2>/dev/null || true)"
       fi
-      if [ -z "${out}" ]; then
+      if [ -z "${out}" ] && [ -z "${CHANNEL_TAG}" ]; then
         local df
         df="$(mktemp "${TMPDIR:-/tmp}/build-release-images-digest.XXXXXX")"
         if podman push --digestfile "${df}" "${ref}" >/dev/null 2>&1; then
@@ -694,18 +1000,180 @@ BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 MANIFEST="${SRC_DIR}/build-manifest.json"
 
 DIGESTS=()
+i=0
 for name in ${IMAGES[@]+"${IMAGES[@]}"}; do
   if [ "${SUBMITTED}" = "true" ]; then
     # The registry may hold an older build of this tag; never report it.
     DIGESTS+=("")
+  elif [ "${CB_WAIT}" = "true" ]; then
+    DIGESTS+=("${CB_DIGESTS[$i]}")
   else
     DIGESTS+=("$(image_digest "${IMG_PREFIX}${name}:${IMAGE_TAG}")")
   fi
+  i=$((i + 1))
 done
 # What the manifest says: a submitted build has pushed nothing yet.
 MANIFEST_PUSHED="${PUSHED}"
 if [ "${SUBMITTED}" = "true" ]; then
   MANIFEST_PUSHED="false"
+fi
+
+# ---------------------------------------------------------------------------
+# --channel-tag preview|stable
+# ---------------------------------------------------------------------------
+
+# Every image's digest is verified (and, for cloud-build, its :<version> tag
+# must still point at the build-result digest), and every image's current
+# :<channel> digest is read and recorded, before the first channel tag moves.
+# Each channel tag is set to a digest, never copied from a tag, and read
+# back. A registry cannot move several tags atomically: if a move or a
+# read-back fails part-way, the run stops, lists the tags moved so far, and
+# writes the commands that point them back (to the recorded digests) to
+# <src-dir>/channel-recovery.XXXXXX. The script never runs them. :latest is
+# not touched here.
+
+# ar_digest <ref>: the digest an Artifact Registry tag points to.
+# It prints nothing when the lookup fails, so callers report '<unavailable>'
+# (and the tags moved so far) instead of dying silently under set -e.
+ar_digest() {
+  local out=""
+  out="$(gcloud artifacts docker images describe "${1:?}" --format='value(image_summary.digest)' 2>/dev/null)" || out=""
+  printf '%s' "${out%%$'\n'*}"
+}
+# read_prev <ref>: the digest <ref> points to before this run moves it.
+# Sets PREV to the digest (rc 0) or to "none" when the tag definitely does not
+# exist (rc 0). The only signal taken as "absent" is a failed lookup whose
+# stderr says "not found", "NOT_FOUND" or "manifest unknown" (any case). Any
+# other failure returns 1, and so does output that is not sha256:<64 hex>.
+read_prev() {
+  local ref="${1:?}" out="" errf rc=0
+  errf="$(mktemp "${TMPDIR:-/tmp}/build-release-images-prev.XXXXXX")"
+  if [ "${CB_WAIT}" = "true" ]; then
+    out="$(gcloud artifacts docker images describe "${ref}" --format='value(image_summary.digest)' 2>"${errf}")" || rc=$?
+  elif [ "${CTR}" = "podman" ]; then
+    out="$(skopeo inspect --format '{{.Digest}}' "docker://${ref}" 2>"${errf}")" || rc=$?
+  else
+    out="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${ref}" 2>"${errf}")" || rc=$?
+  fi
+  PREV=""
+  if [ "${rc}" -ne 0 ]; then
+    if grep -qiE 'not[ _]found|manifest[ _]unknown' "${errf}"; then
+      PREV="none"
+    fi
+    rm -f -- "${errf:?}"
+    [ -n "${PREV}" ]
+    return
+  fi
+  rm -f -- "${errf:?}"
+  PREV="${out%%$'\n'*}"
+  [[ "${PREV}" =~ ${DIGEST_RE} ]]
+}
+# recovery_line <i>: the command that points image i's channel tag back.
+recovery_line() {
+  local name="${IMAGES[$1]}" prev="${PREV_DIGESTS[$1]}"
+  local img="${IMG_PREFIX}${name}" dst="${IMG_PREFIX}${name}:${CHANNEL_TAG}"
+  if [ "${CB_WAIT}" = "true" ]; then
+    if [ "${prev}" = "none" ]; then
+      echo "gcloud artifacts docker tags delete ${dst}"
+    else
+      echo "gcloud artifacts docker tags add ${img}@${prev} ${dst}"
+    fi
+  elif [ "${prev}" = "none" ]; then
+    echo "# ${dst} did not exist before this run; remove that tag with the registry's own tools"
+  elif [ "${CTR}" = "podman" ]; then
+    echo "skopeo copy docker://${img}@${prev} docker://${dst}"
+  else
+    echo "docker buildx imagetools create -t ${dst} ${img}@${prev}"
+  fi
+}
+# ch_fail <i> <message>: stop after a part-way failure at image i. Images 0..i
+# may have moved; restoring one that did not move is harmless.
+ch_fail() {
+  local k="$1" msg="$2" j=0 rf
+  if ! rf="$(mktemp "${SRC_DIR}/channel-recovery.XXXXXX")"; then
+    # Keep the recorded digests: print the commands, then stop.
+    echo "${PROG}: recovery commands (not run); no recovery file could be created in ${SRC_DIR}:" >&2
+    while [ "${j}" -le "${k}" ]; do
+      recovery_line "${j}" >&2
+      j=$((j + 1))
+    done
+    die "--channel-tag ${CHANNEL_TAG}: ${msg} (channel tags moved so far: ${CHANNEL_REFS[*]+${CHANNEL_REFS[*]}}); could not write a recovery file, the commands are above"
+  fi
+  {
+    echo "# build-release-images.sh: channel tag recovery for :${CHANNEL_TAG} at ${IMAGE_TAG}"
+    echo "# The run stopped part-way. Each command points one channel tag back to"
+    echo "# the digest it had before the run. Nothing here has been run."
+    while [ "${j}" -le "${k}" ]; do
+      recovery_line "${j}"
+      j=$((j + 1))
+    done
+  } >> "${rf}"
+  echo "${PROG}: recovery commands (not run), also in ${rf}:" >&2
+  cat "${rf}" >&2
+  die "--channel-tag ${CHANNEL_TAG}: ${msg} (channel tags moved so far: ${CHANNEL_REFS[*]+${CHANNEL_REFS[*]}}); recovery commands: ${rf}"
+}
+TAG_DIGESTS=()
+PREV_DIGESTS=()
+CHANNEL_REFS=()
+if [ -n "${CHANNEL_TAG}" ]; then
+  stop_ch() { die "--channel-tag ${CHANNEL_TAG}: $*; no channel tag was moved"; }
+  if [ ${#IMAGES[@]} -eq 0 ]; then
+    stop_ch "no image list from build-images.sh"
+  fi
+  i=0
+  for name in "${IMAGES[@]}"; do
+    if ! [[ "${name}" =~ ${IMAGE_NAME_RE} ]]; then
+      stop_ch "unexpected image name '${name}' in the build-images.sh step list"
+    fi
+    src_ref="${IMG_PREFIX}${name}:${IMAGE_TAG}"
+    digest="${DIGESTS[$i]:-}"
+    if [ -z "${digest}" ]; then
+      stop_ch "no registry digest for ${src_ref}"
+    fi
+    if ! [[ "${digest}" =~ ${DIGEST_RE} ]]; then
+      stop_ch "the digest of ${src_ref} is not sha256:<64 hex>"
+    fi
+    if [ "${CB_WAIT}" = "true" ]; then
+      tag_digest="$(ar_digest "${src_ref}")"
+      if [ "${tag_digest}" != "${digest}" ]; then
+        stop_ch "${src_ref} points to '${tag_digest:-<unavailable>}', not to the build-result digest ${digest}"
+      fi
+    else
+      # This digest was just read from :<version> itself.
+      tag_digest="${digest}"
+    fi
+    TAG_DIGESTS+=("${tag_digest}")
+    if ! read_prev "${IMG_PREFIX}${name}:${CHANNEL_TAG}"; then
+      stop_ch "could not read the current digest of ${IMG_PREFIX}${name}:${CHANNEL_TAG} (a failed lookup that is not 'not found', or not sha256:<64 hex>)"
+    fi
+    PREV_DIGESTS+=("${PREV}")
+    i=$((i + 1))
+  done
+  i=0
+  for name in "${IMAGES[@]}"; do
+    digest="${DIGESTS[$i]}"
+    src_ref="${IMG_PREFIX}${name}:${IMAGE_TAG}"
+    dst_ref="${IMG_PREFIX}${name}:${CHANNEL_TAG}"
+    if [ "${CB_WAIT}" = "true" ]; then
+      gcloud artifacts docker tags add "${IMG_PREFIX}${name}@${digest}" "${dst_ref}" \
+        || ch_fail "${i}" "gcloud artifacts docker tags add ${dst_ref} failed"
+      got="$(ar_digest "${dst_ref}")"
+    elif [ "${CTR}" = "podman" ]; then
+      podman tag "${src_ref}" "${dst_ref}" || ch_fail "${i}" "podman tag ${dst_ref} failed"
+      podman push "${dst_ref}" || ch_fail "${i}" "podman push ${dst_ref} failed"
+      got="$(image_digest "${dst_ref}")"
+    else
+      docker buildx imagetools create -t "${dst_ref}" "${IMG_PREFIX}${name}@${digest}" \
+        || ch_fail "${i}" "imagetools create ${dst_ref} failed"
+      got="$(image_digest "${dst_ref}")"
+    fi
+    if [ "${got}" != "${digest}" ]; then
+      CHANNEL_REFS+=("${dst_ref}")
+      ch_fail "${i}" "${dst_ref} points to '${got:-<unavailable>}', expected ${digest}"
+    fi
+    CHANNEL_REFS+=("${dst_ref}")
+    i=$((i + 1))
+  done
 fi
 
 echo ""
@@ -737,6 +1205,9 @@ done
 for r in ${LATEST_REFS[@]+"${LATEST_REFS[@]}"}; do
   echo "    ${r}  (also tagged)"
 done
+for r in ${CHANNEL_REFS[@]+"${CHANNEL_REFS[@]}"}; do
+  echo "    ${r}  (channel tag)"
+done
 
 # Staged builds (core-base, then scion-base, then a harness, all in one
 # --src-dir) merge into the manifest of the same version, commit, builder and
@@ -764,7 +1235,13 @@ NEW_LINES=()
 i=0
 for name in ${IMAGES[@]+"${IMAGES[@]}"}; do
   NEW_KEYS+=("$(json_str "${name}")")
-  NEW_LINES+=("    $(json_str "${name}"): {\"ref\": $(json_str "${IMG_PREFIX}${name}:${IMAGE_TAG}"), \"digest\": $(json_str "${DIGESTS[$i]:-}")}")
+  # A channel run also records the digest :<version> pointed to when it was
+  # checked, and the channel tag it moved.
+  extra=""
+  if [ ${#CHANNEL_REFS[@]} -gt 0 ]; then
+    extra=", \"tag_digest\": $(json_str "${TAG_DIGESTS[$i]}"), \"channel_ref\": $(json_str "${CHANNEL_REFS[$i]}")"
+  fi
+  NEW_LINES+=("    $(json_str "${name}"): {\"ref\": $(json_str "${IMG_PREFIX}${name}:${IMAGE_TAG}"), \"digest\": $(json_str "${DIGESTS[$i]:-}")${extra}}")
   i=$((i + 1))
 done
 
