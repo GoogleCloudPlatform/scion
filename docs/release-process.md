@@ -83,8 +83,9 @@ immutable identifiers for published builds.
    stops fast-forwarding it and fails loudly instead. During the freeze, tag each candidate with
    `bump-preview.sh`.
 5. Once the latest preview is approved, promote it to stable with `promote-stable.sh`. Promotion
-   tags the exact tested release-branch commit without a pre-release suffix. Then cut the next
-   release line.
+   tags the exact tested release-branch commit without a pre-release suffix and, in the same
+   atomic push, creates the next `release/vX.(Y+1)` branch. The next Friday, the weekly preview
+   workflow tags `vX.(Y+1).0-preview.1` on it.
 
 ## Operator runbook
 
@@ -154,7 +155,7 @@ weekly fast-forward.
 ### Promote a preview to stable
 
 ```bash
-./scripts/release/promote-stable.sh [--dry-run] [release-branch]
+./scripts/release/promote-stable.sh [--dry-run] [--no-next-branch] [release-branch]
 ```
 
 [`promote-stable.sh`](../scripts/release/promote-stable.sh) also selects the highest versioned
@@ -164,7 +165,34 @@ release branch when no branch is provided. It:
 2. Finds the highest preview tag for the selected release line.
 3. Verifies that the preview tag and the remote release branch HEAD point to the same commit.
 4. Removes the `-preview.N` suffix to derive the stable `vX.Y.Z` tag.
-5. Verifies that the stable tag does not already exist, then creates and pushes it.
+5. Verifies that the stable tag does not already exist.
+6. Selects the next release branch, `release/vX.(Y+1)`, and refuses if it already exists on
+   `origin`. Its base commit is:
+   - the stable commit, when the newest `nightly-YYYYMMDD` tag on `origin/main` contains it (the
+     normal case: the release branch was only fast-forwarded to nightlies);
+   - otherwise that newest nightly (the release branch has freeze cherry-picks, or its head is
+     newer than the newest nightly).
+
+   The base is never newer than the newest nightly, so the weekly workflow can fast-forward the
+   branch. If no nightly is reachable from `origin/main`, the script refuses.
+7. Shows the stable tag and commit, and the next branch with its base commit and the rule that
+   chose it, then asks for confirmation.
+8. Creates the stable tag and pushes it together with the next branch in one
+   `git push --atomic`: either both refs are created on `origin` or neither is.
+
+No preview tag is created for the next line. The weekly preview workflow tags
+`vX.(Y+1).0-preview.1` on the next Friday. To get it sooner, either:
+
+- dispatch the [weekly preview workflow](#weekly-preview-roll-forward) by hand. It selects the new
+  branch and tags `vX.(Y+1).0-preview.1` on the newest nightly that passed CI; or
+- promote with `--no-next-branch` (only the stable tag is pushed), then run `cut-preview.sh`,
+  which cuts `release/vX.(Y+1)` and its first preview from `main` HEAD.
+
+Do not run `cut-preview.sh` after a promotion that created the next branch: it always cuts the
+line after the highest existing branch, so it would create `release/vX.(Y+2)`.
+
+`--dry-run` prints both refs and pushes nothing. Its tests run with
+`./scripts/release/test-promote-stable.sh`.
 
 The commit equality check prevents promotion when fixes on the release branch have not yet been
 published and tested as a preview. If it fails, publish another preview before promoting.
