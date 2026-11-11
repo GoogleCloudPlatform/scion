@@ -178,15 +178,24 @@ release branch when no branch is provided. It:
 7. Shows the stable tag and commit, and the next branch with its base commit and the rule that
    chose it, then asks for confirmation.
 8. Creates the stable tag and pushes it together with the next branch in one
-   `git push --atomic`: either both refs are created on `origin` or neither is.
+   `git push --atomic`: either both refs are created on `origin` or neither is. The branch push
+   carries an empty lease, so it is refused if the branch appeared on `origin` after step 6.
 
-No preview tag is created for the next line. The weekly preview workflow tags
-`vX.(Y+1).0-preview.1` on the next Friday. To get it sooner, either:
+No preview tag is created for the next line. The weekly preview workflow only takes a nightly
+that the branch does not already contain, so `vX.(Y+1).0-preview.1` is tagged on the first run
+after a nightly newer than the base commit has passed CI. To get it sooner, either:
 
-- dispatch the [weekly preview workflow](#weekly-preview-roll-forward) by hand. It selects the new
-  branch and tags `vX.(Y+1).0-preview.1` on the newest nightly that passed CI; or
+- dispatch the [weekly preview workflow](#weekly-preview-roll-forward) by hand. This tags
+  `vX.(Y+1).0-preview.1` at once only when a nightly on `main` is newer than the base commit,
+  which is the case when the stable commit is older than the newest nightly. When the base is the
+  newest nightly (the stable commit is that nightly, or the second base rule applied), a dispatch
+  tags nothing until the next nightly passes CI. The script prints which case applies after the
+  promotion; or
 - promote with `--no-next-branch` (only the stable tag is pushed), then run `cut-preview.sh`,
   which cuts `release/vX.(Y+1)` and its first preview from `main` HEAD.
+
+A major-version bump (for example `v0.x` to `v1.0`) uses `--no-next-branch`; then cut the new
+line by hand.
 
 Do not run `cut-preview.sh` after a promotion that created the next branch: it always cuts the
 line after the highest existing branch, so it would create `release/vX.(Y+2)`.

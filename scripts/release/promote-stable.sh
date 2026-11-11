@@ -104,10 +104,14 @@ git fetch origin --tags
 # --- Determine release branch --------------------------------------------
 
 if [ -z "$RELEASE_BRANCH" ]; then
-  # Auto-detect: pick the highest release/vX.Y from remote refs.
+  # Auto-detect: pick the highest release/vX.Y from remote refs, ignoring
+  # names that are not exactly release/vX.Y (as select-weekly-preview.sh does).
   RELEASE_BRANCH=""
-  for ref in $(git for-each-ref --sort=v:refname --format='%(refname:short)' 'refs/remotes/origin/release/v*'); do
-    RELEASE_BRANCH="${ref#origin/}"
+  for ref in $(git for-each-ref --sort=v:refname --format='%(refname)' 'refs/remotes/origin/release/v*'); do
+    name="${ref#refs/remotes/origin/}"
+    if [[ "$name" =~ ^release/v[0-9]+\.[0-9]+$ ]]; then
+      RELEASE_BRANCH="$name"
+    fi
   done
   if [ -z "$RELEASE_BRANCH" ]; then
     die "no release branches found on origin"
@@ -115,15 +119,15 @@ if [ -z "$RELEASE_BRANCH" ]; then
   info "Auto-detected release branch: ${RELEASE_BRANCH}"
 fi
 
+[[ "$RELEASE_BRANCH" =~ ^release/v[0-9]+\.[0-9]+$ ]] \
+  || die "'${RELEASE_BRANCH}' is not a release/vX.Y branch"
+
 # Validate the branch exists on origin.
 if ! git rev-parse "origin/${RELEASE_BRANCH}" >/dev/null 2>&1; then
   die "branch '${RELEASE_BRANCH}' does not exist on origin"
 fi
 
 # --- Extract version from branch name ------------------------------------
-
-[[ "$RELEASE_BRANCH" =~ ^release/v[0-9]+\.[0-9]+$ ]] \
-  || die "'${RELEASE_BRANCH}' is not a release/vX.Y branch"
 
 # release/vX.Y -> X.Y
 BRANCH_VERSION="${RELEASE_BRANCH#release/v}"
@@ -171,6 +175,7 @@ fi
 NEXT_BRANCH=""
 NEXT_BASE=""
 NEXT_RULE=""
+NEWER_NIGHTLY=false
 if [ "$NEXT_BRANCH_ENABLED" = true ]; then
   NEXT_BRANCH="release/v${MAJOR}.$((10#${MINOR} + 1))"
 
@@ -207,6 +212,10 @@ if [ "$NEXT_BRANCH_ENABLED" = true ]; then
   if git merge-base --is-ancestor "$PREVIEW_COMMIT" "$NEWEST_NIGHTLY_COMMIT"; then
     NEXT_BASE="$PREVIEW_COMMIT"
     NEXT_RULE="stable commit (contained in ${NEWEST_NIGHTLY}, the newest nightly on main)"
+    # The weekly selection only takes a nightly the branch does not contain.
+    if [ "$NEWEST_NIGHTLY_COMMIT" != "$PREVIEW_COMMIT" ]; then
+      NEWER_NIGHTLY=true
+    fi
   else
     NEXT_BASE="$NEWEST_NIGHTLY_COMMIT"
     NEXT_RULE="${NEWEST_NIGHTLY}, the newest nightly on main (the stable commit is not in it)"
@@ -259,9 +268,12 @@ git tag "$STABLE_TAG" "$PREVIEW_COMMIT"
 
 if [ "$NEXT_BRANCH_ENABLED" = true ]; then
   # One atomic push: the stable tag never exists without the next line, and
-  # the next line never exists without the stable tag.
+  # the next line never exists without the stable tag. The empty lease makes
+  # the branch push a create: it is refused if the branch appeared on origin
+  # after the check above, even as a fast-forward.
   info "Pushing tag ${STABLE_TAG} and branch ${NEXT_BRANCH} to origin (atomic)..."
-  if ! git push --atomic origin "refs/tags/${STABLE_TAG}" "${NEXT_BASE}:refs/heads/${NEXT_BRANCH}"; then
+  if ! git push --atomic --force-with-lease="refs/heads/${NEXT_BRANCH}:" origin \
+      "refs/tags/${STABLE_TAG}" "${NEXT_BASE}:refs/heads/${NEXT_BRANCH}"; then
     git tag -d "$STABLE_TAG" >/dev/null
     die "atomic push failed; neither ${STABLE_TAG} nor ${NEXT_BRANCH} was created on origin (local tag removed)"
   fi
@@ -284,6 +296,14 @@ fi
 echo ""
 echo "The build-release workflow should now be triggered by the tag push."
 if [ "$NEXT_BRANCH_ENABLED" = true ]; then
-  echo "The weekly preview workflow tags ${NEXT_BRANCH#release/}.0-preview.1 on ${NEXT_BRANCH} on Friday;"
-  echo "to tag it sooner, dispatch build-preview-weekly.yml by hand."
+  NEXT_PREVIEW="${NEXT_BRANCH#release/}.0-preview.1"
+  if [ "$NEWER_NIGHTLY" = true ]; then
+    echo "The weekly preview workflow tags ${NEXT_PREVIEW} on ${NEXT_BRANCH} on Friday."
+    echo "To tag it sooner, dispatch build-preview-weekly.yml by hand: a nightly on main is"
+    echo "newer than ${NEXT_BRANCH}, and the newest such nightly that passed CI is used."
+  else
+    echo "No nightly on main is newer than ${NEXT_BRANCH} yet, so the weekly preview workflow,"
+    echo "scheduled or dispatched by hand, tags ${NEXT_PREVIEW} only after the next nightly"
+    echo "that passes CI."
+  fi
 fi

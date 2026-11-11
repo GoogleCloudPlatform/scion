@@ -95,6 +95,22 @@ want_remote() { # want_remote REF SHA (empty SHA: must not exist)
 
 want_out() { grep -qF -- "$1" "$tmp/out" || fail "$name: output lacks '$1'"; }
 
+# run_select — run select-weekly-preview.sh in $repo after fetching; sets $sel
+# (outputs) and $sel_status.
+run_select() {
+  g fetch -q origin --tags
+  sel_status=0
+  sel=$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY "$SELECT" --skip-ci-check 2>"$tmp/sel-err") || sel_status=$?
+  [ "$sel_status" = 0 ] || fail "$name: select exit $sel_status ($(tail -1 "$tmp/sel-err"))"
+}
+
+want_sel() { # want_sel KEY VALUE
+  printf '%s\n' "$sel" | grep -qx "$1=$2" || fail "$name: select $1 is not '$2': $(printf '%s' "$sel" | tr '\n' ' ')"
+}
+
+HINT_NOW="dispatch build-preview-weekly.yml by hand"
+HINT_LATER="only after the next nightly"
+
 no_next_previews() {
   [ -z "$(r tag -l 'v0.4.*')" ] || fail "$name: a v0.4 tag was created: $(r tag -l 'v0.4.*' | tr '\n' ' ')"
 }
@@ -106,20 +122,23 @@ want_status 0
 want_remote refs/tags/v0.3.0 "$c2"
 want_remote refs/heads/release/v0.4 "$c2"
 want_out "stable commit"
+want_out "$HINT_NOW"
 no_next_previews
 
-# --- End to end: the weekly selection picks the next line ---
+# --- End to end: straight after promotion, nightly-20261021 (c3) is newer
+# than the next branch, so a dispatch tags preview.1 there at once ---
+run_select
+want_sel selected true; want_sel branch release/v0.4
+want_sel tag v0.4.0-preview.1; want_sel sha "$c3"
+
+# --- End to end: with a later nightly the weekly selection takes it ---
 g commit -q --allow-empty -m c5
 c5=$(g rev-parse HEAD)
 g tag nightly-20261023 "$c5"
 g push -q origin main nightly-20261023
-g fetch -q origin --tags
-sel_status=0
-sel=$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY "$SELECT" --skip-ci-check 2>"$tmp/sel-err") || sel_status=$?
-[ "$sel_status" = 0 ] || fail "$name-e2e: select exit $sel_status ($(tail -1 "$tmp/sel-err"))"
-printf '%s\n' "$sel" | grep -qx "branch=release/v0.4" || fail "$name-e2e: branch not release/v0.4: $sel"
-printf '%s\n' "$sel" | grep -qx "tag=v0.4.0-preview.1" || fail "$name-e2e: tag not v0.4.0-preview.1: $sel"
-printf '%s\n' "$sel" | grep -qx "selected=true" || fail "$name-e2e: not selected: $sel"
+run_select
+want_sel selected true; want_sel branch release/v0.4
+want_sel tag v0.4.0-preview.1; want_sel sha "$c5"
 
 # --- cut-preview.sh after the promotion targets the line after next ---
 cut_out=$(cd "$repo" && "$CUT" --dry-run 2>&1) || fail "$name-cut: cut-preview.sh --dry-run failed: $cut_out"
@@ -135,6 +154,21 @@ want_status 0
 want_remote refs/tags/v0.3.0 "$c4"
 want_remote refs/heads/release/v0.4 "$c3"
 want_out "nightly-20261021"
+want_out "$HINT_LATER"
+
+# --- Stable commit is the newest nightly: no nightly is newer than the next
+# branch, so the weekly selection tags nothing until the next nightly ---
+name=stable-is-newest-nightly; new_repo "$name"
+g tag v0.3.0-preview.3 "$c3"
+g push -q origin "$c3:refs/heads/release/v0.3" v0.3.0-preview.3
+run
+want_status 0
+want_remote refs/heads/release/v0.4 "$c3"
+want_out "stable commit"
+want_out "$HINT_LATER"
+grep -qF "$HINT_NOW" "$tmp/out" && fail "$name: immediate-dispatch hint printed"
+run_select
+want_sel selected false
 
 # --- Cherry-picked release branch: base is the newest nightly on main ---
 name=cherry-pick; new_repo "$name"
@@ -151,18 +185,25 @@ want_status 0
 want_remote refs/tags/v0.3.0 "$pick"
 want_remote refs/heads/release/v0.4 "$c3"
 want_out "nightly-20261021, the newest nightly on main"
+want_out "$HINT_LATER"
+grep -qF "$HINT_NOW" "$tmp/out" && fail "$name: immediate-dispatch hint printed"
 no_next_previews
 
-# End to end for the cherry-pick case too.
+# End to end: straight after promotion the weekly selection tags nothing
+# (nightly-20261030 is not on main, but it is newer by name; drop it so the
+# selection sees only main's nightlies, as in the real repository).
+g tag -d nightly-20261030 >/dev/null
+g push -q origin :refs/tags/nightly-20261030
+run_select
+want_sel selected false
+
+# After the next nightly it takes that one.
 g commit -q --allow-empty -m c5
 c5=$(g rev-parse HEAD)
 g tag nightly-20261031 "$c5"
 g push -q origin main nightly-20261031
-g fetch -q origin --tags
-sel=$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY "$SELECT" --skip-ci-check 2>"$tmp/sel-err") \
-  || fail "$name-e2e: select failed ($(tail -1 "$tmp/sel-err"))"
-printf '%s\n' "$sel" | grep -qx "tag=v0.4.0-preview.1" || fail "$name-e2e: tag not v0.4.0-preview.1: $sel"
-printf '%s\n' "$sel" | grep -qx "sha=$c5" || fail "$name-e2e: sha not c5: $sel"
+run_select
+want_sel selected true; want_sel tag v0.4.0-preview.1; want_sel sha "$c5"
 
 # --- Next branch already exists on origin: refuse, push nothing ---
 name=next-exists; new_repo "$name"
@@ -182,6 +223,52 @@ g config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
 g config --add remote.origin.fetch '+refs/heads/release/v0.3:refs/remotes/origin/release/v0.3'
 run release/v0.3
 want_status 1
+want_out "release/v0.4' already exists on origin"
+want_remote refs/tags/v0.3.0 ""
+
+# --- Next branch appears on origin after the check, as a fast-forward of the
+# base: the lease refuses it and nothing is pushed ---
+name=next-appears-before-push; new_repo "$name"
+mkdir -p "$tmp/shim"
+real_git=$(command -v git)
+cat > "$tmp/shim/git" <<SHIM
+#!/usr/bin/env bash
+if [ "\${1:-}" = push ]; then
+  "$real_git" -C "$remote" update-ref refs/heads/release/v0.4 "$c1"
+fi
+exec "$real_git" "\$@"
+SHIM
+chmod +x "$tmp/shim/git"
+status=0
+(cd "$repo" && printf 'y\n' | PATH="$tmp/shim:$PATH" "$SCRIPT") >"$tmp/out" 2>&1 || status=$?
+rm -rf "$tmp/shim"
+want_status 1
+want_remote refs/tags/v0.3.0 ""
+want_remote refs/heads/release/v0.4 "$c1"
+
+# --- Multi-digit minor: release/v0.9 promotes to v0.9.0 and creates
+# release/v0.10; auto-detect ignores names that are not release/vX.Y ---
+name=multi-digit; new_repo "$name"
+g tag v0.9.0-preview.1 "$c2"
+g push -q origin "$c2:refs/heads/release/v0.9" "$c2:refs/heads/release/v0.9-old" v0.9.0-preview.1
+g push -q origin :refs/heads/release/v0.3
+run
+want_status 0
+want_out "Auto-detected release branch: release/v0.9"
+want_remote refs/tags/v0.9.0 "$c2"
+want_remote refs/heads/release/v0.10 "$c2"
+want_remote refs/heads/release/v0.1 ""
+
+# --- Bad branch names: refused with the release/vX.Y message, also when the
+# branch does not exist ---
+name=bad-name; new_repo "$name"
+g push -q origin "$c2:refs/heads/release/v0.3-old"
+run release/v0.3-old
+want_status 1
+want_out "'release/v0.3-old' is not a release/vX.Y branch"
+run release/foo
+want_status 1
+want_out "'release/foo' is not a release/vX.Y branch"
 want_remote refs/tags/v0.3.0 ""
 
 # --- --no-next-branch: tag only ---
