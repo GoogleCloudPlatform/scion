@@ -320,7 +320,17 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = testIAPCloudRunURL
 				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
 			}),
-			want: containerHubEndpointResult{Endpoint: "http://custom:1234", HubListenPort: 8080},
+			want: containerHubEndpointResult{Endpoint: "http://custom:1234", Configured: true, HubListenPort: 8080},
+		},
+		{
+			name: "configured container endpoint is marked configured in broker-only mode",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.Configured = "http://10.0.0.5:8080"
+				in.HubEnabled = false
+				in.PublicHubEndpoint = "https://hub.example.com"
+				in.PublicHubEndpointSource = hubEndpointSourceBaseURLEnv
+			}),
+			want: containerHubEndpointResult{Endpoint: "http://10.0.0.5:8080", Configured: true, HubListenPort: 8080},
 		},
 		{
 			name: "broker-only mode computes nothing",
@@ -507,7 +517,7 @@ func TestBrokerContainerHubConfig(t *testing.T) {
 			runtimeName: "docker",
 			hubEndpoint: testIAPCloudRunURL,
 			src:         hubEndpointSourceIAPAudience,
-			want:        containerHubEndpointResult{Endpoint: "http://custom:1234", HubListenPort: 8080},
+			want:        containerHubEndpointResult{Endpoint: "http://custom:1234", Configured: true, HubListenPort: 8080},
 		},
 		{
 			name:        "kubernetes default runtime probes for the docker profile target",
@@ -583,10 +593,21 @@ func TestContainerHubEndpointResultApplyTo(t *testing.T) {
 		HubListenPort:                8080,
 	}.applyTo(&cfg)
 	assert.Equal(t, "http://scion-hub.internal:8080", cfg.ContainerHubEndpoint)
+	assert.False(t, cfg.ContainerHubEndpointConfigured, "computed endpoint")
 	assert.Equal(t, testIAPCloudRunURL, cfg.ColocatedPublicHubEndpoint)
 	assert.Equal(t, iapTargets("http://scion-hub.internal:8080"), cfg.ColocatedRuntimeHubEndpoints)
 	assert.Equal(t, 8080, cfg.HubListenPort)
 	assert.Equal(t, "keep", cfg.BrokerID)
+}
+
+// TestContainerHubEndpointResultApplyToConfigured: the configured flag
+// reaches the runtime broker, so it applies the value to non-loopback Hub
+// endpoints (ptone/scion#7748).
+func TestContainerHubEndpointResultApplyToConfigured(t *testing.T) {
+	var cfg runtimebroker.ServerConfig
+	containerHubEndpointResult{Endpoint: "http://scion-hub.internal:8080", Configured: true}.applyTo(&cfg)
+	assert.Equal(t, "http://scion-hub.internal:8080", cfg.ContainerHubEndpoint)
+	assert.True(t, cfg.ContainerHubEndpointConfigured)
 }
 
 // TestBrokerContainerHubConfigPodmanOnlyBroker: a podman-only broker (no

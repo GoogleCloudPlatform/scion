@@ -84,9 +84,12 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		resolved             map[string]string
 		projectPath          string
 		containerHubEndpoint string
-		colocated            colocatedRewrite
-		runtimeName          string
-		want                 string
+		// containerHubConfigured marks containerHubEndpoint as the operator's
+		// explicit server.broker.container_hub_endpoint.
+		containerHubConfigured bool
+		colocated              colocatedRewrite
+		runtimeName            string
+		want                   string
 		// wantTrusted is the trust bit resolveHubEndpointForCreate reports
 		// for the returned endpoint: true only for the request/connection/
 		// broker tiers, false for both the resolved-env and the project-
@@ -199,6 +202,31 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			wantTrusted: true,
 		},
 		{
+			name:                   "configured container endpoint replaces a trusted public endpoint",
+			req:                    "https://hub.example.com",
+			containerHubEndpoint:   "http://scion-hub.internal:8080",
+			containerHubConfigured: true,
+			want:                   "http://scion-hub.internal:8080",
+			wantTrusted:            true,
+		},
+		{
+			// The override replaces the endpoint, not its trust: a
+			// resolved-env endpoint stays untrusted.
+			name:                   "configured container endpoint replaces a resolved-env endpoint, still untrusted",
+			resolved:               map[string]string{"SCION_HUB_ENDPOINT": "https://env.example.com"},
+			containerHubEndpoint:   "http://scion-hub.internal:8080",
+			containerHubConfigured: true,
+			want:                   "http://scion-hub.internal:8080",
+			wantTrusted:            false,
+		},
+		{
+			name:                 "computed container endpoint keeps a public endpoint",
+			req:                  "https://hub.example.com",
+			containerHubEndpoint: "http://host.docker.internal:8080",
+			want:                 "https://hub.example.com",
+			wantTrusted:          true,
+		},
+		{
 			name:                 "colocated IAP public endpoint kept for kubernetes",
 			req:                  "https://scion-hub-123.us-central1.run.app",
 			containerHubEndpoint: "http://scion-hub.internal:8080",
@@ -218,7 +246,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			if rn == "" {
 				rn = "docker"
 			}
-			got, gotTrusted := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, tt.colocated, rn)
+			got, gotTrusted := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, containerHubOverride{Endpoint: tt.containerHubEndpoint, Configured: tt.containerHubConfigured}, tt.colocated, rn)
 			if got != tt.want {
 				t.Fatalf("resolveHubEndpointForCreate() = %q, want %q", got, tt.want)
 			}
@@ -458,11 +486,57 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := applyContainerBridgeOverride(tt.endpoint, tt.containerHubEndpoint, tt.colocated, tt.runtimeName)
+			got := applyContainerBridgeOverride(tt.endpoint, containerHubOverride{Endpoint: tt.containerHubEndpoint}, tt.colocated, tt.runtimeName)
 			if got != tt.want {
 				t.Fatalf("applyContainerBridgeOverride() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestApplyContainerBridgeOverrideConfigured covers an explicitly configured
+// server.broker.container_hub_endpoint against a computed one, per runtime
+// (ptone/scion#7748): only a configured value replaces a non-loopback
+// endpoint, and only for docker and podman agents.
+func TestApplyContainerBridgeOverrideConfigured(t *testing.T) {
+	const (
+		public   = "https://hub.example.com"
+		internal = "http://scion-hub.internal:8080"
+	)
+	tests := []struct {
+		name        string
+		endpoint    string
+		configured  bool
+		runtimeName string
+		want        string
+	}{
+		{name: "configured, docker, public endpoint", endpoint: public, configured: true, runtimeName: "docker", want: internal},
+		{name: "configured, podman, public endpoint", endpoint: public, configured: true, runtimeName: "podman", want: internal},
+		{name: "configured, private-network endpoint", endpoint: "http://10.0.0.5:8080", configured: true, runtimeName: "docker", want: internal},
+		{name: "configured, kubernetes keeps public endpoint", endpoint: public, configured: true, runtimeName: "kubernetes", want: public},
+		{name: "configured, cloudrun keeps public endpoint", endpoint: public, configured: true, runtimeName: "cloudrun", want: public},
+		{name: "configured, cloudrun-sandbox keeps public endpoint", endpoint: public, configured: true, runtimeName: "cloudrun-sandbox", want: public},
+		{name: "configured, Apple container keeps public endpoint", endpoint: public, configured: true, runtimeName: "container", want: public},
+		{name: "configured, empty endpoint stays empty", endpoint: "", configured: true, runtimeName: "docker", want: ""},
+		{name: "configured, localhost endpoint replaced", endpoint: "http://localhost:8080", configured: true, runtimeName: "docker", want: internal},
+		{name: "computed, docker keeps public endpoint", endpoint: public, runtimeName: "docker", want: public},
+		{name: "computed, podman keeps public endpoint", endpoint: public, runtimeName: "podman", want: public},
+		{name: "computed, localhost endpoint replaced", endpoint: "http://localhost:8080", runtimeName: "docker", want: internal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyContainerBridgeOverride(tt.endpoint, containerHubOverride{Endpoint: internal, Configured: tt.configured}, colocatedRewrite{}, tt.runtimeName)
+			if got != tt.want {
+				t.Fatalf("applyContainerBridgeOverride() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// A configured bridge-hostname value on a non-loopback endpoint is used
+	// wholesale: the public endpoint's port says nothing about the bridge.
+	got := applyContainerBridgeOverride(public+":8443", containerHubOverride{Endpoint: "http://host.containers.internal:8080", Configured: true}, colocatedRewrite{}, "podman")
+	if got != "http://host.containers.internal:8080" {
+		t.Fatalf("applyContainerBridgeOverride() = %q, want the configured value unchanged", got)
 	}
 }
 
