@@ -527,6 +527,37 @@ hub:
 		}
 	})
 
+	t.Run("configured container endpoint overrides a non-localhost endpoint", func(t *testing.T) {
+		cfg := testServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.BrokerName = "test-host"
+		cfg.ContainerHubEndpoint = "http://scion-hub.internal:8080"
+		cfg.ContainerHubEndpointConfigured = true
+		cfg.ForceRuntime = "mock"
+
+		mgr := &envCapturingManager{}
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+
+		body := `{
+			"name": "test-agent",
+			"hubEndpoint": "https://hub.example.com"
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+		}
+
+		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "http://scion-hub.internal:8080" {
+			t.Errorf("expected SCION_HUB_ENDPOINT='http://scion-hub.internal:8080' (configured override), got %q", got)
+		}
+	})
+
 	t.Run("kubernetes runtime skips container endpoint override", func(t *testing.T) {
 		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"

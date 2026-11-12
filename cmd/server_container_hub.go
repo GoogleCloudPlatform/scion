@@ -65,6 +65,12 @@ type containerHubEndpointInputs struct {
 type containerHubEndpointResult struct {
 	// Endpoint becomes runtimebroker.ServerConfig.ContainerHubEndpoint.
 	Endpoint string
+	// Configured becomes
+	// runtimebroker.ServerConfig.ContainerHubEndpointConfigured: Endpoint is
+	// the operator's runtime_broker.container_hub_endpoint, not a computed
+	// value, so the broker also applies it to non-loopback Hub endpoints of
+	// docker and podman agents.
+	Configured bool
 	// ColocatedPublicHubEndpoint becomes
 	// runtimebroker.ServerConfig.ColocatedPublicHubEndpoint: the public URL
 	// the broker rewrites for docker and podman agents.
@@ -83,6 +89,7 @@ type containerHubEndpointResult struct {
 // startRuntimeBroker cannot forward one field and drop another.
 func (r containerHubEndpointResult) applyTo(cfg *runtimebroker.ServerConfig) {
 	cfg.ContainerHubEndpoint = r.Endpoint
+	cfg.ContainerHubEndpointConfigured = r.Configured
 	cfg.ColocatedPublicHubEndpoint = r.ColocatedPublicHubEndpoint
 	cfg.ColocatedRuntimeHubEndpoints = r.ColocatedRuntimeHubEndpoints
 	cfg.HubListenPort = r.HubListenPort
@@ -149,8 +156,11 @@ func computeContainerHubEndpoint(in containerHubEndpointInputs, logf func(format
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	if in.Configured != "" || !in.HubEnabled || in.BrokerHubEndpoint == "" || in.RuntimeName == "" {
-		return containerHubEndpointResult{Endpoint: in.Configured, HubListenPort: in.HubListenPort}
+	if in.Configured != "" {
+		return containerHubEndpointResult{Endpoint: in.Configured, Configured: true, HubListenPort: in.HubListenPort}
+	}
+	if !in.HubEnabled || in.BrokerHubEndpoint == "" || in.RuntimeName == "" {
+		return containerHubEndpointResult{HubListenPort: in.HubListenPort}
 	}
 
 	publicDomain := ""

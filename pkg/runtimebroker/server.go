@@ -80,6 +80,12 @@ type ServerConfig struct {
 	// into agent containers. Used for local development where containers
 	// need a bridge address (e.g. host.containers.internal) instead of localhost.
 	ContainerHubEndpoint string
+	// ContainerHubEndpointConfigured reports that ContainerHubEndpoint was set
+	// explicitly (server.broker.container_hub_endpoint) rather than computed
+	// at server start-up. A configured value also replaces a non-loopback
+	// agent Hub endpoint for docker and podman agents; a computed one only
+	// replaces a loopback endpoint.
+	ContainerHubEndpointConfigured bool
 	// ColocatedPublicHubEndpoint is the co-located hub's public URL when this
 	// host does not serve it, so containers cannot reach it (e.g. a Cloud Run
 	// URL derived from the IAP audience on a single-node VM). On the docker
