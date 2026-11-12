@@ -1750,6 +1750,14 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// against the Runtime Broker control paths (controlPathSweeper).
 	s.startControlPathSweep(ctx)
 
+	// Purge agent homes a home reset moved aside that an interrupted purge
+	// left behind (background, once per process; ptone/scion#7757).
+	go func() {
+		if globalDir, err := config.GetGlobalDir(); err == nil {
+			agent.PurgeResetHomeResidueUnder(globalDir, s.agentLifecycleLog)
+		}
+	}()
+
 	// Move shared dirs this broker kept node-local onto the shared tree
 	// its Layout now places them on (background, once per process).
 	s.startSharedDirsMigrationHook(ctx)

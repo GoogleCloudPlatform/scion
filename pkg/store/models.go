@@ -1458,6 +1458,12 @@ type BrokerCapabilities struct {
 	// stopped. It says what the broker build can do; runtime suitability is
 	// a separate hub check.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ReprovisionResetHomeRuntimes lists the runtimes on which this broker's
+	// reprovision can reset an agent home completely (broker dir plus any
+	// NFS leaf). The hub refuses a home-resetting reincarnation (412) for any
+	// other runtime, before anything is stopped (ptone/scion#7757). An old
+	// broker reports none, so it is refused everywhere.
+	ReprovisionResetHomeRuntimes []string `json:"reprovisionResetHomeRuntimes,omitempty"`
 	// ChangedFields indicates the broker re-renders, at start, the files
 	// provisioning wrote for the provision-rendered keys the hub lists in
 	// the inline config's changed_fields (ptone/scion#3982). Only for such

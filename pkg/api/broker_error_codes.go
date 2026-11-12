@@ -147,6 +147,13 @@ const (
 	// were not created by the move (409). The message names no host path.
 	BrokerErrCodeMoveMarkerMismatch = "move_marker_mismatch"
 
+	// BrokerErrCodeReprovisionRefusedHomeIntact marks a reprovision that
+	// asked for a home reset (ResetHome) and was refused by a precondition
+	// before the home was moved aside (409): the agent's home is intact.
+	// Any other failure of such a reprovision may have reset the home
+	// (ptone/scion#7757).
+	BrokerErrCodeReprovisionRefusedHomeIntact = "reprovision_refused_home_intact"
+
 	// BrokerErrCodeReloadUnconfirmed marks a reset-auth that wrote the new
 	// credential into the agent container but could not deliver the reload
 	// signal to the agent's init process (502), so the running agent did not
