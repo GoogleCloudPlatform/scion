@@ -25,6 +25,7 @@ vi.mock('./api.js', async (orig) => ({
 
 const {
   answerDecision,
+  answerDecisionSet,
   applyChoiceHistoryMaps,
   carryChoiceFields,
   newerDecisionView,
@@ -241,6 +242,69 @@ describe('answerDecision', () => {
   it('resolves a network failure as status 0', async () => {
     apiFetch.mockImplementation(() => Promise.reject(new TypeError('offline')));
     const out = await answerDecision('r1', 'y', 'k');
+    expect(out).toMatchObject({ ok: false, status: 0 });
+  });
+});
+
+describe('answerDecisionSet', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  const res = (status: number, body: unknown): Response =>
+    ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(body),
+    }) as unknown as Response;
+
+  it('posts the answers and reads the camelCase 200 (B0)', async () => {
+    apiFetch.mockResolvedValue(
+      res(200, { responseMessageId: 'resp', batchId: 'b1', decisions: [decided()] })
+    );
+    const out = await answerDecisionSet('m 1', [{ rowId: 'r1', choiceId: 'y' }], 'key-1');
+    expect(out).toEqual({
+      ok: true,
+      decisions: [decided()],
+      responseMessageId: 'resp',
+      batchId: 'b1',
+    });
+    const [path, init] = apiFetch.mock.calls[0]!;
+    expect(path).toBe('/api/v1/choice-prompts/m%201/answers');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toEqual({
+      idempotency_key: 'key-1',
+      answers: [{ decision_row_id: 'r1', choice_id: 'y' }],
+    });
+  });
+
+  it('returns the fresh views and reasons on 409 answer_set_changed', async () => {
+    apiFetch.mockResolvedValue(
+      res(409, {
+        error: {
+          code: 'answer_set_changed',
+          message: 'the decisions to answer changed; refresh and submit again',
+          details: { decisions: [view({ status: 'replaced' })], reasons: { r1: 'replaced', x: 3 } },
+        },
+      })
+    );
+    const out = await answerDecisionSet('m1', [{ rowId: 'r1', choiceId: 'y' }], 'k');
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.code).toBe('answer_set_changed');
+    expect(out.decisions?.[0]?.status).toBe('replaced');
+    expect(out.reasons).toEqual({ r1: 'replaced' });
+  });
+
+  it('treats a 200 without decisions as an error', async () => {
+    apiFetch.mockResolvedValue(res(200, { responseMessageId: 'resp' }));
+    const out = await answerDecisionSet('m1', [{ rowId: 'r1', choiceId: 'y' }], 'k');
+    expect(out.ok).toBe(false);
+  });
+
+  it('resolves a network failure as status 0', async () => {
+    apiFetch.mockImplementation(() => Promise.reject(new TypeError('offline')));
+    const out = await answerDecisionSet('m1', [{ rowId: 'r1', choiceId: 'y' }], 'k');
     expect(out).toMatchObject({ ok: false, status: 0 });
   });
 });

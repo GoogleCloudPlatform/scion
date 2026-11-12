@@ -206,3 +206,97 @@ function isDecisionView(v: unknown): v is DecisionView {
     typeof (v as DecisionView).status === 'string'
   );
 }
+
+/** One answer of a set submit. */
+export interface SetAnswer {
+  rowId: string;
+  choiceId: string;
+}
+
+/** The outcome of answering a set prompt. */
+export type AnswerDecisionSetResult =
+  | { ok: true; decisions: DecisionView[]; responseMessageId: string; batchId: string }
+  | {
+      ok: false;
+      status: number;
+      code: string;
+      message: string;
+      /** Every current view of the prompt, on 409 answer_set_changed. */
+      decisions?: DecisionView[];
+      /** Why each changed row differs, by row id, on 409 answer_set_changed. */
+      reasons?: Record<string, string>;
+    };
+
+/**
+ * POST /api/v1/choice-prompts/{messageId}/answers for a set prompt
+ * (design §4.3). A network failure resolves as status 0.
+ */
+export async function answerDecisionSet(
+  messageId: string,
+  answers: readonly SetAnswer[],
+  idempotencyKey: string
+): Promise<AnswerDecisionSetResult> {
+  let res: Response;
+  try {
+    res = await apiFetch(`/api/v1/choice-prompts/${encodeURIComponent(messageId)}/answers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idempotency_key: idempotencyKey,
+        answers: answers.map((a) => ({ decision_row_id: a.rowId, choice_id: a.choiceId })),
+      }),
+    });
+  } catch {
+    return { ok: false, status: 0, code: '', message: 'Network error: the answers were not sent.' };
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  if (res.ok) {
+    const ok = body as {
+      decisions?: unknown;
+      responseMessageId?: string;
+      batchId?: string;
+    } | null;
+    const decisions = decisionViews(ok?.decisions);
+    if (decisions) {
+      return {
+        ok: true,
+        decisions,
+        responseMessageId: ok?.responseMessageId ?? '',
+        batchId: ok?.batchId ?? '',
+      };
+    }
+    return { ok: false, status: res.status, code: '', message: 'Unexpected answer response.' };
+  }
+  const err = (body as { error?: { code?: string; details?: Record<string, unknown> } } | null)
+    ?.error;
+  const details = err?.details ?? {};
+  const decisions = decisionViews(details.decisions);
+  const reasons = stringMap(details.reasons);
+  return {
+    ok: false,
+    status: res.status,
+    code: typeof err?.code === 'string' ? err.code : '',
+    message: apiErrorMessageFromBody(body) ?? `Failed to record the answers (${res.status}).`,
+    ...(decisions ? { decisions } : {}),
+    ...(reasons ? { reasons } : {}),
+  };
+}
+
+function decisionViews(v: unknown): DecisionView[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return v.every(isDecisionView) ? v : undefined;
+}
+
+function stringMap(v: unknown): Record<string, string> | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val === 'string') out[k] = val;
+  }
+  return out;
+}

@@ -158,6 +158,7 @@ const USED_ICONS = [
   'link',
   'link-45deg',
   'list',
+  'list-check',
   'lock',
   'list-ul',
   'moon',

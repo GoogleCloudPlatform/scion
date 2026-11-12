@@ -4101,7 +4101,7 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** Handle scroll-to-message from reply preview click. */
+  /** Handle scroll-to-message from a reply preview click or a choice card's jump link. */
   private handleScrollToMessage(e: CustomEvent<{ messageId: string }>): void {
     // From the starred-only center a reply preview opens its target in the
     // full conversation instead of adding it to the filtered list.
@@ -7568,6 +7568,7 @@ export class ScionChatThread extends LitElement {
             .choiceIntro=${msg.choiceIntro}
             .answerMode=${msg.answerMode}
             @choice-answered=${this.handleChoiceAnswered}
+            @choice-jump=${this.handleScrollToMessage}
             dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
             ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
             dispatchFailureReason=${msg.dispatchFailureReason || ''}

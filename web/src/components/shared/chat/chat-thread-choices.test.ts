@@ -321,3 +321,62 @@ describe('choice-updated', () => {
     expect(internals.messageMap.get('p1')?.decisions?.[0]?.status).toBe('decided');
   });
 });
+
+describe('set prompts and jump links', () => {
+  it('renders a set prompt as one set card with only the intro', async () => {
+    const { defaultChoiceId: _unused, ...noDefault } = decision({ rowId: 'row-2', key: '17' });
+    history = {
+      messages: [prompt()],
+      messageDecisions: { p1: [decision(), noDefault] },
+      messageChoiceIntros: { p1: 'Intro text' },
+      messageChoiceAnswerModes: { p1: 'set' },
+    };
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    const card = cardOf(el)!;
+    expect(card).not.toBeNull();
+    await card.updateComplete;
+    expect(card.shadowRoot.querySelector('.card.set')).not.toBeNull();
+    expect(card.shadowRoot.querySelectorAll('.row').length).toBe(2);
+    expect(bodyText(el)).toContain('Intro text');
+    expect(bodyText(el)).not.toContain('**D234.**');
+  });
+
+  it('a set row answered in another tab locks over SSE', async () => {
+    history = {
+      messages: [prompt()],
+      messageDecisions: { p1: [decision(), decision({ rowId: 'row-2', key: '17' })] },
+      messageChoiceAnswerModes: { p1: 'set' },
+    };
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    choiceUpdated({ messageId: 'p1', threadId: KEY, decision: decided() });
+    await thread.updateComplete;
+    await settle();
+
+    const card = cardOf(el)!;
+    await card.updateComplete;
+    const counter = card.shadowRoot.querySelector('.counter')?.textContent?.replace(/\s+/g, ' ');
+    expect(counter?.trim()).toBe('0 remaining · 1 answered by Bob');
+  });
+
+  it('scrolls to the replacement when a card emits choice-jump', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+    const scroll = vi
+      .spyOn(thread, 'scrollToMessageById')
+      .mockImplementation(() => Promise.resolve());
+
+    cardOf(el)!.dispatchEvent(
+      new CustomEvent('choice-jump', {
+        detail: { messageId: 'p2' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+
+    expect(scroll).toHaveBeenCalledWith('p2');
+  });
+});
