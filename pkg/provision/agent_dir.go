@@ -272,6 +272,14 @@ func PurgeRemovedAgentWorkspaces(agentDir string) error {
 	return purgePrefixedEntries(agentDir, removedAgentWorkspacePrefix)
 }
 
+// PurgePrefixedEntries deletes every entry of the plain directory dir whose
+// name starts with prefix, through an os.Root opened on dir. A missing dir,
+// or one that is not the plain directory opened (a symlink), deletes
+// nothing. The agent home reset purges its moved-aside homes with it.
+func PurgePrefixedEntries(dir, prefix string) error {
+	return purgePrefixedEntries(dir, prefix)
+}
+
 // purgePrefixedEntries deletes every entry of the plain directory dir whose
 // name starts with prefix, through an os.Root opened on dir.
 func purgePrefixedEntries(dir, prefix string) error {

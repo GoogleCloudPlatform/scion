@@ -482,6 +482,23 @@ func recordReincarnatePatchEdits(ci *store.AgentCreateInputs, p *reincarnatePatc
 		}
 		ci.HarnessAuth = ""
 		inline.AuthSelectedType = ""
+		// Inline settings that belong to the old harness or its image.
+		if inline.ConfigDir != "" {
+			dropped.Fields = append(dropped.Fields, "config_dir")
+			inline.ConfigDir = ""
+		}
+		if len(inline.CommandArgs) > 0 {
+			dropped.Fields = append(dropped.Fields, "command_args")
+			inline.CommandArgs = nil
+		}
+		if inline.TaskFlag != "" {
+			dropped.Fields = append(dropped.Fields, "task_flag")
+			inline.TaskFlag = ""
+		}
+		if inline.User != "" {
+			dropped.Fields = append(dropped.Fields, "user")
+			inline.User = ""
+		}
 	}
 	if p.Image != "" {
 		ensureInline().Image = p.Image
@@ -507,4 +524,7 @@ func recordReincarnatePatchEdits(ci *store.AgentCreateInputs, p *reincarnatePatc
 type harnessSwitchDrops struct {
 	Image string
 	Model string
+	// Fields names the other harness-specific inline settings dropped
+	// (config_dir, command_args, task_flag, user), by their config key.
+	Fields []string
 }

@@ -668,7 +668,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		if homeReset {
 			// D-b (fail forward): the home was reset, so no re-render of
 			// `previous`; the row stays on the new-harness config.
-			s.failHomeResetForward(ctx, agentID, reincarnationID, fromState, errMsg, agentSlug, plan)
+			s.failHomeResetForward(ctx, agentID, reincarnationID, fromState, errMsg, agentSlug, plan, true)
 			return
 		}
 		if move != nil {
@@ -882,7 +882,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			// D-b (fail forward): the home may already be gone, so a
 			// re-render of `previous` cannot restore it. The row keeps the
 			// new-harness config, matching the disk.
-			s.failHomeResetForward(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "reprovision failed: "+dispatchFailureText(err), agent.Slug, plan)
+			s.failHomeResetForward(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "reprovision failed: "+dispatchFailureText(err), agent.Slug, plan, false)
 			return
 		}
 		// The store now holds `fresh` (gen N+1) from the write just above,
@@ -998,7 +998,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			if homeReset {
 				// The home was reset before this start: say so, with
 				// the same recovery commands as a fail-forward.
-				errMsg += "; " + homeResetRecoveryHint(agentSlug, plan)
+				errMsg += "; " + homeResetRecoveryHint(agentSlug, plan, true)
 			}
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, nil)
 			return
@@ -1221,21 +1221,32 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 // is gone and a re-render cannot bring it back: the row stays on the new
 // harness config, matching the disk, with phase error and
 // reincarnation_state failed. The failure message, which the failure
-// notification carries, names the recovery commands.
-func (s *Server) failHomeResetForward(ctx context.Context, agentID, reincarnationID, fromState, errMsg, agentSlug string, plan *ReincarnationPlan) {
+// notification carries, names the recovery commands. homeComposed is true
+// when the reprovision succeeded (the fresh home exists), false when it
+// failed after the reset (the home may be missing or half-built).
+func (s *Server) failHomeResetForward(ctx context.Context, agentID, reincarnationID, fromState, errMsg, agentSlug string, plan *ReincarnationPlan, homeComposed bool) {
 	s.agentLifecycleLog.Info("reincarnation failed after the home reset: keeping the new harness config (fail forward)",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", fromState, "cause", errMsg)
-	s.failReincarnation(ctx, agentID, reincarnationID, fromState, errMsg+"; "+homeResetRecoveryHint(agentSlug, plan), nil)
+	s.failReincarnation(ctx, agentID, reincarnationID, fromState, errMsg+"; "+homeResetRecoveryHint(agentSlug, plan, homeComposed), nil)
 }
 
 // homeResetRecoveryHint is the recovery text of a home-resetting
-// reincarnation that failed after the reset.
-func homeResetRecoveryHint(agentSlug string, plan *ReincarnationPlan) string {
+// reincarnation that failed after the reset. When the reprovision itself
+// failed (homeComposed false), the fresh home may be missing or half-built,
+// and a start does not compose it (provisioning on start runs only for a
+// missing agent directory), so the hint names a plain reincarnate, which
+// reprovisions the new config; after a successful reprovision a start is
+// enough.
+func homeResetRecoveryHint(agentSlug string, plan *ReincarnationPlan, homeComposed bool) string {
 	oldHC, newHC := "", ""
 	if plan != nil && plan.Harness != nil {
 		oldHC, newHC = plan.Harness.Old, plan.Harness.New
 	}
-	hint := fmt.Sprintf("the home was already reset; fix the cause and run `scion start %s`", agentSlug)
+	retry := fmt.Sprintf("`scion start %s`", agentSlug)
+	if !homeComposed {
+		retry = fmt.Sprintf("`scion reincarnate %s`", agentSlug)
+	}
+	hint := "the home was already reset; fix the cause and run " + retry
 	if newHC != "" {
 		hint += fmt.Sprintf(" (harness config %s)", newHC)
 	}

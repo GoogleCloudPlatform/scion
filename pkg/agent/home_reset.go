@@ -17,12 +17,11 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
 // Home reset (a harness switch, ptone/scion#7757).
@@ -69,37 +68,11 @@ type homeResetRecord struct {
 }
 
 // purgeResetHomeResidue deletes every home a reset moved aside in
-// homeParent. A missing homeParent is not an error. Nothing refers to a
-// moved-aside home, so it runs without a lock. The deletes run through an
-// os.Root opened on homeParent, so they stay inside it.
+// homeParent (provision.PurgePrefixedEntries, which stays inside the
+// directory it opened). A missing homeParent is not an error. Nothing
+// refers to a moved-aside home, so it runs without a lock.
 func purgeResetHomeResidue(homeParent string) error {
-	root, err := os.OpenRoot(homeParent)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
-	d, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	entries, err := d.ReadDir(-1)
-	_ = d.Close()
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), removingHomePrefix) {
-			continue
-		}
-		if err := root.RemoveAll(e.Name()); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", filepath.Join(homeParent, e.Name()), err))
-		}
-	}
-	return errors.Join(errs...)
+	return provision.PurgePrefixedEntries(homeParent, removingHomePrefix)
 }
 
 // purgeResetHomeResidueAsync purges homeParent in the background and logs a

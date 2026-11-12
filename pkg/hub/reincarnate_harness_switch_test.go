@@ -428,7 +428,13 @@ func TestReincarnateHarness_FailureHandling(t *testing.T) {
 			if tc.wantForward {
 				assert.Equal(t, "codex-hc", final.AppliedConfig.HarnessConfig, "fail forward keeps the new harness config")
 				assert.Contains(t, r.Error, "the home was already reset")
-				assert.Contains(t, r.Error, fmt.Sprintf("scion start %s", f.agent.Slug))
+				// N1: after the reprovision itself failed, the home may be
+				// missing or half-built, which a start does not compose.
+				retry := fmt.Sprintf("`scion reincarnate %s`", f.agent.Slug)
+				if name == "start fails after the reset" {
+					retry = fmt.Sprintf("`scion start %s`", f.agent.Slug)
+				}
+				assert.Contains(t, r.Error, "run "+retry)
 				assert.Contains(t, r.Error, fmt.Sprintf("scion reincarnate %s --harness claude-hc", f.agent.Slug))
 				assert.Contains(t, final.Message, "the home was already reset")
 			} else {
@@ -581,4 +587,38 @@ func TestReincarnateHarness_AmbiguousStartNamesRecovery(t *testing.T) {
 	assert.Contains(t, r.Error, fmt.Sprintf("scion reincarnate %s --harness claude-hc", f.agent.Slug))
 	calls, _ := f.disp.reprovisionSnapshot()
 	assert.Equal(t, 1, calls, "no re-render after an ambiguous start")
+}
+
+// N2: harness-specific inline settings from a create-time config are
+// dropped on a switch, recorded so later generations do not bring them
+// back, with a plan warning each.
+func TestReincarnateHarness_DropsHarnessSpecificInlineSettings(t *testing.T) {
+	f := newHarnessSwitchFixture(t, nil, nil)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	inline := a.AppliedConfig.CreateInputs.InlineConfig
+	inline.ConfigDir = ".claude"
+	inline.CommandArgs = []string{"--dangerously-skip-permissions"}
+	inline.TaskFlag = "-p"
+	inline.User = "claude"
+	require.NoError(t, f.s.UpdateAgent(context.Background(), a))
+
+	rec := reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{DryRun: true, HarnessConfig: "codex-hc"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	warnings := strings.Join(decodeReincarnateResponse(t, rec).Plan.Warnings, "\n")
+	for _, key := range []string{"config_dir", "command_args", "task_flag", "user"} {
+		assert.Contains(t, warnings, "explicit "+key+" dropped")
+	}
+
+	rec = reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{HarnessConfig: "codex-hc"})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForGeneration(t, f.s, f.agent.ID, 2)
+	gen2, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	got := gen2.AppliedConfig.CreateInputs.InlineConfig
+	require.NotNil(t, got)
+	assert.Empty(t, got.ConfigDir)
+	assert.Empty(t, got.CommandArgs)
+	assert.Empty(t, got.TaskFlag)
+	assert.Empty(t, got.User)
 }

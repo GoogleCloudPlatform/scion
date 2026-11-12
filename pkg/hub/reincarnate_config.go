@@ -135,6 +135,9 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		if dropped.Model != "" {
 			warnings = append(warnings, fmt.Sprintf("explicit model %s dropped (models are harness-specific); pass --model to set one", dropped.Model))
 		}
+		for _, f := range dropped.Fields {
+			warnings = append(warnings, fmt.Sprintf("explicit %s dropped (it belongs to the previous harness)", f))
+		}
 		if patch.HarnessConfig != nil {
 			if w := s.templateForeignHarnessDirWarning(ctx, agent, resolvedTemplate, patch.HarnessConfig.Harness); w != "" {
 				warnings = append(warnings, w)

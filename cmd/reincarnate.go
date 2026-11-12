@@ -791,7 +791,7 @@ func printHomeResetWarning(w io.Writer, text string) {
 	line := ""
 	for _, word := range strings.Fields(text) {
 		if line != "" && len(prefix)+len(line)+1+len(word) > width {
-			fmt.Fprintf(w, "%s%s\n", prefix, line)
+			_, _ = fmt.Fprintf(w, "%s%s\n", prefix, line)
 			prefix, line = "   ", ""
 		}
 		if line != "" {
@@ -800,7 +800,7 @@ func printHomeResetWarning(w io.Writer, text string) {
 		line += word
 	}
 	if line != "" {
-		fmt.Fprintf(w, "%s%s\n", prefix, line)
+		_, _ = fmt.Fprintf(w, "%s%s\n", prefix, line)
 	}
 }
 
