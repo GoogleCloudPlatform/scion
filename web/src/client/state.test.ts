@@ -115,6 +115,38 @@ describe('StateManager user-scoped chat subjects', () => {
     const detail = (stars.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
     expect(detail.data).toEqual({ action: 'changed' });
   });
+
+  it('routes user.{id}.chat.choice.updated to choice-updated, never as a message', () => {
+    const sm = new StateManager();
+    const choice = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('choice-updated', choice);
+    sm.addEventListener('chat-message-received', message);
+
+    const data = { messageId: 'm1', threadId: 'dm:agent:a:user:b', decision: { rowId: 'r1' } };
+    emit(sm, 'user.b.chat.choice.updated', data);
+
+    expect(message).not.toHaveBeenCalled();
+    expect(choice).toHaveBeenCalledTimes(1);
+    const detail = (choice.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual(data);
+  });
+
+  it('routes project.{id}.chat.choice.updated to choice-updated with the project id', () => {
+    const sm = new StateManager();
+    const choice = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('choice-updated', choice);
+    sm.addEventListener('chat-message-received', message);
+
+    const data = { messageId: 'm1', threadId: 'topic-1', decision: { rowId: 'r1' } };
+    emit(sm, 'project.p1.chat.choice.updated', data);
+
+    expect(message).not.toHaveBeenCalled();
+    expect(choice).toHaveBeenCalledTimes(1);
+    const detail = (choice.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual({ projectId: 'p1', ...data });
+  });
 });
 
 /**

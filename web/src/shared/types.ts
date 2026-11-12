@@ -1681,6 +1681,124 @@ export interface Message {
   authorizingUserId?: string;
   /** The delegation grant of a message sent with an agent delegated credential. */
   delegationGrantId?: string;
+  /**
+   * Choice prompt decisions (messageType "choice-prompt"). Present only while
+   * the web.chat_choices experiment is on: from the history side map
+   * messageDecisions or inline on the live chat.message event.
+   */
+  decisions?: DecisionView[];
+  /** The prompt's intro without the hub's markdown fallback. */
+  choiceIntro?: string;
+  /** "single" for one decision, "set" for 2 or more (one submit answers all). */
+  answerMode?: ChoiceAnswerMode;
+  /** One-click answer carried by a "choice-response" message. */
+  choiceResponse?: ChoiceResponseView;
+  /** Set submit carried by a "choice-response" message. */
+  choiceResponseSet?: ChoiceResponseSetView;
+}
+
+// ---------------------------------------------------------------------------
+// Choices (mirror of pkg/hub/choices_view.go)
+// ---------------------------------------------------------------------------
+
+export type ChoiceAnswerMode = 'single' | 'set';
+
+/** One option of a decision (pkg/messages Choice). */
+export interface ChoiceOption {
+  id: string;
+  label: string;
+  /** Inline markdown. */
+  description?: string;
+}
+
+/** The version that replaced a decision. */
+export interface DecisionReplacedBy {
+  rowId: string;
+  messageId: string;
+  version: number;
+  at: string;
+}
+
+/** An answer as clients see it (AnswerView). */
+export interface AnswerView {
+  choiceId: string;
+  label: string;
+  answeredByUserId?: string;
+  answeredByName?: string;
+  answeredByEmail?: string;
+  /** "direct" or "agent_interpreted". */
+  provenance: string;
+  /** "answer", "confirm" or "override". */
+  outcome?: string;
+  interpretedByAgentId?: string;
+  sourceMessageId?: string;
+  surface: string;
+  responseMessageId: string;
+  batchId?: string;
+  matchedDefault?: boolean;
+  at: string;
+}
+
+/** One version of a decision as clients see it (DecisionView). */
+export interface DecisionView {
+  rowId: string;
+  messageId: string;
+  key: string;
+  ref: string;
+  version: number;
+  /** "pending", "decided" or "replaced". */
+  status: 'pending' | 'decided' | 'replaced' | (string & {});
+  askerAgentId: string;
+  askerAgentName: string;
+  /** Markdown. */
+  question: string;
+  defaultChoiceId?: string;
+  choices: ChoiceOption[];
+  replacedBy?: DecisionReplacedBy;
+  /** The effective answer; absent while pending. */
+  decision?: AnswerView;
+}
+
+/** What a choice-response row of a one-click answer carries. */
+export interface ChoiceResponseView {
+  rowId: string;
+  ref: string;
+  key: string;
+  version: number;
+  question: string;
+  choiceId: string;
+  label: string;
+  provenance: string;
+  promptMessageId: string;
+  sourceMessageId?: string;
+}
+
+/** One answer of a ChoiceResponseSetView. */
+export interface ChoiceResponseSetAnswer {
+  rowId: string;
+  ref: string;
+  key: string;
+  version: number;
+  question: string;
+  choiceId: string;
+  label: string;
+  provenance: string;
+  outcome: string;
+  matchedDefault: boolean;
+}
+
+/** What the choice-response row of a set submit carries, in position order. */
+export interface ChoiceResponseSetView {
+  promptMessageId: string;
+  batchId: string;
+  answers: ChoiceResponseSetAnswer[];
+}
+
+/** Payload of the chat.choice.updated SSE event. */
+export interface ChoiceUpdatedEvent {
+  decision: DecisionView;
+  messageId: string;
+  threadId: string;
 }
 
 // ---------------------------------------------------------------------------
