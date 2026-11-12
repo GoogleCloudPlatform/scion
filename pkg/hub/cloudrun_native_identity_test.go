@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -976,6 +977,79 @@ func TestDispatch_CloudRunNativeClearedOnConfirmedStopOrDelete(t *testing.T) {
 		require.True(t, m.deleteCalled)
 		assert.False(t, crRecorded(t, d.store, a.ID))
 	})
+}
+
+// nativeRecordedBrokerAgent returns a broker agent in phase with the native
+// Cloud Run decision recorded on its row, on a hub that soft-deletes.
+func nativeRecordedBrokerAgent(t *testing.T, srv *Server, s store.Store, suffix string, phase state.Phase) *store.Agent {
+	t.Helper()
+	srv.config.SoftDeleteRetention = time.Hour
+	agent := setupBrokerAgentInPhase(t, s, suffix, phase)
+	require.NoError(t, s.SetAgentNativeCloudRun(context.Background(), agent.ID, true))
+	require.True(t, crRecorded(t, s, agent.ID))
+	return agent
+}
+
+// A best-effort delete (a created row with no launch) that finalizes
+// without a confirmed broker delete removes the recorded native decision
+// before the soft delete, so the retained row does not keep it
+// (ptone/scion#7620). A failed mandatory dispatch keeps it.
+func TestAgentDelete_BestEffortClearsCloudRunNative(t *testing.T) {
+	t.Run("broker delete fails", func(t *testing.T) {
+		srv, s, _, disp := engineTestServer(t)
+		disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker delete failed") })
+		agent := nativeRecordedBrokerAgent(t, srv, s, "crbe-fail", state.PhaseCreated)
+
+		softDeleteForTest(t, srv, agent.ID)
+		assert.Equal(t, 1, disp.callCount(), "the broker is reachable, so the best-effort delete is sent")
+		got := mustGetAgent(t, s, agent.ID)
+		require.False(t, got.DeletedAt.IsZero(), "soft-deleted")
+		assert.False(t, crRecorded(t, s, agent.ID), "the soft-deleted row keeps no native decision")
+	})
+	t.Run("broker unreachable", func(t *testing.T) {
+		srv, s, _, disp := engineTestServer(t)
+		agent := nativeRecordedBrokerAgent(t, srv, s, "crbe-unreach", state.PhaseCreated)
+		broker, err := s.GetRuntimeBroker(context.Background(), agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		broker.Status = store.BrokerStatusOffline
+		require.NoError(t, s.UpdateRuntimeBroker(context.Background(), broker))
+		require.False(t, srv.brokerReachable(context.Background(), agent))
+
+		softDeleteForTest(t, srv, agent.ID)
+		assert.Zero(t, disp.callCount(), "no dispatch to an unreachable broker")
+		got := mustGetAgent(t, s, agent.ID)
+		require.False(t, got.DeletedAt.IsZero(), "soft-deleted")
+		assert.False(t, crRecorded(t, s, agent.ID), "the soft-deleted row keeps no native decision")
+	})
+	t.Run("failed mandatory dispatch keeps it", func(t *testing.T) {
+		srv, s, _, disp := engineTestServer(t)
+		disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker delete failed") })
+		agent := nativeRecordedBrokerAgent(t, srv, s, "crbe-mand", state.PhaseRunning)
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+		assert.True(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero(), "the row is kept")
+		assert.True(t, crRecorded(t, s, agent.ID), "fails closed: the agent may still run")
+	})
+}
+
+// A restore removes a native decision the soft-deleted row still carries:
+// the restored agent runs nowhere until a later start (ptone/scion#7620).
+func TestRestoreAgent_ClearsCloudRunNative(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	agent := nativeRecordedBrokerAgent(t, srv, s, "crrestore", state.PhaseStopped)
+
+	// The stub dispatcher confirms the teardown without the HTTP
+	// dispatcher's clear, so the soft-deleted row keeps the decision (the
+	// store clears only a live row).
+	softDeleteForTest(t, srv, agent.ID)
+	require.False(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero(), "soft-deleted")
+	require.True(t, crRecorded(t, s, agent.ID), "precondition: the soft-deleted row carries the decision")
+
+	rec := restoreForTest(t, srv, agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.True(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero(), "restored")
+	assert.False(t, crRecorded(t, s, agent.ID), "the restored row carries no native decision")
 }
 
 // The recorded decision alone withholds the scope and refuses mint, with

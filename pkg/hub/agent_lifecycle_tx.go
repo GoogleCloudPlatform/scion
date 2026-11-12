@@ -444,6 +444,22 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	if err != nil {
 		return err
 	}
+	// A restored agent is treated as running nowhere until a later start,
+	// which records a new native Cloud Run decision if it makes one (a row
+	// soft-deleted by a force delete whose mandatory dispatch failed may
+	// still have an instance; the hub no longer tracks it), so a decision
+	// the soft-deleted row still carries is stale (ptone/scion#7620): a soft
+	// delete before the best-effort finalize cleared it, or one whose
+	// teardown the engine confirmed without the dispatcher's clear. The
+	// store clears only a live row, so this follows the commit, within its
+	// own bound; a failure is logged and leaves it set (fail closed). The
+	// row copy is accurate: nothing records a decision on a soft-deleted
+	// row.
+	func() {
+		clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
+		defer cancel()
+		clearRecordedCloudRunNative(clearCtx, s.store, s.agentLifecycleLog, &row, "a restore")
+	}()
 	// A purge of the agent's retained files whose hub stopped mid-dispatch
 	// leaves its claim (deleting, lease lapsed) on the soft-deleted row
 	// (retained_files_purge.go, ptone/scion#4744). A live claim refuses the
