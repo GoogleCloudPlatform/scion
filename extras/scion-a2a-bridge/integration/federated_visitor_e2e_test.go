@@ -134,7 +134,7 @@ func (d *fvDispatcher) DispatchAgentProvision(context.Context, *store.Agent) err
 	return errFVDispatchUnavailable
 }
 
-func (d *fvDispatcher) DispatchAgentReprovision(context.Context, *store.Agent) error {
+func (d *fvDispatcher) DispatchAgentReprovision(context.Context, *store.Agent, hub.ReprovisionOptions) error {
 	return errFVDispatchUnavailable
 }
 

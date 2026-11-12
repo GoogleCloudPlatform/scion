@@ -933,7 +933,7 @@ func TestFlatReincarnate_StalePinRefusedBeforeStop(t *testing.T) {
 func TestFlatReincarnate_ReprovisionSendsExpectedTarget(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.pinnedAgent(t, "reprovision", string(state.PhaseStopped))
-	require.NoError(t, f.srv.GetDispatcher().DispatchAgentReprovision(context.Background(), a))
+	require.NoError(t, f.srv.GetDispatcher().DispatchAgentReprovision(context.Background(), a, ReprovisionOptions{}))
 	require.True(t, f.client.createCalled)
 	assert.Equal(t, f.flat.RuntimeTarget.ID, jsonField(t, f.client.lastCreateReq, "expectedRuntimeTargetId"))
 }

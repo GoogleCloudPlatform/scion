@@ -129,7 +129,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context,
 	if (moveReincarnationID != "") != (expectNFSWorkspace == agentpkg.MoveWorkspaceFreshAgentDir) {
 		return errors.New("DispatchAgentProvisionForMove: the move reincarnation ID goes with, and only with, the fresh-agent-dir expectation")
 	}
-	return d.dispatchProvision(ctx, agent, "DispatchAgentProvisionForMove", false, expectNFSWorkspace, moveReincarnationID)
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvisionForMove", false, expectNFSWorkspace, moveReincarnationID, ReprovisionOptions{})
 }
 
 // DispatchAgentDeleteLocalOnly implements agentMoveDispatcher.
@@ -243,4 +243,29 @@ func isMoveMarkerMismatch(err error) bool {
 	var se *brokerStatusError
 	return errors.As(err, &se) && se != nil && se.StatusCode == http.StatusConflict &&
 		se.brokerErrorCode() == api.BrokerErrCodeMoveMarkerMismatch
+}
+
+// errReprovisionHomeIntact marks a failed home-resetting reprovision that
+// certainly did not reset the agent's home (ptone/scion#7757).
+var errReprovisionHomeIntact = errors.New("the agent home was not reset")
+
+// reprovisionLeftHomeIntact reports whether err, from a home-resetting
+// reprovision dispatch, certainly left the agent's home intact: it failed
+// on the hub before the request was sent, the broker refused it by a
+// precondition before moving the home aside (409 with
+// api.BrokerErrCodeReprovisionRefusedHomeIntact), or the broker never
+// reprovisioned (env still missing, or no home reset confirmed). Any other
+// failure, a timeout included, may have reset the home and is treated as
+// having done so: a re-render of the previous config cannot bring the old
+// home back anyway.
+func reprovisionLeftHomeIntact(err error) bool {
+	if err == nil {
+		return false
+	}
+	if !errors.Is(err, errProvisionSent) || errors.Is(err, errReprovisionHomeIntact) {
+		return true
+	}
+	var se *brokerStatusError
+	return errors.As(err, &se) && se != nil && se.StatusCode == http.StatusConflict &&
+		se.brokerErrorCode() == api.BrokerErrCodeReprovisionRefusedHomeIntact
 }

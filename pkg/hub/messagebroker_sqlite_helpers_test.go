@@ -102,7 +102,7 @@ func (d *brokerMockDispatcher) DispatchAgentProvision(ctx context.Context, agent
 	return nil
 }
 
-func (d *brokerMockDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+func (d *brokerMockDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent, _ ReprovisionOptions) error {
 	return nil
 }
 func (d *brokerMockDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, _ bool) error {

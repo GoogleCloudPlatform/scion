@@ -718,3 +718,25 @@ func TestImageTagSettingExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestReincarnateHarnessSwitchExperimentRegistered pins
+// hub.reincarnate_harness_switch (ptone/scion#7757): the hub handler is the
+// only gate, so it is server-layer only, and it ships off.
+func TestReincarnateHarnessSwitchExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(ReincarnateHarnessSwitch)
+	if !ok {
+		t.Fatalf("%s is not registered", ReincarnateHarnessSwitch)
+	}
+	if ReincarnateHarnessSwitch != "hub.reincarnate_harness_switch" {
+		t.Fatalf("frozen name changed: %q", ReincarnateHarnessSwitch)
+	}
+	if e.Default {
+		t.Fatal("the reincarnate harness switch must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#7757" || e.Stage != StageAlpha {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

@@ -158,7 +158,7 @@ func (d *lifecycleTestDispatcher) DispatchAgentProvision(context.Context, *store
 	return nil
 }
 
-func (d *lifecycleTestDispatcher) DispatchAgentReprovision(context.Context, *store.Agent) error {
+func (d *lifecycleTestDispatcher) DispatchAgentReprovision(context.Context, *store.Agent, ReprovisionOptions) error {
 	return nil
 }
 func (d *lifecycleTestDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, task string, _ bool) error {

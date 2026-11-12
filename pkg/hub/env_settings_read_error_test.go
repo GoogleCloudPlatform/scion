@@ -279,7 +279,7 @@ func TestEnvReadError_ProvisionContinues(t *testing.T) {
 			return f.d.DispatchAgentProvision(context.Background(), f.agent)
 		}},
 		{"reprovision", func(f *envReadFixture) error {
-			return f.d.DispatchAgentReprovision(context.Background(), f.agent)
+			return f.d.DispatchAgentReprovision(context.Background(), f.agent, ReprovisionOptions{})
 		}},
 	}
 	for _, tc := range cases {

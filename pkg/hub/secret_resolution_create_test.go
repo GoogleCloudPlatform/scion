@@ -86,7 +86,7 @@ func TestProvision_SecretResolutionError_StillProvisions(t *testing.T) {
 			return f.d.DispatchAgentProvision(ctx, f.agent)
 		}},
 		{"reprovision", func(ctx context.Context, f *runDispatchFixture) error {
-			return f.d.DispatchAgentReprovision(ctx, f.agent)
+			return f.d.DispatchAgentReprovision(ctx, f.agent, ReprovisionOptions{})
 		}},
 	}
 	for _, tc := range cases {

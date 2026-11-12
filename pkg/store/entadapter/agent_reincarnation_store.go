@@ -57,6 +57,7 @@ func entAgentReincarnationToStore(r *ent.AgentReincarnation) *store.AgentReincar
 		TargetBrokerID: r.TargetBrokerID,
 		SourceCleanup:  r.SourceCleanup,
 		TransferMode:   r.TransferMode,
+		HomeReset:      r.HomeReset,
 	}
 	if r.PreviousAppliedConfig != "" {
 		cfg, err := unmarshalAppliedConfigSnapshot(r.PreviousAppliedConfig)
@@ -119,7 +120,8 @@ func (s *AgentReincarnationStore) CreateAgentReincarnation(ctx context.Context, 
 		SetSourceBrokerID(r.SourceBrokerID).
 		SetTargetBrokerID(r.TargetBrokerID).
 		SetSourceCleanup(r.SourceCleanup).
-		SetTransferMode(r.TransferMode)
+		SetTransferMode(r.TransferMode).
+		SetHomeReset(r.HomeReset)
 
 	if !r.RequestedAt.IsZero() {
 		builder.SetRequestedAt(r.RequestedAt)

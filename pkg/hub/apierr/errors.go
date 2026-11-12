@@ -163,6 +163,14 @@ const (
 	ErrCodeRuntimeTargetTypeUnsupported     = "runtime_target_type_unsupported"      // 422
 	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
 
+	// ErrCodeHarnessConfigNotFound is returned (404) by a reincarnate
+	// --harness request naming a harness config the hub does not know, and
+	// ErrCodeHarnessCredentialsMissing (422) when the target harness config
+	// would have no credentials (ptone/scion#7757). Both are refused before
+	// the agent is stopped.
+	ErrCodeHarnessConfigNotFound     = "harness_config_not_found"
+	ErrCodeHarnessCredentialsMissing = "harness_credentials_missing"
+
 	// ErrCodeDeleteInProgress is returned (409) by start, restart,
 	// reincarnate, restore, create-with-existing-agent and DM wake while a
 	// delete blocks starting the agent (design ptone/scion#2483 §2.1

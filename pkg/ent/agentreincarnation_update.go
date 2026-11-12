@@ -308,6 +308,9 @@ func (_u *AgentReincarnationUpdate) sqlSave(ctx context.Context) (_node int, err
 	if _u.mutation.TransferModeCleared() {
 		_spec.ClearField(agentreincarnation.FieldTransferMode, field.TypeString)
 	}
+	if _u.mutation.HomeResetCleared() {
+		_spec.ClearField(agentreincarnation.FieldHomeReset, field.TypeBool)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{agentreincarnation.Label}
@@ -637,6 +640,9 @@ func (_u *AgentReincarnationUpdateOne) sqlSave(ctx context.Context) (_node *Agen
 	}
 	if _u.mutation.TransferModeCleared() {
 		_spec.ClearField(agentreincarnation.FieldTransferMode, field.TypeString)
+	}
+	if _u.mutation.HomeResetCleared() {
+		_spec.ClearField(agentreincarnation.FieldHomeReset, field.TypeBool)
 	}
 	_node = &AgentReincarnation{config: _u.config}
 	_spec.Assign = _node.assignValues

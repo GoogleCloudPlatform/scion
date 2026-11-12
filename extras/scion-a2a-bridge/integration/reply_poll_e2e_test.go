@@ -203,7 +203,7 @@ func (d *rplDispatcher) DispatchAgentProvision(context.Context, *store.Agent) er
 	return errRPLDispatchUnavailable
 }
 
-func (d *rplDispatcher) DispatchAgentReprovision(context.Context, *store.Agent) error {
+func (d *rplDispatcher) DispatchAgentReprovision(context.Context, *store.Agent, hub.ReprovisionOptions) error {
 	return errRPLDispatchUnavailable
 }
 

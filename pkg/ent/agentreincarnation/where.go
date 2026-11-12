@@ -130,6 +130,11 @@ func TransferMode(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldTransferMode, v))
 }
 
+// HomeReset applies equality check predicate on the "home_reset" field. It's identical to HomeResetEQ.
+func HomeReset(v bool) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldHomeReset, v))
+}
+
 // AgentIDEQ applies the EQ predicate on the "agent_id" field.
 func AgentIDEQ(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldAgentID, v))
@@ -1098,6 +1103,26 @@ func TransferModeEqualFold(v string) predicate.AgentReincarnation {
 // TransferModeContainsFold applies the ContainsFold predicate on the "transfer_mode" field.
 func TransferModeContainsFold(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldContainsFold(FieldTransferMode, v))
+}
+
+// HomeResetEQ applies the EQ predicate on the "home_reset" field.
+func HomeResetEQ(v bool) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldHomeReset, v))
+}
+
+// HomeResetNEQ applies the NEQ predicate on the "home_reset" field.
+func HomeResetNEQ(v bool) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNEQ(FieldHomeReset, v))
+}
+
+// HomeResetIsNil applies the IsNil predicate on the "home_reset" field.
+func HomeResetIsNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIsNull(FieldHomeReset))
+}
+
+// HomeResetNotNil applies the NotNil predicate on the "home_reset" field.
+func HomeResetNotNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotNull(FieldHomeReset))
 }
 
 // And groups predicates with the AND operator between them.

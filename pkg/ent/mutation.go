@@ -21477,6 +21477,7 @@ type AgentReincarnationMutation struct {
 	target_broker_id        *string
 	source_cleanup          *string
 	transfer_mode           *string
+	home_reset              *bool
 	clearedFields           map[string]struct{}
 	done                    bool
 	oldValue                func(context.Context) (*AgentReincarnation, error)
@@ -22333,6 +22334,55 @@ func (m *AgentReincarnationMutation) ResetTransferMode() {
 	delete(m.clearedFields, agentreincarnation.FieldTransferMode)
 }
 
+// SetHomeReset sets the "home_reset" field.
+func (m *AgentReincarnationMutation) SetHomeReset(b bool) {
+	m.home_reset = &b
+}
+
+// HomeReset returns the value of the "home_reset" field in the mutation.
+func (m *AgentReincarnationMutation) HomeReset() (r bool, exists bool) {
+	v := m.home_reset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHomeReset returns the old "home_reset" field's value of the AgentReincarnation entity.
+// If the AgentReincarnation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentReincarnationMutation) OldHomeReset(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHomeReset is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHomeReset requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHomeReset: %w", err)
+	}
+	return oldValue.HomeReset, nil
+}
+
+// ClearHomeReset clears the value of the "home_reset" field.
+func (m *AgentReincarnationMutation) ClearHomeReset() {
+	m.home_reset = nil
+	m.clearedFields[agentreincarnation.FieldHomeReset] = struct{}{}
+}
+
+// HomeResetCleared returns if the "home_reset" field was cleared in this mutation.
+func (m *AgentReincarnationMutation) HomeResetCleared() bool {
+	_, ok := m.clearedFields[agentreincarnation.FieldHomeReset]
+	return ok
+}
+
+// ResetHomeReset resets all changes to the "home_reset" field.
+func (m *AgentReincarnationMutation) ResetHomeReset() {
+	m.home_reset = nil
+	delete(m.clearedFields, agentreincarnation.FieldHomeReset)
+}
+
 // Where appends a list predicates to the AgentReincarnationMutation builder.
 func (m *AgentReincarnationMutation) Where(ps ...predicate.AgentReincarnation) {
 	m.predicates = append(m.predicates, ps...)
@@ -22367,7 +22417,7 @@ func (m *AgentReincarnationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentReincarnationMutation) Fields() []string {
-	fields := make([]string, 0, 16)
+	fields := make([]string, 0, 17)
 	if m.agent_id != nil {
 		fields = append(fields, agentreincarnation.FieldAgentID)
 	}
@@ -22416,6 +22466,9 @@ func (m *AgentReincarnationMutation) Fields() []string {
 	if m.transfer_mode != nil {
 		fields = append(fields, agentreincarnation.FieldTransferMode)
 	}
+	if m.home_reset != nil {
+		fields = append(fields, agentreincarnation.FieldHomeReset)
+	}
 	return fields
 }
 
@@ -22456,6 +22509,8 @@ func (m *AgentReincarnationMutation) Field(name string) (ent.Value, bool) {
 		return m.SourceCleanup()
 	case agentreincarnation.FieldTransferMode:
 		return m.TransferMode()
+	case agentreincarnation.FieldHomeReset:
+		return m.HomeReset()
 	}
 	return nil, false
 }
@@ -22497,6 +22552,8 @@ func (m *AgentReincarnationMutation) OldField(ctx context.Context, name string) 
 		return m.OldSourceCleanup(ctx)
 	case agentreincarnation.FieldTransferMode:
 		return m.OldTransferMode(ctx)
+	case agentreincarnation.FieldHomeReset:
+		return m.OldHomeReset(ctx)
 	}
 	return nil, fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -22618,6 +22675,13 @@ func (m *AgentReincarnationMutation) SetField(name string, value ent.Value) erro
 		}
 		m.SetTransferMode(v)
 		return nil
+	case agentreincarnation.FieldHomeReset:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHomeReset(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -22705,6 +22769,9 @@ func (m *AgentReincarnationMutation) ClearedFields() []string {
 	if m.FieldCleared(agentreincarnation.FieldTransferMode) {
 		fields = append(fields, agentreincarnation.FieldTransferMode)
 	}
+	if m.FieldCleared(agentreincarnation.FieldHomeReset) {
+		fields = append(fields, agentreincarnation.FieldHomeReset)
+	}
 	return fields
 }
 
@@ -22748,6 +22815,9 @@ func (m *AgentReincarnationMutation) ClearField(name string) error {
 		return nil
 	case agentreincarnation.FieldTransferMode:
 		m.ClearTransferMode()
+		return nil
+	case agentreincarnation.FieldHomeReset:
+		m.ClearHomeReset()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation nullable field %s", name)
@@ -22804,6 +22874,9 @@ func (m *AgentReincarnationMutation) ResetField(name string) error {
 		return nil
 	case agentreincarnation.FieldTransferMode:
 		m.ResetTransferMode()
+		return nil
+	case agentreincarnation.FieldHomeReset:
+		m.ResetHomeReset()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)

@@ -118,6 +118,7 @@ type agentEditField struct {
 // Locked reasons shared by several rows or phases.
 const (
 	editReasonImmutable      = "Fixed when the agent was created; no transition applies a change."
+	editReasonHarnessSwitch  = "Fixed when the agent was created; change it with scion reincarnate --harness <harness-config> (experimental), which resets the agent's home."
 	editReasonWorkspace      = "The workspace is provisioned when the agent is created; no transition applies a change."
 	editReasonInternal       = "Managed by Scion; not user-editable."
 	editReasonTemplatePlugin = "Declared by the template; change the template's agent_plugins and reincarnate the agent."
@@ -177,7 +178,7 @@ var agentEditFields = []agentEditField{
 	// TX: immutable.
 	{Key: "projectId", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
 	{Key: "template", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
-	{Key: "harnessConfig", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
+	{Key: "harnessConfig", Tier: EditTierImmutable, LockedReason: editReasonHarnessSwitch},
 	{Key: "runtimeBrokerId", Tier: EditTierImmutable, LockedReason: "Moving an agent to another broker is done by reincarnating it with a target broker."},
 	{Key: "profile", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
 	{Key: "branch", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
