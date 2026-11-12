@@ -1017,13 +1017,16 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 // clearNativeCloudRunBestEffort removes the agent's recorded native Cloud
 // Run decision when the engine finalizes a best-effort delete without a
 // confirmed dispatch (ptone/scion#7620): the broker looked unreachable, or
-// its delete failed. A best-effort delete is of an agent the broker never
-// provisioned (a created row with no launch in flight, or a create the
-// broker refused before any container: deleteNeverProvisioned), so no
-// native instance holds the agent's identity, and the confirmed-delete
-// clear in the dispatcher never ran. It runs before the finalize, while
-// the row is still live (the store clears only a live row), so a soft
-// delete does not keep the decision and a restore does not bring it back.
+// its delete failed. A best-effort delete is of an agent the hub has no
+// record of the broker provisioning (a created row with no launch in
+// flight, or a create the broker refused before any container:
+// deleteNeverProvisioned). That is not proof that no instance exists: a
+// sync start whose request timed out may have created one after the hub
+// stopped waiting. The engine finalizes the record anyway, and the
+// confirmed-delete clear in the dispatcher never ran. It runs before the
+// finalize, while the row is still live (the store clears only a live
+// row), so a soft delete does not keep the decision and a restore does
+// not bring it back.
 // A failure is logged and leaves it set (fail closed). A force continuation
 // after a failed mandatory dispatch never clears it: that agent may still
 // run.
