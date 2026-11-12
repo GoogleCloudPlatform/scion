@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,6 +216,31 @@ func TestScheduledEvent_CreateWithPlainFlag(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(evt.Payload), &payload))
 	assert.True(t, payload.Plain, "plain flag should be preserved in payload")
 	assert.Equal(t, "plain message", payload.Message)
+}
+
+// TestScheduledEvent_CreateWithWakeFlag: wake on the create request reaches
+// the stored message payload (ptone/scion#7734).
+func TestScheduledEvent_CreateWithWakeFlag(t *testing.T) {
+	srv, _, projectID := setupScheduledEventTest(t)
+
+	for _, wake := range []bool{true, false} {
+		req := CreateScheduledEventRequest{
+			EventType: "message",
+			FireIn:    "10m",
+			AgentName: "test-agent",
+			Message:   "wake message",
+			Wake:      wake,
+		}
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var evt store.ScheduledEvent
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&evt))
+		var payload MessageEventPayload
+		require.NoError(t, json.Unmarshal([]byte(evt.Payload), &payload))
+		assert.Equal(t, wake, payload.Wake)
+		assert.Equal(t, wake, strings.Contains(evt.Payload, `"wake"`), "an unset wake is omitted from the payload")
+	}
 }
 
 func TestScheduledEvent_CreateValidation(t *testing.T) {

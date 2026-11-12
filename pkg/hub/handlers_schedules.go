@@ -44,6 +44,8 @@ type CreateScheduleRequest struct {
 	AgentName string `json:"agentName,omitempty"`
 	Message   string `json:"message,omitempty"`
 	Interrupt bool   `json:"interrupt,omitempty"`
+	// Wake resumes a suspended target before delivery (ptone/scion#7734).
+	Wake bool `json:"wake,omitempty"`
 
 	// Convenience fields for "dispatch_agent" events — used to auto-construct Payload
 	Template string `json:"template,omitempty"`
@@ -298,6 +300,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 			AgentName: req.AgentName,
 			Message:   req.Message,
 			Interrupt: req.Interrupt,
+			Wake:      req.Wake,
 		}
 		payloadBytes, marshalErr := json.Marshal(p)
 		if marshalErr != nil {

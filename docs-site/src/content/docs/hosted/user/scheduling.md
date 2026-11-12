@@ -105,6 +105,24 @@ scion schedule create-recurring \
 
 `scion schedule get` shows the zone on a `Zone:` line (`UTC` when none is set), and `scion schedule list` shows it after the expression when it is not UTC. The CLI sets the zone only at creation; change it later in the Web schedule form or with `PATCH` and `timeZone` (an empty string sets it back to UTC).
 
+### Waking a suspended agent
+
+By default a scheduled message is not delivered to a suspended agent: the fire is recorded as failed. Add `--wake` to `scion schedule create` or `create-recurring` (the **Wake agent** option in the Web forms, or `"wake": true` in the API request or message payload) to resume the agent first and then deliver the message. The agent can suspend itself again afterwards, or be auto-suspended.
+
+```bash
+scion schedule create-recurring \
+  --name "morning-check" \
+  --cron "0 8 * * *" \
+  --agent "watcher" \
+  --message "Check the overnight builds" \
+  --wake
+```
+
+- **Permission**: a fire that resumes the agent needs the permission to start it (`agent.lifecycle`), as `scion message --wake` does, checked under the schedule's recorded authority (see **Scheduled Message Authority** below); for a user, the recorded credential's permission ceiling must also include it. Without it, the fire is refused (`scheduled_message_denied: message delivery refused`), and nothing is started or delivered. An agent that is already running needs no extra permission.
+- **Refusals**: a held agent is never woken (the fire is refused), and an agent that is migrating (`scion reincarnate`) fails as without `--wake`. A stopped, errored or halted agent is not resumed: the fire fails with `failed to wake agent <name>: ...`, the same reason `scion message --wake` gives. Any refusal of the start itself (a delete in progress, capacity, broker placement) fails the fire the same way, and nothing is delivered.
+- **Start already in progress**: if another start of the agent (or a stop) is in progress when the message fires, the fire waits for that start to bring the agent up and then delivers. If the agent does not become ready, the fire fails with `target agent was already starting or stopping and did not become ready; message not delivered`.
+- Messages scheduled in a chat conversation never wake an agent.
+
 ---
 
 ## Patterns and Recipes

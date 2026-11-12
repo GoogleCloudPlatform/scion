@@ -38,6 +38,8 @@ type CreateScheduledEventRequest struct {
 	Message   string `json:"message,omitempty"`
 	Interrupt bool   `json:"interrupt,omitempty"`
 	Plain     bool   `json:"plain,omitempty"`
+	// Wake resumes a suspended target before delivery (ptone/scion#7734).
+	Wake bool `json:"wake,omitempty"`
 
 	// There is no top-level raw convenience field. This request surface
 	// never accepted one: a "raw" key here is an unknown field that JSON
@@ -424,6 +426,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 			Message:   req.Message,
 			Interrupt: req.Interrupt,
 			Plain:     req.Plain,
+			Wake:      req.Wake,
 		}
 		payloadBytes, err := json.Marshal(p)
 		if err != nil {

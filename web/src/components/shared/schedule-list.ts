@@ -169,6 +169,7 @@ export class ScionScheduleList extends LitElement {
   @state() private dialogAgent = '';
   @state() private dialogMessage = '';
   @state() private dialogInterrupt = false;
+  @state() private dialogWake = false;
   @state() private dialogTemplate = '';
   @state() private dialogTask = '';
   @state() private dialogBranch = '';
@@ -275,6 +276,7 @@ export class ScionScheduleList extends LitElement {
     this.dialogAgent = '';
     this.dialogMessage = '';
     this.dialogInterrupt = false;
+    this.dialogWake = false;
     this.dialogTemplate = '';
     this.dialogTask = '';
     this.dialogBranch = '';
@@ -305,6 +307,7 @@ export class ScionScheduleList extends LitElement {
       if (this.dialogEventType === 'message') {
         body.message = this.dialogMessage;
         body.interrupt = this.dialogInterrupt;
+        body.wake = this.dialogWake;
       } else if (this.dialogEventType === 'dispatch_agent') {
         if (this.dialogTemplate) body.template = this.dialogTemplate;
         if (this.dialogTask) body.task = this.dialogTask;
@@ -814,6 +817,22 @@ export class ScionScheduleList extends LitElement {
                     <span>Interrupt agent</span>
                     <span class="checkbox-description"
                       >Interrupt the agent's current task before delivering the message.</span
+                    >
+                  </span>
+                </label>
+
+                <label class="checkbox-label">
+                  <input
+                    type="checkbox"
+                    .checked=${this.dialogWake}
+                    @change=${(e: Event) =>
+                      (this.dialogWake = (e.target as HTMLInputElement).checked)}
+                  />
+                  <span class="checkbox-text">
+                    <span>Wake agent</span>
+                    <span class="checkbox-description"
+                      >Resume the agent if it is suspended when the message fires. Requires
+                      permission to start the agent.</span
                     >
                   </span>
                 </label>

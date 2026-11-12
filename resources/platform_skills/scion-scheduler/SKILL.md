@@ -72,6 +72,15 @@ scion schedule create --non-interactive --type message \
   --in 15m
 ```
 
+## Waking a suspended agent
+
+A scheduled message to a suspended agent fails unless the schedule sets
+`--wake` (on `create` or `create-recurring`). With `--wake` the fire resumes
+the agent, then delivers. It needs permission to start the agent; without
+it, or for a held agent, the fire is refused and nothing starts. A stopped
+agent is not resumed. A suspended agent can schedule its own wake-up this
+way.
+
 ## Two event types
 
 ### One-shot events

@@ -5889,6 +5889,11 @@ type MessageEventPayload struct {
 	Message   string `json:"message"`
 	Interrupt bool   `json:"interrupt,omitempty"`
 	Plain     bool   `json:"plain,omitempty"`
+	// Wake resumes a suspended target before delivery (ptone/scion#7734),
+	// through the shared direct-message wake path. The fire needs the
+	// permission a direct-message wake needs, under the event's
+	// authorization revision (authorizeScheduledWake).
+	Wake bool `json:"wake,omitempty"`
 }
 
 // errScheduledMessageRefused is the public refusal a scheduled message
@@ -6028,6 +6033,28 @@ func (s *Server) messageEventHandler() EventHandler {
 			return fmt.Errorf("target agent is reincarnating")
 		}
 
+		// Wake (ptone/scion#7734): after authorization, standing and the
+		// migration gate, so a refused or migrating fire resumes nothing.
+		// The wake permission is decided under the event's authorization
+		// revision; a denial is a refusal like any other and starts
+		// nothing.
+		if payload.Wake {
+			if wakeErr := s.authorizeScheduledWake(ctx, auth, identity, agent); wakeErr != nil {
+				slog.Warn("Scheduler: scheduled message wake refused at fire time",
+					"eventID", evt.ID,
+					"agent_id", agent.ID,
+					"projectID", evt.ProjectID,
+					"principal_kind", auth.PrincipalKind,
+					"principal_id", auth.PrincipalID,
+					"authorization_revision", auth.Revision,
+					"error", wakeErr)
+				return errScheduledMessageRefused
+			}
+			if err := s.wakeScheduledTarget(ctx, evt, agent); err != nil {
+				return err
+			}
+		}
+
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {
 			return fmt.Errorf("no dispatcher available to deliver message")
@@ -6055,7 +6082,14 @@ func (s *Server) messageEventHandler() EventHandler {
 			})
 		}
 
-		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+		// A wake fire may have spent the handler's deadline on the resume
+		// (wakeScheduledTarget runs on its own budget); its dispatch gets
+		// a fresh bound, keeping the handler's values.
+		dispatchBase := ctx
+		if payload.Wake {
+			dispatchBase = context.WithoutCancel(ctx)
+		}
+		retryCtx, retryCancel := context.WithTimeout(dispatchBase, 30*time.Second)
 		defer retryCancel()
 
 		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
@@ -6950,6 +6984,23 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		return
 	}
 
+	// A wake fire (ptone/scion#7734) can outlast the evaluator tick: the
+	// resume and readiness wait run on their own budget. Advance next_run_at
+	// before it runs, so a later tick does not select the schedule again
+	// while it runs, and record its outcome on a context that outlives the
+	// tick's.
+	wakeFire := sched.EventType == "message" && scheduledPayloadWakes(sched.Payload)
+	if wakeFire {
+		if err := s.store.AdvanceScheduleNextRun(ctx, sched.ID, nextRunAt); err != nil {
+			msg := fmt.Sprintf("failed to advance schedule before wake: %v", err)
+			log.Error("schedule-evaluator: failed to advance next run before a wake fire", "error", err)
+			failedAt := time.Now()
+			_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFailed, &failedAt, msg)
+			_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt, msg)
+			return
+		}
+	}
+
 	// Execute the event immediately
 	var errMsg string
 	handler, ok := s.scheduler.GetEventHandler(sched.EventType)
@@ -6971,6 +7022,15 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		cancel()
 	}
 
+	// A wake fire may have outlasted the tick's context: record its
+	// outcome on one that does not end with the tick.
+	recordCtx := ctx
+	if wakeFire {
+		rc, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelRecord()
+		recordCtx = rc
+	}
+
 	// Update event status. If the handler returned an error, record as
 	// failed rather than fired — matches fireEvent semantics (O-R3-1).
 	firedAt := time.Now()
@@ -6978,10 +7038,10 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	if errMsg != "" {
 		status = store.ScheduledEventFailed
 	}
-	_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &firedAt, errMsg)
+	_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &firedAt, errMsg)
 
 	// Update schedule run state
-	_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt, errMsg)
+	_ = s.store.UpdateScheduleAfterRun(recordCtx, sched.ID, now, nextRunAt, errMsg)
 }
 
 // registerSchedulerHandlers registers every periodic scheduler task, plus the

@@ -701,6 +701,18 @@ func (s *ScheduleStore) UpdateScheduleAfterRun(ctx context.Context, id string, r
 	return nil
 }
 
+// AdvanceScheduleNextRun sets only next_run_at on a schedule.
+func (s *ScheduleStore) AdvanceScheduleNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	if err := s.client.Schedule.UpdateOneID(uid).SetNextRunAt(nextRunAt).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // DeleteSchedule removes a schedule by ID (hard delete).
 func (s *ScheduleStore) DeleteSchedule(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)

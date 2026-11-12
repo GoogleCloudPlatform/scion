@@ -56,6 +56,30 @@ func TestSchedule_Create(t *testing.T) {
 	assert.NotEmpty(t, sched.Payload)
 }
 
+// TestSchedule_CreateWithWakeFlag: wake on the create request reaches the
+// stored message payload (ptone/scion#7734).
+func TestSchedule_CreateWithWakeFlag(t *testing.T) {
+	srv, _, projectID := setupScheduleTest(t)
+
+	req := CreateScheduleRequest{
+		Name:      "wake-poke",
+		CronExpr:  "*/5 * * * *",
+		EventType: "message",
+		AgentName: "all",
+		Message:   "recheck",
+		Wake:      true,
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var sched store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sched))
+	var payload MessageEventPayload
+	require.NoError(t, json.Unmarshal([]byte(sched.Payload), &payload))
+	assert.True(t, payload.Wake)
+	assert.True(t, scheduledPayloadWakes(sched.Payload))
+}
+
 func TestSchedule_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T) {
 	srv, _, projectID := setupScheduleTest(t)
 
