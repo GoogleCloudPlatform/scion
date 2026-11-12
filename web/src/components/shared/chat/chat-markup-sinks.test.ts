@@ -364,6 +364,78 @@ describe('chat message markup boundary', () => {
     expect(sinkState.calls.filter((c) => c.policy === 'dompurify')).toHaveLength(1);
   });
 
+  it('renders a choice card question and choice descriptions through the sanitizer', async () => {
+    // Choice cards (ptone/scion#7673, v4 #12): the question is full markdown
+    // and a choice description inline markdown, both through the shared
+    // renderer and DOMPurify, never a plain-string markup sink.
+    window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.chat_choices': true };
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.senderIsAgent = true;
+    el.fromAgent = true;
+    el.messageType = 'choice-prompt';
+    el.choiceIntro = 'One call before I tag it.';
+    el.body = 'One call before I tag it.\n\nFallback text the card hides.';
+    el.decisions = [
+      {
+        rowId: 'row-1',
+        messageId: 'msg-1',
+        key: 'D234',
+        ref: 'D234',
+        version: 1,
+        status: 'pending',
+        askerAgentId: 'agent-1',
+        askerAgentName: 'release-bot',
+        question:
+          'Ship **v0.9** today? <img src=x onerror="window.__pwned=1"><script>window.__pwned=1</script>',
+        defaultChoiceId: 'yes',
+        choices: [
+          {
+            id: 'yes',
+            label: 'Yes',
+            description:
+              'Tag `v0.9` now. <a href="javascript:window.__pwned=1">docs</a><iframe src="https://evil.example"></iframe>',
+          },
+          { id: 'no', label: 'No', description: 'Wait for _owner/repo#812_.' },
+        ],
+      },
+    ];
+    document.body.appendChild(el);
+    let card: HTMLElement | null | undefined;
+    await vi.waitFor(
+      () => {
+        card = el.shadowRoot?.querySelector('scion-chat-choices');
+        if (!card?.shadowRoot?.querySelector('.q strong')) {
+          throw new Error('the choice question markdown has not rendered yet');
+        }
+        if (!card.shadowRoot.querySelector('.desc code')) {
+          throw new Error('the choice description markdown has not rendered yet');
+        }
+      },
+      { timeout: 2000, interval: 10 }
+    );
+
+    const root = card!.shadowRoot!;
+    expect(root.querySelector('.q strong')?.textContent).toBe('v0.9');
+    // The description is inline: the lone paragraph is unwrapped.
+    const desc = root.querySelector('.desc');
+    expect(desc?.querySelector('p')).toBeNull();
+    expect(desc?.querySelector('code')?.textContent).toBe('v0.9');
+    expect(root.querySelectorAll('.desc em')).toHaveLength(1);
+    // The sanitizer dropped every active part.
+    expect(root.querySelector('script, iframe')).toBeNull();
+    expect(root.querySelector('img')?.hasAttribute('onerror') ?? false).toBe(false);
+    for (const a of root.querySelectorAll('a')) {
+      expect(a.getAttribute('href') ?? '').not.toMatch(/^javascript:/i);
+    }
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+    expect(flagged()).toEqual([]);
+    // The question and both descriptions parse through DOMPurify's policy.
+    expect(sinkState.calls.filter((c) => c.policy === 'dompurify').length).toBeGreaterThanOrEqual(
+      3
+    );
+    delete window.__SCION_FEATURES__?.['web.chat_choices'];
+  });
+
   it('opens an inter-agent message preview with no plain-string markup parsing', async () => {
     type Marker = HTMLElement & {
       messages: unknown[];
