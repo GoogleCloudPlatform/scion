@@ -184,9 +184,37 @@ func TestScheduledMessageWake_AgentPrincipalNeedsLifecycleScope(t *testing.T) {
 		assert.Len(t, f.disp.getStartCalls(), 1)
 		assert.Len(t, f.disp.getMessageCalls(), 1)
 	})
+	t.Run("a revision recorded without lifecycle is refused after the role widens", func(t *testing.T) {
+		// Review R1 of ptone/scion#7769: the agent's current role grants
+		// lifecycle, but the frozen revision ceiling does not. The revision
+		// decides: the fire is refused and nothing starts.
+		f := newSchedWake(t, state.PhaseSuspended)
+		f.srv.authzService.mintDevAuthOverride = false
+		sender, err := f.store.GetAgent(context.Background(), f.sender.ID)
+		require.NoError(t, err)
+		sender.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
+		require.NoError(t, f.store.UpdateAgent(context.Background(), sender))
+		evt := withMockAgentRevision(f.event(true), f.sender.ID)
+		evt.AuthorityCeiling.PermissionIDs = []string{"agent.read", "agent.message"}
+		require.False(t, EffectCeilingAllows(evt.AuthorityCeiling, scheduledWakePermission, false))
+		f.reportReadyOnStart(t)
+
+		err = f.fire(evt)
+		require.Error(t, err)
+		assert.Equal(t, errScheduledMessageRefused.Error(), err.Error())
+		assert.Empty(t, f.disp.getStartCalls(), "a refused revision never starts the agent")
+		assert.Empty(t, f.disp.getMessageCalls(), "a refused revision delivers nothing")
+		assert.Equal(t, string(state.PhaseSuspended), f.phase(t))
+
+		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: f.sender.ID, Ceiling: evt.AuthorityCeiling}
+		err = f.srv.authorizeScheduledWake(context.Background(), auth, wakeDMSenderIdentity(f.sender, ScopeAgentLifecycle), f.target)
+		require.ErrorIs(t, err, errScheduledAuthorityDenied)
+	})
 	t.Run("authorizeScheduledWake refuses an agent identity without the scope", func(t *testing.T) {
 		f := newSchedWake(t, state.PhaseSuspended)
-		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: f.sender.ID}
+		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: f.sender.ID,
+			Ceiling: store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1,
+				PermissionIDs: []string{"agent.lifecycle", "agent.message"}}}
 		require.Error(t, f.srv.authorizeScheduledWake(context.Background(), auth, wakeDMSenderIdentity(f.sender), f.target))
 		require.NoError(t, f.srv.authorizeScheduledWake(context.Background(), auth,
 			wakeDMSenderIdentity(f.sender, ScopeAgentLifecycle), f.target))

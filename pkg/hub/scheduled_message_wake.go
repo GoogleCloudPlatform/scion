@@ -70,17 +70,25 @@ func scheduledWakeNeedsResume(agent *store.Agent) bool {
 
 // authorizeScheduledWake decides a scheduled wake under the event's
 // authorization revision, after the send itself was authorized
-// (authorizeScheduledMessageFire): a target that the wake would resume needs
-// the permission a direct-message wake needs (agentLifecycleAllowed) for the
-// revision's identity and, for a user principal, the revision's frozen
-// ceiling must allow it too. A target the wake would not resume needs
-// nothing more. A denial returns an error naming the cause, for the log.
+// (authorizeScheduledMessageFire). A target that the wake would resume needs
+// both:
+//   - the revision's frozen ceiling allowing agent.lifecycle, for user and
+//     agent principals alike. An agent principal's identity is rebuilt from
+//     the agent's current role, so only the frozen ceiling keeps a revision
+//     authored without lifecycle authority from waking anyone after that
+//     role widens. (agent.message has no such check for agents because no
+//     agent scope covers it; agent.lifecycle is covered by
+//     ScopeAgentLifecycle and so is recorded in agent ceilings.)
+//   - the permission a direct-message wake needs (agentLifecycleAllowed)
+//     for the revision's identity now.
+//
+// A target the wake would not resume needs nothing more. A denial returns an
+// error naming the cause, for the log.
 func (s *Server) authorizeScheduledWake(ctx context.Context, auth ScheduledAuthority, identity Identity, agent *store.Agent) error {
 	if !scheduledWakeNeedsResume(agent) {
 		return nil
 	}
-	if auth.PrincipalKind == store.DelegationPrincipalUser &&
-		!EffectCeilingAllows(auth.Ceiling, scheduledWakePermission, false) {
+	if !EffectCeilingAllows(auth.Ceiling, scheduledWakePermission, false) {
 		return fmt.Errorf("%w: revision ceiling does not allow %s", errScheduledAuthorityDenied, scheduledWakePermission)
 	}
 	if !s.agentLifecycleAllowed(ctx, identity, agent) {
