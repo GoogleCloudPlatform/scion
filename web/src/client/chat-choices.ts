@@ -47,12 +47,24 @@ export function isTerminalDecision(view: DecisionView): boolean {
 }
 
 /**
+ * How far a decision has gone: pending < decided < replaced. The hub never
+ * moves a row back, and replaced is final (a row answered just before an
+ * `--update` is then replaced).
+ */
+function statusRank(view: DecisionView): number {
+  if (view.status === 'replaced') return 2;
+  if (view.status === 'decided') return 1;
+  return 0;
+}
+
+/**
  * The view to hold for a decision row once `incoming` arrives: the incoming
- * one, unless the held view is terminal and the incoming one is pending
- * (an out-of-order event or a page fetched before the answer).
+ * one, unless it is behind the held one in pending < decided < replaced
+ * (an out-of-order event, a page fetched before the change, or the
+ * viewer's own POST answering just before a replacement arrived).
  */
 export function newerDecisionView(held: DecisionView, incoming: DecisionView): DecisionView {
-  if (isTerminalDecision(held) && incoming.status === 'pending') return held;
+  if (statusRank(incoming) < statusRank(held)) return held;
   return incoming;
 }
 

@@ -395,3 +395,33 @@ describe('agent-written markdown in the card', () => {
     expect(root(el).querySelector('img[src^="https://tracker.example"]')).toBeNull();
   });
 });
+
+describe('own answer racing a replacement', () => {
+  it('keeps replaced when the own POST returns decided after the replaced event', async () => {
+    let release: (r: Response) => void = () => {};
+    apiFetch.mockReturnValue(new Promise<Response>((resolve) => (release = resolve)));
+    const el = await mount([view()]);
+    button(el, 'yes').click();
+    await settle(el);
+
+    // The --update lands first (SSE through the thread)...
+    el.decisions = [
+      view({
+        status: 'replaced',
+        replacedBy: { rowId: 'r1-v2', messageId: 'm2', version: 2, at: '2026-11-12T15:43:00Z' },
+      }),
+    ];
+    await el.updateComplete;
+    // ...then the POST that was answered just before it returns decided.
+    release(
+      res(200, {
+        decision: answered('yes', { id: 'u-me', name: 'Me' }),
+        responseMessageId: 'resp-1',
+      })
+    );
+    await settle(el);
+
+    expect(foot(el)).toMatch(/^Replaced by v2/);
+    expect(root(el).querySelector('.row')?.getAttribute('data-status')).toBe('replaced');
+  });
+});

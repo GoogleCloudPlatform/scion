@@ -94,9 +94,17 @@ describe('newerDecisionView', () => {
     expect(newerDecisionView(replaced, view())).toBe(replaced);
   });
 
-  it('lets a terminal view replace another terminal view', () => {
+  it('moves decided to replaced, and keeps replaced over a later decided', () => {
     const replaced = view({ status: 'replaced' });
     expect(newerDecisionView(decided(), replaced)).toBe(replaced);
+    // An own POST answered just before the --update lands after the
+    // replaced event: replaced is final.
+    expect(newerDecisionView(replaced, decided())).toBe(replaced);
+  });
+
+  it('takes a newer decided view over a decided one', () => {
+    const later = decided({ decision: { ...decided().decision!, choiceId: 'n', label: 'No' } });
+    expect(newerDecisionView(decided(), later)).toBe(later);
   });
 });
 
