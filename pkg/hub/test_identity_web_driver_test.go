@@ -546,6 +546,9 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// (internal/hubtestutil, scanned through guardScanSubdirs), not a
 		// user or transport resolver.
 		"RecordAttrs a.Value",
+		// The conduit router (router.Resolve: whether the agent has any
+		// session for its run), not a user or transport resolver.
+		"agentHasConduitSession rtr",
 		"agentPTYPath rtr",
 		"authenticateExternalBearer cfg.GoogleResolver",
 		"brokerPTYPath rtr",

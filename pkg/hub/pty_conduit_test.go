@@ -136,7 +136,7 @@ func TestPTYPath_PreflightAndOpenAgree(t *testing.T) {
 		{"unsupported broker, pty agent: agent", false, false, boolPtr(true), ptyPathAgent, ""},
 		{"unsupported broker connected, pty agent: agent", false, true, boolPtr(true), ptyPathAgent, ""},
 		{"unsupported broker, agent without pty: none", false, true, boolPtr(false), ptyPathNone, ptyReasonAgentPTYUnavailable},
-		{"unsupported broker, no agent session: none", false, false, nil, ptyPathNone, ptyReasonAgentPTYUnavailable},
+		{"unsupported broker, no agent session: none, not connected yet", false, false, nil, ptyPathNone, ptyReasonAgentNotConnected},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPTYConduitFixture(t)
@@ -252,6 +252,40 @@ func TestAgentPTY_C10_NeitherPathIs503NoUpgrade(t *testing.T) {
 	assert.Equal(t, wsprotocol.ErrCodeRuntimeAttachUnsupported, er.Error.Code)
 	assert.Equal(t, ptyReasonAgentPTYUnavailable, er.Error.Details["reason"])
 	assert.Empty(t, f.spawned)
+}
+
+// TestAgentPTY_NoSessionYetIsRetryable (ptone/scion#7766): an agent whose
+// broker reports attach unsupported and that has no conduit session at all
+// for its current run (a Cloud Run agent still in its start-up, before
+// sciontool dials conduit) is refused with the retryable 503 unavailable,
+// reason agent_not_connected, never the final runtime_attach_unsupported,
+// on the preflight and the WebSocket open alike. Once the agent connects
+// with a session serving a PTY, the same attach takes the agent path.
+func TestAgentPTY_NoSessionYetIsRetryable(t *testing.T) {
+	f := newPTYConduitFixture(t)
+	f.setBrokerRow(t, attachCaps(false), "")
+
+	status, path, reason := f.preflight(t)
+	assert.Equal(t, http.StatusServiceUnavailable, status)
+	assert.Equal(t, string(ptyPathNone), path)
+	assert.Equal(t, ptyReasonAgentNotConnected, reason)
+
+	_, resp, err := f.dialPTY(t, "")
+	require.ErrorIs(t, err, websocket.ErrBadHandshake, "no WebSocket is upgraded")
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	var er ErrorResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&er))
+	assert.Equal(t, ErrCodeUnavailable, er.Error.Code, "retryable, not runtime_attach_unsupported")
+	assert.NotEqual(t, wsprotocol.ErrCodeRuntimeAttachUnsupported, er.Error.Code)
+	assert.Equal(t, ptyReasonAgentNotConnected, er.Error.Details["reason"])
+	assert.Equal(t, "The agent has no conduit session yet (it may still be starting); try again shortly", er.Error.Message)
+	assert.Empty(t, f.spawned)
+
+	f.startPTYAgent(t, f.public.URL)
+	status, path, _ = f.preflight(t)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, string(ptyPathAgent), path)
 }
 
 // TestAgentPTY_C2_CrossNode: criterion 2 for the agent path. The agent's

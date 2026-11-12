@@ -76,6 +76,11 @@ const (
 	// only on the broker terminal path, and this attach would take the
 	// agent's conduit path. Not temporary: retrying does not change it.
 	ptyReasonDelegatedBrokerOnly = "delegated_credential_broker_path_only"
+	// ptyReasonAgentNotConnected: the broker has no attach and the agent
+	// has no conduit session at all for its current run, as while it is
+	// still starting (sciontool dials conduit only once start-up is done).
+	// Temporary: retrying succeeds once the agent connects.
+	ptyReasonAgentNotConnected = "agent_not_connected"
 )
 
 // Close reasons of an agent-path PTY stream that the hub chooses itself.
@@ -245,10 +250,10 @@ func (s *Server) brokerPTYPath(ctx context.Context, agent *store.Agent, viaRoute
 // has no terminal on any broker: the broker branch is skipped, with no
 // broker lookup. With hub.conduit on, an agent session that advertises pty
 // still takes the agent path. When there is no agent pty path (hub.conduit
-// off, or agentPTYPath's agent_pty_unavailable) the attach is refused with
-// 503 runtime_attach_unsupported and reason managed_runtime. Any other
-// agent-path refusal (a temporary one, such as registry_unavailable) is
-// returned unchanged.
+// off, or agentPTYPath's agent_pty_unavailable or agent_not_connected)
+// the attach is refused with 503 runtime_attach_unsupported and reason
+// managed_runtime. Any other agent-path refusal (a temporary one, such as
+// registry_unavailable) is returned unchanged.
 func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
 	if s.experimentEnabled(conduitExperiment) {
 		d := s.agentPTYPath(ctx, identity, agent, false)
@@ -256,7 +261,10 @@ func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *s
 			d.reportPath = true
 			return d
 		}
-		if d.Reason != ptyReasonAgentPTYUnavailable {
+		// A managed runtime has no terminal on any broker, so an agent
+		// with no session yet gets the same final answer as one without
+		// pty there.
+		if d.Reason != ptyReasonAgentPTYUnavailable && d.Reason != ptyReasonAgentNotConnected {
 			return d
 		}
 	}
@@ -269,7 +277,10 @@ func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *s
 // brokerSkipped reports that resolvePTYPath skipped the broker branch for
 // lack of stream renewal: with no agent pty session left, the attach is
 // then refused with the temporary registry_unavailable rather than
-// agent_pty_unavailable. Temporary refusals keep their retryable reasons.
+// agent_pty_unavailable. Otherwise an agent with no conduit session at all
+// for its current run gets the temporary agent_not_connected, and only a
+// connected agent with no pty session gets agent_pty_unavailable.
+// Temporary refusals keep their retryable reasons.
 func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *store.Agent, brokerSkipped bool) ptyPathDecision {
 	rtr := s.conduitRouter()
 	if rtr == nil {
@@ -318,9 +329,47 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 		}
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable, message, ptyReasonRegistryUnavailable)
 	default:
+		// No session that serves a PTY. When the agent has no session at
+		// all for its current run, it has not connected yet (on Cloud Run
+		// the runtime can report the agent running minutes before
+		// sciontool finishes start-up and dials conduit,
+		// ptone/scion#7766): a temporary refusal the client retries. Only
+		// an agent that is connected and serves no PTY gets the final
+		// runtime_attach_unsupported.
+		connected, connErr := agentHasConduitSession(ctx, rtr, agent)
+		slog.Info("PTY: agent has no conduit session that serves PTY",
+			"agent_id", agent.ID, "run_id", agent.RunID, "resolve_error", err,
+			"agent_connected", connected, "connected_check_error", connErr)
+		switch {
+		case errors.Is(connErr, router.ErrRegistryUnavailable):
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
+		case connErr == nil && !connected:
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"The agent has no conduit session yet (it may still be starting); try again shortly",
+				ptyReasonAgentNotConnected)
+		}
 		return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
 			"The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",
 			ptyReasonAgentPTYUnavailable)
+	}
+}
+
+// agentHasConduitSession reports whether the agent has a conduit session
+// of any capability for its current run. The router is asked for no
+// capability, so a connected session without pty still counts. A router
+// error other than ErrNoSession is returned as is.
+func agentHasConduitSession(ctx context.Context, rtr *router.Router, agent *store.Agent) (bool, error) {
+	req := agentPTYRequest(agent)
+	req.Want.Capability = ""
+	_, err := rtr.Resolve(ctx, req, nil)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, router.ErrNoSession):
+		return false, nil
+	default:
+		return false, err
 	}
 }
 
