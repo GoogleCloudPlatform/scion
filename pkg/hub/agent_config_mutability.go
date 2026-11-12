@@ -118,7 +118,7 @@ type agentEditField struct {
 // Locked reasons shared by several rows or phases.
 const (
 	editReasonImmutable      = "Fixed when the agent was created; no transition applies a change."
-	editReasonHarnessSwitch  = "Fixed when the agent was created; change it with scion reincarnate --harness <harness-config> (experimental), which resets the agent's home."
+	editReasonHarnessSwitch  = "Change with scion reincarnate --harness (resets the home)."
 	editReasonWorkspace      = "The workspace is provisioned when the agent is created; no transition applies a change."
 	editReasonInternal       = "Managed by Scion; not user-editable."
 	editReasonTemplatePlugin = "Declared by the template; change the template's agent_plugins and reincarnate the agent."
