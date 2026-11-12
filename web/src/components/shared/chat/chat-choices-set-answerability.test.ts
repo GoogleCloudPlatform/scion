@@ -187,6 +187,45 @@ describe('blocked set card', () => {
   });
 });
 
+describe('answered elsewhere while blocked', () => {
+  const byBob = (d: DecisionView): DecisionView => ({
+    ...d,
+    status: 'decided',
+    decision: {
+      choiceId: 'no',
+      label: 'No',
+      answeredByUserId: 'u-bob',
+      answeredByName: 'Bob',
+      provenance: 'direct',
+      surface: 'web',
+      responseMessageId: 'resp-bob',
+      batchId: 'batch-bob',
+      at: '2026-11-12T15:44:00Z',
+    },
+  });
+
+  for (const [name, a] of [
+    ['blocked by the asker', BLOCKED],
+    [
+      'read-only',
+      {
+        state: 'blocked',
+        readOnly: true,
+        reason: "You can read this thread but can't post in it, so you can't answer.",
+      },
+    ],
+  ] as [string, AskerAnswerability][]) {
+    it(`shows no "your selections were not sent" note to a viewer ${name}`, async () => {
+      const el = await mount(set(), a);
+      el.decisions = set().map(byBob);
+      await settle(el);
+
+      expect(root(el).querySelector('.card-foot .counter')?.textContent).toContain('Submitted by');
+      expect(root(el).textContent).not.toContain('answered while you were choosing');
+    });
+  }
+});
+
 describe('gone asker on a set card', () => {
   it('stays answerable with the not-delivered note', async () => {
     apiFetch.mockResolvedValue(

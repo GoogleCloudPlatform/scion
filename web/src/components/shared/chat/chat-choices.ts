@@ -1395,7 +1395,8 @@ export class ScionChatChoices extends LitElement {
   /**
    * The footer once no row is actionable: "Submitted by X · time" when one
    * set submit answered every decided row, else what happened to the rows;
-   * plus the concurrent-answer note when the viewer's choices were not sent.
+   * plus the concurrent-answer note when the viewer's choices were not sent
+   * (not to a viewer who could not answer: there were no choices to send).
    */
   private renderSetDoneFoot(views: DecisionView[]): TemplateResult {
     const decided = views.filter((d) => d.status === 'decided' && d.decision);
@@ -1411,7 +1412,7 @@ export class ScionChatChoices extends LitElement {
             : this.excludedSummary(views).join(' · ')}</span
         >
       </div>
-      ${others.length > 0
+      ${others.length > 0 && !this.answerBlocked
         ? html`<div class="note" role="status">
             ${joinNames(others)} answered while you were choosing; your selections were not sent.
           </div>`
