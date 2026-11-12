@@ -83,3 +83,40 @@ ptone, msg `6f8bd390-e2c5-4578-9e30-314d5a846bf7`), §8 item 1. Branch
   runs as teardown: use a block body.
 - `pkill -f "<pattern>"` matches the invoking shell's own command line and
   kills it.
+
+## Integration of phases 2-5 (on the same branch)
+
+`scion/chat-choices` was fast-forwarded to the phases 2-3 branch
+(`scion/chat-choices-p23`, set card, replaced + jump, interpreted). Then the
+phases 4-5 commits (`scion/chat-choices-p45`, answerability, response lines,
+touch fix) were rebased on top, keeping their commits, and everything was
+rebased onto upstream main. Conflicts were in `client/chat-choices.ts` (both
+appended blocks; kept both), `chat-thread.ts` (both added a card event
+listener; kept both) and `chat-choices.ts`. That file took p23's version as
+the base, with p45's answerability changes re-applied and extended to set
+mode:
+
+- A blocked viewer disables set rows (`setChoiceState`, `select`) and the
+  set's Submit (`aria-describedby` points at the reason; the tooltip shows
+  the reason instead of the missing keys). `renderAnswerBlocked()` renders
+  once under the set rows; single mode keeps it in the row foot in place of
+  "Awaiting your answer".
+- `renderAskerGoneNote()` renders in set mode too, until no row is pending.
+- A 403 on the set POST goes through the same `applyDenied` as a single
+  click (block, toast, `choice-answer-denied`). `answerDecisionSet` returns
+  `details.reason` like `answerDecision`. Local selections are kept.
+- The two `.note` CSS rules (p23's concurrent-answer note, p45's asker-gone
+  note) were merged into one.
+
+`chat-choices-set-answerability.test.ts` covers blocked + set, gone + set
+and 403 on set submit; 3 of its 6 tests fail with the set-mode blocking and
+the set 403 branch removed.
+
+Left open: p23's `chat-choices-set.test.ts` and `chat-choices-terminal.test.ts`
+are not listed in `tsconfig.component-tests.json`, so they run but are not
+type-checked.
+
+Gate gotchas in a worktree that has been built: `npm run build` leaves
+`web/public/shoelace/` (fails `TestRootLevelStaticFile_ListMatchesPublicDir`)
+and `make build` leaves `build/scion` (fails `ci-web-checks-filter.test.ts`).
+Both are gitignored; move them aside before `make ci` and `npm test`.
