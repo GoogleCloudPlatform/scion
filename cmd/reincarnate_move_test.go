@@ -259,7 +259,7 @@ func TestReincarnateHelp_BrokerParagraph(t *testing.T) {
 		"refused before anything changes",
 		"dispatch unless the broker auto-provides",
 		"already serves its project",
-		"Patch flags combine with --broker",
+		"Patch flags other than --harness combine with --broker",
 		`"Moving an Agent to Another Runtime Broker"`,
 	} {
 		assert.Contains(t, long, want)

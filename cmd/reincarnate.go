@@ -47,6 +47,7 @@ var (
 	reincarnateThinkingLevel  string
 	reincarnateHarnessAuth    string
 	reincarnateImage          string
+	reincarnateHarness        string
 )
 
 // reincarnateFiveLineContract is the design §3.9 self-migration contract,
@@ -154,8 +155,8 @@ Use --dry-run to see the planned changes (template, image, harness config,
 model, env keys, branch) without migrating anything.
 
 Patch flags change a setting on the new generation, and later
-reincarnations keep the new value: --service-account, --role, --model,
---thinking-level, --harness-auth and --image. --service-account and --role
+reincarnations keep the new value: --harness, --service-account, --role,
+--model, --thinking-level, --harness-auth and --image. --service-account and --role
 get the same access checks as create. --dry-run shows the old and new
 value of each patched setting. An agent that patches itself needs the
 agent lifecycle permission, and can lower its own role but not raise it.
@@ -177,8 +178,25 @@ failing check (a broker you cannot see is reported as not found). Add
 --dry-run to see every check. Targeting a broker that does not serve the
 project yet needs project update, plus broker read and dispatch unless the
 broker auto-provides; an agent can move itself only to a broker that
-already serves its project. Patch flags combine with --broker. See "Moving
-an Agent to Another Runtime Broker" in the multi-broker docs.`,
+already serves its project. Patch flags other than --harness combine with
+--broker. See "Moving an Agent to Another Runtime Broker" in the
+multi-broker docs.
+
+Use --harness <harness-config> to move the agent to another harness config
+(for example from claude to codex) in place, keeping its ID, slug,
+workspace, branch, conversations and history. The agent's home directory
+is deleted and rebuilt exactly as for a new agent with that harness
+config: the harness session and transcripts, memory edits, tools and
+caches installed in the home, shell history and dotfile edits are lost,
+and there is no rollback. The handoff is the only continuity, so write a
+complete one. An explicit image, model or harness auth of the old harness
+is dropped unless you pass --image, --model or --harness-auth again
+(--harness-auth none runs the new harness without credentials). Run with
+--dry-run first: it shows the plan and the home-reset warning without
+changing anything. The real command shows the same warning but does not
+ask for confirmation. --harness needs the hub.reincarnate_harness_switch
+experiment, cannot be combined with --broker, and is supported on the
+docker, podman and container runtimes.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")
@@ -296,6 +314,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			// On stderr in both output modes: an agent moving itself
 			// usually runs with --json, and it must amend the handoff.
 			printMoveForceHint(os.Stderr, err, reincarnateForce)
+			if herr := harnessNotSupportedError(err, req.HarnessConfig); herr != nil {
+				return wrapHubError(herr)
+			}
 			if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 				return wrapHubError(perr)
 			}
@@ -334,6 +355,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			// reincarnation, a start in progress, a concurrent write); its
 			// message names which, so the prefix must not claim one.
 			return wrapHubError(fmt.Errorf("cannot reincarnate '%s' now: %w", agentName, err))
+		}
+		if herr := harnessNotSupportedError(err, req.HarnessConfig); herr != nil {
+			return wrapHubError(herr)
 		}
 		if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 			return wrapHubError(perr)
@@ -391,11 +415,50 @@ func validateReincarnatePatchFlags() error {
 	if err := validateAgentRole(reincarnateRole); err != nil {
 		return asUsageError(err)
 	}
-	if err := validateHarnessAuthFlag(reincarnateHarnessAuth); err != nil {
+	if err := validateReincarnateHarnessFlags(reincarnateHarness, reincarnateHarnessAuth, reincarnateBroker); err != nil {
 		return asUsageError(err)
+	}
+	// "none" is accepted only with --harness (validated above).
+	if reincarnateHarness == "" || reincarnateHarnessAuth != harnessAuthNone {
+		if err := validateHarnessAuthFlag(reincarnateHarnessAuth); err != nil {
+			return asUsageError(err)
+		}
 	}
 	_, err := reincarnateThinkingLevelPatch()
 	return err
+}
+
+// harnessAuthNone is the --harness-auth value that runs a harness without
+// credentials; reincarnate accepts it only with --harness.
+const harnessAuthNone = "none"
+
+// validateReincarnateHarnessFlags checks --harness locally: a single
+// harness-config name (the hub's rule), not combined with --broker, and
+// --harness-auth none only with it.
+func validateReincarnateHarnessFlags(harnessConfig, harnessAuth, broker string) error {
+	if harnessConfig == "" {
+		if harnessAuth == harnessAuthNone {
+			return fmt.Errorf("--harness-auth none is only accepted with --harness")
+		}
+		return nil
+	}
+	if !api.IsSingleNameComponent(harnessConfig) {
+		return fmt.Errorf("invalid --harness value %q: must be a single harness-config name", harnessConfig)
+	}
+	if broker != "" {
+		return fmt.Errorf("--harness cannot be combined with --broker: move the agent and switch its harness in separate reincarnations")
+	}
+	return nil
+}
+
+// harnessNotSupportedError explains the 400 an old hub gives a --harness
+// request (it predates the field: "config overrides are not yet
+// supported"). It returns nil for any other error, or without --harness.
+func harnessNotSupportedError(err error, harnessConfig string) error {
+	if harnessConfig == "" || err == nil || !strings.Contains(err.Error(), "not yet supported") {
+		return nil
+	}
+	return fmt.Errorf("this hub does not support --harness; upgrade the hub: %w", err)
 }
 
 // reincarnateThinkingLevelChanged reports whether --thinking-level was set
@@ -425,6 +488,7 @@ func applyReincarnatePatchFlags(req *hubclient.ReincarnateAgentRequest) {
 	req.Role = reincarnateRole
 	req.Image = reincarnateImage
 	req.HarnessAuth = reincarnateHarnessAuth
+	req.HarnessConfig = reincarnateHarness
 	if reincarnateModel != "" {
 		req.Model = config.NormalizeModelAlias(reincarnateModel)
 	}
@@ -443,6 +507,7 @@ func requestedPatchFields(req *hubclient.ReincarnateAgentRequest) []string {
 			out = append(out, name)
 		}
 	}
+	add(req.HarnessConfig != "", "harness")
 	add(req.ServiceAccount != "", "serviceAccount")
 	add(req.Role != "", "role")
 	add(req.Image != "", "image")
@@ -680,6 +745,9 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 	fmt.Println("Reincarnation plan:")
 	printChange("Template", plan.Template)
 	printChange("Image", plan.Image)
+	if plan.Harness != nil {
+		printChange("Harness", *plan.Harness)
+	}
 	printChange("Harness cfg", plan.HarnessCfg)
 	printChange("Model", plan.Model)
 	printPatch := func(label string, c *hubclient.FieldChange) {
@@ -703,8 +771,36 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 		fmt.Printf("  Env changed:   %s\n", strings.Join(plan.EnvKeys.Changed, ", "))
 	}
 
-	for _, w := range plan.Warnings {
+	warnings := plan.Warnings
+	if plan.HomeReset && len(warnings) > 0 {
+		// The hub puts the home-reset warning first; the CLI only adds
+		// emphasis, so every client shows the same wording.
+		printHomeResetWarning(os.Stderr, warnings[0])
+		warnings = warnings[1:]
+	}
+	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	}
+}
+
+// printHomeResetWarning prints the hub's home-reset warning as a prominent
+// block: "!!" before its first line, wrapped and indented.
+func printHomeResetWarning(w io.Writer, text string) {
+	const width = 96
+	prefix := "!! "
+	line := ""
+	for _, word := range strings.Fields(text) {
+		if line != "" && len(prefix)+len(line)+1+len(word) > width {
+			fmt.Fprintf(w, "%s%s\n", prefix, line)
+			prefix, line = "   ", ""
+		}
+		if line != "" {
+			line += " "
+		}
+		line += word
+	}
+	if line != "" {
+		fmt.Fprintf(w, "%s%s\n", prefix, line)
 	}
 }
 
@@ -730,7 +826,8 @@ func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateModel, "model", "", "Model for the new generation (aliases accepted)")
 	reincarnateCmd.Flags().StringVar(&reincarnateThinkingLevel, "thinking-level", "", "Thinking level for the new generation: an integer 0-100, or low (25), medium (50), high (75), max (100)")
 	reincarnateThinkingLevelChanged = func() bool { return reincarnateCmd.Flags().Changed("thinking-level") }
-	reincarnateCmd.Flags().StringVar(&reincarnateHarnessAuth, "harness-auth", "", "Auth method for the new generation (api-key, oauth-token, auth-file, vertex-ai)")
+	reincarnateCmd.Flags().StringVar(&reincarnateHarnessAuth, "harness-auth", "", "Auth method for the new generation (api-key, oauth-token, auth-file, vertex-ai; with --harness also none)")
+	reincarnateCmd.Flags().StringVar(&reincarnateHarness, "harness", "", "Move the agent to this harness config; its home directory is deleted and rebuilt (no rollback). Run with --dry-run first to see the plan and warning")
 	reincarnateCmd.Flags().StringVarP(&reincarnateImage, "image", "i", "", "Container image for the new generation")
 	rootCmd.AddCommand(reincarnateCmd)
 }
