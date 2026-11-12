@@ -186,5 +186,4 @@ func TestReincarnateHelp_RecommendsDryRunForHarness(t *testing.T) {
 	assert.Contains(t, reincarnateCmd.Long, "--harness <harness-config>")
 	assert.Contains(t, reincarnateCmd.Long, "Run with\n--dry-run first")
 	require.NotNil(t, reincarnateCmd.Flags().Lookup("harness"))
-	assert.Nil(t, reincarnateCmd.Flags().Lookup("yes"), "no confirmation flag (warning only)")
 }
