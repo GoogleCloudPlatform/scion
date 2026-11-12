@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -475,9 +476,14 @@ func TestReprovisionLeftHomeIntact(t *testing.T) {
 }
 
 func TestResetHomeRuntimeRefusal(t *testing.T) {
-	supported := []string{"docker", "podman", "container"}
+	// Consume the actual registration advertisement through the hub parser.
+	supported := capabilitiesFromStrings(runtimebroker.StaticCapabilityNames(nil)).ReprovisionResetHomeRuntimes
 	assert.Empty(t, resetHomeRuntimeRefusal("docker", supported))
 	assert.Empty(t, resetHomeRuntimeRefusal("container", supported))
+	assert.Empty(t, resetHomeRuntimeRefusal("cloudrun", supported))
+	assert.Empty(t, resetHomeRuntimeRefusal("cloudrun-instances", supported))
+	assert.NotEmpty(t, resetHomeRuntimeRefusal("cloudrun", nil))
+	assert.NotEmpty(t, resetHomeRuntimeRefusal("cloudrun-instances", nil))
 	assert.Contains(t, resetHomeRuntimeRefusal("kubernetes", supported), "upgrade the broker")
 	assert.Contains(t, resetHomeRuntimeRefusal("docker", nil), "upgrade the broker")
 	assert.Contains(t, resetHomeRuntimeRefusal("substrate", supported), "not supported on runtime substrate")
@@ -485,9 +491,9 @@ func TestResetHomeRuntimeRefusal(t *testing.T) {
 }
 
 func TestCapabilitiesFromStrings_ResetHomeRuntimes(t *testing.T) {
-	caps := capabilitiesFromStrings([]string{"reprovision", "reprovisionResetHome:docker", "reprovisionResetHome:podman", "reprovisionResetHome:docker", "reprovisionResetHome:"})
+	caps := capabilitiesFromStrings([]string{"reprovision", "reprovisionResetHome:docker", "reprovisionResetHome:podman", "reprovisionResetHome:cloudrun", "reprovisionResetHome:cloudrun-instances", "reprovisionResetHome:docker", "reprovisionResetHome:"})
 	assert.True(t, caps.Reprovision)
-	assert.Equal(t, []string{"docker", "podman"}, caps.ReprovisionResetHomeRuntimes)
+	assert.Equal(t, []string{"docker", "podman", "cloudrun", "cloudrun-instances"}, caps.ReprovisionResetHomeRuntimes)
 }
 
 // The dispatcher sends resetHome and the reset ID on a home-resetting
