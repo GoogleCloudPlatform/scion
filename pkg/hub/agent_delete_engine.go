@@ -926,6 +926,7 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	bestEffort := (e.plan.prior.Phase == string(state.PhaseCreated) && e.plan.prior.LaunchID == "") ||
 		deleteNeverProvisioned(agent)
 	if bestEffort && !s.brokerReachable(ctx, agent) {
+		e.clearNativeCloudRunBestEffort()
 		return deletionOutcome{}, true
 	}
 
@@ -1001,6 +1002,7 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	case bestEffort:
 		s.agentLifecycleLog.Warn("Failed to dispatch best-effort agent delete to broker (continuing)",
 			"agent_id", agent.ID, "prior_phase", e.plan.prior.Phase, "phase", agent.Phase, "error", err)
+		e.clearNativeCloudRunBestEffort()
 		return deletionOutcome{}, true
 	case req.Force:
 		s.agentLifecycleLog.Warn("Failed to dispatch agent delete to broker (force=true, continuing)",
@@ -1010,6 +1012,25 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 
 	s.agentLifecycleLog.Error("Failed to dispatch agent delete to broker", "agent_id", agent.ID, "error", err)
 	return e.classifyDispatchFailure(err, startedAt)
+}
+
+// clearNativeCloudRunBestEffort removes the agent's recorded native Cloud
+// Run decision when the engine finalizes a best-effort delete without a
+// confirmed dispatch (ptone/scion#7620): the broker looked unreachable, or
+// its delete failed. A best-effort delete is of an agent the broker never
+// provisioned (a created row with no launch in flight, or a create the
+// broker refused before any container: deleteNeverProvisioned), so no
+// native instance holds the agent's identity, and the confirmed-delete
+// clear in the dispatcher never ran. It runs before the finalize, while
+// the row is still live (the store clears only a live row), so a soft
+// delete does not keep the decision and a restore does not bring it back.
+// A failure is logged and leaves it set (fail closed). A force continuation
+// after a failed mandatory dispatch never clears it: that agent may still
+// run.
+func (e *deletionEngine) clearNativeCloudRunBestEffort() {
+	ctx, cancel := e.step(deleteShortStep)
+	defer cancel()
+	clearRecordedCloudRunNative(ctx, e.s.store, e.s.agentLifecycleLog, e.plan.snapshot, "a best-effort delete")
 }
 
 // refuseDeleteRunMismatch reports whether the delete engine refuses to

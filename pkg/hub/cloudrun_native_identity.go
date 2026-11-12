@@ -217,11 +217,26 @@ func (d *HTTPAgentDispatcher) markCloudRunNative(ctx context.Context, agent *sto
 // (logged): either way the GCP token path stays closed until a later
 // confirmed stop or delete.
 func (d *HTTPAgentDispatcher) clearCloudRunNative(ctx context.Context, agent *store.Agent) {
-	if !agentRecordedNativeCloudRun(agent) || d.store == nil {
+	clearRecordedCloudRunNative(ctx, d.store, d.log, agent, "a confirmed stop or delete")
+}
+
+// clearRecordedCloudRunNative removes agent's recorded native decision
+// from its live row when the caller's copy shows one, and then from the
+// copy. after names the event that allows it, for the log. A copy with no
+// decision, or a nil store, writes nothing. A row that is gone or
+// soft-deleted (ErrNotFound) has nothing left to clear. Any other failure
+// is logged and leaves the decision set, so GCP tokens stay withheld.
+//
+// Callers are the hub's confirmed stop or delete (clearCloudRunNative),
+// the delete engine's best-effort finalize of an agent the broker never
+// provisioned (deletionEngine.clearNativeCloudRunBestEffort), and a
+// restore (restoreAgentTx).
+func clearRecordedCloudRunNative(ctx context.Context, st store.Store, log *slog.Logger, agent *store.Agent, after string) {
+	if !agentRecordedNativeCloudRun(agent) || st == nil {
 		return
 	}
-	if err := d.store.SetAgentNativeCloudRun(ctx, agent.ID, false); err != nil && !errors.Is(err, store.ErrNotFound) {
-		d.log.Warn("clearing the recorded Cloud Run identity after a confirmed stop or delete failed; GCP tokens stay withheld",
+	if err := st.SetAgentNativeCloudRun(ctx, agent.ID, false); err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Warn("clearing the recorded Cloud Run identity after "+after+" failed; GCP tokens stay withheld",
 			"agent_id", agent.ID, "error", err)
 		return
 	}
