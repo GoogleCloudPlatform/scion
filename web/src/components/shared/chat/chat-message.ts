@@ -65,9 +65,15 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 import './chat-choices.js';
+import './chat-choice-response.js';
 import { ANSWERABLE, chatChoicesEnabled } from '../../../client/chat-choices.js';
 import type { AskerAnswerability } from '../../../client/chat-choices.js';
-import type { ChoiceAnswerMode, DecisionView } from '../../../shared/types.js';
+import type {
+  ChoiceAnswerMode,
+  ChoiceResponseSetView,
+  ChoiceResponseView,
+  DecisionView,
+} from '../../../shared/types.js';
 import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
 
 /** Structured attachment reference from the W7 API. */
@@ -822,6 +828,14 @@ export class ScionChatMessage extends LitElement {
   @property({ attribute: false })
   answerability: AskerAnswerability | undefined = undefined;
 
+  /** A choice-response's one-click answer (web.chat_choices; absent while off). */
+  @property({ attribute: false })
+  choiceResponse: ChoiceResponseView | undefined = undefined;
+
+  /** A choice-response's set submit (web.chat_choices; absent while off). */
+  @property({ attribute: false })
+  choiceResponseSet: ChoiceResponseSetView | undefined = undefined;
+
   /** Reason for dispatch failure. */
   @property()
   dispatchFailureReason = '';
@@ -992,6 +1006,21 @@ export class ScionChatMessage extends LitElement {
       max-width: min(70%, 600px);
       min-width: 3rem;
       position: relative;
+    }
+
+    /* A choice-response is a compact line in the answerer's lane (design §4.6). */
+    .choice-response-row {
+      display: flex;
+      padding: 0.25rem 1rem;
+    }
+
+    .choice-response-row.own {
+      justify-content: flex-end;
+    }
+
+    .choice-response-row.other {
+      justify-content: flex-start;
+      padding-left: 3.5rem;
     }
 
     /* A choice card needs room for its buttons (design §4.1). */
@@ -2026,6 +2055,15 @@ export class ScionChatMessage extends LitElement {
         padding-right: 0.5rem;
       }
 
+      .choice-response-row {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+      }
+
+      .choice-response-row.other {
+        padding-left: 3rem;
+      }
+
       .bubble-content {
         padding: 0.625rem 0.75rem;
       }
@@ -2589,6 +2627,7 @@ export class ScionChatMessage extends LitElement {
   }
 
   override render() {
+    if (this.showsChoiceResponse && !this.deletedAt) return this.renderChoiceResponse();
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
@@ -2888,6 +2927,35 @@ export class ScionChatMessage extends LitElement {
       .currentUserId=${this.currentUserId}
       .answerability=${this.answerability ?? ANSWERABLE}
     ></scion-chat-choices>`;
+  }
+
+  /**
+   * Whether this message renders as a compact choice-response line
+   * (design §4.6): a choice-response carrying its view, and the browser
+   * flag on (double gate, as for the card).
+   */
+  private get showsChoiceResponse(): boolean {
+    return (
+      this.messageType === 'choice-response' &&
+      !!(this.choiceResponse || this.choiceResponseSet) &&
+      chatChoicesEnabled()
+    );
+  }
+
+  /** The response line in the answerer's lane, without a bubble. */
+  private renderChoiceResponse(): TemplateResult {
+    const own = !this.fromAgent;
+    return html`<div class="choice-response-row ${own ? 'own' : 'other'}">
+      <scion-chat-choice-response
+        lane=${own ? 'own' : 'other'}
+        .response=${this.choiceResponse}
+        .responseSet=${this.choiceResponseSet}
+        answererName=${own ? 'you' : this.senderName || this.sender}
+        agentName=${this.routedTo}
+        timestamp=${this.timestamp}
+        dispatchState=${this.dispatchState}
+      ></scion-chat-choice-response>
+    </div>`;
   }
 
   private renderBody() {

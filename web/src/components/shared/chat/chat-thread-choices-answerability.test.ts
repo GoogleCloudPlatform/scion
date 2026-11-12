@@ -106,6 +106,23 @@ function prompt(id: string, minute: number) {
   };
 }
 
+function response(id: string, senderId: string, minute: number) {
+  return {
+    id,
+    projectId: 'proj-1',
+    sender: `user:${senderId}`,
+    senderId,
+    recipient: 'agent:release-bot',
+    recipientId: 'a1',
+    msg: 'alice chose "Yes" for D234 "Ship it?"',
+    type: 'choice-response',
+    agentId: 'a1',
+    createdAt: `2026-11-12T15:${minute}:00Z`,
+    threadId: KEY,
+    dispatchState: 'failed',
+  };
+}
+
 let history: Record<string, unknown>;
 let agentRead: () => Response;
 
@@ -262,5 +279,85 @@ describe('asker answerability', () => {
     expect(thread.shadowRoot!.querySelector('scion-chat-composer')).toBeNull();
     const second = await cardOf(thread, 'p2');
     expect(text(second.shadowRoot.querySelector('.reason'))).toContain("can't post in it");
+  });
+});
+
+describe('choice-response lines', () => {
+  beforeEach(() => {
+    history.messages = [prompt('p1', 41), response('c1', 'u-me', 42), response('c2', 'u-bob', 43)];
+    history.messageChoiceResponses = {
+      c1: {
+        rowId: 'row-p1',
+        ref: 'D234',
+        key: 'D234',
+        version: 1,
+        question: 'Ship it?',
+        choiceId: 'yes',
+        label: 'Yes',
+        provenance: 'direct',
+        promptMessageId: 'p1',
+      },
+    };
+    history.messageChoiceResponseSets = {
+      c2: {
+        promptMessageId: 'p1',
+        batchId: 'b1',
+        answers: [
+          {
+            rowId: 'row-p1',
+            ref: 'D234',
+            key: 'D234',
+            version: 1,
+            question: 'Ship it?',
+            choiceId: 'yes',
+            label: 'Yes',
+            provenance: 'direct',
+            outcome: 'answer',
+            matchedDefault: true,
+          },
+        ],
+      },
+    };
+  });
+
+  function lineOf(el: HTMLElement) {
+    return el.shadowRoot!.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
+      'scion-chat-choice-response'
+    );
+  }
+
+  it('renders a compact line in the answerer’s lane, no bubble', async () => {
+    const thread = await open();
+    const own = await messageEl(thread, 'c1');
+    expect(own.shadowRoot!.querySelector('.bubble')).toBeNull();
+    expect(own.shadowRoot!.querySelector('.choice-response-row.own')).not.toBeNull();
+    const line = lineOf(own)!;
+    await line.updateComplete;
+    expect(text(line.shadowRoot!.querySelector('.line'))).toMatch(
+      /^you chose Yes for D234 Ship it\? · \d\d:\d\d · not delivered \(agent gone\) · Jump$/
+    );
+
+    const other = await messageEl(thread, 'c2');
+    expect(other.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
+    const setLine = lineOf(other)!;
+    await setLine.updateComplete;
+    expect(text(setLine.shadowRoot!.querySelector('summary'))).toContain('answered 1 decision');
+  });
+
+  it('jumps to the prompt', async () => {
+    const thread = await open();
+    const scroll = vi.spyOn(thread, 'scrollToMessageById').mockResolvedValue();
+    const line = lineOf(await messageEl(thread, 'c1'))!;
+    await line.updateComplete;
+    line.shadowRoot!.querySelector<HTMLElement>('[data-action="jump"]')!.click();
+    expect(scroll).toHaveBeenCalledWith('p1');
+  });
+
+  it('keeps the bubble with the browser flag off', async () => {
+    setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+    const thread = await open();
+    const el = await messageEl(thread, 'c1');
+    expect(lineOf(el)).toBeNull();
+    expect(text(el.shadowRoot!.querySelector('.bubble-content'))).toContain('alice chose');
   });
 });
