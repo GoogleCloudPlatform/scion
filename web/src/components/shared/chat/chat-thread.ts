@@ -4132,7 +4132,10 @@ export class ScionChatThread extends LitElement {
     void this.scrollToMessageById(e.detail.messageId);
   }
 
-  /** SSE handler for message-edited events. */
+  /**
+   * SSE handler for chat.choice.updated: patches the row of a loaded
+   * prompt (design §4.4).
+   */
   private handleChoiceUpdated(e: Event): void {
     const detail = (e as CustomEvent).detail as
       | ({ data?: Partial<ChoiceUpdatedEvent> } & Partial<ChoiceUpdatedEvent>)
@@ -4222,6 +4225,7 @@ export class ScionChatThread extends LitElement {
     this.messages = this.messages.map((m) => (m.id === messageId ? updated : m));
   }
 
+  /** SSE handler for message-edited events. */
   private handleV2MessageEdited(e: Event): void {
     const detail = (e as CustomEvent).detail as
       | ({

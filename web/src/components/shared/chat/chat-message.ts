@@ -2426,14 +2426,14 @@ export class ScionChatMessage extends LitElement {
     });
   }
 
+  /** The card mode the rendered body was built for. */
+  private renderedCardMode = false;
+
   /**
    * Whether this message renders as a choice card (design §4.1): a
    * choice-prompt with decisions, and the browser flag on. The hub omits
    * the fields while the experiment is off; the flag gates presentation.
    */
-  /** The card mode the rendered body was built for. */
-  private renderedCardMode = false;
-
   private get showsChoiceCard(): boolean {
     const d = this.decisions;
     return this.messageType === 'choice-prompt' && !!d && d.length > 0 && chatChoicesEnabled();

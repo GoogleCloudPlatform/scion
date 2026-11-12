@@ -266,6 +266,8 @@ describe('chat message markup boundary', () => {
 
   afterEach(() => {
     document.body.replaceChildren();
+    // The choice card case turns the flag on; reset it even if that test failed.
+    delete window.__SCION_FEATURES__?.['web.chat_choices'];
   });
 
   it('renders a message with no plain-string markup parsing', async () => {
@@ -433,7 +435,6 @@ describe('chat message markup boundary', () => {
     expect(sinkState.calls.filter((c) => c.policy === 'dompurify').length).toBeGreaterThanOrEqual(
       3
     );
-    delete window.__SCION_FEATURES__?.['web.chat_choices'];
   });
 
   it('opens an inter-agent message preview with no plain-string markup parsing', async () => {
