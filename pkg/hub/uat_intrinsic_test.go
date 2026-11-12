@@ -229,6 +229,7 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 			"uatIntrinsicDecides":           true, // compares the stored and the hop ceiling
 			"deliverIDsAllowedByChain":      true, // a chain fold
 			"authorizeScheduledMessageFire": true, // scheduler ceiling: not a token hop
+			"authorizeScheduledWake":        true, // scheduler ceiling: not a token hop
 		},
 		"childRoleWithinCeiling": {
 			"planAgentDelegatorReissue": true, // an agent parent's ceiling (agentRowEffectCeiling)
