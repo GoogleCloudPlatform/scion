@@ -711,7 +711,7 @@ func (r *replayOnCreateStore) CreateScheduledEvent(ctx context.Context, evt *sto
 	if err := r.Store.CreateScheduledEvent(ctx, evt); err != nil || !r.fault.Active() {
 		return err
 	}
-	pending, err := r.Store.ListPendingScheduledEvents(ctx)
+	pending, err := r.ListPendingScheduledEvents(ctx)
 	if err == nil {
 		for _, p := range pending {
 			if p.ID == evt.ID {
