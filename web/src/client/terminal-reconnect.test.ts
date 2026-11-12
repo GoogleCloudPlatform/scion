@@ -351,6 +351,36 @@ describe('error classification (#1659 AC3)', () => {
     }
   );
 
+  it('preflight 503 unavailable agent_not_connected (agent still starting) is retriable, not final', async () => {
+    // ptone/scion#7766: the hub answers a starting agent with no conduit
+    // session yet with the retryable 503 unavailable, never the final
+    // runtime_attach_unsupported.
+    const f = fixture();
+    const notConnected = {
+      error: {
+        code: 'unavailable',
+        message:
+          'The agent has not connected yet; the terminal will be available once it finishes starting',
+        details: { reason: 'agent_not_connected', path: 'none' },
+      },
+    };
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(notConnected, 503));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('server-error');
+    expect(session.state.error).toContain('has not connected yet');
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // Once the agent connects, trying again attaches.
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(1);
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
+    expect(session.state.connection).toBe('connected');
+  });
+
   it('preflight 503 runtime_attach_unsupported without a message uses a fixed one', async () => {
     const f = fixture();
     f.fetcher
