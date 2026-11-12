@@ -960,6 +960,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	// Every error answer to a home-resetting request says whether the home
+	// was moved aside (ptone/scion#7757); only the reprovision below can
+	// move it, and it marks the reset applied there.
+	var homeReset *homeResetErrorWriter
+	if req.ResetHome {
+		homeReset = newHomeResetErrorWriter(w)
+		w = homeReset
+		defer homeReset.finish()
+	}
 	// The signed-URL workspace download asks the Hub the create came from.
 	if req.WorkspaceDownloadMode != "" {
 		req.workspaceHubConn = s.resolveHubNameForLaunch(r)
@@ -1130,6 +1139,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 			case dispatchAttemptInProgress:
 				s.dispatchAttemptsMu.Unlock()
+				// The running attempt may be resetting the home.
+				homeReset.markUnknown()
 				writeError(w, http.StatusConflict, ErrCodeConflict, "create request already in progress", map[string]interface{}{
 					"requestId": req.RequestID,
 				})
@@ -2048,6 +2059,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			opts.ResetHome = req.ResetHome
 			opts.ResetHomeID = req.ResetHomeID
 			cfg, err = sc.Manager.Reprovision(ctx, opts)
+			if err != nil && errors.Is(err, agent.ErrHomeResetApplied) {
+				homeReset.markApplied()
+			}
 		} else {
 			cfg, err = sc.Manager.Provision(ctx, opts)
 		}
@@ -2073,14 +2087,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, agent.ErrReprovisionRefused) {
 				markAttemptFailed(http.StatusConflict, "reprovision refused")
 				span.SetStatus(codes.Error, spanErrorText(err))
-				// A refusal of a home-resetting reprovision before the
-				// home was moved aside says so, so the hub restores the
-				// previous config (ptone/scion#7757).
-				code := ErrCodeConflict
-				if req.ResetHome && !errors.Is(err, agent.ErrHomeResetApplied) {
-					code = api.BrokerErrCodeReprovisionRefusedHomeIntact
-				}
-				writeError(w, http.StatusConflict, code, "Failed to provision agent: "+err.Error(), nil)
+				Conflict(w, "Failed to provision agent: "+err.Error())
 				return
 			}
 			span.SetStatus(codes.Error, spanErrorText(err))

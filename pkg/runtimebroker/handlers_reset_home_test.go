@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -138,44 +139,113 @@ func TestHeartbeatService_ReportsResetHomeRuntimes(t *testing.T) {
 	}
 }
 
-// TestCreateAgentReprovision_ResetHome_RefusalCode: a refused home-resetting
-// reprovision carries the home-intact code only when the refusal came
-// before the home was moved aside.
-func TestCreateAgentReprovision_ResetHome_RefusalCode(t *testing.T) {
+// homeResetDetail returns the home reset detail of an error answer, or "".
+func homeResetDetail(t *testing.T, body []byte) string {
+	t.Helper()
+	var resp struct {
+		Error struct {
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode error answer: %v (%s)", err, body)
+	}
+	v, _ := resp.Error.Details[api.BrokerErrDetailHomeReset].(string)
+	return v
+}
+
+func postResetCreate(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// TestCreateAgentReprovision_ResetHome_ErrorDetail: every error answer to a
+// home-resetting request, whatever its status, says whether the home was
+// moved: "applied" only when the reprovision failed after the move.
+func TestCreateAgentReprovision_ResetHome_ErrorDetail(t *testing.T) {
 	refused := fmt.Errorf("%w: container is still running", agent.ErrReprovisionRefused)
 	for name, tc := range map[string]struct {
-		err      error
-		reset    bool
-		wantCode string
+		err        error
+		wantStatus int
+		want       string
 	}{
-		"before the reset":          {err: refused, reset: true, wantCode: api.BrokerErrCodeReprovisionRefusedHomeIntact},
-		"after the reset":           {err: fmt.Errorf("%w; %w", refused, agent.ErrHomeResetApplied), reset: true, wantCode: ErrCodeConflict},
-		"plain reprovision refusal": {err: refused, reset: false, wantCode: ErrCodeConflict},
+		"409 refusal before the reset": {err: refused, wantStatus: http.StatusConflict, want: api.BrokerHomeResetIntact},
+		"500 failure before the reset": {err: errors.New("load effective settings: boom"), wantStatus: http.StatusInternalServerError, want: api.BrokerHomeResetIntact},
+		"409 refusal after the reset":  {err: fmt.Errorf("%w; %w", refused, agent.ErrHomeResetApplied), wantStatus: http.StatusConflict, want: api.BrokerHomeResetApplied},
+		"500 failure after the reset":  {err: fmt.Errorf("skill: %w", agent.ErrHomeResetApplied), wantStatus: http.StatusInternalServerError, want: api.BrokerHomeResetApplied},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, mgr := newTestServerWithProvisionCapture()
 			mgr.reprovisionErr = tc.err
-			extra := ""
-			if tc.reset {
-				extra = `"resetHome": true, "resetHomeId": "r1", `
+			w := postResetCreate(t, srv, `{"name": "a", "id": "agent-uuid-a", "slug": "a", "provisionOnly": true, "reprovision": true, "resetHome": true, "resetHomeId": "r1", "config": {"template": "claude"}}`)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tc.wantStatus, w.Body.String())
 			}
-			body := `{"name": "a", "id": "agent-uuid-a", "slug": "a", "provisionOnly": true, "reprovision": true, ` + extra + `"config": {"template": "claude"}}`
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(w, req)
-			if w.Code != http.StatusConflict {
-				t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
-			}
-			var body409 struct {
-				Error struct {
-					Code string `json:"code"`
-				} `json:"error"`
-			}
-			_ = json.Unmarshal(w.Body.Bytes(), &body409)
-			if body409.Error.Code != tc.wantCode {
-				t.Errorf("error code = %q, want %q (body %s)", body409.Error.Code, tc.wantCode, w.Body.String())
+			if got := homeResetDetail(t, w.Body.Bytes()); got != tc.want {
+				t.Errorf("homeReset detail = %q, want %q (body %s)", got, tc.want, w.Body.String())
 			}
 		})
 	}
+
+	t.Run("400 validation", func(t *testing.T) {
+		srv, _ := newTestServerWithProvisionCapture()
+		w := postResetCreate(t, srv, `{"name": "a", "id": "agent-uuid-a", "slug": "a", "provisionOnly": true, "reprovision": true, "resetHome": true, "resetHomeId": "../x", "config": {"template": "claude"}}`)
+		if w.Code != http.StatusBadRequest || homeResetDetail(t, w.Body.Bytes()) != api.BrokerHomeResetIntact {
+			t.Fatalf("got %d %s, want 400 with the intact detail", w.Code, w.Body.String())
+		}
+	})
+	t.Run("plain reprovision error has no detail", func(t *testing.T) {
+		srv, mgr := newTestServerWithProvisionCapture()
+		mgr.reprovisionErr = refused
+		w := postResetCreate(t, srv, `{"name": "a", "id": "agent-uuid-a", "slug": "a", "provisionOnly": true, "reprovision": true, "config": {"template": "claude"}}`)
+		if w.Code != http.StatusConflict || homeResetDetail(t, w.Body.Bytes()) != "" {
+			t.Fatalf("got %d %s, want 409 without the detail", w.Code, w.Body.String())
+		}
+	})
+}
+
+// resetHomeStampedBody is dispatchStampedAgent's create as a home-resetting
+// reprovision.
+const resetHomeStampedBody = `{
+	"name": "gate-agent", "id": "agent-uuid-gate", "slug": "gate-agent", "requestId": "req-gate-reset",
+	"provisionOnly": true, "reprovision": true, "resetHome": true, "resetHomeId": "r1",
+	"config": {"harnessConfig": "hub-only", "harnessConfigId": "hc-id", "harnessConfigHash": "sha256:dispatch"}
+}`
+
+// Early create-path failures of a home-resetting request (the target
+// harness config's hydration, the broker's harness-config policy) say the
+// home is intact, and the reprovision never runs.
+func TestCreateAgentReprovision_ResetHome_EarlyFailuresAreIntact(t *testing.T) {
+	t.Run("hydration failure", func(t *testing.T) {
+		srv, mgr, _ := dispatchTestEnv(t, false)
+		attachHubHC(t, srv, "", errors.New("record vanished"))
+		w := postResetCreate(t, srv, resetHomeStampedBody)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+		}
+		if got := homeResetDetail(t, w.Body.Bytes()); got != api.BrokerHomeResetIntact {
+			t.Errorf("homeReset detail = %q, want intact (%s)", got, w.Body.String())
+		}
+		if mgr.reprovisionCalled {
+			t.Error("Reprovision ran after a hydration failure")
+		}
+	})
+	t.Run("harness-config policy refusal", func(t *testing.T) {
+		srv, mgr, _ := dispatchTestEnv(t, false)
+		attachHubHC(t, srv, scriptedHarnessYAML, nil)
+		w := postResetCreate(t, srv, resetHomeStampedBody)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+		}
+		if got := homeResetDetail(t, w.Body.Bytes()); got != api.BrokerHomeResetIntact {
+			t.Errorf("homeReset detail = %q, want intact (%s)", got, w.Body.String())
+		}
+		if mgr.reprovisionCalled {
+			t.Error("Reprovision ran after a policy refusal")
+		}
+	})
 }

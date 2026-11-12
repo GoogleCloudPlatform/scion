@@ -377,14 +377,31 @@ func TestReincarnateHarness_FailureHandling(t *testing.T) {
 			setup:       func(d *reincarnateTestDispatcher) { d.startErr = definitiveStartErr() },
 			wantForward: true, wantCalls: 1,
 		},
-		"reprovision fails after sending": {
-			setup:       func(d *reincarnateTestDispatcher) { d.reprovisionErr = provisionSent(errors.New("broker 500")) },
+		"broker answer says the home was reset": {
+			setup: func(d *reincarnateTestDispatcher) {
+				d.reprovisionErr = provisionSent(brokerHomeResetErr(http.StatusInternalServerError, api.BrokerHomeResetApplied))
+			},
 			wantForward: true, wantCalls: 1,
 		},
-		"reprovision refused with the home intact": {
+		"broker answer without the detail (ambiguous)": {
+			setup:       func(d *reincarnateTestDispatcher) { d.reprovisionErr = provisionSent(errors.New("timeout")) },
+			wantForward: true, wantCalls: 1,
+		},
+		"broker 409 refusal with the home intact": {
 			setup: func(d *reincarnateTestDispatcher) {
-				d.reprovisionErr = provisionSent(&brokerStatusError{StatusCode: http.StatusConflict,
-					Body: `{"error":{"code":"` + api.BrokerErrCodeReprovisionRefusedHomeIntact + `","message":"container is still running"}}`})
+				d.reprovisionErr = provisionSent(brokerHomeResetErr(http.StatusConflict, api.BrokerHomeResetIntact))
+			},
+			wantForward: false, wantCalls: 2,
+		},
+		"broker 500 hydration failure with the home intact": {
+			setup: func(d *reincarnateTestDispatcher) {
+				d.reprovisionErr = provisionSent(brokerHomeResetErr(http.StatusInternalServerError, api.BrokerHomeResetIntact))
+			},
+			wantForward: false, wantCalls: 2,
+		},
+		"broker 403 policy refusal with the home intact": {
+			setup: func(d *reincarnateTestDispatcher) {
+				d.reprovisionErr = provisionSent(brokerHomeResetErr(http.StatusForbidden, api.BrokerHomeResetIntact))
 			},
 			wantForward: false, wantCalls: 2,
 		},
@@ -422,20 +439,28 @@ func TestReincarnateHarness_FailureHandling(t *testing.T) {
 	}
 }
 
+// brokerHomeResetErr is a broker error answer carrying the home reset
+// detail state.
+func brokerHomeResetErr(status int, state string) *brokerStatusError {
+	return &brokerStatusError{StatusCode: status,
+		Body: `{"error":{"code":"x","message":"x","details":{"` + api.BrokerErrDetailHomeReset + `":"` + state + `"}}}`}
+}
+
 func TestReprovisionLeftHomeIntact(t *testing.T) {
-	intact := &brokerStatusError{StatusCode: http.StatusConflict,
-		Body: `{"error":{"code":"` + api.BrokerErrCodeReprovisionRefusedHomeIntact + `","message":"x"}}`}
-	plain409 := &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"conflict","message":"x"}}`}
+	plain := &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"conflict","message":"x"}}`}
 	for name, tc := range map[string]struct {
 		err  error
 		want bool
 	}{
 		"nil":                     {nil, false},
 		"not sent":                {errors.New("x"), true},
-		"sent, home intact code":  {provisionSent(intact), true},
+		"sent, 409 intact":        {provisionSent(brokerHomeResetErr(http.StatusConflict, api.BrokerHomeResetIntact)), true},
+		"sent, 500 intact":        {provisionSent(brokerHomeResetErr(http.StatusInternalServerError, api.BrokerHomeResetIntact)), true},
+		"sent, 500 applied":       {provisionSent(brokerHomeResetErr(http.StatusInternalServerError, api.BrokerHomeResetApplied)), false},
 		"sent, env still missing": {provisionSent(fmt.Errorf("needs: %w", errReprovisionHomeIntact)), true},
-		"sent, plain conflict":    {provisionSent(plain409), false},
+		"sent, no detail":         {provisionSent(plain), false},
 		"sent, transport failure": {provisionSent(errors.New("timeout")), false},
+		"sent, not JSON":          {provisionSent(&brokerStatusError{StatusCode: http.StatusBadGateway, Body: "<html>"}), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, reprovisionLeftHomeIntact(tc.err))
@@ -538,4 +563,22 @@ func TestSweepStaleReincarnations_HomeResetFailsForward(t *testing.T) {
 			}
 		})
 	}
+}
+
+// O3: an ambiguous start after a reset keeps the row on the new config and
+// its message carries the home-reset recovery text.
+func TestReincarnateHarness_AmbiguousStartNamesRecovery(t *testing.T) {
+	f := newHarnessSwitchFixture(t, nil, nil)
+	f.disp.startErr = errors.New("connection reset by peer")
+	rec := reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{HarnessConfig: "codex-hc"})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	final, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "codex-hc", final.AppliedConfig.HarnessConfig)
+	assert.Contains(t, r.Error, "the home was already reset")
+	assert.Contains(t, r.Error, fmt.Sprintf("scion reincarnate %s --harness claude-hc", f.agent.Slug))
+	calls, _ := f.disp.reprovisionSnapshot()
+	assert.Equal(t, 1, calls, "no re-render after an ambiguous start")
 }

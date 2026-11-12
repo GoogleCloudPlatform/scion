@@ -202,11 +202,11 @@ func TestReprovision_ResetHome_InvalidIDRefused(t *testing.T) {
 }
 
 func TestResetAgentHome(t *testing.T) {
-	t.Run("retry of the same reset is idempotent", func(t *testing.T) {
+	t.Run("retry of the same reset moves the partial home aside too", func(t *testing.T) {
 		agentDir := t.TempDir()
 		home := filepath.Join(agentDir, "home")
 		_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
-		if err := resetAgentHome(agentDir, home, "r1"); err != nil {
+		if err := resetAgentHome(context.Background(), agentDir, home, "r1"); err != nil {
 			t.Fatalf("first reset: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(agentDir, removingHomePrefix+"r1", ".claude")); err != nil {
@@ -214,16 +214,60 @@ func TestResetAgentHome(t *testing.T) {
 		}
 		// The earlier attempt started composing a new home, then failed.
 		_ = os.MkdirAll(filepath.Join(home, "partial"), 0o755)
-		if err := resetAgentHome(agentDir, home, "r1"); err != nil {
+		if err := resetAgentHome(context.Background(), agentDir, home, "r1"); err != nil {
 			t.Fatalf("retry: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(agentDir, removingHomePrefix+"r1", ".claude")); err != nil {
-			t.Fatalf("moved-aside home replaced on retry: %v", err)
+			t.Fatalf("first moved-aside home replaced on retry: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(agentDir, removingHomePrefix+"r1-1", "partial")); err != nil {
+			t.Fatalf("partial home not moved aside on retry: %v", err)
+		}
+		if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("home path still holds the partial home (err=%v)", err)
+		}
+	})
+	t.Run("a failed move leaves the home intact and is not applied", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		agentDir := t.TempDir()
+		parent := filepath.Join(agentDir, "ext")
+		home := filepath.Join(parent, "home")
+		_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+		// A read-only parent makes the rename fail.
+		if err := os.Chmod(parent, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+		err := resetAgentHome(context.Background(), agentDir, home, "r1")
+		if err == nil || errors.Is(err, ErrHomeResetApplied) {
+			t.Fatalf("err = %v, want a failure without ErrHomeResetApplied", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".claude")); err != nil {
+			t.Fatalf("home not intact: %v", err)
+		}
+	})
+	t.Run("a record failure after the move is applied", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		agentDir := t.TempDir()
+		homeParent := t.TempDir()
+		home := filepath.Join(homeParent, "home")
+		_ = os.MkdirAll(home, 0o755)
+		// A directory where the record goes makes its rename fail.
+		if err := os.MkdirAll(filepath.Join(agentDir, homeResetRecordFile, "x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := resetAgentHome(context.Background(), agentDir, home, "r1")
+		if !errors.Is(err, ErrHomeResetApplied) {
+			t.Fatalf("err = %v, want ErrHomeResetApplied", err)
 		}
 	})
 	t.Run("missing home is not an error", func(t *testing.T) {
 		agentDir := t.TempDir()
-		if err := resetAgentHome(agentDir, filepath.Join(agentDir, "home"), "r1"); err != nil {
+		if err := resetAgentHome(context.Background(), agentDir, filepath.Join(agentDir, "home"), "r1"); err != nil {
 			t.Fatalf("reset: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(agentDir, homeResetRecordFile)); err != nil {
@@ -237,7 +281,7 @@ func TestResetAgentHome(t *testing.T) {
 		if err := os.Symlink(target, home); err != nil {
 			t.Fatal(err)
 		}
-		if err := resetAgentHome(agentDir, home, "r1"); !errors.Is(err, ErrReprovisionRefused) {
+		if err := resetAgentHome(context.Background(), agentDir, home, "r1"); !errors.Is(err, ErrReprovisionRefused) {
 			t.Fatalf("err = %v, want ErrReprovisionRefused", err)
 		}
 		if fi, err := os.Lstat(home); err != nil || fi.Mode()&os.ModeSymlink == 0 {

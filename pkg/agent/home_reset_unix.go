@@ -17,6 +17,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,20 +26,28 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // resetAgentHome moves agentHome aside, in its own parent, as
-// removingHomePrefix+resetID, and records resetID in the agent directory's
+// removingHomePrefix+resetID (with a "-<n>" suffix when that name is
+// taken), and records resetID in the agent directory's
 // homeResetRecordFile. Reprovision calls it after every precondition has
-// passed and before ProvisionAgent composes the fresh home.
+// passed and before ProvisionAgent composes the fresh home. Both steps run
+// under the agent directory's file lock (provision.WithAgentDirLock), the
+// lock ProvisionAgentDir takes.
 //
-// It is idempotent for a retry of the same reset: a missing home is not an
-// error, and when the moved-aside name already exists the rename is
-// skipped. A home that is a symlink, or not a directory, is refused with
-// ErrReprovisionRefused before anything changes.
-func resetAgentHome(agentDir, agentHome, resetID string) error {
+// A home that exists is always moved, so a retry of the same reset never
+// composes over what an earlier attempt left at the home path. A missing
+// home is not an error. A home that is a symlink, or not a directory, is
+// refused with ErrReprovisionRefused before anything changes.
+//
+// Once the home has been moved, a failure (writing the record) carries
+// ErrHomeResetApplied; any failure before the move leaves the home intact
+// and does not.
+func resetAgentHome(ctx context.Context, agentDir, agentHome, resetID string) error {
 	if !api.ValidResetHomeID(resetID) {
 		return fmt.Errorf("%w: invalid home reset ID %q", ErrReprovisionRefused, resetID)
 	}
@@ -46,36 +55,59 @@ func resetAgentHome(agentDir, agentHome, resetID string) error {
 		return fmt.Errorf("%w: cannot reset agent home %q", ErrReprovisionRefused, agentHome)
 	}
 	homeParent := filepath.Dir(agentHome)
-	aside := filepath.Join(homeParent, removingHomePrefix+resetID)
-	if ok, err := pathcanon.Within(homeParent, aside); err != nil || !ok {
-		return fmt.Errorf("%w: moved-aside home %s is not inside %s", ErrReprovisionRefused, aside, homeParent)
-	}
-
-	fi, err := os.Lstat(agentHome)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		// Nothing to move: a retry after the move, or a home never created.
-	case err != nil:
-		return fmt.Errorf("reset agent home: %w", err)
-	case fi.Mode()&os.ModeSymlink != 0:
-		return fmt.Errorf("%w: agent home %s is a symbolic link; it cannot be reset", ErrReprovisionRefused, agentHome)
-	case !fi.IsDir():
-		return fmt.Errorf("%w: agent home %s is not a directory", ErrReprovisionRefused, agentHome)
-	default:
-		if _, err := os.Lstat(aside); err == nil {
-			// A retry of the same reset: the old home is already aside, and
-			// agentHome is what the earlier attempt started to compose.
-			break
-		} else if !errors.Is(err, fs.ErrNotExist) {
+	return provision.WithAgentDirLock(ctx, agentDir, 0, func() error {
+		moved := false
+		fi, err := os.Lstat(agentHome)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// Nothing to move: a home never created.
+		case err != nil:
 			return fmt.Errorf("reset agent home: %w", err)
+		case fi.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("%w: agent home %s is a symbolic link; it cannot be reset", ErrReprovisionRefused, agentHome)
+		case !fi.IsDir():
+			return fmt.Errorf("%w: agent home %s is not a directory", ErrReprovisionRefused, agentHome)
+		default:
+			aside, err := freeAsideName(homeParent, removingHomePrefix+resetID)
+			if err != nil {
+				return fmt.Errorf("reset agent home: %w", err)
+			}
+			// Same parent, so a single rename on one filesystem; the name
+			// was just checked absent, under the lock.
+			if err := os.Rename(agentHome, aside); err != nil {
+				return fmt.Errorf("reset agent home: move %s aside: %w", agentHome, err)
+			}
+			moved = true
 		}
-		// Same parent, so a single rename on one filesystem. The reset ID
-		// is unique to this reset, and the name was just checked absent.
-		if err := os.Rename(agentHome, aside); err != nil {
-			return fmt.Errorf("reset agent home: move %s aside: %w", agentHome, err)
+		if err := writeHomeResetRecord(agentDir, resetID); err != nil {
+			if moved {
+				return homeResetAppliedError{err}
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+// freeAsideName returns the first of dir/base, dir/base-1, dir/base-2, ...
+// that does not exist, contained in dir.
+func freeAsideName(dir, base string) (string, error) {
+	for n := 0; n < 1000; n++ {
+		name := base
+		if n > 0 {
+			name = fmt.Sprintf("%s-%d", base, n)
+		}
+		candidate := filepath.Join(dir, name)
+		if ok, err := pathcanon.Within(dir, candidate); err != nil || !ok {
+			return "", fmt.Errorf("moved-aside home %s is not inside %s", candidate, dir)
+		}
+		if _, err := os.Lstat(candidate); errors.Is(err, fs.ErrNotExist) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
 		}
 	}
-	return writeHomeResetRecord(agentDir, resetID)
+	return "", fmt.Errorf("no free name for the moved-aside home in %s", dir)
 }
 
 // writeHomeResetRecord writes homeResetRecordFile in agentDir through a

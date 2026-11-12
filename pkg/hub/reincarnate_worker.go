@@ -995,6 +995,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			// A container may run: keep the capacity; the sweep releases
 			// it once the agent is seen idle.
 			releaseCapacityOnExit = false
+			if homeReset {
+				// The home was reset before this start: say so, with
+				// the same recovery commands as a fail-forward.
+				errMsg += "; " + homeResetRecoveryHint(agentSlug, plan)
+			}
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, nil)
 			return
 		}

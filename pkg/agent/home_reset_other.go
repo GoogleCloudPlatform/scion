@@ -17,12 +17,13 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
 
 // resetAgentHome is not supported on this platform: agent provisioning is
 // unix-only. It fails closed and changes nothing.
-func resetAgentHome(agentDir, agentHome, resetID string) error {
+func resetAgentHome(ctx context.Context, agentDir, agentHome, resetID string) error {
 	return fmt.Errorf("reset agent home: %w on this platform", errors.ErrUnsupported)
 }

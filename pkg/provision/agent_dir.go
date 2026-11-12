@@ -365,3 +365,27 @@ func ensurePlainDir(path string) error {
 	}
 	return checkPlainDir(path)
 }
+
+// WithAgentDirLock runs fn under the file lock in agentDir that
+// ProvisionAgentDir and RemoveAgentWorkspace take. lockWait bounds only the
+// wait for the lock (0 is the default wait); the caller's cancellation is
+// ignored once the lock is held, so fn always finishes. agentDir must be a
+// plain directory.
+func WithAgentDirLock(ctx context.Context, agentDir string, lockWait time.Duration, fn func() error) error {
+	if err := checkPlainDir(agentDir); err != nil {
+		return fmt.Errorf("agent directory lock: %w", err)
+	}
+	if lockWait <= 0 {
+		lockWait = defaultFileLockWait()
+	}
+	held, err := acquireFileLockWithin(context.WithoutCancel(ctx), agentDir, lockWait)
+	if err != nil {
+		return fmt.Errorf("agent directory lock in %s: %w", agentDir, err)
+	}
+	defer func() {
+		if releaseErr := held.release(); releaseErr != nil {
+			slog.Warn("agent directory lock: failed to release the lock", "path", agentDir, "error", releaseErr)
+		}
+	}()
+	return fn()
+}

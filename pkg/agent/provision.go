@@ -1281,7 +1281,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// home at the same path, exactly as for a create.
 	if opts.ResetHome {
 		resetHome := config.GetAgentHomePath(projectDir, opts.Name)
-		if err := resetAgentHome(agentDir, resetHome, opts.ResetHomeID); err != nil {
+		if err := resetAgentHome(ctx, agentDir, resetHome, opts.ResetHomeID); err != nil {
 			return nil, err
 		}
 		// From here on the previous home is gone: every failure says so.
