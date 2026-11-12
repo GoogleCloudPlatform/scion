@@ -1,0 +1,323 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Choice prompts in the thread (ptone/scion#7673, design §4.1, §4.4): the
+ * double gate (hub fields and the web.chat_choices browser flag), the
+ * history side maps and live chat.message fields, and the version-guarded
+ * patch from `choice-updated` (another tab's answer over SSE) and from the
+ * card's own `choice-answered`.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { setFeatureFlag } from '../../../utils/feature-flags.js';
+import { CHAT_CHOICES_EXPERIMENT } from '../../../client/chat-choices.js';
+import type { DecisionView } from '../../../shared/types.js';
+
+const stateManager = vi.hoisted(() =>
+  Object.assign(new EventTarget(), {
+    currentScope: null,
+    isConnected: false,
+    getAgent: (): undefined => undefined,
+    seedAgents: (): void => {},
+  })
+);
+
+const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: unknown) => Promise<Response>>());
+
+vi.mock('../../../client/main.js', async () => ({
+  ...(await import('../../../client/__fixtures__/main-stub.js')),
+  stateManager,
+}));
+
+vi.mock('../../../client/api.js', () => ({
+  apiFetch,
+  extractApiError: (): Promise<string> => Promise.resolve('error'),
+  apiErrorMessageFromBody: (): undefined => undefined,
+}));
+
+await import('./chat-thread.js');
+type ScionChatThread = import('./chat-thread.js').ScionChatThread;
+
+const KEY = 'topic-choices';
+const FALLBACK = 'Intro text\n\n**D234.** Ship it?\n  yes) Yes _(recommended)_\n  no) No';
+
+function json(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response;
+}
+
+function decision(over: Partial<DecisionView> = {}): DecisionView {
+  return {
+    rowId: 'row-1',
+    messageId: 'p1',
+    key: 'D234',
+    ref: 'D234',
+    version: 1,
+    status: 'pending',
+    askerAgentId: 'a1',
+    askerAgentName: 'release-bot',
+    question: 'Ship it?',
+    defaultChoiceId: 'yes',
+    choices: [
+      { id: 'yes', label: 'Yes' },
+      { id: 'no', label: 'No' },
+    ],
+    ...over,
+  };
+}
+
+function decided(byName = 'Bob'): DecisionView {
+  return decision({
+    status: 'decided',
+    decision: {
+      choiceId: 'no',
+      label: 'No',
+      answeredByUserId: 'u-bob',
+      answeredByName: byName,
+      provenance: 'direct',
+      surface: 'web',
+      responseMessageId: 'resp-1',
+      at: '2026-11-12T15:42:00Z',
+    },
+  });
+}
+
+function prompt(id = 'p1') {
+  return {
+    id,
+    projectId: 'proj-1',
+    sender: 'agent:release-bot',
+    senderId: 'a1',
+    recipient: '',
+    recipientId: '',
+    msg: FALLBACK,
+    type: 'choice-prompt',
+    agentId: 'a1',
+    createdAt: '2026-11-12T15:41:00Z',
+    threadId: KEY,
+  };
+}
+
+let history: Record<string, unknown>;
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function open(): Promise<ScionChatThread> {
+  const thread = document.createElement('scion-chat-thread');
+  thread.conversationKey = KEY;
+  thread.projectId = 'proj-1';
+  thread.currentUserId = 'u-me';
+  document.body.appendChild(thread);
+  await thread.updateComplete;
+  await vi.waitFor(() =>
+    expect(apiFetch.mock.calls.some(([path]) => path.includes('/messages?'))).toBe(true)
+  );
+  await settle();
+  await thread.updateComplete;
+  return thread;
+}
+
+async function messageEl(thread: ScionChatThread, id = 'p1'): Promise<HTMLElement> {
+  const el = thread.shadowRoot!.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
+    `#msg-${id}`
+  )!;
+  expect(el).not.toBeNull();
+  await el.updateComplete;
+  await settle();
+  return el;
+}
+
+function cardOf(msgEl: HTMLElement) {
+  return msgEl.shadowRoot!.querySelector<
+    HTMLElement & { updateComplete: Promise<boolean>; shadowRoot: ShadowRoot }
+  >('scion-chat-choices');
+}
+
+async function footText(msgEl: HTMLElement): Promise<string> {
+  const card = cardOf(msgEl)!;
+  await card.updateComplete;
+  return card.shadowRoot.querySelector('.row-foot')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+}
+
+function bodyText(msgEl: HTMLElement): string {
+  return msgEl.shadowRoot!.querySelector('.bubble-content')?.textContent ?? '';
+}
+
+function choiceUpdated(data: Record<string, unknown>): void {
+  stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: { state: {}, data } }));
+}
+
+beforeEach(() => {
+  setFeatureFlag(CHAT_CHOICES_EXPERIMENT, true);
+  history = {
+    messages: [prompt()],
+    messageDecisions: { p1: [decision()] },
+    messageChoiceIntros: { p1: 'Intro text' },
+    messageChoiceAnswerModes: { p1: 'single' },
+  };
+  apiFetch.mockReset();
+  apiFetch.mockImplementation((path) => {
+    if (path.includes('/messages?')) return Promise.resolve(json(history));
+    return Promise.resolve(json({ items: [] }));
+  });
+});
+
+afterEach(() => {
+  document.body.innerHTML = '';
+  setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+});
+
+describe('choice prompt rendering', () => {
+  it('renders the card from the history maps and shows only the intro', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    expect(cardOf(el)).not.toBeNull();
+    const text = bodyText(el);
+    expect(text).toContain('Intro text');
+    // The hub's markdown fallback is hidden.
+    expect(text).not.toContain('recommended)_');
+    expect(text).not.toContain('**D234.**');
+    expect(el.shadowRoot!.querySelector('.bubble.choice')).not.toBeNull();
+  });
+
+  it('renders the fallback markdown as today with the browser flag off', async () => {
+    setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    expect(cardOf(el)).toBeNull();
+    expect(bodyText(el)).toContain('Ship it?');
+    expect(el.shadowRoot!.querySelector('.bubble.choice')).toBeNull();
+  });
+
+  it('renders the fallback when the hub sends no choice fields (experiment off)', async () => {
+    history = { messages: [prompt()] };
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    expect(cardOf(el)).toBeNull();
+    expect(bodyText(el)).toContain('Ship it?');
+  });
+
+  it('renders the card for a live chat.message with inline choice fields', async () => {
+    history = { messages: [] };
+    const thread = await open();
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          state: {},
+          data: {
+            ...prompt('p2'),
+            conversationKey: KEY,
+            decisions: [decision({ messageId: 'p2', rowId: 'row-2' })],
+            choiceIntro: 'Live intro',
+            answerMode: 'single',
+          },
+        },
+      })
+    );
+    await settle();
+    await thread.updateComplete;
+    const el = await messageEl(thread, 'p2');
+
+    expect(cardOf(el)).not.toBeNull();
+    expect(bodyText(el)).toContain('Live intro');
+    expect(bodyText(el)).not.toContain('**D234.**');
+  });
+});
+
+describe('choice-updated', () => {
+  it('patches the card when another tab answers (SSE)', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+    expect(await footText(el)).toBe('Awaiting your answer');
+
+    choiceUpdated({ messageId: 'p1', threadId: KEY, decision: decided() });
+    await thread.updateComplete;
+    await settle();
+
+    expect(await footText(el)).toMatch(/^Answered by Bob · /);
+  });
+
+  it('ignores an event for another conversation', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    choiceUpdated({ messageId: 'p1', threadId: 'topic-other', decision: decided() });
+    await thread.updateComplete;
+    await settle();
+
+    expect(await footText(el)).toBe('Awaiting your answer');
+  });
+
+  it('ignores a pending view arriving after the answer (out of order)', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    choiceUpdated({ messageId: 'p1', threadId: KEY, decision: decided() });
+    choiceUpdated({ messageId: 'p1', threadId: KEY, decision: decision() });
+    await thread.updateComplete;
+    await settle();
+
+    expect(await footText(el)).toMatch(/^Answered by Bob/);
+  });
+
+  it('keeps the answer when a history page fetched earlier still says pending', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+    choiceUpdated({ messageId: 'p1', threadId: KEY, decision: decided() });
+    await thread.updateComplete;
+
+    // A reconnect refetch whose page predates the answer.
+    const historyCalls = () =>
+      apiFetch.mock.calls.filter(([path]) => path.includes('/messages?')).length;
+    const before = historyCalls();
+    // The first connect is the initial one; the second is a reconnect.
+    stateManager.dispatchEvent(new Event('connected'));
+    stateManager.dispatchEvent(new Event('connected'));
+    await vi.waitFor(() => expect(historyCalls()).toBeGreaterThan(before));
+    await settle();
+    await thread.updateComplete;
+
+    expect(await footText(el)).toMatch(/^Answered by Bob/);
+  });
+
+  it('holds the view of the card’s own answer (choice-answered)', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+
+    cardOf(el)!.dispatchEvent(
+      new CustomEvent('choice-answered', {
+        detail: { messageId: 'p1', decisions: [decided('Me')], responseMessageId: 'resp-1' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await thread.updateComplete;
+
+    const internals = thread as unknown as {
+      messageMap: Map<string, { decisions?: DecisionView[] }>;
+    };
+    expect(internals.messageMap.get('p1')?.decisions?.[0]?.status).toBe('decided');
+  });
+});
