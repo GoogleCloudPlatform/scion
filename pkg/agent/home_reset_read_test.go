@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,7 +30,7 @@ func TestReadHomeResetID(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, id)
 	for _, data := range []string{`{"reset_id":"reset-A19"}`, `{`, `{}`, `{"reset_id":"../escape"}`, `{"reset_id":"a_b"}`, `{"reset_id":"` + strings.Repeat("x", 65) + `"}`} {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, homeResetRecordFile), []byte(data), 0o600))
+		writePrivateResetRecord(t, dir, data)
 		id, err := readHomeResetID(dir)
 		if data == `{"reset_id":"reset-A19"}` {
 			require.NoError(t, err)
@@ -43,4 +44,28 @@ func TestReadHomeResetID(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(dir, homeResetRecordFile), 0o700))
 	_, err = readHomeResetID(dir)
 	require.Error(t, err)
+}
+
+func TestReadHomeResetIDRejectsOversizedRecord(t *testing.T) {
+	dir := t.TempDir()
+	// A valid record prefix must not hide trailing data beyond the read bound.
+	data := `{"reset_id":"reset-1"}` + strings.Repeat(" ", 1024)
+	writePrivateResetRecord(t, dir, data)
+	id, err := readHomeResetID(dir)
+	require.Error(t, err)
+	require.Empty(t, id)
+}
+
+func TestReadHomeResetIDMissingAgentDir(t *testing.T) {
+	id, err := readHomeResetID(filepath.Join(t.TempDir(), "missing"))
+	require.Error(t, err)
+	require.Empty(t, id)
+}
+
+func writePrivateResetRecord(t *testing.T, dir, data string) {
+	t.Helper()
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, tree.Close()) }()
+	require.NoError(t, tree.WriteFile(homeResetRecordFile, []byte(data), privatefs.Private))
 }
