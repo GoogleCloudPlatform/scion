@@ -30,6 +30,9 @@ import (
 // commands with the sentinel, mode file and link result formats below.
 const FeatureToken = "home-v1"
 
+// ResetFeatureToken adds --reset-id and full-home cleanup to home prepare.
+const ResetFeatureToken = "home-reset-v1"
+
 // Reserved names. Entries whose name starts with ReservedPrefix belong to
 // scion: the sentinel, its temporary files and the write probe.
 const (
@@ -103,6 +106,7 @@ type Sentinel struct {
 	State          string          `json:"state"`
 	ManifestDigest string          `json:"manifest_digest,omitempty"`
 	Manifest       json.RawMessage `json:"manifest,omitempty"`
+	ResetID        string          `json:"reset_id,omitempty"`
 	StartID        string          `json:"start_id"`
 	LaunchID       string          `json:"launch_id,omitempty"`
 	UID            int             `json:"uid"`
@@ -146,6 +150,8 @@ func parseSentinel(data []byte) (*Sentinel, error) {
 // Decision is what prepare does with the home.
 type Decision struct {
 	Mode string
+	// CleanAll removes all content except the sentinel for a new home reset.
+	CleanAll bool
 	// CleanInterrupted is set for an interrupted seed: every entry except
 	// the sentinel is removed before seeding again.
 	CleanInterrupted bool
@@ -156,8 +162,9 @@ type Decision struct {
 // Decide returns what prepare does, from the sentinel read result, this
 // agent's ID, the current uid and the names in the home. It fails closed:
 // anything but a missing sentinel on an otherwise empty home, or a
-// sentinel of this agent with this uid, is an error and changes nothing.
-func Decide(read SentinelRead, agentID string, uid int, names []string) (Decision, error) {
+// sentinel of this agent with this uid (or a pending reset), is an error
+// and changes nothing. A reset never bypasses the agent identity check.
+func Decide(read SentinelRead, agentID string, uid int, names []string, resetID string) (Decision, error) {
 	switch {
 	case read.Err != nil:
 		return Decision{}, classErr(ErrClassPrepare, "cannot read the home sentinel: %v", read.Err)
@@ -181,6 +188,9 @@ func Decide(read SentinelRead, agentID string, uid int, names []string) (Decisio
 	}
 	if s.AgentID != agentID {
 		return Decision{}, classErr(ErrClassPrepare, "the home belongs to agent %q, not %q", s.AgentID, agentID)
+	}
+	if resetID != "" && s.ResetID != resetID {
+		return Decision{Mode: ModeSeed, CleanAll: true}, nil
 	}
 	if s.UID != uid {
 		return Decision{}, classErr(ErrClassPrepare, "the home was seeded by uid %d, this start runs as uid %d", s.UID, uid)

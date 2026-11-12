@@ -62,6 +62,7 @@ var (
 	homeSkeletonSrc string
 	homeAgentIDFlag string
 	homeStartIDFlag string
+	homeResetID     string
 )
 
 var homePrepareCmd = &cobra.Command{
@@ -98,6 +99,7 @@ memory directory. Never follows a symbolic link and never leaves the home.`,
 			Home:             homeDir,
 			MemDir:           homeMemDir,
 			AgentID:          agentID,
+			ResetID:          homeResetID,
 			StartID:          os.Getenv(envHomeStartID),
 			LaunchID:         os.Getenv(envHomeLaunchID),
 			Links:            links,
@@ -181,6 +183,7 @@ func homeFail(cmd *cobra.Command, err error) error {
 }
 
 func init() {
+	homePrepareCmd.Flags().StringVar(&homeResetID, "reset-id", "", "Latest home reset ID; clear this agent's home once when it changes")
 	homePrepareCmd.Flags().StringVar(&homeDir, "home", defaultHomeMount, "Agent home on the export, as mounted in this container")
 	homePrepareCmd.Flags().StringVar(&homeMemDir, "mem-dir", defaultMemDir, "Pod memory directory for the mode and link result files")
 	homePrepareCmd.Flags().StringVar(&homeSkeletonSrc, "skeleton-source", "", "Image home directory to copy into a new home (default "+envHomeSkeletonSrc+")")

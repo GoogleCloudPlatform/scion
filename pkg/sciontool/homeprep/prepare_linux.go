@@ -56,7 +56,7 @@ func Prepare(opts PrepareOptions) (string, error) {
 		return "", classErr(ErrClassPrepare, "cannot list the agent home: %v", err)
 	}
 	uid := os.Getuid()
-	dec, err := Decide(read, opts.AgentID, uid, names)
+	dec, err := Decide(read, opts.AgentID, uid, names, opts.ResetID)
 	if err != nil {
 		return "", err
 	}
@@ -69,15 +69,15 @@ func Prepare(opts PrepareOptions) (string, error) {
 				return "", classErr(ErrClassSeed, "cannot remove %s: %v", n, err)
 			}
 		}
-		if dec.CleanInterrupted {
-			opts.logf("Previous seed of the agent home did not finish; clearing it")
+		if dec.CleanInterrupted || dec.CleanAll {
+			opts.logf("Clearing the agent home for a reset or interrupted seed")
 			if err := removeContents(r.fd, keepSentinel); err != nil {
-				return "", classErr(ErrClassSeed, "cannot clear an interrupted seed: %v", err)
+				return "", classErr(ErrClassSeed, "cannot clear the agent home: %v", err)
 			}
 		}
 		sentinel = Sentinel{
 			Version: 1, AgentID: opts.AgentID, State: StateSeeding,
-			StartID: opts.StartID, LaunchID: opts.LaunchID,
+			StartID: opts.StartID, LaunchID: opts.LaunchID, ResetID: opts.ResetID,
 			UID: uid, GID: os.Getgid(), Skeleton: SkeletonNone,
 		}
 		if err := writeSentinel(r, &sentinel); err != nil {
