@@ -99,6 +99,39 @@ Example:
 My recommendation is plain text for agent-only updates.
 ```
 
+### Automatic links in the web chat
+
+The web chat links these forms on its own. Write them as plain text, not inside a
+Markdown link:
+
+| Write | The chat shows |
+|---|---|
+| `owner/repo#123` | A link to that GitHub issue or PR. A bare `#123` is not linked. |
+| `/workspace/<path>` or `/scion-volumes/<dir>/<path>` naming a file | A link that opens a file preview |
+| `scion://artifact/<uuid>`, optionally with `@<version>` | A link that opens the artifact preview, when artifacts are enabled |
+| `gs://<bucket>/<object>` | A link that opens the object preview, in agent messages only and when the `web.gcs_links` experiment is on |
+| `https://...`, `www....` or an email address | An ordinary link. A descriptive Markdown link still reads better. |
+
+For example, this message body renders both references as links:
+
+```markdown
+Fixed in ptone/scion#123; notes in /scion-volumes/scratchpad/notes.md.
+```
+
+- **Code:** nothing in a fenced code block is linked. In inline code, file paths and
+  `gs://` references are still linked, but GitHub references, artifact references
+  and URLs are not. Keep `owner/repo#123` outside backticks.
+- **File paths:** the last segment needs an extension, or must be a known file such
+  as `Makefile`, `Dockerfile` or `README`. Directories are not linked. A path stops
+  at any character other than a letter, digit, `_`, `.`, `-` or `/`, so a path
+  with spaces is cut short.
+- **Which file opens:** the Hub serves the preview. `/workspace/...` opens the file
+  from the project workspace, which may not be your private clone or worktree.
+  `/scion-volumes/<dir>/...` opens the project shared directory `<dir>`. A file
+  that exists only in your container may not open.
+- **GitHub references:** a reference straight after a letter, digit, `_`, `.`, `-`
+  or `/` is not linked, which keeps references inside URLs and paths from linking.
+
 ### Use the user's timezone
 
 Express times, dates and deadlines in the user's timezone, **using the timezone
