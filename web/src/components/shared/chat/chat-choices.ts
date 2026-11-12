@@ -252,6 +252,15 @@ export class ScionChatChoices extends LitElement {
       --sl-color-neutral-700: var(--scion-text, #1e293b);
     }
 
+    /*
+     * A filled primary button draws its label in neutral-0, which the dark
+     * theme maps to a dark slate (about 3.5:1 on the primary fill). Keep it
+     * white, as in light mode and the mocks.
+     */
+    .card sl-button[variant='primary']:not([outline]) {
+      --sl-color-neutral-0: #fff;
+    }
+
     .opt {
       display: flex;
       align-items: flex-start;

@@ -255,6 +255,11 @@ for (const theme of ['light', 'dark'] as const) {
       );
       const hintId = await submit.getAttribute('aria-describedby');
       await expect(c.locator(`[id="${hintId}"]`)).toHaveText('Choose an answer for 17 first');
+      // A filled (selected) choice has a white label in both themes, as in the mocks.
+      const filledColor = await d234
+        .locator('sl-button[data-choice="yes"]')
+        .evaluate((b) => getComputedStyle(b.shadowRoot!.querySelector('[part~="base"]')!).color);
+      expect(filledColor).toBe('rgb(255, 255, 255)');
       await shot(page, testInfo, theme, '04-set-pending', ['prompt-set']);
     });
 
