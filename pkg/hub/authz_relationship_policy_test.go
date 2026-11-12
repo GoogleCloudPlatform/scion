@@ -75,7 +75,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	// satisfies it until the slice that wires the token-mint check adds that
 	// mapping. No user relationship, including ownership, should grant it.
 	{"owner", "user", "gcp_service_account"}: {"gcp_service_account.use"},
-	{"owner", "user", "skill"}:               {},
+	{"owner", "user", "skill"}:               {"skill.create_global", "skill.update_global", "skill.delete_global"},
 	{"ancestor", "user", "agent"}:            {"agent.log_append", "agent.delegation.exchange", "agent.delegation.revoke", "agent.delegation.credential.revoke", "agent.delegation.list", "agent.delegation.read", "agent.delegation.revoke_all"},
 	// Agent ancestors: permissions with no agent JWT scope, and the
 	// Reserved agent.log_append.
@@ -101,7 +101,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 		"gcp_service_account.use",
 	},
 	{"progeny", "agent", "skill"}: {
-		"skill.create", "skill.create_global", "skill.update", "skill.delete", "skill.list", "skill.register",
+		"skill.create", "skill.create_global", "skill.update", "skill.update_global", "skill.delete", "skill.delete_global", "skill.list", "skill.register",
 	},
 	// Progeny material pairs (ptone/scion#2129). Every secret and env_var
 	// permission is admitted; skill_injection.deliver is granted by

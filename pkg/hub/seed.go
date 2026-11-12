@@ -105,26 +105,26 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    10, // R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    11, // R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    10, // R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
+			Revision:    11, // R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
-			// global-catalog-author: Phase 1 (ptone/scion#1713) grants only
-			// skill.create_global. Phase 2 extends this to update/delete for
-			// skills and templates. Seeded as a role *definition only* — no
-			// binding is created. An operator grants it deliberately.
-			// See design doc §3.1 (roles).
+			// global-catalog-author: grants global-catalog skill CRUD twins
+			// (skill.create_global, skill.update_global, skill.delete_global;
+			// template twins follow in Phase 2 of ptone/scion#1713). Seeded as
+			// a role *definition only* — no binding is created. An operator
+			// grants it deliberately.
 			Name:        store.SystemRoleGlobalCatalogAuthor,
-			Description: "Creates global (hub-scoped) skills",
+			Description: "Creates and maintains global (hub-scoped) catalog skills",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: skill.update_global, skill.delete_global (ptone/scion#1713); R1: skill.create_global
 			Permissions: globalCatalogAuthorPermissionIDs(),
 		},
 		{
@@ -1091,6 +1091,8 @@ func hubAdminPermissionIDs() []string {
 		"skill.delete":        true,
 		"skill.register":      true,
 		"skill.create_global": true,
+		"skill.update_global": true,
+		"skill.delete_global": true,
 		// Access constraints — full operator control.
 		// hub-admin can read and administer access constraints so that
 		// operators who are not super-admins can manage them via the web UI.
@@ -1122,6 +1124,8 @@ func hubAdminPermissionIDs() []string {
 func globalCatalogAuthorPermissionIDs() []string {
 	return []string{
 		"skill.create_global",
+		"skill.delete_global",
+		"skill.update_global",
 	}
 }
 

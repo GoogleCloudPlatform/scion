@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -364,7 +365,7 @@ func (s *Server) authorizeSkillDiscover(r *http.Request, w http.ResponseWriter, 
 func (s *Server) authorizeTokenSkillDiscover(ctx context.Context, w http.ResponseWriter, userIdent UserIdentity, projectID string) bool {
 	if projectID == "" {
 		decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent,
-			skillScopeResource(store.SkillScopeGlobal, ""), ActionCreateGlobal, hubCollectionEvidence("skill.create_global"))
+			skillScopeResource(store.SkillScopeGlobal, ""), catalogWriteAction(permissions.ResourceSkill, store.SkillScopeGlobal, ActionCreate), hubCollectionEvidence("skill.create_global"))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to discover skills for the global catalog", nil)

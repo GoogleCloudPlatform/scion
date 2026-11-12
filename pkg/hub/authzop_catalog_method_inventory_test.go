@@ -193,11 +193,14 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	// three segments, so the action handlers below receive any trailing
 	// segment as part of the third one and ignore it, or treat it as a
 	// nested file path.
-	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/download"}:       "handleSkillByID passes the download action with a trailing segment to handleSkillDownload, which ignores it and answers as for the bare path",
-	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/resolve"}:        "handleSkillByID passes the resolve action with a trailing segment to handleSkillResolveSingle, which ignores it and answers as for the bare path",
-	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/upload"}:      "handleSkillByID passes the upload action with a trailing segment to handleSkillUpload, which ignores it and answers as for the bare path",
-	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/finalize"}:    "handleSkillByID passes the finalize action with a trailing segment to handleSkillFinalize, which ignores it and answers as for the bare path",
-	{OperationID: "skill.update", Method: "PUT", Pattern: "/api/v1/skills/{id}/files/{path}"}: "the file path may be nested, so the trailing segment names a file below {path}; the write is checked like the bare path and answers 409 for the published version",
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/download"}:              "handleSkillByID passes the download action with a trailing segment to handleSkillDownload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/resolve"}:               "handleSkillByID passes the resolve action with a trailing segment to handleSkillResolveSingle, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/upload"}:             "handleSkillByID passes the upload action with a trailing segment to handleSkillUpload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/finalize"}:           "handleSkillByID passes the finalize action with a trailing segment to handleSkillFinalize, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "PUT", Pattern: "/api/v1/skills/{id}/files/{path}"}:        "the file path may be nested, so the trailing segment names a file below {path}; the write is checked like the bare path and answers 409 for the published version",
+	{OperationID: "skill.global.update", Method: "POST", Pattern: "/api/v1/skills/{id}/upload"}:      "same as skill.update above on a global-scope skill",
+	{OperationID: "skill.global.update", Method: "POST", Pattern: "/api/v1/skills/{id}/finalize"}:    "same as skill.update above on a global-scope skill",
+	{OperationID: "skill.global.update", Method: "PUT", Pattern: "/api/v1/skills/{id}/files/{path}"}: "same as skill.update above on a global-scope skill",
 	// The batch resolve is reached through the skill ID segment "resolve",
 	// so a trailing segment is ignored the same way.
 	{OperationID: "skill.resolve.local", Method: "POST", Pattern: "/api/v1/skills/resolve"}:          "handleSkillByID sends any path whose first segment is \"resolve\" to handleSkillsResolve, which ignores the rest",

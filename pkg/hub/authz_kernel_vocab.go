@@ -73,6 +73,8 @@ const (
 	// so a system-scoped binding carrying only these IDs does not
 	// silently grant project-level authority.
 	ActionCreateGlobal Action = "create_global"
+	ActionUpdateGlobal Action = "update_global"
+	ActionDeleteGlobal Action = "delete_global"
 
 	// ActionAutoProvide gates turning on a broker's auto-provide setting
 	// (broker.auto_provide).

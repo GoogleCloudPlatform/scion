@@ -155,14 +155,15 @@ var compressBypassedUntagged = map[string]string{
 	// versions and resolve paths are bypassed as a whole. These carry no
 	// signed URL: workspace status and finalize, the link list and revoke,
 	// skill version reads and deprecation, and the per-skill resolve.
-	"GET /api/v1/agents/{id}/workspace":                   "signed-URL path",
-	"POST /api/v1/agents/{id}/workspace/sync-to/finalize": "signed-URL path",
-	"GET /api/v1/artifacts/{id}/links":                    "signed-URL path",
-	"DELETE /api/v1/artifacts/{id}/links/{linkId}":        "signed-URL path",
-	"GET /api/v1/skills/{id}/resolve":                     "signed-URL path",
-	"GET /api/v1/skills/{id}/versions":                    "signed-URL path",
-	"GET /api/v1/skills/{id}/versions/{vid}":              "signed-URL path",
-	"POST /api/v1/skills/{id}/versions/{vid}/deprecate":   "signed-URL path",
+	"GET /api/v1/agents/{id}/workspace":                               "signed-URL path",
+	"POST /api/v1/agents/{id}/workspace/sync-to/finalize":             "signed-URL path",
+	"GET /api/v1/artifacts/{id}/links":                                "signed-URL path",
+	"DELETE /api/v1/artifacts/{id}/links/{linkId}":                    "signed-URL path",
+	"GET /api/v1/skills/{id}/resolve":                                 "signed-URL path",
+	"GET /api/v1/skills/{id}/versions":                                "signed-URL path",
+	"GET /api/v1/skills/{id}/versions/{vid}":                          "signed-URL path",
+	"POST /api/v1/skills/{id}/versions/{vid}/deprecate":               "signed-URL path",
+	"POST /api/v1/skills/{id}/versions/{vid}/deprecate #scope=global": "signed-URL path",
 
 	// Artifact capability routes: the shared link answers with a redirect
 	// whose Location header carries the view capability, and the view route

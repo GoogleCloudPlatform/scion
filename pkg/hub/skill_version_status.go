@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -51,16 +52,19 @@ func skillVersionStatusListed(status string) bool {
 }
 
 // skillVersionsAllStatuses reports whether identity sees the versions of
-// skill in every status: the skill's owner, its creator, or a caller with
-// update access to the skill.
+// skill in every status: the skill's owner or creator (for non-global skills;
+// global catalog authorship is role-governed, never owner-governed), or a
+// caller with update access to the skill.
 func (s *Server) skillVersionsAllStatuses(ctx context.Context, identity Identity, skill *store.Skill) bool {
 	if identity == nil || skill == nil {
 		return false
 	}
-	if id := identity.ID(); id != "" && (id == skill.OwnerID || id == skill.CreatedBy) {
-		return true
+	if skill.Scope != store.SkillScopeGlobal {
+		if id := identity.ID(); id != "" && (id == skill.OwnerID || id == skill.CreatedBy) {
+			return true
+		}
 	}
-	return s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate).Allowed
+	return s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate)).Allowed
 }
 
 // skillVersionVisible reports whether identity may read sv, a version of

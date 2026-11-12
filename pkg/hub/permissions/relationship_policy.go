@@ -142,11 +142,14 @@ var RelationshipPolicies = []RelationshipPolicy{
 	},
 	{
 		// owner/user/skill (TestRelationshipCharacterization_Owner).
+		// Global-catalog twins (skill.*_global) are excluded: global skill
+		// records have no owner relationship (skillResource omits OwnerID on
+		// SkillScopeGlobal), and global catalog authorship is role-governed.
 		Relationship:   "owner",
 		PrincipalKinds: []string{"user"},
 		ResourceType:   ResourceSkill,
 		PermissionIDs: []string{
-			"skill.create", "skill.create_global", "skill.read", "skill.update", "skill.delete",
+			"skill.create", "skill.read", "skill.update", "skill.delete",
 			"skill.list", "skill.register",
 		},
 	},

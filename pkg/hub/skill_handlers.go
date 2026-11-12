@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -490,7 +491,7 @@ func (s *Server) canCreateSkillInScope(ctx context.Context, scope, scopeID strin
 		if userIdent == nil {
 			return false
 		}
-		return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(scope, ""), globalWriteAction(scope, ActionCreate)).Allowed
+		return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(scope, ""), catalogWriteAction(permissions.ResourceSkill, scope, ActionCreate)).Allowed
 	case store.SkillScopeProject:
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			own := agentIdent.ProjectID()
@@ -656,7 +657,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		// hub scope, so a user access token needs skill:create_global on a
 		// hub boundary.
 		decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent, skillScopeResource(scope, ""),
-			globalWriteAction(scope, ActionCreate), hubCollectionEvidence("skill.create_global"))
+			catalogWriteAction(permissions.ResourceSkill, scope, ActionCreate), hubCollectionEvidence("skill.create_global"))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
 			return
@@ -797,7 +798,7 @@ func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) 
 	if !requireSkillProfileWriter(w, r, existing) {
 		return
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, skillResource(existing), ActionUpdate)
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(existing), catalogWriteAction(permissions.ResourceSkill, existing.Scope, ActionUpdate))
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to update this skill", nil)
 		return
@@ -850,7 +851,7 @@ func (s *Server) deleteSkill(w http.ResponseWriter, r *http.Request, id string) 
 	if !requireSkillProfileWriter(w, r, existing) {
 		return
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, skillResource(existing), ActionDelete)
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(existing), catalogWriteAction(permissions.ResourceSkill, existing.Scope, ActionDelete))
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete this skill", nil)
 		return
@@ -992,7 +993,7 @@ func (s *Server) deprecateSkillVersion(w http.ResponseWriter, r *http.Request, s
 	if !requireSkillProfileWriter(w, r, skill) {
 		return
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to deprecate versions of this skill", nil)
 		return
@@ -1054,7 +1055,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	if !requireSkillProfileWriter(w, r, skill) {
 		return
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to publish versions for this skill", nil)
 		return
@@ -1385,7 +1386,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	if !requireSkillProfileWriter(w, r, skill) {
 		return
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to upload files for this skill", nil)
 		return
@@ -1466,7 +1467,7 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 	if !requireSkillProfileWriter(w, r, skill) {
 		return
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to finalize versions for this skill", nil)
 		return
@@ -1898,21 +1899,6 @@ func expandScopeAliases(uri *api.SkillURI, projectID, userID string) {
 	if uri.Scope == store.SkillScopeUser && uri.ScopeID == "" && userID != "" {
 		uri.ScopeID = userID
 	}
-}
-
-// globalWriteAction maps a CRUD action to its global-catalog twin for records
-// that live in the hub catalog. Project- and user-scoped records are unchanged.
-// Key off the record's stored scope, not parentlessness — user-scoped records
-// are also parentless but must NOT require global permissions. See design §3.1.
-func globalWriteAction(scope string, a Action) Action {
-	switch scope {
-	case store.SkillScopeGlobal, store.SkillScopeCore:
-		switch a {
-		case ActionCreate:
-			return ActionCreateGlobal
-		}
-	}
-	return a
 }
 
 // skillResource constructs a Resource from a store.Skill for capability computation.

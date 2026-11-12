@@ -206,7 +206,7 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	// list is exactly what the caller can do.
 	var allowed []string
 	for _, action := range actions {
-		decision := a.CheckAccess(ctx, identity, resource, action)
+		decision := a.CheckAccess(ctx, identity, resource, catalogWriteAction(resource.Type, resource.ScopeKind, action))
 		if decision.Allowed {
 			allowed = append(allowed, string(action))
 		}
@@ -249,6 +249,8 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
+	// ComputeScopeCapabilities checks scope-level actions (ParentType/ParentID,
+	// empty ScopeKind), so restore plain action here rather than catalogWriteAction.
 	var allowed []string
 	for _, action := range actions {
 		decision := a.CheckAccess(ctx, identity, resource, action)
@@ -323,7 +325,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		}
 		var allowed []string
 		for _, action := range actions {
-			decision := a.CheckAccess(ctx, identity, resource, action)
+			decision := a.CheckAccess(ctx, identity, resource, catalogWriteAction(resource.Type, resource.ScopeKind, action))
 			if decision.Allowed {
 				allowed = append(allowed, string(action))
 			}
@@ -380,7 +382,7 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 		}
 		var allowed []string
 		for _, action := range actions {
-			decision := a.CheckAccess(ctx, identity, resource, action)
+			decision := a.CheckAccess(ctx, identity, resource, catalogWriteAction(resource.Type, resource.ScopeKind, action))
 			if decision.Allowed {
 				allowed = append(allowed, string(action))
 			}
@@ -434,7 +436,7 @@ func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, ident
 	}
 	allowed := make([]string, 0, len(actions))
 	for _, action := range actions {
-		if a.DecideFromContext(ctx, resource, action).Allowed {
+		if a.DecideFromContext(ctx, resource, catalogWriteAction(resource.Type, resource.ScopeKind, action)).Allowed {
 			allowed = append(allowed, string(action))
 		}
 	}
