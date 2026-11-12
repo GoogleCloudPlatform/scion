@@ -16,11 +16,15 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
@@ -120,4 +124,24 @@ func PurgeResetHomeResidueUnder(globalDir string, log *slog.Logger) {
 			}
 		}
 	}
+}
+
+// readHomeResetID returns the latest persistent reset ID. A damaged record
+// refuses the start so an NFS runtime cannot silently reuse the old home.
+func readHomeResetID(agentDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(agentDir, homeResetRecordFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read home reset record: %w", err)
+	}
+	var rec homeResetRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return "", fmt.Errorf("parse home reset record: %w", err)
+	}
+	if !api.ValidResetHomeID(rec.ResetID) {
+		return "", fmt.Errorf("invalid home reset ID in %s", homeResetRecordFile)
+	}
+	return rec.ResetID, nil
 }

@@ -149,6 +149,9 @@ type RunConfig struct {
 	// HomeStorage describes the NFS agent home. Set exactly when
 	// HomeStorageBackend is HomeStorageNFS.
 	HomeStorage *HomeStorageRealization
+	// HomeResetID is the latest home reset ID from home-reset.json, empty
+	// when none. NFS-home runtimes compare it to their persistent leaf.
+	HomeResetID string
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
