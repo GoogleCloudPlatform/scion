@@ -51,6 +51,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'nodeImageRegistry',
   'reprovision',
   'reprovisionEmptyPerAgent',
+  'reprovisionResetHomeRuntimes',
   'startsInFlight',
   'templateTiers',
   'unlimitedCountLimits',
