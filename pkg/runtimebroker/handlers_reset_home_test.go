@@ -127,7 +127,7 @@ func TestHeartbeatService_ReportsResetHomeRuntimes(t *testing.T) {
 	if len(calls) != 1 || calls[0].Heartbeat.Capabilities == nil {
 		t.Fatalf("expected 1 heartbeat with capabilities, got %d calls", len(calls))
 	}
-	want := []string{"docker", "podman", "container", "cloudrun", "cloudrun-instances"}
+	want := []string{"docker", "podman", "container", "cloudrun", "cloudrun-instances", "kubernetes"}
 	if got := calls[0].Heartbeat.Capabilities.ReprovisionResetHomeRuntimes; !slices.Equal(got, want) {
 		t.Errorf("heartbeat ReprovisionResetHomeRuntimes = %v, want %v", got, want)
 	}
