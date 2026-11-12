@@ -245,7 +245,14 @@ func TestScheduledMessageWake_Deferred(t *testing.T) {
 		u := f.user(t, "sw-deferred-ok", lifecyclePerms...)
 		_, err := f.store.ClaimAgentStart(context.Background(), f.target.ID, "other-hub", store.StartClaimUser, "", time.Minute)
 		require.NoError(t, err)
+		// The other start writes starting only after the readiness wait's
+		// first poll (500ms) would have run: the wake must wait for the
+		// start to begin rather than fail on the suspended row.
 		go func() {
+			time.Sleep(600 * time.Millisecond)
+			_ = f.store.UpdateAgentStatus(context.Background(), f.target.ID, store.AgentStatusUpdate{
+				Phase: string(state.PhaseStarting),
+			})
 			time.Sleep(300 * time.Millisecond)
 			_ = f.store.UpdateAgentStatus(context.Background(), f.target.ID, store.AgentStatusUpdate{
 				Phase: string(state.PhaseRunning), Activity: "idle",

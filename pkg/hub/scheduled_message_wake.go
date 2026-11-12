@@ -118,7 +118,11 @@ func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEve
 	// that does not become ready fails the fire.
 	slog.Info("Scheduler: scheduled message wake deferred; waiting for the start in progress",
 		"eventID", evt.ID, "agent_id", agent.ID, "holder", string(agent.StartClaimKind))
-	activity, err := s.waitForAgentReady(wakeCtx, agent.ID, wakeReadyTimeout)
+	err := s.waitForStartToBegin(wakeCtx, agent.ID, wakeReadyTimeout)
+	var activity state.Activity
+	if err == nil {
+		activity, err = s.waitForAgentReady(wakeCtx, agent.ID, wakeReadyTimeout)
+	}
 	if err != nil {
 		slog.Warn("Scheduler: scheduled message target did not become ready after a deferred wake",
 			"eventID", evt.ID, "agent_id", agent.ID, "error", err)
@@ -131,4 +135,31 @@ func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEve
 	}
 	agent.Activity = string(activity)
 	return nil
+}
+
+// scheduledWakePollInterval is how often waitForStartToBegin re-reads the
+// target.
+const scheduledWakePollInterval = 100 * time.Millisecond
+
+// waitForStartToBegin waits, up to timeout, while agentID is still at rest
+// in the suspended phase: a start that holds the start claim may not have
+// written starting yet, and waitForAgentReady treats a suspended row as a
+// failed start.
+func (s *Server) waitForStartToBegin(ctx context.Context, agentID string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		a, err := s.store.GetAgent(ctx, agentID)
+		if err != nil {
+			return fmt.Errorf("failed to check agent status: %w", err)
+		}
+		if !scheduledWakeNeedsResume(a) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("the start in progress did not begin")
+		case <-time.After(scheduledWakePollInterval):
+		}
+	}
 }
