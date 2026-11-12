@@ -206,6 +206,12 @@ export class ScionChatChoices extends LitElement {
       margin-bottom: 0;
     }
 
+    /* The first block is the question; what follows is detail (mock s3). */
+    .q > div > * + * {
+      font-weight: 400;
+      color: var(--scion-text-secondary, #475569);
+    }
+
     .q :is(h1, h2, h3, h4, h5, h6) {
       font-size: 1em;
       margin: 0.25rem 0;

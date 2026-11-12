@@ -175,6 +175,11 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(c.locator('.choices.stack')).toBeVisible();
       await expect(c.locator('button.opt.recd')).toHaveAttribute('data-choice', 'extend');
       await expect(c.locator('.desc code').first()).toHaveText('timeout');
+      // The question's first paragraph is the question; the second is muted detail.
+      const paragraphs = c.locator('.q p');
+      await expect(paragraphs).toHaveCount(2);
+      await expect(paragraphs.nth(0)).toHaveCSS('font-weight', '600');
+      await expect(paragraphs.nth(1)).toHaveCSS('font-weight', '400');
       await shot(page, testInfo, theme, '03-single-descriptions', ['prompt-desc']);
     });
 
