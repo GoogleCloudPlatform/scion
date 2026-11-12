@@ -37,7 +37,10 @@ The experiment and runtime capability list remain those supplied by P1.
 - GREEN: shard-2 binary `hub.test -test.v -test.run '^TestReincarnateHarness_'`
   passed, including dry-run/real refusal parity, names without values, unchanged
   row/history/dispatcher on 422, explicit no-auth skips, and successful env/secret
-  credentials. The complete shard-2 run is still in progress at initial submission.
+  credentials. The complete `make test-hub-shard SHARD=2` also passed: 227s, four existing
+  skips (optional soak, Ent-only group deletion, PostgreSQL-only topics, and
+  the existing DEF-15 attachment case). Test-list validation: 5358 tests compiled
+  as expected.
 - `make fmt-check check-custom build`: passed (all custom checks; 121 image-script
   checks; Linux binary built).
 - `GOGC=40 go vet -overlay /tmp/p2-vet-overlay/overlay.json -tags
