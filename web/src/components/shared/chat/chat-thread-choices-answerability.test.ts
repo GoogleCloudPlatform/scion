@@ -282,6 +282,43 @@ describe('asker answerability', () => {
   });
 });
 
+describe('a 403 over the asker read', () => {
+  it('a 403 on one card is not undone by the asker read resolving later', async () => {
+    let release: (r: Response) => void = () => {};
+    const slow = new Promise<Response>((resolve) => (release = resolve));
+    apiFetch.mockImplementation((path) => {
+      if (path.includes('/messages?')) return Promise.resolve(json(history));
+      if (path === '/api/v1/agents/a1') return slow;
+      if (path.includes('/answer')) {
+        return Promise.resolve(
+          json(
+            {
+              error: {
+                code: 'message_denied',
+                message: 'Message delivery denied',
+                details: { reason: 'mode_lineage_no_ancestry' },
+              },
+            },
+            403
+          )
+        );
+      }
+      return Promise.resolve(json({ items: [] }));
+    });
+    const thread = await open();
+    const first = await cardOf(thread, 'p1');
+    first.shadowRoot!.querySelector<HTMLElement>('[data-choice="no"]')!.click();
+    await settle();
+    await thread.updateComplete;
+    expect((await cardOf(thread, 'p2')).answerBlocked).toBe(true);
+
+    release(json({ id: 'a1', name: 'release-bot', _messageability: { canMessage: true } }));
+    await settle();
+    await thread.updateComplete;
+    expect((await cardOf(thread, 'p2')).answerBlocked).toBe(true);
+  });
+});
+
 describe('choice-response lines', () => {
   beforeEach(() => {
     history.messages = [prompt('p1', 41), response('c1', 'u-me', 42), response('c2', 'u-bob', 43)];

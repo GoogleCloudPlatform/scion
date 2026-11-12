@@ -380,3 +380,51 @@ describe('set prompts and jump links', () => {
     expect(scroll).toHaveBeenCalledWith('p2');
   });
 });
+
+describe('history choice maps on the other load paths', () => {
+  it('renders a prompt that arrives through a lightweight-notification backfill as a card', async () => {
+    history = { messages: [] };
+    const thread = await open();
+    history = {
+      messages: [prompt('p2')],
+      messageDecisions: { p2: [decision({ messageId: 'p2', rowId: 'row-2' })] },
+      messageChoiceIntros: { p2: 'Backfilled intro' },
+      messageChoiceAnswerModes: { p2: 'single' },
+    };
+    stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: undefined }));
+    await vi.waitFor(async () => {
+      await thread.updateComplete;
+      expect(thread.shadowRoot!.querySelector('#msg-p2')).not.toBeNull();
+    });
+    const el = await messageEl(thread, 'p2');
+    expect(cardOf(el)).not.toBeNull();
+    expect(bodyText(el)).toContain('Backfilled intro');
+    expect(bodyText(el)).not.toContain('**D234.**');
+  });
+
+  it('renders the replacement as a card after Jump to v2 loads a window around it', async () => {
+    const thread = await open();
+    apiFetch.mockImplementation((path) => {
+      if (path.includes('around=')) {
+        return Promise.resolve(
+          json({
+            messages: [prompt('p9')],
+            messageDecisions: { p9: [decision({ messageId: 'p9', rowId: 'row-9', version: 2 })] },
+            messageChoiceIntros: { p9: 'Version two' },
+            messageChoiceAnswerModes: { p9: 'single' },
+          })
+        );
+      }
+      if (path.includes('/messages?')) return Promise.resolve(json(history));
+      return Promise.resolve(json({ items: [] }));
+    });
+    void thread.scrollToMessageById('p9');
+    await vi.waitFor(async () => {
+      await thread.updateComplete;
+      expect(thread.shadowRoot!.querySelector('#msg-p9')).not.toBeNull();
+    });
+    const el = await messageEl(thread, 'p9');
+    expect(cardOf(el)).not.toBeNull();
+    expect(bodyText(el)).not.toContain('**D234.**');
+  });
+});
