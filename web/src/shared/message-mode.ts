@@ -166,7 +166,9 @@ export function getDenialMessage(
   if (!template) {
     return 'Message delivery denied.';
   }
+  // Function replacements: a name is inserted as is, with no `$&`-style
+  // patterns expanded.
   return template
-    .replace('{recipient}', recipientName || 'This agent')
-    .replace('{sender}', senderName || 'This agent');
+    .replace('{recipient}', () => recipientName || 'This agent')
+    .replace('{sender}', () => senderName || 'This agent');
 }

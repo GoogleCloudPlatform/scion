@@ -341,3 +341,57 @@ describe('Enter on the focused card', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 });
+
+describe('agent-written markdown in the card', () => {
+  async function rendered(el: ScionChatChoices): Promise<void> {
+    await vi.waitFor(
+      () => {
+        if (!root(el).querySelector('.desc strong')) throw new Error('markdown not rendered yet');
+      },
+      { timeout: 2000, interval: 10 }
+    );
+  }
+
+  it('renders no link or image inside a choice button, so its text cannot open anything', async () => {
+    const el = await mount([
+      view({
+        question: 'Ship it? See [the plan](https://example.com/plan).',
+        choices: [
+          {
+            id: 'yes',
+            label: 'Yes',
+            description:
+              '**Now.** See [the runbook](https://example.com/runbook) ![diagram](https://example.com/d.png)',
+          },
+          { id: 'no', label: 'No', description: 'Wait.' },
+        ],
+      }),
+    ]);
+    await rendered(el);
+
+    const opt = button(el, 'yes');
+    expect(opt.tagName).toBe('BUTTON');
+    expect(opt.querySelector('a, img')).toBeNull();
+    const desc = opt.querySelector('.desc')!;
+    expect(desc.textContent).toContain('See the runbook diagram');
+    // The question is not inside a control: its link stays.
+    expect(root(el).querySelector('.q a')?.getAttribute('href')).toBe('https://example.com/plan');
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('drops images from elsewhere in the question', async () => {
+    const el = await mount([
+      view({
+        question: 'Ship it? ![pixel](https://tracker.example/p.gif)',
+        choices: [
+          { id: 'yes', label: 'Yes', description: '**Now.**' },
+          { id: 'no', label: 'No' },
+        ],
+      }),
+    ]);
+    await rendered(el);
+
+    expect(root(el).querySelector('.q')?.textContent).toContain('Ship it?');
+    expect(root(el).querySelector('img[src^="https://tracker.example"]')).toBeNull();
+  });
+});

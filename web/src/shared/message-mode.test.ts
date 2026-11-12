@@ -59,6 +59,17 @@ describe('getMessageModeDisplay', () => {
   });
 });
 
+describe('getDenialMessage — names', () => {
+  it('inserts a name as is, with no replacement patterns expanded', () => {
+    expect(getDenialMessage('mode_none', "bot-$&-$'-$`")).toBe(
+      "bot-$&-$'-$` is sealed (mode: none) and cannot receive messages."
+    );
+    expect(getDenialMessage('mode_lineage_agent_to_agent', undefined, 'a$&b')).toBe(
+      'a$&b is in lineage mode: it can message lineage users but not other agents.'
+    );
+  });
+});
+
 describe('getDenialMessage — cross-project codes', () => {
   it('returns message for cross_project_disabled', () => {
     const msg = getDenialMessage('cross_project_disabled');

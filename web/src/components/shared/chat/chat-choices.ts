@@ -546,19 +546,35 @@ export class ScionChatChoices extends LitElement {
     try {
       const renderer = await getMarkdownRenderer();
       const next = new Map(this.rendered);
-      for (const src of sources) next.set(src, renderer.renderFragment(src));
+      // No image from elsewhere: agent-written markdown must not make every
+      // viewer's browser fetch from a host the agent chose.
+      for (const src of sources) {
+        next.set(src, renderer.renderFragment(src, { sameOriginImagesOnly: true }));
+      }
       this.rendered = next;
     } catch {
       // Plain text stays shown.
     }
   }
 
-  /** Rendered markdown for `src`, as fresh nodes; inline unwraps a lone paragraph. */
+  /**
+   * Rendered markdown for `src`, as fresh nodes. Inline (a choice
+   * description, which sits inside the choice's button) unwraps a lone
+   * paragraph and turns links into their text and images into their alt
+   * text: a link inside the button would record the answer when clicked,
+   * and nested interactive content is unreachable by keyboard.
+   */
   private markdown(src: string, inline: boolean): Node | string {
     const frag = this.rendered.get(src);
     if (!frag) return src;
     const copy = frag.cloneNode(true) as DocumentFragment;
     if (inline) {
+      for (const a of Array.from(copy.querySelectorAll('a'))) {
+        a.replaceWith(...Array.from(a.childNodes));
+      }
+      for (const img of Array.from(copy.querySelectorAll('img'))) {
+        img.replaceWith(img.getAttribute('alt') ?? '');
+      }
       const elements = Array.from(copy.children);
       if (elements.length === 1 && elements[0]?.tagName === 'P') {
         const span = document.createElement('span');
