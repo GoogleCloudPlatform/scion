@@ -577,3 +577,119 @@ func TestScheduledMessageWake_RecurringWakeFireRefusedWhileShuttingDown(t *testi
 	assert.Equal(t, store.ScheduledEventFailed, events.Items[0].Status)
 	assert.Zero(t, srv.scheduledWakeFires.stop(ctx, time.Second), "nothing left to join")
 }
+
+// createDueWakeTestSchedule creates a message schedule through the API and
+// makes it due at due.
+func createDueWakeTestSchedule(t *testing.T, srv *Server, s store.Store, projectID, name string, wake bool, due time.Time) store.Schedule {
+	t.Helper()
+	ctx := context.Background()
+	rec := doRequest(t, srv, "POST", "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name: name, CronExpr: "*/5 * * * *", EventType: "message",
+		AgentName: "worker", Message: "poke", Wake: wake,
+	})
+	require.Equal(t, 201, rec.Code, rec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	row, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	row.NextRunAt = &due
+	require.NoError(t, s.UpdateSchedule(ctx, row, store.ScheduleFieldMask{NextRunAt: true},
+		row.AuthorizationRevision, row.AuthorizationRevision != 0, nil))
+	row, err = s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	return *row
+}
+
+// TestScheduledMessageWake_RecurringWakeFirePanicIsContained: a panic in a
+// recurring wake fire, which runs on its own goroutine outside the
+// scheduler's recovery, is contained (review 4 of ptone/scion#7769): the hub
+// keeps running, the event and the schedule record the failure, and other
+// schedules still execute.
+func TestScheduledMessageWake_RecurringWakeFirePanicIsContained(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	past := time.Now().UTC().Add(-time.Minute)
+	panicky := createDueWakeTestSchedule(t, srv, s, projectID, "panicky-wake", true, past)
+	other := createDueWakeTestSchedule(t, srv, s, projectID, "after-panic", false, past)
+
+	var otherRan atomic.Int32
+	srv.scheduler.RegisterEventHandler("message", func(_ context.Context, evt store.ScheduledEvent) error {
+		if evt.ScheduleID == panicky.ID {
+			panic("wake handler exploded")
+		}
+		otherRan.Add(1)
+		return nil
+	})
+
+	srv.executeSchedule(ctx, panicky, time.Now().UTC())
+	srv.scheduledWakeFires.wg.Wait()
+
+	got, err := s.GetSchedule(ctx, panicky.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.RunCount)
+	assert.Equal(t, store.ScheduleRunError, got.LastRunStatus)
+	assert.Contains(t, got.LastRunError, "handler panicked: wake handler exploded")
+	events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: panicky.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, events.Items, 1)
+	assert.Equal(t, store.ScheduledEventFailed, events.Items[0].Status)
+	assert.Contains(t, events.Items[0].Error, "handler panicked")
+
+	// The hub is still up: another schedule executes.
+	srv.executeSchedule(ctx, other, time.Now().UTC())
+	assert.Equal(t, int32(1), otherRan.Load())
+	got, err = s.GetSchedule(ctx, other.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.RunCount)
+	assert.Equal(t, store.ScheduleRunSuccess, got.LastRunStatus)
+}
+
+// TestScheduledMessageWake_RecurringWakeFireEventNotReplayable: while a
+// recurring wake fire runs, its materialized event is already claimed, so
+// a hub restart or another replica starting meanwhile does not replay it
+// from the pending events (loadPersistedTimers): no late duplicate wake
+// and delivery (review 4 of ptone/scion#7769). The outcome then sets the
+// final status.
+func TestScheduledMessageWake_RecurringWakeFireEventNotReplayable(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	sched := createDueWakeTestSchedule(t, srv, s, projectID, "slow-claimed-wake", true, time.Now().UTC().Add(-time.Minute))
+
+	running := make(chan string, 1)
+	release := make(chan struct{})
+	srv.scheduler.RegisterEventHandler("message", func(_ context.Context, evt store.ScheduledEvent) error {
+		running <- evt.ID
+		<-release
+		return nil
+	})
+
+	srv.executeSchedule(ctx, sched, time.Now().UTC())
+	var eventID string
+	select {
+	case eventID = <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wake fire did not start")
+	}
+
+	// What a restarting hub or a starting replica would replay.
+	pending, err := s.ListPendingScheduledEvents(ctx)
+	require.NoError(t, err)
+	for _, p := range pending {
+		assert.NotEqual(t, eventID, p.ID, "a running wake fire's event is not pending")
+	}
+	evt, err := s.GetScheduledEvent(ctx, eventID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFired, evt.Status, "claimed before the fire runs")
+	if claimer, ok := s.(store.ScheduledEventClaimer); ok {
+		claimed, err := claimer.ClaimScheduledEvent(ctx, eventID, store.ScheduledEventExpired)
+		require.NoError(t, err)
+		assert.False(t, claimed, "a replay cannot claim it again")
+	}
+
+	close(release)
+	srv.scheduledWakeFires.wg.Wait()
+	evt, err = s.GetScheduledEvent(ctx, eventID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFired, evt.Status)
+	assert.Empty(t, evt.Error)
+}

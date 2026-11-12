@@ -7017,6 +7017,28 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// a wake fire is not started: it is recorded as failed.
 	if wakeFire {
 		fireCtx := context.WithoutCancel(ctx)
+		// Claim the materialized event (pending -> fired) before the fire
+		// runs. A wake fire can run for minutes, and a pending event would
+		// be replayed by loadPersistedTimers if the hub restarts, or
+		// another replica starts, meanwhile: one late duplicate wake and
+		// delivery. runScheduleFire's outcome write then sets the final
+		// status. An event that cannot be claimed is not fired.
+		if claimer, ok := s.store.(store.ScheduledEventClaimer); ok {
+			claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, store.ScheduledEventFired)
+			if err != nil || !claimed {
+				msg := "failed to claim the wake fire's event"
+				if err != nil {
+					msg = fmt.Sprintf("%s: %v", msg, err)
+				}
+				log.Error("schedule-evaluator: "+msg, "event_id", evt.ID, "claimed", claimed)
+				recordCtx, cancelRecord := context.WithTimeout(fireCtx, 10*time.Second)
+				defer cancelRecord()
+				failedAt := time.Now()
+				_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, store.ScheduledEventFailed, &failedAt, msg)
+				_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, msg)
+				return
+			}
+		}
 		if s.scheduledWakeFires.goTracked(func(context.Context) {
 			s.runScheduleFire(fireCtx, log, sched, evt, now, nextRunAt, true)
 		}) {
@@ -7056,7 +7078,19 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 		handlerCtx, cancel := context.WithTimeout(
 			ContextWithExecutor(ctx, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}),
 			30*time.Second)
-		if handlerErr := handler(handlerCtx, evt); handlerErr != nil {
+		// A wake fire runs on its own goroutine (executeSchedule), outside
+		// the scheduler's panic recovery: contain a handler panic here, as
+		// fireEvent does, and record it as the fire's failure.
+		handlerErr := func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("handler panicked: %v", r)
+					log.Error("schedule-evaluator: event handler panicked", "panic", r)
+				}
+			}()
+			return handler(handlerCtx, evt)
+		}()
+		if handlerErr != nil {
 			errMsg = handlerErr.Error()
 			log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)
 		} else {
