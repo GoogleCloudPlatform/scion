@@ -78,8 +78,9 @@ A scheduled message to a suspended agent fails unless the schedule sets
 `--wake` (on `create` or `create-recurring`). With `--wake` the fire resumes
 the agent, then delivers. It needs permission to start the agent; without
 it, or for a held agent, the fire is refused and nothing starts. A stopped
-agent is not resumed. A suspended agent can schedule its own wake-up this
-way.
+agent is not resumed. An agent can schedule its own wake-up this way only
+if it holds lifecycle permission (the `full` agent role); with the
+`baseline` or `readonly` role every wake fire is refused.
 
 ## Two event types
 

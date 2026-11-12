@@ -2137,6 +2137,13 @@ type Server struct {
 	// it before the store closes (broker_work.go, ptone/scion#4869).
 	brokerWork brokerWorkTracker
 
+	// scheduledWakeFires admits and joins recurring wake fires
+	// (ptone/scion#7734), which run off the schedule evaluator loop
+	// (executeSchedule). Admission closes when the hub stops its dispatch
+	// producers; the background teardown joins them, bounded by
+	// scheduledWakeFireStopGrace.
+	scheduledWakeFires brokerWorkTracker
+
 	// autoSuspend is the auto-suspend worker the stalled-detection tick
 	// hands stalled agents to (auto_suspend_worker.go).
 	autoSuspend autoSuspendWorker
@@ -7001,7 +7008,43 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		}
 	}
 
-	// Execute the event immediately
+	// A wake fire runs off the evaluator loop (review 3 of ptone/scion#7769):
+	// it can take the whole wake budget, and run inline it would hold the
+	// evaluator, its slot in the scheduler's shared semaphore and, on
+	// Postgres, the evaluator's advisory lock, delaying every other due
+	// schedule. Its next run is already reserved, and its outcome is
+	// recorded without touching next_run_at. Once the hub is shutting down
+	// a wake fire is not started: it is recorded as failed.
+	if wakeFire {
+		fireCtx := context.WithoutCancel(ctx)
+		if s.scheduledWakeFires.goTracked(func(context.Context) {
+			s.runScheduleFire(fireCtx, log, sched, evt, now, nextRunAt, true)
+		}) {
+			return
+		}
+		msg := "hub is shutting down; the wake fire did not run"
+		log.Warn("schedule-evaluator: " + msg)
+		recordCtx, cancelRecord := context.WithTimeout(fireCtx, 10*time.Second)
+		defer cancelRecord()
+		failedAt := time.Now()
+		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, store.ScheduledEventFailed, &failedAt, msg)
+		_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, msg)
+		return
+	}
+	s.runScheduleFire(ctx, log, sched, evt, now, nextRunAt, false)
+}
+
+// scheduledWakeFireStopGrace bounds how long shutdown waits for recurring
+// wake fires still running (scheduledWakeFires). It is short: a wake can
+// take minutes, so the wait only lets fires that are about to finish record
+// their outcome; the rest are logged.
+var scheduledWakeFireStopGrace = 5 * time.Second
+
+// runScheduleFire runs the event materialized from sched and records its
+// outcome on the event and the schedule. A wake fire's next run was
+// reserved before it ran (AdvanceScheduleNextRun), so its outcome is
+// recorded without touching next_run_at (RecordScheduleRun).
+func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched store.Schedule, evt store.ScheduledEvent, now, nextRunAt time.Time, wakeFire bool) {
 	var errMsg string
 	handler, ok := s.scheduler.GetEventHandler(sched.EventType)
 	if !ok {
@@ -7601,6 +7644,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		}
 		if scheduler != nil {
 			scheduler.Stop()
+		}
+		if n := s.scheduledWakeFires.stop(ctx, scheduledWakeFireStopGrace); n > 0 {
+			slog.Warn("Scheduled wake fires still running after the shutdown grace; their outcome may not be recorded",
+				"running", n, "grace", scheduledWakeFireStopGrace)
 		}
 		if notificationDispatcher != nil {
 			notificationDispatcher.Stop()

@@ -227,6 +227,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
+	if req.Wake && req.EventType != "message" {
+		ValidationError(w, "wake applies to message events only", nil)
+		return
+	}
 	// Recurring schedules accept (ptone/scion#2200)
 	// the same advanced Payload JSON as one-shot scheduled events and must
 	// be tombstoned the same way (see createScheduledEvent), for both

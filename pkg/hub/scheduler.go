@@ -384,7 +384,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 // and waits for the root ticker goroutine to exit. In-flight recurring
 // handler goroutines (spawned per tick by runRecurringHandlers) are not
 // tracked; they will be cancelled via the parent context when the server
-// shuts down. The launch reaper's dedicated goroutine is different: it runs
+// shuts down. Recurring wake fires (ptone/scion#7734) are the exception: they
+// run off the evaluator on detached contexts, and the hub's teardown joins
+// them (Server.scheduledWakeFires). The launch reaper's dedicated goroutine is different: it runs
 // synchronously (no per-tick goroutine), is tracked by the same s.wg, and so
 // Stop also waits for it to exit — including finishing any tick already in
 // flight, bounded by the store's 10s tick timeout plus its up-to-2s

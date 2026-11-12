@@ -107,7 +107,7 @@ scion schedule create-recurring \
 
 ### Waking a suspended agent
 
-By default a scheduled message is not delivered to a suspended agent: the fire is recorded as failed. Add `--wake` to `scion schedule create` or `create-recurring` (the **Wake agent** option in the Web forms, or `"wake": true` in the API request or message payload) to resume the agent first and then deliver the message. The agent can suspend itself again afterwards, or be auto-suspended.
+By default a scheduled message is not delivered to a suspended agent: the fire is recorded as failed. Add `--wake` to `scion schedule create` or `create-recurring` (the **Wake agent** option in the Web forms, or `"wake": true` in the API request or message payload) to resume the agent first and then deliver the message. The agent can suspend itself again afterwards, or be auto-suspended. `wake` applies to message events only; it is refused (`400`) on a `dispatch_agent` event or schedule.
 
 ```bash
 scion schedule create-recurring \

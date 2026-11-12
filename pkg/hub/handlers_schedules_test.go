@@ -78,6 +78,13 @@ func TestSchedule_CreateWithWakeFlag(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(sched.Payload), &payload))
 	assert.True(t, payload.Wake)
 	assert.True(t, scheduledPayloadWakes(sched.Payload))
+
+	// wake is refused on any event type but message.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name: "wake-dispatch", CronExpr: "*/5 * * * *", EventType: "dispatch_agent", AgentName: "new-agent", Wake: true,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "wake applies to message events only")
 }
 
 func TestSchedule_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T) {

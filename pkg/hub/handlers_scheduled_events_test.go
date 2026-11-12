@@ -241,6 +241,13 @@ func TestScheduledEvent_CreateWithWakeFlag(t *testing.T) {
 		assert.Equal(t, wake, payload.Wake)
 		assert.Equal(t, wake, strings.Contains(evt.Payload, `"wake"`), "an unset wake is omitted from the payload")
 	}
+
+	// wake is refused on any event type but message.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", CreateScheduledEventRequest{
+		EventType: "dispatch_agent", FireIn: "10m", AgentName: "new-agent", Wake: true,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "wake applies to message events only")
 }
 
 func TestScheduledEvent_CreateValidation(t *testing.T) {

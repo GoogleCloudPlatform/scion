@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -359,6 +360,7 @@ func TestScheduledMessageWake_RecurringFireAdvancesNextRunFirst(t *testing.T) {
 
 		now := time.Now().UTC()
 		srv.executeSchedule(tickCtx, *row, now)
+		srv.scheduledWakeFires.wg.Wait() // a wake fire runs off the evaluator
 		endTick()
 
 		assert.Equal(t, wake, advancedDuringFire, "wake=%v: next run advanced before the handler", wake)
@@ -430,10 +432,9 @@ func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) 
 
 	now := time.Now().UTC().Truncate(time.Minute)
 	later := now.Add(time.Minute)
-	calls := 0
+	var calls atomic.Int32
 	srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
-		calls++
-		if calls == 1 {
+		if calls.Add(1) == 1 {
 			// The older run is still waking when the next minute's
 			// evaluator selects the schedule and runs it to completion.
 			due, err := s.ListDueSchedules(ctx, later)
@@ -446,7 +447,8 @@ func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) 
 	})
 
 	srv.executeSchedule(ctx, row, now)
-	require.Equal(t, 2, calls)
+	srv.scheduledWakeFires.wg.Wait() // both fires run off the evaluator
+	require.Equal(t, int32(2), calls.Load())
 
 	got, err := s.GetSchedule(ctx, row.ID)
 	require.NoError(t, err)
@@ -465,4 +467,113 @@ func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) 
 	for _, d := range due {
 		assert.NotEqual(t, row.ID, d.ID, "no off-cadence fire becomes due")
 	}
+}
+
+// TestScheduledMessageWake_RecurringWakeFireDoesNotBlockEvaluator: a slow
+// recurring wake fire runs off the schedule evaluator (review 3 of
+// ptone/scion#7769), so another schedule due in the same tick fires at once
+// and the evaluator returns while the wake is still running. The wake's
+// outcome is recorded when it ends.
+func TestScheduledMessageWake_RecurringWakeFireDoesNotBlockEvaluator(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	create := func(name string, wake bool, due time.Time) store.Schedule {
+		rec := doRequest(t, srv, "POST", "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+			Name: name, CronExpr: "*/5 * * * *", EventType: "message",
+			AgentName: "worker", Message: "poke", Wake: wake,
+		})
+		require.Equal(t, 201, rec.Code, rec.Body.String())
+		var created store.Schedule
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+		row, err := s.GetSchedule(ctx, created.ID)
+		require.NoError(t, err)
+		row.NextRunAt = &due
+		require.NoError(t, s.UpdateSchedule(ctx, row, store.ScheduleFieldMask{NextRunAt: true},
+			row.AuthorizationRevision, row.AuthorizationRevision != 0, nil))
+		return *row
+	}
+	// The wake schedule is due first, so the evaluator reaches it first.
+	slow := create("slow-wake", true, time.Now().UTC().Add(-2*time.Minute))
+	other := create("other", false, time.Now().UTC().Add(-time.Minute))
+
+	release := make(chan struct{})
+	otherFired := make(chan struct{})
+	srv.scheduler.RegisterEventHandler("message", func(_ context.Context, evt store.ScheduledEvent) error {
+		if evt.ScheduleID == slow.ID {
+			<-release // a wake that takes a long time
+			return nil
+		}
+		close(otherFired)
+		return nil
+	})
+
+	evaluated := make(chan struct{})
+	go func() {
+		srv.evaluateSchedulesHandler()(ctx)
+		close(evaluated)
+	}()
+	select {
+	case <-evaluated:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("the evaluator waited for the slow wake fire")
+	}
+	select {
+	case <-otherFired:
+	default:
+		t.Fatal("the other due schedule did not fire in the same tick")
+	}
+	got, err := s.GetSchedule(ctx, other.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.RunCount, "the other schedule's run is recorded")
+	got, err = s.GetSchedule(ctx, slow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.RunCount, "the wake fire is still running")
+	require.NotNil(t, got.NextRunAt)
+	assert.True(t, got.NextRunAt.After(time.Now()), "its next run is already reserved")
+
+	close(release)
+	srv.scheduledWakeFires.wg.Wait()
+	got, err = s.GetSchedule(ctx, slow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.RunCount, "the wake fire's run is recorded when it ends")
+	assert.Equal(t, store.ScheduleRunSuccess, got.LastRunStatus)
+}
+
+// TestScheduledMessageWake_RecurringWakeFireRefusedWhileShuttingDown: once
+// the hub is shutting down a recurring wake fire is not started; its event
+// and the schedule record the failure, and shutdown joins fires already
+// running.
+func TestScheduledMessageWake_RecurringWakeFireRefusedWhileShuttingDown(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	rec := doRequest(t, srv, "POST", "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name: "late-wake", CronExpr: "*/5 * * * *", EventType: "message",
+		AgentName: "worker", Message: "poke", Wake: true,
+	})
+	require.Equal(t, 201, rec.Code, rec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	row, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+		calls.Add(1)
+		return nil
+	})
+	srv.scheduledWakeFires.closeAdmission()
+
+	srv.executeSchedule(ctx, *row, time.Now().UTC())
+	assert.Zero(t, calls.Load(), "no wake fire starts once shutdown began")
+	got, err := s.GetSchedule(ctx, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.RunCount)
+	assert.Equal(t, store.ScheduleRunError, got.LastRunStatus)
+	assert.Contains(t, got.LastRunError, "shutting down")
+	events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: row.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, events.Items, 1)
+	assert.Equal(t, store.ScheduledEventFailed, events.Items[0].Status)
+	assert.Zero(t, srv.scheduledWakeFires.stop(ctx, time.Second), "nothing left to join")
 }

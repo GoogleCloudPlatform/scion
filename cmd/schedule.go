@@ -824,7 +824,7 @@ func init() {
 	scheduleCreateCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
 	scheduleCreateCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
-	scheduleCreateCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Resume the target agent if it is suspended when the message fires (requires permission to start it)")
+	scheduleCreateCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
 
 	// Create recurring flags
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
@@ -834,7 +834,7 @@ func init() {
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
 	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
-	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Resume the target agent if it is suspended when the message fires (requires permission to start it)")
+	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
 }
 
 // scheduleWhen renders a scheduled time relative to now. A pending time that
