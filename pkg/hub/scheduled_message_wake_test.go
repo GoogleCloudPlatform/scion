@@ -437,10 +437,12 @@ func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) 
 		if calls.Add(1) == 1 {
 			// The older run is still waking when the next minute's
 			// evaluator selects the schedule and runs it to completion.
+			// This handler runs on the wake fire's goroutine: assert, not
+			// require (t.FailNow must run on the test goroutine).
 			due, err := s.ListDueSchedules(ctx, later)
-			require.NoError(t, err)
-			require.Len(t, due, 1, "the next recurrence is due")
-			srv.executeSchedule(ctx, due[0], later)
+			if assert.NoError(t, err) && assert.Len(t, due, 1, "the next recurrence is due") {
+				srv.executeSchedule(ctx, due[0], later)
+			}
 			return assert.AnError // the older run then fails
 		}
 		return nil
@@ -645,7 +647,7 @@ func TestScheduledMessageWake_RecurringWakeFirePanicIsContained(t *testing.T) {
 }
 
 // TestScheduledMessageWake_RecurringWakeFireEventNotReplayable: while a
-// recurring wake fire runs, its materialized event is already claimed, so
+// recurring wake fire runs, its materialized event is already fired, so
 // a hub restart or another replica starting meanwhile does not replay it
 // from the pending events (loadPersistedTimers): no late duplicate wake
 // and delivery (review 4 of ptone/scion#7769). The outcome then sets the
@@ -679,7 +681,7 @@ func TestScheduledMessageWake_RecurringWakeFireEventNotReplayable(t *testing.T) 
 	}
 	evt, err := s.GetScheduledEvent(ctx, eventID)
 	require.NoError(t, err)
-	assert.Equal(t, store.ScheduledEventFired, evt.Status, "claimed before the fire runs")
+	assert.Equal(t, store.ScheduledEventFired, evt.Status, "created fired, before the fire runs")
 	if claimer, ok := s.(store.ScheduledEventClaimer); ok {
 		claimed, err := claimer.ClaimScheduledEvent(ctx, eventID, store.ScheduledEventExpired)
 		require.NoError(t, err)
@@ -692,4 +694,137 @@ func TestScheduledMessageWake_RecurringWakeFireEventNotReplayable(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduledEventFired, evt.Status)
 	assert.Empty(t, evt.Error)
+}
+
+// replayOnCreateStore, once armed, acts as a replica starting up right
+// after a scheduled event is created: it lists the pending events, as
+// loadPersistedTimers does, and tries to claim the new one, as a replayed
+// fireEvent would.
+type replayOnCreateStore struct {
+	store.Store
+	fault       *storeFaultSwitch
+	wasPending  atomic.Bool
+	replayClaim atomic.Bool
+}
+
+func (r *replayOnCreateStore) CreateScheduledEvent(ctx context.Context, evt *store.ScheduledEvent) error {
+	if err := r.Store.CreateScheduledEvent(ctx, evt); err != nil || !r.fault.Active() {
+		return err
+	}
+	pending, err := r.Store.ListPendingScheduledEvents(ctx)
+	if err == nil {
+		for _, p := range pending {
+			if p.ID == evt.ID {
+				r.wasPending.Store(true)
+			}
+		}
+	}
+	if claimer, ok := r.Store.(store.ScheduledEventClaimer); ok {
+		if claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, store.ScheduledEventExpired); err == nil && claimed {
+			r.replayClaim.Store(true)
+		}
+	}
+	return nil
+}
+
+// TestScheduledMessageWake_RecurringWakeEventNeverPending: a recurring wake
+// fire's event is created already fired (fix verification 4 of
+// ptone/scion#7769). A replica starting right after it is created does not
+// see it pending and cannot claim it, so there is no lost claim to clobber
+// a replay's outcome and no duplicate delivery; the fire runs once and
+// records its success.
+func TestScheduledMessageWake_RecurringWakeEventNeverPending(t *testing.T) {
+	srv, s, projectID, replay, fault := setupScheduleTestWithStore(t, func(inner store.Store, fault *storeFaultSwitch) *replayOnCreateStore {
+		return &replayOnCreateStore{Store: inner, fault: fault}
+	})
+	ctx := context.Background()
+	sched := createDueWakeTestSchedule(t, srv, s, projectID, "never-pending", true, time.Now().UTC().Add(-time.Minute))
+	var calls atomic.Int32
+	srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+		calls.Add(1)
+		return nil
+	})
+	fault.Arm()
+
+	srv.executeSchedule(ctx, sched, time.Now().UTC())
+	srv.scheduledWakeFires.wg.Wait()
+
+	assert.False(t, replay.wasPending.Load(), "the wake fire's event is never pending")
+	assert.False(t, replay.replayClaim.Load(), "a starting replica cannot claim it")
+	assert.Equal(t, int32(1), calls.Load(), "the fire runs once")
+	events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: sched.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, events.Items, 1)
+	assert.Equal(t, store.ScheduledEventFired, events.Items[0].Status)
+	assert.Empty(t, events.Items[0].Error)
+	got, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduleRunSuccess, got.LastRunStatus)
+	assert.Equal(t, 1, got.RunCount)
+}
+
+// TestScheduledMessageWake_ShutdownAbortsRunningWakeFire: a recurring wake
+// fire still running when the hub's shutdown grace ends is aborted and
+// recorded as not delivered (review 5 of ptone/scion#7769), whether it stops
+// on the abort or keeps running (as a detached broker launch would); its
+// event never stays fired with nothing delivered, and a late finish does not
+// overwrite the recorded outcome.
+func TestScheduledMessageWake_ShutdownAbortsRunningWakeFire(t *testing.T) {
+	prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
+	scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = 100*time.Millisecond, time.Second
+	t.Cleanup(func() { scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = prevStop, prevAbort })
+
+	assertShutdownOutcome := func(t *testing.T, s store.Store, projectID, scheduleID string) {
+		t.Helper()
+		events, err := s.ListScheduledEvents(context.Background(), store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: scheduleID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, events.Items, 1)
+		assert.Equal(t, store.ScheduledEventFailed, events.Items[0].Status)
+		assert.Equal(t, errScheduledWakeShutdown.Error(), events.Items[0].Error)
+		got, err := s.GetSchedule(context.Background(), scheduleID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, got.RunCount)
+		assert.Equal(t, store.ScheduleRunError, got.LastRunStatus)
+		assert.Equal(t, errScheduledWakeShutdown.Error(), got.LastRunError)
+	}
+
+	t.Run("a fire that stops on the abort records the shutdown", func(t *testing.T) {
+		srv, s, projectID := setupScheduleTest(t)
+		ctx := context.Background()
+		sched := createDueWakeTestSchedule(t, srv, s, projectID, "abort-respects", true, time.Now().UTC().Add(-time.Minute))
+		started := make(chan struct{})
+		srv.scheduler.RegisterEventHandler("message", func(hctx context.Context, _ store.ScheduledEvent) error {
+			close(started)
+			<-hctx.Done() // a wake step that honours its context
+			return hctx.Err()
+		})
+		srv.executeSchedule(ctx, sched, time.Now().UTC())
+		<-started
+
+		srv.stopScheduledWakeFires(ctx)
+		assert.Zero(t, srv.scheduledWakeFires.runningCount(), "the aborted fire ended within the grace")
+		assertShutdownOutcome(t, s, projectID, sched.ID)
+	})
+
+	t.Run("a fire that keeps running is recorded by the shutdown", func(t *testing.T) {
+		srv, s, projectID := setupScheduleTest(t)
+		ctx := context.Background()
+		sched := createDueWakeTestSchedule(t, srv, s, projectID, "abort-ignores", true, time.Now().UTC().Add(-time.Minute))
+		started := make(chan struct{})
+		release := make(chan struct{})
+		srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+			close(started)
+			<-release // ignores its context, like a detached broker launch
+			return nil
+		})
+		srv.executeSchedule(ctx, sched, time.Now().UTC())
+		<-started
+
+		srv.stopScheduledWakeFires(ctx)
+		assertShutdownOutcome(t, s, projectID, sched.ID)
+
+		close(release)
+		srv.scheduledWakeFires.wg.Wait()
+		assertShutdownOutcome(t, s, projectID, sched.ID) // the late finish does not overwrite it
+	})
 }

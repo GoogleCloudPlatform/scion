@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -106,7 +107,9 @@ func (s *Server) authorizeScheduledWake(ctx context.Context, auth ScheduledAutho
 // The wake runs on a budget of its own (scheduledWakeBudget), detached from
 // the fire handler's deadline but keeping its values.
 func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEvent, agent *store.Agent) error {
-	wakeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledWakeBudget)
+	detached, cancelDetached := detachKeepFireAbort(ctx)
+	defer cancelDetached()
+	wakeCtx, cancel := context.WithTimeout(detached, scheduledWakeBudget)
 	defer cancel()
 
 	// A target already starting is not resumed (the shared wake path
@@ -188,5 +191,130 @@ func (s *Server) waitForStartToBegin(ctx context.Context, agentID string, timeou
 			return fmt.Errorf("the start in progress did not begin")
 		case <-time.After(scheduledWakePollInterval):
 		}
+	}
+}
+
+// errScheduledWakeShutdown is recorded on a recurring wake fire that the
+// hub's shutdown cut short: the fire was aborted (scheduledWakeFires), or it
+// was still running when the shutdown grace ended.
+var errScheduledWakeShutdown = errors.New("hub shut down during the wake; message not delivered")
+
+// scheduledFireAbortKey carries a recurring wake fire's abort context: it
+// ends when the hub's shutdown gives up waiting for the fire.
+type scheduledFireAbortKey struct{}
+
+// withScheduledFireAbort returns ctx carrying abort as the fire's abort
+// context.
+func withScheduledFireAbort(ctx, abort context.Context) context.Context {
+	return context.WithValue(ctx, scheduledFireAbortKey{}, abort)
+}
+
+// scheduledFireAborted reports whether ctx carries a fire abort context that
+// has ended.
+func scheduledFireAborted(ctx context.Context) bool {
+	abort, _ := ctx.Value(scheduledFireAbortKey{}).(context.Context)
+	return abort != nil && abort.Err() != nil
+}
+
+// detachKeepFireAbort returns ctx without its cancellation and deadline, as
+// context.WithoutCancel does, but still cancelled when the fire's abort
+// context (if any) ends: the wake and its dispatch outlive the fire
+// handler's deadline, not the hub's shutdown. The caller must call the
+// returned cancel func.
+func detachKeepFireAbort(ctx context.Context) (context.Context, context.CancelFunc) {
+	detached, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	abort, _ := ctx.Value(scheduledFireAbortKey{}).(context.Context)
+	if abort == nil {
+		return detached, cancel
+	}
+	stop := context.AfterFunc(abort, cancel)
+	return detached, func() {
+		stop()
+		cancel()
+	}
+}
+
+// wakeFireRun is one recurring wake fire in flight. Its outcome is recorded
+// once: by the fire when it ends, or by the hub's shutdown for a fire still
+// running when the shutdown stops waiting (recordAbandonedWakeFires).
+type wakeFireRun struct {
+	eventID    string
+	scheduleID string
+	ranAt      time.Time
+	once       sync.Once
+}
+
+// record runs write unless the run's outcome was already recorded.
+func (r *wakeFireRun) record(write func()) { r.once.Do(write) }
+
+// wakeFireRuns is the set of recurring wake fires in flight.
+type wakeFireRuns struct {
+	mu   sync.Mutex
+	runs map[*wakeFireRun]struct{}
+}
+
+func (w *wakeFireRuns) add(r *wakeFireRun) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.runs == nil {
+		w.runs = make(map[*wakeFireRun]struct{})
+	}
+	w.runs[r] = struct{}{}
+}
+
+func (w *wakeFireRuns) remove(r *wakeFireRun) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.runs, r)
+}
+
+func (w *wakeFireRuns) snapshot() []*wakeFireRun {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]*wakeFireRun, 0, len(w.runs))
+	for r := range w.runs {
+		out = append(out, r)
+	}
+	return out
+}
+
+// scheduledWakeFireAbortGrace bounds how long shutdown waits, after it
+// aborts the recurring wake fires that outlived scheduledWakeFireStopGrace,
+// for them to record their own outcome.
+var scheduledWakeFireAbortGrace = 2 * time.Second
+
+// stopScheduledWakeFires is the background teardown's step for recurring
+// wake fires: admission closes, running fires get scheduledWakeFireStopGrace
+// to finish, then they are aborted and get scheduledWakeFireAbortGrace to
+// record their outcome (errScheduledWakeShutdown). A fire still running
+// after that (for example inside a broker launch the shared wake path keeps
+// detached) has the same failure recorded for it, so its event does not
+// stay fired with nothing delivered. It runs before the store closes.
+func (s *Server) stopScheduledWakeFires(ctx context.Context) {
+	n := s.scheduledWakeFires.stop(ctx, scheduledWakeFireStopGrace)
+	if n == 0 {
+		return
+	}
+	n = s.scheduledWakeFires.wait(ctx, scheduledWakeFireAbortGrace)
+	if n == 0 {
+		return
+	}
+	slog.Warn("Scheduled wake fires still running after the shutdown grace; recording them as not delivered",
+		"running", n, "grace", scheduledWakeFireStopGrace+scheduledWakeFireAbortGrace)
+	s.recordAbandonedWakeFires()
+}
+
+// recordAbandonedWakeFires records errScheduledWakeShutdown for every
+// recurring wake fire still in flight whose outcome is not recorded yet.
+func (s *Server) recordAbandonedWakeFires() {
+	for _, r := range s.runningWakeFires.snapshot() {
+		r.record(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			msg := errScheduledWakeShutdown.Error()
+			failedAt := time.Now()
+			_ = s.store.UpdateScheduledEventStatus(ctx, r.eventID, store.ScheduledEventFailed, &failedAt, msg)
+			_ = s.store.RecordScheduleRun(ctx, r.scheduleID, r.ranAt, msg)
+		})
 	}
 }

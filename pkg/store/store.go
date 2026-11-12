@@ -3258,7 +3258,8 @@ type ScheduleStore interface {
 
 	// AdvanceScheduleNextRun sets only next_run_at, so a run that takes
 	// longer than an evaluator tick is not selected again as due while it
-	// runs. UpdateScheduleAfterRun still records the run when it completes.
+	// runs. RecordScheduleRun records the run when it completes, without
+	// changing next_run_at.
 	// Returns ErrNotFound if the schedule doesn't exist.
 	AdvanceScheduleNextRun(ctx context.Context, id string, nextRunAt time.Time) error
 

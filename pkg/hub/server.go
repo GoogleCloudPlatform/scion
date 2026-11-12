@@ -2143,6 +2143,9 @@ type Server struct {
 	// producers; the background teardown joins them, bounded by
 	// scheduledWakeFireStopGrace.
 	scheduledWakeFires brokerWorkTracker
+	// runningWakeFires are the recurring wake fires in flight, so shutdown
+	// can record the outcome of one it gave up waiting for.
+	runningWakeFires wakeFireRuns
 
 	// autoSuspend is the auto-suspend worker the stalled-detection tick
 	// hands stalled agents to (auto_suspend_worker.go).
@@ -6094,7 +6097,9 @@ func (s *Server) messageEventHandler() EventHandler {
 		// a fresh bound, keeping the handler's values.
 		dispatchBase := ctx
 		if payload.Wake {
-			dispatchBase = context.WithoutCancel(ctx)
+			detached, cancelDetached := detachKeepFireAbort(ctx)
+			defer cancelDetached()
+			dispatchBase = detached
 		}
 		retryCtx, retryCancel := context.WithTimeout(dispatchBase, 30*time.Second)
 		defer retryCancel()
@@ -6984,6 +6989,19 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		AuthorityCeiling: sched.AuthorityCeiling,
 	}
 
+	// A wake fire's event (ptone/scion#7734) is created already fired, not
+	// pending: the fire can run for minutes, and a pending event would be
+	// replayed by loadPersistedTimers if the hub restarted, or another
+	// replica started, meanwhile (one late duplicate wake and delivery).
+	// Created fired, it is never pending, so there is no claim to race. Its
+	// outcome write sets the final status.
+	wakeFire := sched.EventType == "message" && scheduledPayloadWakes(sched.Payload)
+	if wakeFire {
+		evt.Status = store.ScheduledEventFired
+		firedAt := now
+		evt.FiredAt = &firedAt
+	}
+
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
 		log.Error("schedule-evaluator: failed to create event", "error", err)
 		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt,
@@ -6991,12 +7009,10 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		return
 	}
 
-	// A wake fire (ptone/scion#7734) can outlast the evaluator tick: the
-	// resume and readiness wait run on their own budget. Advance next_run_at
-	// before it runs, so a later tick does not select the schedule again
-	// while it runs, and record its outcome on a context that outlives the
-	// tick's.
-	wakeFire := sched.EventType == "message" && scheduledPayloadWakes(sched.Payload)
+	// A wake fire can outlast the evaluator tick: the resume and readiness
+	// wait run on their own budget. Advance next_run_at before it runs, so
+	// a later tick does not select the schedule again while it runs, and
+	// record its outcome on a context that outlives the tick's.
 	if wakeFire {
 		if err := s.store.AdvanceScheduleNextRun(ctx, sched.ID, nextRunAt); err != nil {
 			msg := fmt.Sprintf("failed to advance schedule before wake: %v", err)
@@ -7016,44 +7032,33 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// recorded without touching next_run_at. Once the hub is shutting down
 	// a wake fire is not started: it is recorded as failed.
 	if wakeFire {
-		fireCtx := context.WithoutCancel(ctx)
-		// Claim the materialized event (pending -> fired) before the fire
-		// runs. A wake fire can run for minutes, and a pending event would
-		// be replayed by loadPersistedTimers if the hub restarts, or
-		// another replica starts, meanwhile: one late duplicate wake and
-		// delivery. runScheduleFire's outcome write then sets the final
-		// status. An event that cannot be claimed is not fired.
-		if claimer, ok := s.store.(store.ScheduledEventClaimer); ok {
-			claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, store.ScheduledEventFired)
-			if err != nil || !claimed {
-				msg := "failed to claim the wake fire's event"
-				if err != nil {
-					msg = fmt.Sprintf("%s: %v", msg, err)
-				}
-				log.Error("schedule-evaluator: "+msg, "event_id", evt.ID, "claimed", claimed)
-				recordCtx, cancelRecord := context.WithTimeout(fireCtx, 10*time.Second)
-				defer cancelRecord()
-				failedAt := time.Now()
-				_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, store.ScheduledEventFailed, &failedAt, msg)
-				_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, msg)
-				return
-			}
-		}
-		if s.scheduledWakeFires.goTracked(func(context.Context) {
-			s.runScheduleFire(fireCtx, log, sched, evt, now, nextRunAt, true)
+		run := &wakeFireRun{eventID: evt.ID, scheduleID: sched.ID, ranAt: now}
+		s.runningWakeFires.add(run)
+		if s.scheduledWakeFires.goTracked(func(trackCtx context.Context) {
+			defer s.runningWakeFires.remove(run)
+			// The fire outlives the tick, but not the hub's shutdown: its
+			// context ends when the shutdown aborts the tracked work, and
+			// carries that abort so the wake and dispatch, which detach
+			// from the handler deadline, still stop.
+			fireCtx, cancelFire := context.WithCancel(context.WithoutCancel(ctx))
+			defer cancelFire()
+			stop := context.AfterFunc(trackCtx, cancelFire)
+			defer stop()
+			s.runScheduleFire(withScheduledFireAbort(fireCtx, trackCtx), log, sched, evt, now, nextRunAt, run)
 		}) {
 			return
 		}
+		s.runningWakeFires.remove(run)
 		msg := "hub is shutting down; the wake fire did not run"
 		log.Warn("schedule-evaluator: " + msg)
-		recordCtx, cancelRecord := context.WithTimeout(fireCtx, 10*time.Second)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelRecord()
 		failedAt := time.Now()
 		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, store.ScheduledEventFailed, &failedAt, msg)
 		_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, msg)
 		return
 	}
-	s.runScheduleFire(ctx, log, sched, evt, now, nextRunAt, false)
+	s.runScheduleFire(ctx, log, sched, evt, now, nextRunAt, nil)
 }
 
 // scheduledWakeFireStopGrace bounds how long shutdown waits for recurring
@@ -7063,10 +7068,14 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 var scheduledWakeFireStopGrace = 5 * time.Second
 
 // runScheduleFire runs the event materialized from sched and records its
-// outcome on the event and the schedule. A wake fire's next run was
-// reserved before it ran (AdvanceScheduleNextRun), so its outcome is
-// recorded without touching next_run_at (RecordScheduleRun).
-func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched store.Schedule, evt store.ScheduledEvent, now, nextRunAt time.Time, wakeFire bool) {
+// outcome on the event and the schedule. run is set for a recurring wake
+// fire (nil otherwise): its next run was reserved before it ran
+// (AdvanceScheduleNextRun), so its outcome is recorded without touching
+// next_run_at (RecordScheduleRun), and only once (the hub's shutdown may
+// record it first). A wake fire the shutdown aborted that did not deliver
+// records errScheduledWakeShutdown.
+func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched store.Schedule, evt store.ScheduledEvent, now, nextRunAt time.Time, run *wakeFireRun) {
+	wakeFire := run != nil
 	var errMsg string
 	handler, ok := s.scheduler.GetEventHandler(sched.EventType)
 	if !ok {
@@ -7099,33 +7108,35 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 		cancel()
 	}
 
-	// A wake fire may have outlasted the tick's context: record its
-	// outcome on one that does not end with the tick.
-	recordCtx := ctx
-	if wakeFire {
-		rc, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancelRecord()
-		recordCtx = rc
+	// A wake fire the hub's shutdown aborted, and that did not deliver,
+	// reports the shutdown rather than whatever step the abort ended.
+	if wakeFire && errMsg != "" && scheduledFireAborted(ctx) {
+		errMsg = errScheduledWakeShutdown.Error()
 	}
 
-	// Update event status. If the handler returned an error, record as
-	// failed rather than fired — matches fireEvent semantics (O-R3-1).
 	firedAt := time.Now()
 	status := store.ScheduledEventFired
 	if errMsg != "" {
 		status = store.ScheduledEventFailed
 	}
-	_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &firedAt, errMsg)
-
-	// Update schedule run state. A wake fire's next run was reserved before
-	// it ran, and a newer recurrence may have run (and reserved the run
-	// after it) while this one was waking: record the outcome without
-	// touching next_run_at, so a late completion cannot rewind it.
-	if wakeFire {
-		_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, errMsg)
+	if !wakeFire {
+		// Update event status. If the handler returned an error, record as
+		// failed rather than fired — matches fireEvent semantics (O-R3-1).
+		_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &firedAt, errMsg)
+		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt, errMsg)
 		return
 	}
-	_ = s.store.UpdateScheduleAfterRun(recordCtx, sched.ID, now, nextRunAt, errMsg)
+	// A wake fire may have outlasted the tick's context, or been aborted:
+	// record its outcome on a short context of its own. A newer recurrence
+	// may have run (and reserved the run after it) while this one was
+	// waking: record the outcome without touching next_run_at, so a late
+	// completion cannot rewind it.
+	run.record(func() {
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelRecord()
+		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &firedAt, errMsg)
+		_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, errMsg)
+	})
 }
 
 // registerSchedulerHandlers registers every periodic scheduler task, plus the
@@ -7679,10 +7690,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if scheduler != nil {
 			scheduler.Stop()
 		}
-		if n := s.scheduledWakeFires.stop(ctx, scheduledWakeFireStopGrace); n > 0 {
-			slog.Warn("Scheduled wake fires still running after the shutdown grace; their outcome may not be recorded",
-				"running", n, "grace", scheduledWakeFireStopGrace)
-		}
+		s.stopScheduledWakeFires(ctx)
 		if notificationDispatcher != nil {
 			notificationDispatcher.Stop()
 		}
