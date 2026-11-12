@@ -346,7 +346,7 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 				"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
 		case connErr == nil && !connected:
 			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
-				"The agent has not connected yet; the terminal will be available once it finishes starting",
+				"The agent has no conduit session yet (it may still be starting); try again shortly",
 				ptyReasonAgentNotConnected)
 		}
 		return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,

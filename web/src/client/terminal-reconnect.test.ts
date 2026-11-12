@@ -360,7 +360,7 @@ describe('error classification (#1659 AC3)', () => {
       error: {
         code: 'unavailable',
         message:
-          'The agent has not connected yet; the terminal will be available once it finishes starting',
+          'The agent has no conduit session yet (it may still be starting); try again shortly',
         details: { reason: 'agent_not_connected', path: 'none' },
       },
     };
@@ -370,8 +370,11 @@ describe('error classification (#1659 AC3)', () => {
 
     expect(session.state.connection).toBe('disconnected');
     expect(session.state.disconnectReason).toBe('server-error');
-    expect(session.state.error).toContain('has not connected yet');
+    expect(session.state.error).toContain('no conduit session yet');
     expect(FakeSocket.instances).toHaveLength(0);
+    // Not final on the client side: the session stays armed for a retry
+    // (a final runtime_attach_unsupported refusal disarms it).
+    expect((session as unknown as { autoArmed: boolean }).autoArmed).toBe(true);
 
     // Once the agent connects, trying again attaches.
     await session.connect();

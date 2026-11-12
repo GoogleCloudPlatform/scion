@@ -279,6 +279,7 @@ func TestAgentPTY_NoSessionYetIsRetryable(t *testing.T) {
 	assert.Equal(t, ErrCodeUnavailable, er.Error.Code, "retryable, not runtime_attach_unsupported")
 	assert.NotEqual(t, wsprotocol.ErrCodeRuntimeAttachUnsupported, er.Error.Code)
 	assert.Equal(t, ptyReasonAgentNotConnected, er.Error.Details["reason"])
+	assert.Equal(t, "The agent has no conduit session yet (it may still be starting); try again shortly", er.Error.Message)
 	assert.Empty(t, f.spawned)
 
 	f.startPTYAgent(t, f.public.URL)
