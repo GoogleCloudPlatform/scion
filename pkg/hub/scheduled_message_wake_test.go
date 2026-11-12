@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -974,4 +975,52 @@ func (d *blockingStartDispatcher) DispatchAgentStart(ctx context.Context, agent 
 	d.once.Do(func() { close(d.started) })
 	<-d.release
 	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, prompt, cont)
+}
+
+// refreshFailStore, once armed, fails GetAgent from the second read that
+// finds the agent running: the readiness wait's read passes, the re-read
+// for the dispatch fails.
+type refreshFailStore struct {
+	store.Store
+	fault        *storeFaultSwitch
+	runningReads atomic.Int32
+}
+
+var errRefreshFault = errors.New("injected agent re-read fault")
+
+func (r *refreshFailStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	a, err := r.Store.GetAgent(ctx, id)
+	if err != nil || !r.fault.Active() || a.Phase != string(state.PhaseRunning) {
+		return a, err
+	}
+	if r.runningReads.Add(1) >= 2 {
+		return nil, errRefreshFault
+	}
+	return a, nil
+}
+
+// TestScheduledMessageWake_RefreshFailureAfterStartFailsFire: when the
+// target became ready through a start already in progress but cannot be
+// re-read, the fire fails visibly instead of dispatching on the row read
+// before that start (upstream review of GoogleCloudPlatform/scion#4783).
+func TestScheduledMessageWake_RefreshFailureAfterStartFailsFire(t *testing.T) {
+	f := newSchedWake(t, state.PhaseStarting)
+	u := f.user(t, "sw-refresh-fail", lifecyclePerms...)
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *refreshFailStore {
+		return &refreshFailStore{Store: inner, fault: fault}
+	})
+	fault.Arm()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = f.store.UpdateAgentStatus(context.Background(), f.target.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseRunning), Activity: "idle",
+		})
+	}()
+
+	err := f.fire(withSessionRevision(f.event(true), u.ID))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errRefreshFault)
+	assert.Contains(t, err.Error(), "failed to refresh agent "+f.target.Slug)
+	assert.Empty(t, f.disp.getStartCalls())
+	assert.Empty(t, f.disp.getMessageCalls(), "nothing is dispatched on a stale row")
 }

@@ -160,9 +160,19 @@ func (s *Server) awaitStartInProgress(ctx context.Context, evt store.ScheduledEv
 			"eventID", evt.ID, "agent_id", agent.ID, "error", err)
 		return errScheduledWakeNotReady
 	}
-	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
-		*agent = *fresh
+	// Deliver to the run the other start brought up: a target that cannot
+	// be re-read fails the fire rather than dispatching on the row read
+	// before that start (its broker or phase may be stale).
+	fresh, gerr := s.store.GetAgent(ctx, agent.ID)
+	if gerr == nil && fresh == nil {
+		gerr = store.ErrNotFound
 	}
+	if gerr != nil {
+		slog.Warn("Scheduler: scheduled message target could not be re-read after a start in progress",
+			"eventID", evt.ID, "agent_id", agent.ID, "error", gerr)
+		return fmt.Errorf("failed to refresh agent %s after the start in progress: %w", agent.Slug, gerr)
+	}
+	*agent = *fresh
 	agent.Activity = string(activity)
 	return nil
 }
