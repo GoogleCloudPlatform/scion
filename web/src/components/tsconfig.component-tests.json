@@ -25,6 +25,7 @@
     "shared/chat/chat-space-rail-badge-invariant.test.ts",
     "shared/chat/chat-message-links-dom.test.ts",
     "shared/chat/chat-choices.test.ts",
+    "shared/chat/chat-choices-set-answerability.test.ts",
     "shared/chat/chat-thread-choices.test.ts",
     "shared/chat/chat-choices-answerability.test.ts",
     "shared/chat/chat-choice-response.test.ts",
