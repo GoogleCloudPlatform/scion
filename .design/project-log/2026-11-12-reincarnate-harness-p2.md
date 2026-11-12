@@ -3,7 +3,9 @@
 **Date:** 2026-11-12
 **Branch:** scion/reincarnate-harness-p2
 **Issues:** ptone/scion#7759 (phase), ptone/scion#7757 (tracking)
-**Stack:** ptone/scion PR 7770, P1 head d01b08b674c105601501e6ae4eb75e108c085022.
+**Stack:** ptone/scion PR 7770, P1 head 534e6e301a4b438598be647823555636d2eae72e.
+Rebased from d01b08b without conflicts; the P1 update only fixes a dead initial
+assignment in `reincarnate_patch.go`.
 
 ## Behavior
 
@@ -37,23 +39,26 @@ The experiment and runtime capability list remain those supplied by P1.
 - GREEN: shard-2 binary `hub.test -test.v -test.run '^TestReincarnateHarness_'`
   passed, including dry-run/real refusal parity, names without values, unchanged
   row/history/dispatcher on 422, explicit no-auth skips, and successful env/secret
-  credentials. The complete `make test-hub-shard SHARD=2` also passed: 227s, four existing
+  credentials. The complete `make test-hub-shard SHARD=2` passed after the final P1 rebase:
+  207s, four existing
   skips (optional soak, Ent-only group deletion, PostgreSQL-only topics, and
   the existing DEF-15 attachment case). Test-list validation: 5358 tests compiled
   as expected.
 - `make fmt-check check-custom build`: passed (all custom checks; 121 image-script
   checks; Linux binary built).
-- `GOGC=40 go vet -overlay /tmp/p2-vet-overlay/overlay.json -tags
+- `GOGC=40 go vet -overlay /tmp/p2-final-vet-overlay/overlay.json -tags
   hubshard,hubshard_2 ./pkg/hub`: passed. The overlay was generated with
-  `hack/hubshard/hubshard.sh -overlay /tmp/p2-vet-overlay`.
+  `hack/hubshard/hubshard.sh -overlay /tmp/p2-final-vet-overlay`.
 - `GOMAXPROCS=2 GOOS=windows GOARCH=amd64 go build -p 1 -buildvcs=false
   -o /dev/null ./cmd/scion`: passed.
 - `bash hack/winsec-guard.sh`: passed (`winsec-guard: ok (3130 files)`).
-- `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1
-  --tests=false ./pkg/hub/...`: reported only P1's `reincarnate_patch.go:235:20:
-  ineffectual assignment to caps (ineffassign)` (`1 issues: * ineffassign: 1`).
-  The manager confirmed the P1 developer is fixing it and authorized staging this
-  PR with lint pending that fix; P2 does not change the affected code.
+- Final `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1
+  --tests=false ./pkg/hub/...`: passed, exact output `0 issues.`. The inherited
+  P1 ineffassign reported at initial submission was fixed on the P1 branch and
+  resolved by the conflict-free rebase; P2 did not change that code.
+- After the P1 update, fmt/custom/Linux build, shard-overlay vet, Windows build
+  and winsec were re-run and passed. The final full shard run also passed (207s).
+
 
 `make ci` was replaced by scoped equivalents because its `lint` and `test-fast`
 targets compile the entire hub test package, which this repository forbids.
