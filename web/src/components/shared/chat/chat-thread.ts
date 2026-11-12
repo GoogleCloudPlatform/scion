@@ -196,6 +196,14 @@ const MESSAGE_UNAVAILABLE_CODE = 'message_unavailable';
 export const MESSAGE_UNAVAILABLE_TOAST = 'That message is no longer available.';
 
 /**
+ * The toast of a choice card's "Jump to vN" whose replacement is not in
+ * this conversation: an `--update` may post the new version elsewhere (a
+ * DM version of a thread prompt), and the window fetch is scoped to this
+ * conversation.
+ */
+export const CHOICE_REPLACEMENT_ELSEWHERE_TOAST = 'The new version is in another conversation.';
+
+/**
  * Detail of `chat-message-filter-change`: the thread asks the page to show
  * the conversation under `filter`. `messageId`, when set, is the message a
  * jump opens in full context (the page puts it in the URL fragment).
@@ -4133,6 +4141,23 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * A choice card's "Jump to vN": like any jump, except that a replacement
+   * this conversation does not have is named as being elsewhere.
+   */
+  private handleChoiceJump(e: CustomEvent<{ messageId: string }>): void {
+    if (this.filtered) {
+      this.handleScrollToMessage(e);
+      return;
+    }
+    void this.scrollToMessageById(
+      e.detail.messageId,
+      true,
+      false,
+      CHOICE_REPLACEMENT_ELSEWHERE_TOAST
+    );
+  }
+
+  /**
    * SSE handler for chat.choice.updated: patches the row of a loaded
    * prompt (design §4.4).
    */
@@ -4789,8 +4814,15 @@ export class ScionChatThread extends LitElement {
   /**
    * Scroll to a specific message by ID, with optional highlight animation.
    * Can be called externally (e.g. from search navigation on same conversation).
+   * `unavailableToast` is what a message this conversation does not have
+   * shows (see fetchAroundMessage).
    */
-  async scrollToMessageById(messageId: string, highlight = true, focus = false): Promise<void> {
+  async scrollToMessageById(
+    messageId: string,
+    highlight = true,
+    focus = false,
+    unavailableToast: string = MESSAGE_UNAVAILABLE_TOAST
+  ): Promise<void> {
     // Explicit programmatic navigation (search-jump, reply-jump, deep link)
     // takes precedence over the open-time unread anchor (rule 5). Without
     // this, a same-thread search-jump made inside the anchor window is
@@ -4812,7 +4844,7 @@ export class ScionChatThread extends LitElement {
     // the thread shows a spinner, not the scroll container.
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(messageId, isCurrent, true);
+      await this.fetchAroundMessage(messageId, isCurrent, unavailableToast);
       await this.updateComplete;
       if (!isCurrent()) return;
       msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
@@ -5094,14 +5126,14 @@ export class ScionChatThread extends LitElement {
    * caller superseded in the meantime (a restore overtaken by a jump) must
    * not replace the window that the newer request loaded.
    *
-   * With `notifyUnavailable`, a 404 with code message_unavailable (the
-   * message was removed, for example by the hub's retention policy) shows
-   * the toast "That message is no longer available."
+   * With `unavailableToast`, a 404 with code message_unavailable (the
+   * message was removed, for example by the hub's retention policy, or is
+   * not in this conversation) shows that toast.
    */
   private async fetchAroundMessage(
     messageId: string,
     isCurrent: () => boolean = () => true,
-    notifyUnavailable = false
+    unavailableToast: string | null = null
   ): Promise<void> {
     if (!this.conversationKey) return;
 
@@ -5116,7 +5148,7 @@ export class ScionChatThread extends LitElement {
       const res = await apiFetch(this.historyUrl(params));
       if (currentId !== this.fetchId || !isCurrent()) return;
       if (!res.ok) {
-        if (notifyUnavailable && res.status === 404) {
+        if (unavailableToast && res.status === 404) {
           const body = (await res.json().catch(() => null)) as {
             error?: { code?: string };
           } | null;
@@ -5125,7 +5157,7 @@ export class ScionChatThread extends LitElement {
             currentId === this.fetchId &&
             isCurrent()
           ) {
-            showToast(MESSAGE_UNAVAILABLE_TOAST, 'warning');
+            showToast(unavailableToast, 'warning');
           }
         }
         return;
@@ -7656,7 +7688,7 @@ export class ScionChatThread extends LitElement {
             .choiceResponse=${msg.choiceResponse}
             .choiceResponseSet=${msg.choiceResponseSet}
             @choice-answered=${this.handleChoiceAnswered}
-            @choice-jump=${this.handleScrollToMessage}
+            @choice-jump=${this.handleChoiceJump}
             @choice-answer-denied=${this.handleChoiceAnswerDenied}
             dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
             ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}

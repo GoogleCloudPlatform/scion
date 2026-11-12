@@ -37,6 +37,9 @@ const stateManager = vi.hoisted(() =>
 );
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: unknown) => Promise<Response>>());
+const showToast = vi.hoisted(() => vi.fn());
+
+vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
 vi.mock('../../../client/main.js', async () => ({
   ...(await import('../../../client/__fixtures__/main-stub.js')),
@@ -49,7 +52,8 @@ vi.mock('../../../client/api.js', () => ({
   apiErrorMessageFromBody: (): undefined => undefined,
 }));
 
-await import('./chat-thread.js');
+const { CHOICE_REPLACEMENT_ELSEWHERE_TOAST, MESSAGE_UNAVAILABLE_TOAST } =
+  await import('./chat-thread.js');
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 
 const KEY = 'topic-choices';
@@ -377,7 +381,35 @@ describe('set prompts and jump links', () => {
       })
     );
 
-    expect(scroll).toHaveBeenCalledWith('p2');
+    expect(scroll).toHaveBeenCalledWith('p2', true, false, CHOICE_REPLACEMENT_ELSEWHERE_TOAST);
+  });
+
+  it('says the new version is in another conversation when this one does not have it', async () => {
+    const thread = await open();
+    const el = await messageEl(thread);
+    showToast.mockReset();
+    apiFetch.mockImplementation((path) => {
+      if (path.includes('around=')) {
+        return Promise.resolve(
+          json({ error: { code: 'message_unavailable', message: 'not found' } }, 404)
+        );
+      }
+      if (path.includes('/messages?')) return Promise.resolve(json(history));
+      return Promise.resolve(json({ items: [] }));
+    });
+
+    cardOf(el)!.dispatchEvent(
+      new CustomEvent('choice-jump', {
+        detail: { messageId: 'p-dm-v2' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith(CHOICE_REPLACEMENT_ELSEWHERE_TOAST, 'warning')
+    );
+    expect(showToast).not.toHaveBeenCalledWith(MESSAGE_UNAVAILABLE_TOAST, 'warning');
   });
 });
 
