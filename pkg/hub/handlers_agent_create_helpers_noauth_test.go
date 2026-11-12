@@ -421,9 +421,16 @@ func TestHasRequiredAuthCredentials_ExplicitBlockIgnoresProjectSA(t *testing.T) 
 			want: false,
 		},
 		{
-			name: "auto-detect, assign: project SA still counts",
+			name: "auto-detect, assign: agent identity counts",
 			cfg: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeAssign,
+			}},
+			want: true,
+		},
+		{
+			name: "auto-detect, passthrough: agent identity counts",
+			cfg: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode: store.GCPMetadataModePassthrough,
 			}},
 			want: true,
 		},
