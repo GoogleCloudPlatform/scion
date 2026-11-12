@@ -639,6 +639,64 @@ func TestDecisionAnswer_DMChoiceUpdatedOnlyToUser(t *testing.T) {
 	assert.Empty(t, collectEvents(projEvents), "a DM answer is never published on the project subject")
 }
 
+// replacedEvent decodes the one chat.choice.updated event of evts and
+// checks it is the replaced view of row, pointing at its new version.
+func replacedEvent(t *testing.T, evts []Event, row string, newRow string) {
+	t.Helper()
+	require.Len(t, evts, 1, "one chat.choice.updated for the replaced version")
+	var got struct {
+		Decision  DecisionView `json:"decision"`
+		MessageID string       `json:"messageId"`
+	}
+	require.NoError(t, json.Unmarshal(evts[0].Data, &got))
+	assert.Equal(t, row, got.Decision.RowID)
+	assert.Equal(t, store.DecisionStatusReplaced, got.Decision.Status)
+	require.NotNil(t, got.Decision.ReplacedBy, "the view carries replacedBy")
+	assert.Equal(t, newRow, got.Decision.ReplacedBy.RowID)
+	assert.Equal(t, 2, got.Decision.ReplacedBy.Version)
+	assert.Equal(t, got.Decision.MessageID, got.MessageID, "published for the old row's own prompt")
+}
+
+// An --update send publishes chat.choice.updated for the version it
+// replaced, on the old prompt's own subjects: here the old version is in a
+// project thread and the new one in a DM, so the replaced view goes out on
+// the project subject (ptone/scion#7673 review R1).
+func TestChoicesSend_UpdatePublishesReplacedOnOldThread(t *testing.T) {
+	f := newChoicesFixture(t)
+	_, v1 := f.topicPrompt(t, oneDecision, false)
+	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	defer unsub()
+
+	v2 := f.sendPromptToBob(t, oneDecision, true)
+	require.NotNil(t, v2.Decisions[0].Replaced, "the send replaced v1")
+	replacedEvent(t, collectEvents(events), v1.Decisions[0].RowID, v2.Decisions[0].RowID)
+}
+
+// A replaced DM decision is published to the DM's user only, never on the
+// project subject.
+func TestChoicesSend_UpdatePublishesReplacedDMOnlyToUser(t *testing.T) {
+	f := newChoicesFixture(t)
+	raw := `[{"id":"dm-rep","question":"DM?","choices":["y","n"]}]`
+	v1 := f.sendPromptToBob(t, raw, false)
+	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	defer unsubProject()
+	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	defer unsubUser()
+
+	v2 := f.sendPromptToBob(t, raw, true)
+	replacedEvent(t, collectEvents(userEvents), v1.Decisions[0].RowID, v2.Decisions[0].RowID)
+	assert.Empty(t, collectEvents(projEvents), "a DM replacement is never published on the project subject")
+}
+
+// A send without --update replaces nothing and publishes no choice.updated.
+func TestChoicesSend_NewPromptPublishesNoChoiceUpdated(t *testing.T) {
+	f := newChoicesFixture(t)
+	userEvents, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	defer unsub()
+	f.sendPromptToBob(t, `[{"id":"fresh","question":"New?","choices":["y","n"]}]`, false)
+	assert.Empty(t, collectEvents(userEvents))
+}
+
 // The asker is gone: the answer still stands (200), its response row is
 // stored as failed, and nothing is dispatched.
 func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {

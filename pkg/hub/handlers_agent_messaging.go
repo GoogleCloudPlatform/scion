@@ -1503,6 +1503,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 		s.events.PublishUserMessage(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
 		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
+		if choiceSend != nil {
+			// Open cards of the versions this send replaced (--update).
+			s.publishReplacedDecisions(storeCtx, choiceSend.result)
+		}
 		return nil
 	}
 
