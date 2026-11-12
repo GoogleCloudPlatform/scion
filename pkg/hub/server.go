@@ -6060,7 +6060,21 @@ func (s *Server) messageEventHandler() EventHandler {
 					"error", wakeErr)
 				return errScheduledMessageRefused
 			}
+			// Join the wake and the dispatch after it to the hub's
+			// shutdown tracking (one-shot fires; a recurring fire is
+			// already tracked): once shutdown has begun the wake does
+			// not start, and a wake the shutdown aborts records that it
+			// did not deliver.
+			trackedCtx, endTracking, admitted := s.trackScheduledWake(ctx, evt)
+			if !admitted {
+				return errScheduledWakeShuttingDown
+			}
+			defer endTracking()
+			ctx = trackedCtx
 			if err := s.wakeScheduledTarget(ctx, evt, agent); err != nil {
+				if scheduledFireAborted(ctx) {
+					return errScheduledWakeShutdown
+				}
 				return err
 			}
 		}
@@ -6105,6 +6119,9 @@ func (s *Server) messageEventHandler() EventHandler {
 		defer retryCancel()
 
 		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
+			if payload.Wake && scheduledFireAborted(ctx) {
+				return errScheduledWakeShutdown
+			}
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
 		// Log the revision authority the send ran under alongside the
@@ -7049,7 +7066,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 			return
 		}
 		s.runningWakeFires.remove(run)
-		msg := "hub is shutting down; the wake fire did not run"
+		msg := errScheduledWakeShuttingDown.Error()
 		log.Warn("schedule-evaluator: " + msg)
 		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelRecord()

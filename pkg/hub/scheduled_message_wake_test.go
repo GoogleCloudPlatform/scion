@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -827,4 +829,149 @@ func TestScheduledMessageWake_ShutdownAbortsRunningWakeFire(t *testing.T) {
 		srv.scheduledWakeFires.wg.Wait()
 		assertShutdownOutcome(t, s, projectID, sched.ID) // the late finish does not overwrite it
 	})
+}
+
+// fireOneShotWake schedules evt through a real Scheduler (scheduleTimer and
+// fireEvent) whose message handler is f's, and returns the scheduler and a
+// channel closed when the handler has returned.
+func fireOneShotWake(t *testing.T, f *schedWake, evt store.ScheduledEvent) (*Scheduler, <-chan struct{}, <-chan struct{}) {
+	t.Helper()
+	evt.ScheduleID = ""
+	evt.FireAt = time.Now().Add(50 * time.Millisecond)
+	evt.Status = store.ScheduledEventPending
+	require.NoError(t, f.store.CreateScheduledEvent(context.Background(), &evt))
+	sch := NewScheduler(f.store, slog.Default())
+	entered := make(chan struct{})
+	finished := make(chan struct{})
+	sch.RegisterEventHandler("message", func(ctx context.Context, e store.ScheduledEvent) error {
+		close(entered)
+		defer close(finished)
+		return f.srv.messageEventHandler()(ctx, e)
+	})
+	sch.scheduleTimer(context.Background(), evt)
+	return sch, entered, finished
+}
+
+// waitEventStatus polls until the event leaves fired or the timeout ends,
+// and returns it (fireEvent records after the handler returns).
+func waitEventStatus(t *testing.T, s store.Store, id string, want string) *store.ScheduledEvent {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := s.GetScheduledEvent(context.Background(), id)
+		require.NoError(t, err)
+		if got.Status == want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestScheduledMessageWake_OneShotWakeShutdownOutcome: one-shot wake fires
+// get the shutdown protection recurring ones have (review 6 of
+// ptone/scion#7769): an undelivered wake whose scheduler halted records its
+// failure; one the hub's teardown aborts records the shutdown; one stuck in
+// a detached broker launch has the shutdown recorded for it; and once
+// shutdown has begun a wake does not start.
+func TestScheduledMessageWake_OneShotWakeShutdownOutcome(t *testing.T) {
+	t.Run("halted scheduler still records an undelivered wake", func(t *testing.T) {
+		// The reviewer's repro: the halt cancels the timer context while
+		// the wake waits for readiness.
+		prev := wakeReadyTimeout
+		wakeReadyTimeout = 800 * time.Millisecond
+		t.Cleanup(func() { wakeReadyTimeout = prev })
+		f := newSchedWake(t, state.PhaseStarting)
+		u := f.user(t, "sw-oneshot-halt", lifecyclePerms...)
+		evt := withSessionRevision(f.event(true), u.ID)
+		sch, entered, finished := fireOneShotWake(t, f, evt)
+		<-entered
+		time.Sleep(100 * time.Millisecond)
+		sch.halt()
+		<-finished
+
+		got := waitEventStatus(t, f.store, evt.ID, store.ScheduledEventFailed)
+		assert.Equal(t, store.ScheduledEventFailed, got.Status, "a wake that never delivered records failure")
+		assert.Equal(t, errScheduledWakeNotReady.Error(), got.Error)
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+
+	t.Run("teardown aborts a waiting wake and records the shutdown", func(t *testing.T) {
+		prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
+		scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = 100*time.Millisecond, 2*time.Second
+		t.Cleanup(func() { scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = prevStop, prevAbort })
+		f := newSchedWake(t, state.PhaseStarting) // never becomes ready
+		u := f.user(t, "sw-oneshot-abort", lifecyclePerms...)
+		evt := withSessionRevision(f.event(true), u.ID)
+		sch, entered, finished := fireOneShotWake(t, f, evt)
+		<-entered
+		time.Sleep(100 * time.Millisecond)
+		sch.halt()
+		f.srv.stopScheduledWakeFires(context.Background())
+		<-finished
+
+		got := waitEventStatus(t, f.store, evt.ID, store.ScheduledEventFailed)
+		assert.Equal(t, store.ScheduledEventFailed, got.Status)
+		assert.Equal(t, errScheduledWakeShutdown.Error(), got.Error)
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+
+	t.Run("teardown records a wake stuck in a detached launch", func(t *testing.T) {
+		prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
+		scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = 100*time.Millisecond, 200*time.Millisecond
+		prevReady := wakeReadyTimeout
+		wakeReadyTimeout = 300 * time.Millisecond // the woken run never reports ready
+		t.Cleanup(func() {
+			scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = prevStop, prevAbort
+			wakeReadyTimeout = prevReady
+		})
+		f := newSchedWake(t, state.PhaseSuspended)
+		release := make(chan struct{})
+		launching := make(chan struct{})
+		f.srv.SetDispatcher(&blockingStartDispatcher{wakeTrackingDispatcher: f.disp, started: launching, release: release})
+		u := f.user(t, "sw-oneshot-stuck", lifecyclePerms...)
+		evt := withSessionRevision(f.event(true), u.ID)
+		sch, entered, finished := fireOneShotWake(t, f, evt)
+		<-entered
+		<-launching
+		sch.halt()
+		f.srv.stopScheduledWakeFires(context.Background())
+
+		got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFailed, got.Status, "recorded by the teardown while the launch is stuck")
+		assert.Equal(t, errScheduledWakeShutdown.Error(), got.Error)
+
+		close(release)
+		<-finished
+		got = waitEventStatus(t, f.store, evt.ID, store.ScheduledEventFailed)
+		assert.Equal(t, store.ScheduledEventFailed, got.Status)
+		assert.Empty(t, f.disp.getMessageCalls(), "nothing is delivered after the shutdown")
+	})
+
+	t.Run("a wake does not start once shutdown has begun", func(t *testing.T) {
+		f := newSchedWake(t, state.PhaseSuspended)
+		u := f.user(t, "sw-oneshot-closed", lifecyclePerms...)
+		f.srv.scheduledWakeFires.closeAdmission()
+
+		err := f.fire(withSessionRevision(f.event(true), u.ID))
+		require.ErrorIs(t, err, errScheduledWakeShuttingDown)
+		assert.Empty(t, f.disp.getStartCalls())
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+}
+
+// blockingStartDispatcher blocks the resume dispatch until release closes,
+// ignoring its context, as a broker launch the shared wake path keeps
+// detached would.
+type blockingStartDispatcher struct {
+	*wakeTrackingDispatcher
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (d *blockingStartDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, prompt string, cont bool) error {
+	d.once.Do(func() { close(d.started) })
+	<-d.release
+	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, prompt, cont)
 }

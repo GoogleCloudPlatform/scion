@@ -641,9 +641,16 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		status = store.ScheduledEventFailed
 	}
 
+	// Record the outcome on a bounded context of its own: the event was
+	// claimed (fired) before the handler ran, and a shutdown that cancelled
+	// ctx meanwhile (halt) must not leave it fired with the failure
+	// unrecorded, for example a scheduled wake that never delivered
+	// (ptone/scion#7734).
 	now := time.Now()
 	if s.store != nil {
-		_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &now, errMsg)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelRecord()
+		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &now, errMsg)
 	}
 }
 
