@@ -6303,7 +6303,10 @@ export class ScionChatThread extends LitElement {
     // actually clicked inside it. `composedPath()[0]` is the real innermost
     // element, which is what "was a link/button tapped?" needs to inspect.
     const target = e.composedPath()[0] as HTMLElement;
-    if (target.closest?.('a, button, sl-icon-button, .entity-link, .mention, .reply-preview'))
+    // `summary` toggles a <details> (a set's choice-response answers).
+    if (
+      target.closest?.('a, button, summary, sl-icon-button, .entity-link, .mention, .reply-preview')
+    )
       return;
 
     this.handleMessageContextMenu(e, msg);

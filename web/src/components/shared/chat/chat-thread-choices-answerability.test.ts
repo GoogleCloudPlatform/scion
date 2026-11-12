@@ -353,6 +353,31 @@ describe('choice-response lines', () => {
     expect(scroll).toHaveBeenCalledWith('p1');
   });
 
+  it('expands a set on a touch device without opening the message menu', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none)',
+          media: query,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList
+    );
+    try {
+      const thread = await open();
+      const line = lineOf(await messageEl(thread, 'c2'))!;
+      await line.updateComplete;
+      const summary = line.shadowRoot!.querySelector('summary')!;
+      summary.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, composed: true, clientX: 10, clientY: 20 })
+      );
+      await thread.updateComplete;
+      expect(thread.shadowRoot!.querySelector('.context-menu')).toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it('keeps the bubble with the browser flag off', async () => {
     setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
     const thread = await open();
