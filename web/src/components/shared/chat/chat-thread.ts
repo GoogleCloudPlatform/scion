@@ -823,11 +823,21 @@ export class ScionChatThread extends LitElement {
   @state() private postDeniedReason: ChatPostDeniedReason = '';
   /**
    * Whether the viewer can answer each choice asker's decisions, by agent
-   * id (design §4.5): one agent read per asker per thread load.
+   * id (design §4.5): one agent read per asker per thread load, two when
+   * the first comes back unknown.
    */
   @state() private askerAnswerability = new Map<string, AskerAnswerability>();
   /** Askers looked up (or being looked up) for this thread load. */
   private _askerLookups = new Set<string>();
+
+  /**
+   * Asker reads that came back unknown (a network error or an unexpected
+   * status) this thread load. One such asker is read once more, on the
+   * next update of the messages; after that its unknown stays (the card
+   * stays answerable and the hub's 403 decides), so a read that keeps
+   * failing is not repeated on every update.
+   */
+  private _askerUnknownReads = new Set<string>();
   /** Bumped per thread load: a lookup for an earlier load is dropped. */
   private _askerLookupGen = 0;
   /**
@@ -4182,6 +4192,7 @@ export class ScionChatThread extends LitElement {
   private resetAskerAnswerability(): void {
     this._askerLookupGen++;
     this._askerLookups.clear();
+    this._askerUnknownReads.clear();
     if (this.askerAnswerability.size > 0) this.askerAnswerability = new Map();
   }
 
@@ -4200,6 +4211,11 @@ export class ScionChatThread extends LitElement {
       const gen = this._askerLookupGen;
       void fetchAskerAnswerability(d.askerAgentId, d.askerAgentName).then((a) => {
         if (gen !== this._askerLookupGen) return;
+        if (a.state === 'unknown' && !this._askerUnknownReads.has(d.askerAgentId)) {
+          // First failure: allow one more read on the next update.
+          this._askerUnknownReads.add(d.askerAgentId);
+          this._askerLookups.delete(d.askerAgentId);
+        }
         // A 403 the viewer already hit is authoritative over the read.
         if (this.askerAnswerability.get(d.askerAgentId)?.state === 'blocked') return;
         const next = new Map(this.askerAnswerability);

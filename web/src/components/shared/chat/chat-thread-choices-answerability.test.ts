@@ -282,6 +282,67 @@ describe('asker answerability', () => {
   });
 });
 
+/** A live chat message in this thread: any update of the thread's messages. */
+function liveMessage(id: string, minute: number): void {
+  stateManager.dispatchEvent(
+    new CustomEvent('chat-message-received', {
+      detail: {
+        state: {},
+        data: {
+          id,
+          projectId: 'proj-1',
+          sender: 'user:u-bob',
+          senderId: 'u-bob',
+          recipient: '',
+          recipientId: '',
+          msg: `hello ${id}`,
+          type: 'chat',
+          agentId: '',
+          createdAt: `2026-11-12T15:${minute}:00Z`,
+          threadId: KEY,
+          conversationKey: KEY,
+        },
+      },
+    })
+  );
+}
+
+describe('asker read that fails', () => {
+  it('retries once on a later update, then shows what the asker allows', async () => {
+    agentRead = () => json({ error: { code: 'unavailable', message: 'down' } }, 503);
+    const thread = await open();
+    await cardOf(thread, 'p1');
+    expect(agentReads()).toBe(1);
+    // unknown stays answerable (design §4.5).
+    expect((await cardOf(thread, 'p1')).answerBlocked).toBe(false);
+
+    agentRead = () =>
+      json({
+        id: 'a1',
+        name: 'release-bot',
+        _messageability: { canMessage: false, reason: 'mode_lineage_no_ancestry' },
+      });
+    liveMessage('m-live-1', 50);
+    await vi.waitFor(() => expect(agentReads()).toBe(2));
+    await settle();
+    await thread.updateComplete;
+    const card = await cardOf(thread, 'p1');
+    expect(card.answerBlocked).toBe(true);
+  });
+
+  it('stops after one retry while the read keeps failing', async () => {
+    agentRead = () => json({ error: { code: 'unavailable', message: 'down' } }, 503);
+    const thread = await open();
+    await cardOf(thread, 'p1');
+    for (const [i, id] of ['m-a', 'm-b', 'm-c', 'm-d'].entries()) {
+      liveMessage(id, 50 + i);
+      await settle();
+      await thread.updateComplete;
+    }
+    expect(agentReads()).toBe(2);
+  });
+});
+
 describe('a 403 over the asker read', () => {
   it('a 403 on one card is not undone by the asker read resolving later', async () => {
     let release: (r: Response) => void = () => {};
