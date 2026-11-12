@@ -104,9 +104,9 @@ const submitOrNull = (el: ScionChatChoices): HTMLElement | null =>
 function expectBlockedLook(el: ScionChatChoices): void {
   for (const r of ['r1', 'r2']) {
     const yes = choice(el, r, 'yes');
+    expect(yes.tagName).toBe('BUTTON');
     expect(yes.getAttribute('aria-pressed'), `${r}/yes`).toBe('false');
-    expect(yes.getAttribute('variant')).toBe('primary');
-    expect(yes.hasAttribute('outline')).toBe(true);
+    expect(yes.getAttribute('data-look')).toBe('outline');
     expect(yes.querySelector('sl-icon')).toBeNull();
   }
   expect(submitOrNull(el)).toBeNull();
@@ -180,7 +180,7 @@ describe('blocked set card', () => {
     await el.updateComplete;
 
     expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
-    expect(choice(el, 'r1', 'yes').hasAttribute('outline')).toBe(false);
+    expect(choice(el, 'r1', 'yes').getAttribute('data-look')).toBe('filled');
     expect(root(el).querySelector('.counter')?.textContent).toContain('0 remaining');
     expect(submit(el).hasAttribute('disabled')).toBe(false);
     expect(root(el).querySelector('.reason')).toBeNull();

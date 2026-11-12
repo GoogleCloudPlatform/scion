@@ -182,13 +182,26 @@ describe('set card, pending', () => {
   it('pre-selects recommended choices: filled with check-lg, aria-pressed', async () => {
     const el = await mount(set());
     const yes = choice(el, 'r1', 'yes');
-    expect(yes.getAttribute('variant')).toBe('primary');
-    expect(yes.hasAttribute('outline')).toBe(false);
+    // A native toggle button, so aria-pressed reaches assistive technology
+    // (sl-button keeps it on its host, where it is not exposed).
+    expect(yes.tagName).toBe('BUTTON');
+    expect((yes as HTMLButtonElement).type).toBe('button');
     expect(yes.getAttribute('aria-pressed')).toBe('true');
+    expect(yes.getAttribute('data-look')).toBe('filled');
     expect(yes.querySelector('sl-icon')?.getAttribute('name')).toBe('check-lg');
     const no = choice(el, 'r1', 'no');
-    expect(no.getAttribute('variant')).toBe('default');
+    expect(no.tagName).toBe('BUTTON');
+    expect(no.getAttribute('data-look')).toBe('default');
     expect(no.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('exposes the selection on the buttons themselves, not on a wrapper', async () => {
+    const el = await mount(set());
+    const pressed = Array.from(
+      root(el).querySelectorAll<HTMLElement>('.row [aria-pressed="true"]')
+    ).map((b) => `${b.tagName}:${b.closest('.row')!.getAttribute('data-row')}:${b.dataset.choice}`);
+    expect(pressed).toEqual(['BUTTON:r1:yes', 'BUTTON:r3:no']);
+    expect(root(el).querySelector('sl-button[aria-pressed]')).toBeNull();
   });
 
   it('counts rows without a selection in warning colour and disables Submit', async () => {
@@ -224,8 +237,7 @@ describe('set card, pending', () => {
     const el = await mount(set());
     await click(el, choice(el, 'r3', 'yes'));
     const no = choice(el, 'r3', 'no');
-    expect(no.getAttribute('variant')).toBe('primary');
-    expect(no.hasAttribute('outline')).toBe(true);
+    expect(no.getAttribute('data-look')).toBe('outline');
     expect(no.getAttribute('aria-pressed')).toBe('false');
     expect(choice(el, 'r3', 'yes').getAttribute('aria-pressed')).toBe('true');
   });

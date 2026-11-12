@@ -253,6 +253,130 @@ export class ScionChatChoices extends LitElement {
     }
 
     /*
+     * A set card's plain choices are native buttons (renderSetButton) drawn
+     * as a small sl-button: Shoelace's own rules and tokens, so both themes
+     * match the single card's sl-buttons. Default labels use the theme text
+     * colour and filled labels white, as the sl-button overrides below do.
+     */
+    .sb {
+      appearance: none;
+      margin: 0;
+      display: inline-flex;
+      align-items: stretch;
+      justify-content: center;
+      border-style: solid;
+      border-width: var(--sl-input-border-width, 1px);
+      border-radius: var(--sl-input-border-radius-small, 0.1875rem);
+      min-height: var(--sl-input-height-small, 1.875rem);
+      padding: 0;
+      font-family: var(--sl-input-font-family, inherit);
+      font-size: var(--sl-button-font-size-small, 0.75rem);
+      font-weight: var(--sl-font-weight-semibold, 600);
+      line-height: calc(
+        var(--sl-input-height-small, 1.875rem) - var(--sl-input-border-width, 1px) * 2
+      );
+      white-space: nowrap;
+      vertical-align: middle;
+      user-select: none;
+      -webkit-user-select: none;
+      cursor: pointer;
+      transition:
+        var(--sl-transition-x-fast, 100ms) background-color,
+        var(--sl-transition-x-fast, 100ms) color,
+        var(--sl-transition-x-fast, 100ms) border,
+        var(--sl-transition-x-fast, 100ms) box-shadow;
+    }
+
+    .sb:focus {
+      outline: none;
+    }
+
+    .sb:focus-visible {
+      outline: var(--sl-focus-ring, 2px solid #3b82f6);
+      outline-offset: var(--sl-focus-ring-offset, 1px);
+    }
+
+    .sb:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .sb:disabled * {
+      pointer-events: none;
+    }
+
+    .sb-prefix {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      pointer-events: none;
+    }
+
+    .sb-label {
+      display: inline-block;
+      padding: 0 var(--sl-spacing-small, 0.75rem);
+    }
+
+    .sb.has-prefix {
+      padding-inline-start: var(--sl-spacing-x-small, 0.5rem);
+    }
+
+    .sb.has-prefix .sb-label {
+      padding-inline-start: var(--sl-spacing-x-small, 0.5rem);
+    }
+
+    .sb-default {
+      background-color: var(--sl-color-neutral-0, #fff);
+      border-color: var(--sl-input-border-color, #cbd5e1);
+      color: var(--scion-text, #1e293b);
+    }
+
+    .sb-default:hover:not(:disabled) {
+      background-color: var(--sl-color-primary-50);
+      border-color: var(--sl-color-primary-300);
+      color: var(--sl-color-primary-700);
+    }
+
+    .sb-default:active:not(:disabled) {
+      background-color: var(--sl-color-primary-100);
+      border-color: var(--sl-color-primary-400);
+      color: var(--sl-color-primary-700);
+    }
+
+    .sb-filled {
+      background-color: var(--sl-color-primary-600, #2563eb);
+      border-color: var(--sl-color-primary-600, #2563eb);
+      color: #fff;
+    }
+
+    .sb-filled:hover:not(:disabled) {
+      background-color: var(--sl-color-primary-500);
+      border-color: var(--sl-color-primary-500);
+    }
+
+    .sb-filled:active:not(:disabled) {
+      background-color: var(--sl-color-primary-600);
+      border-color: var(--sl-color-primary-600);
+    }
+
+    .sb-outline {
+      background: none;
+      border-color: var(--sl-color-primary-600, #2563eb);
+      color: var(--sl-color-primary-600, #2563eb);
+    }
+
+    .sb-outline:hover:not(:disabled) {
+      background-color: var(--sl-color-primary-600);
+      color: var(--sl-color-neutral-0);
+    }
+
+    .sb-outline:active:not(:disabled) {
+      border-color: var(--sl-color-primary-700);
+      background-color: var(--sl-color-primary-700);
+      color: var(--sl-color-neutral-0);
+    }
+
+    /*
      * A filled primary button draws its label in neutral-0, which the dark
      * theme maps to a dark slate (about 3.5:1 on the primary fill). Keep it
      * white, as in light mode and the mocks.
@@ -1148,27 +1272,38 @@ export class ScionChatChoices extends LitElement {
     return { chosen, selected, recommended, disabled };
   }
 
+  /**
+   * A plain set choice: a native toggle button, so its `aria-pressed`
+   * reaches assistive technology (Shoelace's `sl-button` does not forward
+   * it from the host to its inner button). Styled as a small `sl-button`
+   * (`.sb` rules): filled when selected or chosen, outlined when
+   * recommended and not selected.
+   */
   private renderSetButton(d: DecisionView, c: ChoiceOption): TemplateResult {
     const s = this.setChoiceState(d, c);
     const filled = s.chosen || s.selected;
     const outlined = !filled && s.recommended && d.status === 'pending';
     const icon = s.chosen ? 'check-circle-fill' : s.selected ? 'check-lg' : '';
-    return html`<sl-button
-      size="small"
+    const look = filled ? 'filled' : outlined ? 'outline' : 'default';
+    return html`<button
+      type="button"
+      class="sb sb-${look}${icon ? ' has-prefix' : ''}"
       data-choice=${c.id}
-      variant=${filled || outlined ? 'primary' : 'default'}
-      ?outline=${outlined}
+      data-look=${look}
       ?disabled=${s.disabled}
       aria-disabled=${s.disabled ? 'true' : nothing}
       aria-pressed=${d.status === 'pending' ? String(s.selected) : nothing}
       title=${s.recommended ? `${c.label} (recommended)` : c.label}
       @click=${() => this.select(d, c.id)}
-      >${icon
-        ? html`<sl-icon slot="prefix" name=${icon}></sl-icon>`
-        : nothing}${c.label}${s.recommended
-        ? html`<span class="sr-only"> (recommended)</span>`
-        : nothing}</sl-button
-    >`;
+    >
+      ${icon
+        ? html`<span class="sb-prefix"><sl-icon name=${icon} aria-hidden="true"></sl-icon></span>`
+        : nothing}<span class="sb-label"
+        >${c.label}${s.recommended
+          ? html`<span class="sr-only"> (recommended)</span>`
+          : nothing}</span
+      >
+    </button>`;
   }
 
   private renderSetOptRow(d: DecisionView, c: ChoiceOption): TemplateResult {

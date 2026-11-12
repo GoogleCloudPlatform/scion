@@ -233,18 +233,14 @@ for (const theme of ['light', 'dark'] as const) {
       );
       await expect(c.locator('.card-head .title')).toHaveText('3 decisions');
       await expect(c.locator('.row[role="group"]')).toHaveCount(3);
-      const d234 = c.locator('.row[data-row="prompt-set-d234"]');
-      await expect(d234.locator('sl-button[data-choice="yes"]')).toHaveAttribute(
-        'aria-pressed',
-        'true'
-      );
-      await expect(d234.locator('sl-button[data-choice="no"]')).toHaveAttribute(
-        'aria-pressed',
-        'false'
-      );
-      await expect(
-        c.locator('.row[data-row="prompt-set-ship-now"] sl-button[data-choice="no"]')
-      ).toHaveAttribute('aria-pressed', 'true');
+      // Selection is read from the accessibility tree (role + pressed state),
+      // not from a host attribute.
+      const d234 = c.getByRole('group', { name: 'Ship v0.9 today?' });
+      await expect(d234.getByRole('button', { name: /^Yes/, pressed: true })).toBeVisible();
+      await expect(d234.getByRole('button', { name: /^No/, pressed: false })).toBeVisible();
+      const shipNow = c.getByRole('group', { name: 'Deploy to prod after tagging?' });
+      await expect(shipNow.getByRole('button', { name: /^No/, pressed: true })).toBeVisible();
+      await expect(c.getByRole('button', { pressed: true })).toHaveCount(2);
       await expect(c.locator('.counter')).toHaveText('1 remaining');
       await expect(c.locator('.counter')).toHaveClass(/missing/);
       const submit = c.locator('sl-button.submit');
@@ -256,10 +252,7 @@ for (const theme of ['light', 'dark'] as const) {
       const hintId = await submit.getAttribute('aria-describedby');
       await expect(c.locator(`[id="${hintId}"]`)).toHaveText('Choose an answer for 17 first');
       // A filled (selected) choice has a white label in both themes, as in the mocks.
-      const filledColor = await d234
-        .locator('sl-button[data-choice="yes"]')
-        .evaluate((b) => getComputedStyle(b.shadowRoot!.querySelector('[part~="base"]')!).color);
-      expect(filledColor).toBe('rgb(255, 255, 255)');
+      await expect(d234.locator('[data-choice="yes"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
       await shot(page, testInfo, theme, '04-set-pending', ['prompt-set']);
     });
 
@@ -285,7 +278,7 @@ for (const theme of ['light', 'dark'] as const) {
       await openChoices(page, theme, setThread('prompt-set', decisions));
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
-      await c.locator('.row[data-row="prompt-set-17"] sl-button[data-choice="a"]').click();
+      await c.locator('.row[data-row="prompt-set-17"] [data-choice="a"]').click();
       await expect(c.locator('.counter')).toHaveText('0 remaining');
       await expect(c.locator('.counter')).not.toHaveClass(/missing/);
       const submit = c.locator('sl-button.submit');
@@ -356,7 +349,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(replaced).toHaveClass(/replaced/);
       await expect(replaced.locator('.row-foot')).toContainText('Replaced by v2');
       await expect(replaced.locator('a.jump')).toHaveText('Jump to v2');
-      await expect(replaced.locator('sl-button').first()).toHaveAttribute('aria-disabled', 'true');
+      await expect(replaced.locator('[data-choice]').first()).toBeDisabled();
       await expect(c.locator('.counter')).toHaveText('0 remaining · 1 replaced');
       await shot(page, testInfo, theme, '07-set-replaced-row', ['prompt-set']);
     });
@@ -368,8 +361,8 @@ for (const theme of ['light', 'dark'] as const) {
       await openChoices(page, theme, setThread('prompt-set', decisions));
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
-      await c.locator('.row[data-row="prompt-set-d234"] sl-button[data-choice="no"]').click();
-      await c.locator('.row[data-row="prompt-set-17"] sl-button[data-choice="a"]').click();
+      await c.locator('.row[data-row="prompt-set-d234"] [data-choice="no"]').click();
+      await c.locator('.row[data-row="prompt-set-17"] [data-choice="a"]').click();
       await page.route('**/api/v1/choice-prompts/*/answers', (route) =>
         route.fulfill({
           status: 409,
@@ -402,8 +395,10 @@ for (const theme of ['light', 'dark'] as const) {
         'Your other selections are kept — review and submit again.'
       );
       await expect(
-        c.locator('.row[data-row="prompt-set-d234"] sl-button[data-choice="no"]')
-      ).toHaveAttribute('aria-pressed', 'true');
+        c
+          .getByRole('group', { name: 'Ship v0.9 today?' })
+          .getByRole('button', { name: /^No/, pressed: true })
+      ).toBeVisible();
       await expect(c.locator('.row[data-row="prompt-set-17"] .row-foot')).toContainText(
         'Answered by Bob'
       );
@@ -477,16 +472,17 @@ for (const theme of ['light', 'dark'] as const) {
       const group = c.locator('.card.set');
       await expect(group).toHaveAttribute('aria-disabled', 'true');
       await expect(group).toHaveAttribute('aria-describedby', (await reason.getAttribute('id'))!);
-      for (const b of await c.locator('.row sl-button').all()) {
-        await expect(b).toHaveAttribute('aria-disabled', 'true');
+      for (const b of await c.locator('.row [data-choice]').all()) {
+        await expect(b).toBeDisabled();
       }
       // Mock s10: nothing selected, the recommended choice outlined, and no
       // counter or Submit; the reason line is the footer.
-      const yes = c.locator('.row[data-row="prompt-set-d234"] sl-button[data-choice="yes"]');
+      const yes = c
+        .getByRole('group', { name: 'Ship v0.9 today?' })
+        .getByRole('button', { name: /^Yes/ });
       await expect(yes).toHaveAttribute('aria-pressed', 'false');
-      await expect(yes).toHaveAttribute('variant', 'primary');
-      await expect(yes).toHaveAttribute('outline', '');
-      await expect(c.locator('[aria-pressed="true"]')).toHaveCount(0);
+      await expect(yes).toHaveAttribute('data-look', 'outline');
+      await expect(c.getByRole('button', { pressed: true })).toHaveCount(0);
       await expect(c.locator('.card-foot')).toHaveCount(0);
       await expect(c.locator('sl-button.submit')).toHaveCount(0);
       await shot(page, testInfo, theme, '10-blocked', ['prompt-set']);
