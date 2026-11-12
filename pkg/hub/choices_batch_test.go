@@ -435,7 +435,7 @@ func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
 	f := newChoicesFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
-	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".choice.updated")
+	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
 	defer unsubUpdates()
 	chat, unsubChat := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.dm")
 	defer unsubChat()

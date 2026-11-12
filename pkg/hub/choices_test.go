@@ -539,7 +539,7 @@ func TestDecisionAnswer_Replaced409(t *testing.T) {
 // The answer publishes choice.updated on the project subject for a thread.
 func TestDecisionAnswer_PublishesChoiceUpdated(t *testing.T) {
 	f := newChoicesFixture(t)
-	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".choice.updated")
+	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
 	defer unsub()
 	_, res := f.topicPrompt(t, oneDecision, false)
 	rr := f.answer(t, f.bob, res.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
@@ -626,9 +626,9 @@ func TestChoicesSend_GroupPostWakesNoAgent(t *testing.T) {
 // project subject (a thread answer does, TestDecisionAnswer_PublishesChoiceUpdated).
 func TestDecisionAnswer_DMChoiceUpdatedOnlyToUser(t *testing.T) {
 	f := newChoicesFixture(t)
-	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".choice.updated")
+	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
 	defer unsubProject()
-	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".choice.updated")
+	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
 	defer unsubUser()
 
 	dm := f.sendPromptToBob(t, `[{"id":"dm-upd","question":"DM?","choices":["y","n"]}]`, false)
