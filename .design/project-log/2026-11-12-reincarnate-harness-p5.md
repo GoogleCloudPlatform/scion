@@ -42,8 +42,9 @@ No further code/doc mismatch or required help-string change found.
 - `git diff --check`: exit 0, no output.
 - No docs lint script is defined by `docs-site/package.json`; the build performs
   link validation required by `docs-site/AGENTS.md`.
-- `make ci` was invoked and stopped before its lint/test stages because its
-  unsharded whole-Hub test/vet recipes are prohibited by repository guidance.
+- `make ci` passed formatting and was interrupted during lint dependency
+  downloads, before whole-Hub compilation or tests, because its unsharded
+  whole-Hub test/vet recipes are prohibited by repository guidance.
   Full Go CI was not run for these prose-only changes. No executed gate failed.
 
 Review: prose-only, direct maintainer review as assigned; no agent review loop.
