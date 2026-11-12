@@ -109,6 +109,17 @@ func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEve
 	wakeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledWakeBudget)
 	defer cancel()
 
+	// A target already starting is not resumed (the shared wake path
+	// refuses a starting agent): another start is bringing it up, so wait
+	// for that start like a deferred wake. Delivering once it is ready is
+	// a delivery to a running agent, which the message authorization
+	// already covers; nothing is started here.
+	if state.Phase(agent.Phase) == state.PhaseStarting {
+		slog.Info("Scheduler: scheduled message target is already starting; waiting for it to become ready",
+			"eventID", evt.ID, "agent_id", agent.ID)
+		return s.awaitStartInProgress(wakeCtx, evt, agent)
+	}
+
 	result, dmErr := s.wakeAgentForDM(wakeCtx, agent)
 	if dmErr != nil {
 		slog.Warn("Scheduler: scheduled message wake failed",
@@ -126,19 +137,27 @@ func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEve
 	// that does not become ready fails the fire.
 	slog.Info("Scheduler: scheduled message wake deferred; waiting for the start in progress",
 		"eventID", evt.ID, "agent_id", agent.ID, "holder", string(agent.StartClaimKind))
-	err := s.waitForStartToBegin(wakeCtx, agent.ID, wakeReadyTimeout)
+	return s.awaitStartInProgress(wakeCtx, evt, agent)
+}
+
+// awaitStartInProgress waits, within ctx and wakeReadyTimeout for each
+// step, for a start of the target that someone else began to bring it up:
+// first for that start to leave the suspended phase, then for readiness. On
+// success agent is refreshed to the row the start brought up, so the
+// dispatch goes to the new run. A target that does not become ready returns
+// errScheduledWakeNotReady.
+func (s *Server) awaitStartInProgress(ctx context.Context, evt store.ScheduledEvent, agent *store.Agent) error {
+	err := s.waitForStartToBegin(ctx, agent.ID, wakeReadyTimeout)
 	var activity state.Activity
 	if err == nil {
-		activity, err = s.waitForAgentReady(wakeCtx, agent.ID, wakeReadyTimeout)
+		activity, err = s.waitForAgentReady(ctx, agent.ID, wakeReadyTimeout)
 	}
 	if err != nil {
-		slog.Warn("Scheduler: scheduled message target did not become ready after a deferred wake",
+		slog.Warn("Scheduler: scheduled message target did not become ready after a start in progress",
 			"eventID", evt.ID, "agent_id", agent.ID, "error", err)
 		return errScheduledWakeNotReady
 	}
-	// Deliver to the run the other start brought up, not to the row read
-	// before it.
-	if fresh, gerr := s.store.GetAgent(wakeCtx, agent.ID); gerr == nil && fresh != nil {
+	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
 		*agent = *fresh
 	}
 	agent.Activity = string(activity)

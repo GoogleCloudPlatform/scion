@@ -7040,7 +7040,14 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	}
 	_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &firedAt, errMsg)
 
-	// Update schedule run state
+	// Update schedule run state. A wake fire's next run was reserved before
+	// it ran, and a newer recurrence may have run (and reserved the run
+	// after it) while this one was waking: record the outcome without
+	// touching next_run_at, so a late completion cannot rewind it.
+	if wakeFire {
+		_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, errMsg)
+		return
+	}
 	_ = s.store.UpdateScheduleAfterRun(recordCtx, sched.ID, now, nextRunAt, errMsg)
 }
 

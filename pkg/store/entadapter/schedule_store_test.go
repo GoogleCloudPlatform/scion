@@ -140,6 +140,51 @@ func TestUpdateScheduleAfterRun(t *testing.T) {
 	assert.Equal(t, "boom", got.LastRunError)
 }
 
+// TestAdvanceAndRecordScheduleRun: a run whose next_run_at was reserved up
+// front records its outcome without touching next_run_at, and a run that
+// finishes after a newer one keeps the newer outcome (ptone/scion#7734).
+func TestAdvanceAndRecordScheduleRun(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	sc := newTestSchedule(uuid.NewString(), "waker")
+	require.NoError(t, s.CreateSchedule(ctx, sc))
+
+	older := time.Now().UTC().Truncate(time.Minute)
+	newer := older.Add(time.Minute)
+	reserved := newer.Add(time.Minute)
+
+	require.NoError(t, s.AdvanceScheduleNextRun(ctx, sc.ID, reserved))
+	got, err := s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.NextRunAt)
+	assert.True(t, got.NextRunAt.Equal(reserved))
+	assert.Equal(t, 0, got.RunCount, "advancing records no run")
+
+	// The newer run finishes first, then the older one, with an error.
+	require.NoError(t, s.RecordScheduleRun(ctx, sc.ID, newer, ""))
+	require.NoError(t, s.RecordScheduleRun(ctx, sc.ID, older, "late failure"))
+
+	got, err = s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.True(t, got.NextRunAt.Equal(reserved), "next_run_at is never changed by a recorded run")
+	require.NotNil(t, got.LastRunAt)
+	assert.True(t, got.LastRunAt.Equal(newer), "the newer outcome is kept")
+	assert.Equal(t, store.ScheduleRunSuccess, got.LastRunStatus)
+	assert.Empty(t, got.LastRunError)
+	assert.Equal(t, 2, got.RunCount)
+	assert.Equal(t, 1, got.ErrorCount)
+
+	// A later failing run does overwrite the outcome.
+	require.NoError(t, s.RecordScheduleRun(ctx, sc.ID, reserved, "boom"))
+	got, err = s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduleRunError, got.LastRunStatus)
+	assert.Equal(t, "boom", got.LastRunError)
+
+	assert.ErrorIs(t, s.RecordScheduleRun(ctx, uuid.NewString(), newer, ""), store.ErrNotFound)
+	assert.ErrorIs(t, s.AdvanceScheduleNextRun(ctx, uuid.NewString(), newer), store.ErrNotFound)
+}
+
 func TestListSchedulesFilterAndPagination(t *testing.T) {
 	s := newTestScheduleStore(t)
 	ctx := context.Background()

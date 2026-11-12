@@ -375,3 +375,94 @@ func TestScheduledMessageWake_RecurringFireAdvancesNextRunFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestScheduledMessageWake_TargetAlreadyStarting: a target another start
+// has already moved to starting (review 2, finding 1 of ptone/scion#7769)
+// is not resumed again: the fire waits for it to become ready and delivers,
+// or fails visibly when it does not.
+func TestScheduledMessageWake_TargetAlreadyStarting(t *testing.T) {
+	t.Run("delivers once ready, with no second start", func(t *testing.T) {
+		f := newSchedWake(t, state.PhaseStarting)
+		u := f.user(t, "sw-starting-ok", lifecyclePerms...)
+		_, err := f.store.ClaimAgentStart(context.Background(), f.target.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			_ = f.store.UpdateAgentStatus(context.Background(), f.target.ID, store.AgentStatusUpdate{
+				Phase: string(state.PhaseRunning), Activity: "idle",
+			})
+		}()
+
+		require.NoError(t, f.fire(withSessionRevision(f.event(true), u.ID)))
+		assert.Empty(t, f.disp.getStartCalls(), "the start in progress is not repeated")
+		assert.Len(t, f.disp.getMessageCalls(), 1, "delivered once the target is ready")
+	})
+	t.Run("fails visibly when it never becomes ready", func(t *testing.T) {
+		prev := wakeReadyTimeout
+		wakeReadyTimeout = 300 * time.Millisecond
+		t.Cleanup(func() { wakeReadyTimeout = prev })
+
+		f := newSchedWake(t, state.PhaseStarting)
+		u := f.user(t, "sw-starting-fail", lifecyclePerms...)
+
+		err := f.fire(withSessionRevision(f.event(true), u.ID))
+		require.ErrorIs(t, err, errScheduledWakeNotReady)
+		assert.Empty(t, f.disp.getStartCalls())
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+}
+
+// TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun: a wake fire
+// that finishes after a newer recurrence of the same schedule ran (review
+// 2, finding 2 of ptone/scion#7769; SQLite has no evaluator lock) must not
+// rewind the newer recurrence's next-run reservation or its last-run
+// outcome, and no off-cadence fire becomes due.
+func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	rec := doRequest(t, srv, "POST", "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name: "overlap-wake", CronExpr: "* * * * *", EventType: "message",
+		AgentName: "worker", Message: "poke", Wake: true,
+	})
+	require.Equal(t, 201, rec.Code, rec.Body.String())
+	var row store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&row))
+
+	now := time.Now().UTC().Truncate(time.Minute)
+	later := now.Add(time.Minute)
+	calls := 0
+	srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+		calls++
+		if calls == 1 {
+			// The older run is still waking when the next minute's
+			// evaluator selects the schedule and runs it to completion.
+			due, err := s.ListDueSchedules(ctx, later)
+			require.NoError(t, err)
+			require.Len(t, due, 1, "the next recurrence is due")
+			srv.executeSchedule(ctx, due[0], later)
+			return assert.AnError // the older run then fails
+		}
+		return nil
+	})
+
+	srv.executeSchedule(ctx, row, now)
+	require.Equal(t, 2, calls)
+
+	got, err := s.GetSchedule(ctx, row.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.NextRunAt)
+	assert.True(t, got.NextRunAt.After(later),
+		"the older completion must not rewind next_run_at: got %s, newer run at %s", got.NextRunAt, later)
+	require.NotNil(t, got.LastRunAt)
+	assert.True(t, got.LastRunAt.Equal(later), "the newer run's outcome is kept: last run %s", got.LastRunAt)
+	assert.Equal(t, store.ScheduleRunSuccess, got.LastRunStatus)
+	assert.Empty(t, got.LastRunError)
+	assert.Equal(t, 2, got.RunCount, "both runs are counted")
+	assert.Equal(t, 1, got.ErrorCount, "the older run's failure is counted")
+
+	due, err := s.ListDueSchedules(ctx, later.Add(30*time.Second))
+	require.NoError(t, err)
+	for _, d := range due {
+		assert.NotEqual(t, row.ID, d.ID, "no off-cadence fire becomes due")
+	}
+}
