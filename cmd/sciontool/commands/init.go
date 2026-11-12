@@ -3274,6 +3274,39 @@ func isUIDMapped(uid int) bool {
 var errGitCloneWorkspacePrivilegeDropRequired = errors.New(
 	"gitCloneWorkspace: privilege drop required but uid/gid were not both set; refusing to run git as root")
 
+const (
+	// defaultGitCheckoutWorkers is the number of parallel checkout workers
+	// passed via `git -c checkout.workers=<N>` when populating or switching
+	// branches in gitCloneWorkspace. On NFS-backed workspaces (e.g. Cloud Run
+	// with Filestore), single-threaded checkout is bottlenecked on per-file
+	// create/write/close RPC latency (~4.5x faster at 16 workers on ~13.5k
+	// files), while on local disk 16 workers is slightly faster or neutral.
+	//
+	// checkout.thresholdForParallelism is intentionally left at Git's built-in
+	// default (100 files) so small checkouts and few-file branch switches avoid
+	// worker-process spawn overhead while any nontrivial tree gets parallel I/O.
+	// Passing checkout.workers via `-c` rather than `git config` keeps
+	// .git/config clean under pkg/util/git_config_policy.go.
+	defaultGitCheckoutWorkers = 16
+	maxGitCheckoutWorkers     = 64
+	envGitCheckoutWorkers     = "SCION_GIT_CHECKOUT_WORKERS"
+)
+
+func resolveGitCheckoutWorkers() int {
+	raw := os.Getenv(envGitCheckoutWorkers)
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultGitCheckoutWorkers
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil || n < 0 || n > maxGitCheckoutWorkers {
+		log.Warn("%s is not a valid integer in 0..%d (%q), defaulting to %d",
+			envGitCheckoutWorkers, maxGitCheckoutWorkers, raw, defaultGitCheckoutWorkers)
+		return defaultGitCheckoutWorkers
+	}
+	return n
+}
+
 // gitCloneWorkspace clones a git repository into /workspace when SCION_GIT_CLONE_URL
 // is set. This supports hub-first git projects where the repository must be cloned
 // before the harness starts. When uid > 0, all git commands run as the specified
@@ -3351,6 +3384,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		depth = 1
 		depthStr = "1"
 	}
+	checkoutWorkersArg := fmt.Sprintf("checkout.workers=%d", resolveGitCheckoutWorkers())
 	agentName := os.Getenv("SCION_AGENT_NAME")
 
 	// Helper to configure a git command: run as the scion user and disable
@@ -3501,7 +3535,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	}
 
 	// Check out the fetched branch to populate the working tree.
-	checkoutArgs := []string{"-C", workspacePath, "checkout", "-b", clonedBranch, "origin/" + clonedBranch}
+	checkoutArgs := []string{"-c", checkoutWorkersArg, "-C", workspacePath, "checkout", "-b", clonedBranch, "origin/" + clonedBranch}
 	coCmd := exec.Command("git", checkoutArgs...)
 	setupGitCmd(coCmd)
 	if out, err := procreap.CombinedOutputManaged(coCmd); err != nil {
@@ -3558,7 +3592,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		checked := false
 
 		// 1. Try local checkout (works if branch matches the cloned branch)
-		checkoutCmd := exec.Command("git", "-C", workspacePath, "checkout", branchName)
+		checkoutCmd := exec.Command("git", "-c", checkoutWorkersArg, "-C", workspacePath, "checkout", branchName)
 		setupGitCmd(checkoutCmd)
 		if err := procreap.RunManaged(checkoutCmd); err == nil {
 			checked = true
@@ -3570,7 +3604,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 			setupGitCmd(fetchCmd)
 			if err := procreap.RunManaged(fetchCmd); err == nil {
 				// Branch exists on remote — check it out tracking origin
-				trackCmd := exec.Command("git", "-C", workspacePath, "checkout", "-b", branchName, "origin/"+branchName)
+				trackCmd := exec.Command("git", "-c", checkoutWorkersArg, "-C", workspacePath, "checkout", "-b", branchName, "origin/"+branchName)
 				setupGitCmd(trackCmd)
 				if err := procreap.RunManaged(trackCmd); err == nil {
 					checked = true
@@ -3580,7 +3614,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 
 		// 3. Branch doesn't exist anywhere — create it
 		if !checked {
-			createCmd := exec.Command("git", "-C", workspacePath, "checkout", "-b", branchName)
+			createCmd := exec.Command("git", "-c", checkoutWorkersArg, "-C", workspacePath, "checkout", "-b", branchName)
 			setupGitCmd(createCmd)
 			if err := procreap.RunManaged(createCmd); err != nil {
 				return fmt.Errorf("failed to create branch %s: %w", branchName, err)
