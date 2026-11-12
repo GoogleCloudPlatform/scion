@@ -112,8 +112,11 @@ Markdown link:
 | `gs://<bucket>/<object>` | A link that opens the object preview, in agent messages only and when the `web.gcs_links` experiment is on |
 | `https://...`, `www....` or an email address | An ordinary link. A descriptive Markdown link still reads better. |
 
-For example, `Fixed in ptone/scion#123; notes in /scion-volumes/scratchpad/notes.md.`
-renders both references as links.
+For example, this message body renders both references as links:
+
+```markdown
+Fixed in ptone/scion#123; notes in /scion-volumes/scratchpad/notes.md.
+```
 
 - **Code:** nothing in a fenced code block is linked. In inline code, file paths and
   `gs://` references are still linked, but GitHub references, artifact references
