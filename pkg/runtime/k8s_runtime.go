@@ -2234,14 +2234,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 	for _, e := range config.Env {
 		// Parse "KEY=VALUE"
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
+		if name, value, ok := strings.Cut(e, "="); ok {
 			// The start command stays the runtime's, as on Docker, where
 			// the merged environment never replaces it.
-			if parts[0] == k8sStartCmdEnv {
+			if name == k8sStartCmdEnv {
 				continue
 			}
-			envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
+			envVars = append(envVars, corev1.EnvVar{Name: name, Value: value})
 		}
 	}
 
