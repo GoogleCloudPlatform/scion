@@ -94,6 +94,25 @@ async function mount(
 const root = (el: ScionChatChoices): ShadowRoot => el.shadowRoot!;
 const submit = (el: ScionChatChoices): HTMLElement =>
   root(el).querySelector<HTMLElement>('sl-button.submit')!;
+const submitOrNull = (el: ScionChatChoices): HTMLElement | null =>
+  root(el).querySelector<HTMLElement>('sl-button.submit');
+
+/**
+ * A blocked set (mock s10): nothing selected, the recommended choice
+ * outlined, and no counter or Submit; the reason line is the footer.
+ */
+function expectBlockedLook(el: ScionChatChoices): void {
+  for (const r of ['r1', 'r2']) {
+    const yes = choice(el, r, 'yes');
+    expect(yes.getAttribute('aria-pressed'), `${r}/yes`).toBe('false');
+    expect(yes.getAttribute('variant')).toBe('primary');
+    expect(yes.hasAttribute('outline')).toBe(true);
+    expect(yes.querySelector('sl-icon')).toBeNull();
+  }
+  expect(submitOrNull(el)).toBeNull();
+  expect(root(el).querySelector('.card-foot')).toBeNull();
+  expect(root(el).querySelector('.counter')).toBeNull();
+}
 const choice = (el: ScionChatChoices, rowId: string, id: string): HTMLElement =>
   root(el).querySelector<HTMLElement>(`[data-row="${rowId}"] [data-choice="${id}"]`)!;
 
@@ -121,21 +140,24 @@ describe('blocked set card', () => {
         expect(choice(el, r, c).getAttribute('aria-disabled')).toBe('true');
       }
     }
-    expect(submit(el).hasAttribute('disabled')).toBe(true);
+    expectBlockedLook(el);
     const reasons = root(el).querySelectorAll('.reason');
     expect(reasons).toHaveLength(1);
     expect(reasons[0]!.textContent).toContain("You can't answer release-bot:");
-    expect(submit(el).getAttribute('aria-describedby')).toBe(reasons[0]!.id);
-    expect(root(el).querySelector('.card')!.getAttribute('aria-disabled')).toBe('true');
+    // The reason is the card's last element: it stands in for the footer.
+    expect(root(el).querySelector('.card')!.lastElementChild).toBe(reasons[0]);
+    const card = root(el).querySelector('.card')!;
+    expect(card.getAttribute('aria-disabled')).toBe('true');
+    expect(card.getAttribute('aria-describedby')).toBe(reasons[0]!.id);
   });
 
   it('ignores clicks and never posts', async () => {
     const el = await mount(set(), BLOCKED);
     choice(el, 'r1', 'no').click();
-    submit(el).click();
     await settle(el);
 
     expect(choice(el, 'r1', 'no').getAttribute('aria-pressed')).toBe('false');
+    expect(submitOrNull(el)).toBeNull();
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
@@ -147,7 +169,21 @@ describe('blocked set card', () => {
     });
     const reason = root(el).querySelector('.reason')!;
     expect(reason.getAttribute('data-reason')).toBe('read-only');
-    expect(submit(el).hasAttribute('disabled')).toBe(true);
+    expectBlockedLook(el);
+  });
+
+  it('returns to the normal set look, defaults selected, once unblocked', async () => {
+    const el = await mount(set(), BLOCKED);
+    expectBlockedLook(el);
+
+    el.answerability = { state: 'ok' };
+    await el.updateComplete;
+
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
+    expect(choice(el, 'r1', 'yes').hasAttribute('outline')).toBe(false);
+    expect(root(el).querySelector('.counter')?.textContent).toContain('0 remaining');
+    expect(submit(el).hasAttribute('disabled')).toBe(false);
+    expect(root(el).querySelector('.reason')).toBeNull();
   });
 });
 
@@ -219,7 +255,7 @@ describe('403 on the set submit', () => {
       expect.stringContaining("You can't answer release-bot"),
       'warning'
     );
-    expect(submit(el).hasAttribute('disabled')).toBe(true);
+    expectBlockedLook(el);
     expect(choice(el, 'r1', 'no').hasAttribute('disabled')).toBe(true);
     expect(root(el).querySelectorAll('.reason')).toHaveLength(1);
   });
@@ -233,6 +269,6 @@ describe('403 on the set submit', () => {
     await settle(el);
 
     expect(root(el).querySelector('.reason')?.getAttribute('data-reason')).toBe('read-only');
-    expect(submit(el).hasAttribute('disabled')).toBe(true);
+    expectBlockedLook(el);
   });
 });

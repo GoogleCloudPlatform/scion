@@ -475,7 +475,15 @@ for (const theme of ['light', 'dark'] as const) {
       for (const b of await c.locator('.row sl-button').all()) {
         await expect(b).toHaveAttribute('aria-disabled', 'true');
       }
-      await expect(c.locator('sl-button.submit')).toHaveAttribute('aria-disabled', 'true');
+      // Mock s10: nothing selected, the recommended choice outlined, and no
+      // counter or Submit; the reason line is the footer.
+      const yes = c.locator('.row[data-row="prompt-set-d234"] sl-button[data-choice="yes"]');
+      await expect(yes).toHaveAttribute('aria-pressed', 'false');
+      await expect(yes).toHaveAttribute('variant', 'primary');
+      await expect(yes).toHaveAttribute('outline', '');
+      await expect(c.locator('[aria-pressed="true"]')).toHaveCount(0);
+      await expect(c.locator('.card-foot')).toHaveCount(0);
+      await expect(c.locator('sl-button.submit')).toHaveCount(0);
       await shot(page, testInfo, theme, '10-blocked', ['prompt-set']);
     });
 

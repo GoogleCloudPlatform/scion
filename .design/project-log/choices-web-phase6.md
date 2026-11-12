@@ -79,10 +79,14 @@ stays behind `web.chat_choices`.
 
 ## Deviations and left open
 
-- Blocked set (mock s10): defaults stay pre-selected (filled) while the
-  card is blocked, and the footer ("1 remaining", disabled Submit) is
-  shown. The mock shows the recommended choice outlined, nothing selected,
-  and no footer. Not changed. Raised with choices-em.
+- Blocked set (mock s10): at first, defaults stayed pre-selected and the
+  footer showed while the card was blocked. On choices-em's decision (msg
+  `bdedb934`) the card now matches the mock. A blocked set shows nothing
+  selected, with recommended choices outlined, and drops the counter and
+  Submit; the reason line ends the card. The viewer's picks are kept, so an
+  in-session unblock restores the normal set, defaults included. The
+  Submit footer's blocked-tooltip branch is gone, because it can no longer
+  render.
 - Earlier accepted deviations still apply: 24-hour times, the blocked
   wording per design §4.5, and "not delivered" muted.
 - Adjacent cleanup, not done: `web/src/styles/theme.css` dark mode maps

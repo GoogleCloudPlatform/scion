@@ -1115,7 +1115,9 @@ export class ScionChatChoices extends LitElement {
   ): { chosen: boolean; selected: boolean; recommended: boolean; disabled: boolean } {
     const pending = d.status === 'pending';
     const chosen = d.status === 'decided' && d.decision?.choiceId === c.id;
-    const selected = pending && this.selectionOf(d) === c.id;
+    // A blocked card shows nothing selected (mock s10): the recommended
+    // choice stays outlined. Picks are kept for an in-session unblock.
+    const selected = pending && !this.answerBlocked && this.selectionOf(d) === c.id;
     const recommended = d.defaultChoiceId === c.id;
     const disabled = !chosen && (!pending || this.setSubmitting || this.answerBlocked);
     return { chosen, selected, recommended, disabled };
@@ -1196,20 +1198,17 @@ export class ScionChatChoices extends LitElement {
     return parts;
   }
 
-  private renderSetFoot(views: DecisionView[]): TemplateResult {
+  private renderSetFoot(views: DecisionView[]): TemplateResult | typeof nothing {
     const actionable = views.filter((d) => d.status === 'pending');
     if (actionable.length === 0) return this.renderSetDoneFoot(views);
+    // Blocked (mock s10): the reason line is the footer; no counter or Submit.
+    if (this.answerBlocked) return nothing;
     const missing = actionable.filter((d) => !this.selectionOf(d));
     const remaining = missing.length;
     const excluded = this.excludedSummary(views);
     const missingKeys = missing.map((d) => d.key || d.ref).join(', ');
-    const blocked = this.answerBlocked;
-    const hint = blocked
-      ? blockedText(this.effectiveAnswerability)
-      : remaining > 0
-        ? `Choose an answer for ${missingKeys} first`
-        : '';
-    const disabled = blocked || remaining > 0;
+    const hint = remaining > 0 ? `Choose an answer for ${missingKeys} first` : '';
+    const disabled = remaining > 0;
     const submit = html`<sl-button
       class="submit"
       size="small"
@@ -1217,7 +1216,7 @@ export class ScionChatChoices extends LitElement {
       ?disabled=${disabled}
       aria-disabled=${disabled ? 'true' : nothing}
       ?loading=${this.setSubmitting}
-      aria-describedby=${blocked ? this.reasonId : remaining > 0 ? this.submitHintId : nothing}
+      aria-describedby=${disabled ? this.submitHintId : nothing}
       @click=${() => void this.submitSet()}
       >Submit answers</sl-button
     >`;
@@ -1226,12 +1225,10 @@ export class ScionChatChoices extends LitElement {
         ><b>${remaining} remaining</b>${excluded.map((p) => ` · ${p}`)}</span
       >
       <span class="spacer"></span>
-      ${blocked
-        ? html`<sl-tooltip content=${hint}>${submit}</sl-tooltip>`
-        : remaining > 0
-          ? html`<span class="sr-only" id=${this.submitHintId}>${hint}</span>
-              <sl-tooltip content=${hint}>${submit}</sl-tooltip>`
-          : submit}
+      ${disabled
+        ? html`<span class="sr-only" id=${this.submitHintId}>${hint}</span>
+            <sl-tooltip content=${hint}>${submit}</sl-tooltip>`
+        : submit}
     </div>`;
   }
 
