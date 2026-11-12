@@ -26,6 +26,8 @@
     "shared/chat/chat-message-links-dom.test.ts",
     "shared/chat/chat-choices.test.ts",
     "shared/chat/chat-thread-choices.test.ts",
+    "shared/chat/chat-choices-answerability.test.ts",
+    "shared/chat/chat-thread-choices-answerability.test.ts",
     "pages/chat-unread-dms.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",

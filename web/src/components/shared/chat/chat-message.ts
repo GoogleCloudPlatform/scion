@@ -65,7 +65,8 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 import './chat-choices.js';
-import { chatChoicesEnabled } from '../../../client/chat-choices.js';
+import { ANSWERABLE, chatChoicesEnabled } from '../../../client/chat-choices.js';
+import type { AskerAnswerability } from '../../../client/chat-choices.js';
 import type { ChoiceAnswerMode, DecisionView } from '../../../shared/types.js';
 import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
 
@@ -816,6 +817,10 @@ export class ScionChatMessage extends LitElement {
   /** A choice prompt's answer mode. */
   @property()
   answerMode: ChoiceAnswerMode | undefined = undefined;
+
+  /** Whether the viewer can answer the prompt's asker (design §4.5). */
+  @property({ attribute: false })
+  answerability: AskerAnswerability | undefined = undefined;
 
   /** Reason for dispatch failure. */
   @property()
@@ -2881,6 +2886,7 @@ export class ScionChatMessage extends LitElement {
       .decisions=${this.decisions ?? []}
       .answerMode=${this.answerMode}
       .currentUserId=${this.currentUserId}
+      .answerability=${this.answerability ?? ANSWERABLE}
     ></scion-chat-choices>`;
   }
 

@@ -23,7 +23,9 @@
 
 import { apiFetch, apiErrorMessageFromBody } from './api.js';
 import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { getDenialMessage } from '../shared/message-mode.js';
 import type {
+  Agent,
   ChoiceAnswerMode,
   ChoiceResponseSetView,
   ChoiceResponseView,
@@ -139,6 +141,21 @@ export interface ChoiceAnsweredDetail {
   responseMessageId?: string;
 }
 
+/**
+ * Detail of the `choice-answer-denied` event a card emits when an answer
+ * endpoint refused the viewer with 403 (design §4.5 step 3).
+ */
+export interface ChoiceAnswerDeniedDetail {
+  messageId: string;
+  askerAgentId: string;
+  /** The error code: message_denied, chat_post_denied, or another. */
+  code: string;
+  /** details.reason, when the hub sent one. */
+  reason?: string;
+  /** What the card now shows. */
+  answerability: AskerAnswerability;
+}
+
 /** The outcome of answering one decision. */
 export type AnswerDecisionResult =
   | { ok: true; decision: DecisionView; responseMessageId: string }
@@ -151,6 +168,8 @@ export type AnswerDecisionResult =
       decision?: DecisionView;
       /** The newer version, on 409 replaced. */
       replacedBy?: DecisionView;
+      /** details.reason, on 403 message_denied / chat_post_denied. */
+      reason?: string;
     };
 
 /**
@@ -195,6 +214,7 @@ export async function answerDecision(
     message: apiErrorMessageFromBody(body) ?? `Failed to record the answer (${res.status}).`,
     ...(isDecisionView(details.decision) ? { decision: details.decision } : {}),
     ...(isDecisionView(details.replacedBy) ? { replacedBy: details.replacedBy } : {}),
+    ...(typeof details.reason === 'string' ? { reason: details.reason } : {}),
   };
 }
 
@@ -225,6 +245,8 @@ export type AnswerDecisionSetResult =
       decisions?: DecisionView[];
       /** Why each changed row differs, by row id, on 409 answer_set_changed. */
       reasons?: Record<string, string>;
+      /** details.reason, on 403 message_denied / chat_post_denied. */
+      reason?: string;
     };
 
 /**
@@ -284,6 +306,7 @@ export async function answerDecisionSet(
     message: apiErrorMessageFromBody(body) ?? `Failed to record the answers (${res.status}).`,
     ...(decisions ? { decisions } : {}),
     ...(reasons ? { reasons } : {}),
+    ...(typeof details.reason === 'string' ? { reason: details.reason } : {}),
   };
 }
 
@@ -299,4 +322,97 @@ function stringMap(v: unknown): Record<string, string> | undefined {
     if (typeof val === 'string') out[k] = val;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Answerability (design §4.5): can the viewer answer a prompt of this asker?
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the viewer can answer an asker's decisions, as a card shows it:
+ * `blocked` disables every row (and a set's Submit) with `reason` shown;
+ * `gone` stays answerable with a note that the answer is not delivered;
+ * `unknown` (the lookup failed) stays answerable, the hub's 403 decides.
+ */
+export interface AskerAnswerability {
+  state: 'ok' | 'blocked' | 'gone' | 'unknown';
+  /** Why the viewer cannot answer (`blocked`), a full sentence. */
+  reason?: string;
+  /** Blocked by the asker's messaging rules: the reason leads with this name. */
+  askerName?: string;
+  /** Blocked because the viewer may read the thread but not post in it. */
+  readOnly?: boolean;
+}
+
+/** Nothing known against answering. */
+export const ANSWERABLE: AskerAnswerability = { state: 'ok' };
+
+/** Text of a read-only thread's reason (design §4.5 step 1). */
+export const READ_ONLY_ANSWER_REASON =
+  "You can read this thread but can't post in it, so you can't answer.";
+
+/** Text of a 403 that is neither message_denied nor chat_post_denied. */
+export const GENERIC_ANSWER_DENIED_REASON = "You can't answer this decision.";
+
+/** The answerability of a viewer who may read the thread but not post. */
+export function readOnlyAnswerability(): AskerAnswerability {
+  return { state: 'blocked', readOnly: true, reason: READ_ONLY_ANSWER_REASON };
+}
+
+/** Blocked by the asker's messaging rules (`reason` is a denial code). */
+export function deniedAnswerability(
+  reason: string | undefined,
+  askerName: string
+): AskerAnswerability {
+  return {
+    state: 'blocked',
+    askerName,
+    reason: getDenialMessage(reason, askerName),
+  };
+}
+
+/**
+ * The answerability a 403 from an answer endpoint means (design §4.5 step
+ * 3, authoritative): message_denied names the asker's rule, chat_post_denied
+ * is a read-only thread, any other 403 a generic refusal.
+ */
+export function answerabilityFromDenial(
+  code: string,
+  reason: string | undefined,
+  askerName: string
+): AskerAnswerability {
+  if (code === 'message_denied') return deniedAnswerability(reason, askerName);
+  if (code === 'chat_post_denied') return readOnlyAnswerability();
+  return { state: 'blocked', reason: GENERIC_ANSWER_DENIED_REASON };
+}
+
+/**
+ * Looks up whether the viewer can answer `askerAgentId` (design §4.5 step
+ * 2) through the agent read, whose `_messageability` is computed by the
+ * same rule the answer endpoints apply. 404 is a gone asker; a failed or
+ * unexpected read is `unknown` (answerable; the 403 backstop decides).
+ */
+export async function fetchAskerAnswerability(
+  askerAgentId: string,
+  askerName: string
+): Promise<AskerAnswerability> {
+  let res: Response;
+  try {
+    res = await apiFetch(`/api/v1/agents/${encodeURIComponent(askerAgentId)}`);
+  } catch {
+    return { state: 'unknown' };
+  }
+  if (res.status === 404) return { state: 'gone' };
+  if (!res.ok) return { state: 'unknown' };
+  let agent: Agent | null;
+  try {
+    agent = (await res.json()) as Agent | null;
+  } catch {
+    return { state: 'unknown' };
+  }
+  const m = agent?._messageability;
+  if (m && m.canMessage === false) {
+    return deniedAnswerability(m.reason, askerName || agent?.name || 'This agent');
+  }
+  return ANSWERABLE;
 }

@@ -52,9 +52,15 @@ import type {
   Message,
 } from '../../../shared/types.js';
 import {
+  ANSWERABLE,
   applyChoiceHistoryMaps,
   carryChoiceFields,
+  chatChoicesEnabled,
+  fetchAskerAnswerability,
   patchDecisions,
+  readOnlyAnswerability,
+  type AskerAnswerability,
+  type ChoiceAnswerDeniedDetail,
   type ChoiceAnsweredDetail,
   type ChoiceHistoryMaps,
 } from '../../../client/chat-choices.js';
@@ -203,6 +209,9 @@ export interface MessageFilterChangeDetail {
 export interface StarOpenDetail {
   item: StarItem;
 }
+
+/** The answerability every card of a read-only thread shows. */
+const READ_ONLY_ANSWERABILITY = readOnlyAnswerability();
 
 /** One history response, as the thread reads it. */
 interface HistoryWindow extends ChoiceHistoryMaps {
@@ -804,6 +813,15 @@ export class ScionChatThread extends LitElement {
   @state() private canPost = true;
   /** Why the caller may not post (`canPost` false), from the hub; '' if unknown. */
   @state() private postDeniedReason: ChatPostDeniedReason = '';
+  /**
+   * Whether the viewer can answer each choice asker's decisions, by agent
+   * id (design §4.5): one agent read per asker per thread load.
+   */
+  @state() private askerAnswerability = new Map<string, AskerAnswerability>();
+  /** Askers looked up (or being looked up) for this thread load. */
+  private _askerLookups = new Set<string>();
+  /** Bumped per thread load: a lookup for an earlier load is dropped. */
+  private _askerLookupGen = 0;
   /**
    * Conversation whose wake-and-send is in flight, or ''. Its composer is
    * blocked meanwhile (up to the hub's wake budget), so text typed during
@@ -1875,6 +1893,7 @@ export class ScionChatThread extends LitElement {
    * new conversationKey — we must tear down old state and reload.
    */
   override updated(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('messages')) this.lookupChoiceAskers();
     this.syncStarReconcilers();
     this.syncActionsTabStop();
     this.measureSendErrorTruncation();
@@ -2027,6 +2046,7 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
     this.canPost = true;
     this.postDeniedReason = '';
+    this.resetAskerAnswerability();
     // A send still in flight belongs to the conversation we just left; its
     // completion will not touch `sending` (fetchId guard), so release the
     // composer here.
@@ -4128,6 +4148,64 @@ export class ScionChatThread extends LitElement {
   private handleChoiceAnswered = (e: CustomEvent<ChoiceAnsweredDetail>): void => {
     const { messageId, decisions } = e.detail;
     if (messageId && decisions?.length) this.patchChoiceDecisions(messageId, decisions);
+  };
+
+  /** Forgets the askers' answerability: the next thread load reads them again. */
+  private resetAskerAnswerability(): void {
+    this._askerLookupGen++;
+    this._askerLookups.clear();
+    if (this.askerAnswerability.size > 0) this.askerAnswerability = new Map();
+  }
+
+  /**
+   * Reads the answerability of every choice asker not yet looked up for
+   * this thread load (design §4.5 step 2). Nothing to read in a read-only
+   * thread: every card is blocked there anyway.
+   */
+  private lookupChoiceAskers(): void {
+    if (!chatChoicesEnabled()) return;
+    if (!this.isDM && !this.canPost) return;
+    for (const msg of this.messages) {
+      const d = msg.decisions?.[0];
+      if (!d?.askerAgentId || this._askerLookups.has(d.askerAgentId)) continue;
+      this._askerLookups.add(d.askerAgentId);
+      const gen = this._askerLookupGen;
+      void fetchAskerAnswerability(d.askerAgentId, d.askerAgentName).then((a) => {
+        if (gen !== this._askerLookupGen) return;
+        // A 403 the viewer already hit is authoritative over the read.
+        if (this.askerAnswerability.get(d.askerAgentId)?.state === 'blocked') return;
+        const next = new Map(this.askerAnswerability);
+        next.set(d.askerAgentId, a);
+        this.askerAnswerability = next;
+      });
+    }
+  }
+
+  /** What a choice prompt's card shows about answering (design §4.5). */
+  private answerabilityFor(msg: Message): AskerAnswerability | undefined {
+    const d = msg.decisions?.[0];
+    if (!d) return undefined;
+    if (!this.isDM && !this.canPost) return READ_ONLY_ANSWERABILITY;
+    return this.askerAnswerability.get(d.askerAgentId) ?? ANSWERABLE;
+  }
+
+  /**
+   * A card's answer was refused with 403 (design §4.5 step 3):
+   * chat_post_denied makes the thread read-only, message_denied blocks
+   * every prompt of that asker.
+   */
+  private handleChoiceAnswerDenied = (e: CustomEvent<ChoiceAnswerDeniedDetail>): void => {
+    const { askerAgentId, code, reason, answerability } = e.detail;
+    if (answerability.readOnly) {
+      this.canPost = false;
+      this.postDeniedReason = reason === 'token_scope' ? 'token_scope' : 'read_only';
+      return;
+    }
+    if (code === 'message_denied' && askerAgentId) {
+      const next = new Map(this.askerAnswerability);
+      next.set(askerAgentId, answerability);
+      this.askerAnswerability = next;
+    }
   };
 
   /**
@@ -7567,8 +7645,10 @@ export class ScionChatThread extends LitElement {
             .decisions=${msg.decisions}
             .choiceIntro=${msg.choiceIntro}
             .answerMode=${msg.answerMode}
+            .answerability=${this.answerabilityFor(msg)}
             @choice-answered=${this.handleChoiceAnswered}
             @choice-jump=${this.handleScrollToMessage}
+            @choice-answer-denied=${this.handleChoiceAnswerDenied}
             dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
             ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
             dispatchFailureReason=${msg.dispatchFailureReason || ''}
