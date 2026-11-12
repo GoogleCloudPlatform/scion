@@ -104,6 +104,13 @@ func (AgentReincarnation) Fields() []ent.Field {
 		field.String("transfer_mode").
 			Optional().
 			Immutable(),
+		// home_reset records, at creation, that this reincarnation resets
+		// the agent's home (a harness switch, `scion reincarnate --harness`,
+		// ptone/scion#7757). False for every other reincarnation and for a
+		// record written before this field existed.
+		field.Bool("home_reset").
+			Optional().
+			Immutable(),
 	}
 }
 

@@ -167,7 +167,7 @@ func (d *wakeTrackingDispatcher) DispatchAgentProvision(_ context.Context, _ *st
 	return nil
 }
 
-func (d *wakeTrackingDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+func (d *wakeTrackingDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent, _ ReprovisionOptions) error {
 	return nil
 }
 func (d *wakeTrackingDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {

@@ -1614,6 +1614,15 @@ type StartOptions struct {
 	// marker, before anything else; a rollback delete removes only
 	// directories marked with it.
 	MoveReincarnationID string
+
+	// ResetHome, on a reprovision only (Manager.Reprovision), moves the
+	// agent's existing home aside after every precondition has passed, so
+	// the reprovision composes a fresh home (a harness switch,
+	// ptone/scion#7757). ResetHomeID names the reset: it is recorded in the
+	// agent directory and names the moved-aside directory. It must match
+	// ValidResetHomeID.
+	ResetHome   bool
+	ResetHomeID string
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on

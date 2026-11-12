@@ -119,6 +119,11 @@ type BrokerCapabilities struct {
 	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
 	// hub checks runtime suitability separately.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ReprovisionResetHomeRuntimes lists the runtimes on which this broker's
+	// reprovision can reset an agent home completely (broker dir plus any
+	// NFS leaf). The hub refuses a home-resetting reincarnation (412) for any
+	// other runtime, before anything is stopped (ptone/scion#7757).
+	ReprovisionResetHomeRuntimes []string `json:"reprovisionResetHomeRuntimes,omitempty"`
 	// ChangedFields indicates this broker re-renders, at start, the files
 	// provisioning wrote for the provision-rendered keys the hub lists in
 	// the inline config's changed_fields (ptone/scion#3982).
@@ -348,6 +353,15 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// ResetHome, on a ProvisionOnly+Reprovision request only (any other
+	// request is refused with 400), resets the agent's home: after every
+	// reprovision precondition has passed, the broker moves the existing
+	// home aside and composes a fresh one, exactly as a create does (a
+	// harness switch, ptone/scion#7757). ResetHomeID is required with it and
+	// must be 1 to 64 characters of [A-Za-z0-9-]; the hub sends the
+	// reincarnation ID.
+	ResetHome   bool   `json:"resetHome,omitempty"`
+	ResetHomeID string `json:"resetHomeId,omitempty"`
 	// ExpectExistingNFSWorkspace is the moved-agent workspace expectation of
 	// a ProvisionOnly request for an agent moved here from another broker
 	// (the JSON key predates the third value). For a move on the same NFS
@@ -582,6 +596,11 @@ type CreateAgentResponse struct {
 	// treats an absent echo on a reprovision dispatch as a failure, which is
 	// what keeps that failure mode closed instead of a silent no-op.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// HomeReset is set true only when a reprovision that asked for
+	// ResetHome succeeded, so the agent's previous home was moved aside and
+	// a fresh one composed. A broker that predates the field never sets it.
+	HomeReset bool `json:"homeReset,omitempty"`
 
 	// LaunchPending is set true instead of running Manager.Start inline when
 	// the broker accepted an async launch (design §3.2, §7 P1b-1): the Hub

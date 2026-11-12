@@ -449,15 +449,56 @@ func mergePresentInlineFields(oldInline, cfg *api.ScionConfig, present map[strin
 // The model is recorded as given (not alias-resolved), like create's own
 // CreateInputs; deriveAgentConfig resolves it against the current harness
 // config each generation.
-func recordReincarnatePatchEdits(ci *store.AgentCreateInputs, p *reincarnatePatch) {
+//
+// A harness switch (p.HarnessConfig, ptone/scion#7757 §3.3.3) is recorded
+// first: the new harness-config name and harness type replace the old ones,
+// and the old harness's explicit image, model and harness auth are dropped
+// (images, models and auth modes are harness-specific) unless the same
+// request sets them again. The drops are recorded too, so a later plain
+// reincarnation cannot bring an old-harness value back. The dropped
+// values are returned for the plan's warnings.
+func recordReincarnatePatchEdits(ci *store.AgentCreateInputs, p *reincarnatePatch) (dropped harnessSwitchDrops) {
 	if ci == nil || p == nil {
-		return
+		return dropped
 	}
 	ensureInline := func() *api.ScionConfig {
 		if ci.InlineConfig == nil {
 			ci.InlineConfig = &api.ScionConfig{}
 		}
 		return ci.InlineConfig
+	}
+	if p.HarnessConfig != nil {
+		ci.HarnessConfig = p.HarnessConfigName
+		inline := ensureInline()
+		inline.HarnessConfig = p.HarnessConfigName
+		inline.Harness = p.HarnessConfig.Harness
+		if p.Image == "" && inline.Image != "" {
+			dropped.Image = inline.Image
+			inline.Image = ""
+		}
+		if p.Model == "" && inline.Model != "" {
+			dropped.Model = inline.Model
+			inline.Model = ""
+		}
+		ci.HarnessAuth = ""
+		inline.AuthSelectedType = ""
+		// Inline settings that belong to the old harness or its image.
+		if inline.ConfigDir != "" {
+			dropped.Fields = append(dropped.Fields, "config_dir")
+			inline.ConfigDir = ""
+		}
+		if len(inline.CommandArgs) > 0 {
+			dropped.Fields = append(dropped.Fields, "command_args")
+			inline.CommandArgs = nil
+		}
+		if inline.TaskFlag != "" {
+			dropped.Fields = append(dropped.Fields, "task_flag")
+			inline.TaskFlag = ""
+		}
+		if inline.User != "" {
+			dropped.Fields = append(dropped.Fields, "user")
+			inline.User = ""
+		}
 	}
 	if p.Image != "" {
 		ensureInline().Image = p.Image
@@ -475,4 +516,15 @@ func recordReincarnatePatchEdits(ci *store.AgentCreateInputs, p *reincarnatePatc
 		ci.HarnessAuth = p.HarnessAuth
 		ensureInline().AuthSelectedType = p.HarnessAuth
 	}
+	return dropped
+}
+
+// harnessSwitchDrops are the explicit old-harness values a harness switch
+// dropped from the agent's recorded inputs.
+type harnessSwitchDrops struct {
+	Image string
+	Model string
+	// Fields names the other harness-specific inline settings dropped
+	// (config_dir, command_args, task_flag, user), by their config key.
+	Fields []string
 }

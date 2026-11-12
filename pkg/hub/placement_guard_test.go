@@ -418,7 +418,7 @@ var placementGuardClassification = map[string]placementGuardOp{
 		return d.DispatchAgentProvision(ctx, a)
 	}},
 	"DispatchAgentReprovision": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
-		return d.DispatchAgentReprovision(ctx, a)
+		return d.DispatchAgentReprovision(ctx, a, ReprovisionOptions{})
 	}},
 	"DispatchAgentStart": {guardFirst: true, call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentStart(ctx, a, "", false)

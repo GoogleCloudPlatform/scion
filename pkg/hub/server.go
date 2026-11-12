@@ -783,9 +783,10 @@ type AgentDispatcher interface {
 	// on the runtime broker from its current AppliedConfig, for a
 	// `scion reincarnate` request (design §3.4). Unlike DispatchAgentProvision
 	// it overwrites the persisted config rather than reusing it, while
-	// preserving the agent's home directory and clone-per-agent workspace. It
-	// does not start the container.
-	DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error
+	// preserving the agent's clone-per-agent workspace, and its home
+	// directory unless opts.ResetHome asks the broker to reset it. It does
+	// not start the container.
+	DispatchAgentReprovision(ctx context.Context, agent *store.Agent, opts ReprovisionOptions) error
 
 	// DispatchAgentStart resumes a stopped agent on the runtime broker.
 	// task is an optional task string to pass to the agent on start.
@@ -1559,6 +1560,11 @@ type RemoteCreateAgentRequest struct {
 	// runtimebroker.CreateAgentRequest.MoveReincarnationID: a forced move's
 	// reincarnation ID, sent with the fresh-agent-dir expectation.
 	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
+	// ResetHome and ResetHomeID mirror runtimebroker.CreateAgentRequest's
+	// home reset fields: set only on a reprovision that resets the agent's
+	// home (ptone/scion#7757).
+	ResetHome   bool   `json:"resetHome,omitempty"`
+	ResetHomeID string `json:"resetHomeId,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
@@ -1783,6 +1789,17 @@ type RemoteGCPIdentityConfig struct {
 	NativeCloudRun bool `json:"native_cloud_run,omitempty"`
 }
 
+// ReprovisionOptions are the options of a reprovision dispatch
+// (AgentDispatcher.DispatchAgentReprovision). The zero value is a plain
+// reprovision that keeps the agent's home.
+type ReprovisionOptions struct {
+	// ResetHome asks the broker to reset the agent's home: move the
+	// existing home aside and compose a fresh one (a harness switch,
+	// ptone/scion#7757). ResetID names the reset; the reincarnation ID.
+	ResetHome bool
+	ResetID   string
+}
+
 // RemoteAgentResponse is the response from creating an agent on a remote runtime broker.
 type RemoteAgentResponse struct {
 	Agent   *RemoteAgentInfo `json:"agent,omitempty"`
@@ -1795,6 +1812,12 @@ type RemoteAgentResponse struct {
 	// an old broker has no such field and silently ran a plain Provision
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// HomeReset mirrors runtimebroker.CreateAgentResponse.HomeReset: set by
+	// the broker only when a reprovision with ResetHome succeeded. A
+	// home-resetting reprovision without it fails (an old broker ignores
+	// ResetHome and keeps the home).
+	HomeReset bool `json:"homeReset,omitempty"`
 
 	// LaunchPending, LaunchID and LaunchInstanceID mirror
 	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending

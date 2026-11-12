@@ -337,7 +337,7 @@ func createDispatchFns() map[string]func(context.Context, *HTTPAgentDispatcher, 
 			return d.DispatchAgentProvision(ctx, a)
 		},
 		"reprovision": func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
-			return d.DispatchAgentReprovision(ctx, a)
+			return d.DispatchAgentReprovision(ctx, a, ReprovisionOptions{})
 		},
 		"create with gather": func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 			_, err := d.DispatchAgentCreateWithGather(ctx, a)

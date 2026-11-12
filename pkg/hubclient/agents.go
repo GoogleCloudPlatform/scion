@@ -1403,9 +1403,12 @@ type ReincarnateAgentRequest struct {
 	Model          string `json:"model,omitempty"`
 	ThinkingLevel  *int   `json:"thinkingLevel,omitempty"`
 	HarnessAuth    string `json:"harnessAuth,omitempty"`
+	// HarnessConfig (`--harness`) moves the agent to another harness config
+	// and resets its home (ptone/scion#7757). A hub that predates it
+	// answers 400 "not yet supported".
+	HarnessConfig string `json:"harnessConfig,omitempty"`
 
 	// Overrides not yet supported by the hub.
-	HarnessConfig  string            `json:"harnessConfig,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TemplateHash   string            `json:"templateHash,omitempty"`
 	ResetOverrides bool              `json:"resetOverrides,omitempty"`
@@ -1507,4 +1510,10 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
+
+	// HomeReset is set when the reincarnation deletes and rebuilds the
+	// agent's home (a harness switch); Warnings[0] is then the home-reset
+	// warning. Harness is the harness-config name old→new.
+	HomeReset bool         `json:"homeReset,omitempty"`
+	Harness   *FieldChange `json:"harness,omitempty"`
 }

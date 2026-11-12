@@ -147,6 +147,15 @@ const (
 	// were not created by the move (409). The message names no host path.
 	BrokerErrCodeMoveMarkerMismatch = "move_marker_mismatch"
 
+	// BrokerErrDetailHomeReset is the error detail key every error answer
+	// to a create request with resetHome carries, whatever its status
+	// (ptone/scion#7757): BrokerHomeResetIntact when the broker did not
+	// move the agent's home aside, BrokerHomeResetApplied when it did. The
+	// hub treats an answer without it (a proxy page, a timeout) as a reset.
+	BrokerErrDetailHomeReset = "homeReset"
+	BrokerHomeResetIntact    = "intact"
+	BrokerHomeResetApplied   = "applied"
+
 	// BrokerErrCodeReloadUnconfirmed marks a reset-auth that wrote the new
 	// credential into the agent container but could not deliver the reload
 	// signal to the agent's init process (502), so the running agent did not

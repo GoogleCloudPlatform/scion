@@ -433,6 +433,11 @@ type BrokerCapabilities struct {
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ReprovisionResetHomeRuntimes lists the runtimes on which the broker's
+	// reprovision can reset an agent home completely (ptone/scion#7757;
+	// store.BrokerCapabilities.ReprovisionResetHomeRuntimes is its
+	// counterpart).
+	ReprovisionResetHomeRuntimes []string `json:"reprovisionResetHomeRuntimes,omitempty"`
 	// ChangedFields indicates the broker re-renders, at start, the files
 	// provisioning wrote for the provision-rendered keys the hub lists in
 	// the inline config's changed_fields (ptone/scion#3982;

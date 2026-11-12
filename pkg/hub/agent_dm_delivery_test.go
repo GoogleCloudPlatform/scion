@@ -68,7 +68,7 @@ func (d *spyStateDispatcher) DispatchAgentProvision(_ context.Context, _ *store.
 	return nil
 }
 
-func (d *spyStateDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+func (d *spyStateDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent, _ ReprovisionOptions) error {
 	return nil
 }
 func (d *spyStateDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {

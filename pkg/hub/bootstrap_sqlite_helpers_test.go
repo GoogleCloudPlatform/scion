@@ -264,7 +264,7 @@ func (d *mockDispatcher) DispatchAgentProvision(_ context.Context, agent *store.
 	return nil
 }
 
-func (d *mockDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
+func (d *mockDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent, _ ReprovisionOptions) error {
 	if d.returnErr != nil {
 		return d.returnErr
 	}

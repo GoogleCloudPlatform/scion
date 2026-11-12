@@ -620,6 +620,14 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return reincarnationRecoveryConfig(previous, toGeneration, handoff, fromState)
 	}
 
+	// homeReset: this reincarnation resets the agent's home (a harness
+	// switch, ptone/scion#7757). The handler set it on the plan it returned
+	// and on the record (AgentReincarnation.HomeReset).
+	homeReset := plan != nil && plan.HomeReset
+	// agentSlug names the agent in a fail-forward notification; set from
+	// the first agent read below.
+	agentSlug := agentID
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "no dispatcher available", recovery(store.AgentReincarnationStatePending))
@@ -657,6 +665,12 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// move is rolled back to the source broker; a plain reincarnation
 	// re-renders the previous config on its broker.
 	failAfterProvision := func(fromState, errMsg string) {
+		if homeReset {
+			// D-b (fail forward): the home was reset, so no re-render of
+			// `previous`; the row stays on the new-harness config.
+			s.failHomeResetForward(ctx, agentID, reincarnationID, fromState, errMsg, agentSlug, plan, true)
+			return
+		}
 		if move != nil {
 			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, recovery(fromState), move, srcAgent, move.recreates() && !provisionDispatched)
 			return
@@ -704,6 +718,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	if err != nil {
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to record stopping state: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
+	}
+	if agent.Slug != "" {
+		agentSlug = agent.Slug
 	}
 	// Capacity backstop (ptone/scion#6033): the agent reads stopping, a
 	// counted phase, from here on. Until this write it read its prior phase,
@@ -854,10 +871,20 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	}
 
 	// Step: reprovision (re-render scion-agent.json/agent-info.json, re-inject
-	// skills, preserve home and workspace — design §3.4).
+	// skills, preserve the workspace — design §3.4). The home is preserved
+	// too, unless this reincarnation resets it (a harness switch,
+	// ptone/scion#7757): then the broker moves it aside and composes a
+	// fresh one, under the reincarnation ID.
 	if move != nil {
 		// Provisioned on the target above.
-	} else if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+	} else if err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{ResetHome: homeReset, ResetID: reincarnationID}); err != nil {
+		if homeReset && !reprovisionLeftHomeIntact(err) {
+			// D-b (fail forward): the home may already be gone, so a
+			// re-render of `previous` cannot restore it. The row keeps the
+			// new-harness config, matching the disk.
+			s.failHomeResetForward(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "reprovision failed: "+dispatchFailureText(err), agent.Slug, plan, false)
+			return
+		}
 		// The store now holds `fresh` (gen N+1) from the write just above,
 		// but the disk was never successfully re-rendered — restore
 		// `previous` so the store does not claim a generation that was
@@ -968,6 +995,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			// A container may run: keep the capacity; the sweep releases
 			// it once the agent is seen idle.
 			releaseCapacityOnExit = false
+			if homeReset {
+				// The home was reset before this start: say so, with
+				// the same recovery commands as a fail-forward.
+				errMsg += "; " + homeResetRecoveryHint(agentSlug, plan, true)
+			}
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, nil)
 			return
 		}
@@ -1173,7 +1205,7 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 	}
 	cfg := *previous
 	agent.AppliedConfig = &cfg
-	if err := dispatcher.DispatchAgentReprovision(rctx, agent); err != nil {
+	if err := dispatcher.DispatchAgentReprovision(rctx, agent, ReprovisionOptions{}); err != nil {
 		s.agentLifecycleLog.Warn("reincarnation failed: best-effort re-render of the previous config failed; the on-disk agent config may be partly the new generation",
 			"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", fromState, "cause", cause, "error", err)
 		return false
@@ -1181,6 +1213,64 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 	s.agentLifecycleLog.Info("reincarnation failed: re-rendered the previous config",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", fromState, "cause", cause)
 	return true
+}
+
+// failHomeResetForward fails a home-resetting reincarnation once the broker
+// may have reset the agent's home (D-b, fail forward; ptone/scion#7757). The
+// previous config is not re-rendered or restored, because the previous home
+// is gone and a re-render cannot bring it back: the row stays on the new
+// harness config, matching the disk, with phase error and
+// reincarnation_state failed. The failure message, which the failure
+// notification carries, names the recovery commands. homeComposed is true
+// when the reprovision succeeded (the fresh home exists), false when it
+// failed after the reset (the home may be missing or half-built).
+func (s *Server) failHomeResetForward(ctx context.Context, agentID, reincarnationID, fromState, errMsg, agentSlug string, plan *ReincarnationPlan, homeComposed bool) {
+	s.agentLifecycleLog.Info("reincarnation failed after the home reset: keeping the new harness config (fail forward)",
+		"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", fromState, "cause", errMsg)
+	s.failReincarnation(ctx, agentID, reincarnationID, fromState, errMsg+"; "+homeResetRecoveryHint(agentSlug, plan, homeComposed), nil)
+}
+
+// homeResetRecoveryHint is the recovery text of a home-resetting
+// reincarnation that failed after the reset. When the reprovision itself
+// failed (homeComposed false), the fresh home may be missing or half-built,
+// and a start does not compose it (provisioning on start runs only for a
+// missing agent directory), so the hint names a plain reincarnate, which
+// reprovisions the new config; after a successful reprovision a start is
+// enough.
+func homeResetRecoveryHint(agentSlug string, plan *ReincarnationPlan, homeComposed bool) string {
+	oldHC, newHC := "", ""
+	if plan != nil && plan.Harness != nil {
+		oldHC, newHC = plan.Harness.Old, plan.Harness.New
+	}
+	retry := fmt.Sprintf("`scion start %s`", agentSlug)
+	if !homeComposed {
+		retry = fmt.Sprintf("`scion reincarnate %s`", agentSlug)
+	}
+	hint := "the home was already reset; fix the cause and run " + retry
+	if newHC != "" {
+		hint += fmt.Sprintf(" (harness config %s)", newHC)
+	}
+	if oldHC != "" {
+		hint += fmt.Sprintf(" or `scion reincarnate %s --harness %s`", agentSlug, oldHC)
+	}
+	return hint
+}
+
+// homeResetPreambleSentence tells a generation whose home was reset that
+// nothing from the previous home is there (ptone/scion#7757).
+func homeResetPreambleSentence(plan ReincarnationPlan) string {
+	var b strings.Builder
+	if plan.Harness != nil && plan.Harness.New != "" {
+		if plan.Harness.Old != "" && plan.Harness.Old != plan.Harness.New {
+			fmt.Fprintf(&b, "This generation runs on harness config %s (previously %s). ", plan.Harness.New, plan.Harness.Old)
+		} else {
+			fmt.Fprintf(&b, "This generation runs on harness config %s. ", plan.Harness.New)
+		}
+	}
+	b.WriteString("Your home directory was reset: nothing from the previous generation's home " +
+		"(harness session, memory files, installed tools, shell history) is here. " +
+		"Rely on the handoff below and on the workspace.\n")
+	return b.String()
 }
 
 // failAfterReprovision fails a reincarnation after its reprovision dispatch
@@ -1665,6 +1755,9 @@ func (s *Server) buildReincarnationPreambleWith(agent *store.Agent, toGeneration
 	if recreated != nil {
 		b.WriteString(recreated.sentence())
 	}
+	if plan != nil && plan.HomeReset {
+		b.WriteString(homeResetPreambleSentence(*plan))
+	}
 	b.WriteString("Before resuming:\n")
 	// Design §3.4 Amendment A23: neutral wording, since Phase 1b also serves
 	// shared-workspace and hub-managed agents, whose git state is not "your
@@ -1852,7 +1945,12 @@ func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReinc
 	}
 
 	var restoreConfig *store.AgentAppliedConfig
-	if rec.State != store.AgentReincarnationStateStarting {
+	// A home-resetting record that reached provisioning may have had its
+	// home reset by the broker already, so it fails forward like the
+	// worker would (D-b, ptone/scion#7757): the previous config is not
+	// restored.
+	homeMayBeReset := rec.HomeReset && rec.State == store.AgentReincarnationStateProvisioning
+	if rec.State != store.AgentReincarnationStateStarting && !homeMayBeReset {
 		// The recovery config, as the worker's own failure paths restore
 		// (ptone/scion#5511); the record's PreviousAppliedConfig is not
 		// changed.

@@ -50,6 +50,8 @@ type AgentReincarnation struct {
 	SourceCleanup string `json:"source_cleanup,omitempty"`
 	// TransferMode holds the value of the "transfer_mode" field.
 	TransferMode string `json:"transfer_mode,omitempty"`
+	// HomeReset holds the value of the "home_reset" field.
+	HomeReset    bool `json:"home_reset,omitempty"`
 	selectValues sql.SelectValues
 }
 
@@ -58,6 +60,8 @@ func (*AgentReincarnation) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case agentreincarnation.FieldHomeReset:
+			values[i] = new(sql.NullBool)
 		case agentreincarnation.FieldFromGeneration, agentreincarnation.FieldToGeneration:
 			values[i] = new(sql.NullInt64)
 		case agentreincarnation.FieldAgentID, agentreincarnation.FieldRequestedBy, agentreincarnation.FieldState, agentreincarnation.FieldError, agentreincarnation.FieldPreviousAppliedConfig, agentreincarnation.FieldNewAppliedConfig, agentreincarnation.FieldHandoff, agentreincarnation.FieldSourceBrokerID, agentreincarnation.FieldTargetBrokerID, agentreincarnation.FieldSourceCleanup, agentreincarnation.FieldTransferMode:
@@ -184,6 +188,12 @@ func (_m *AgentReincarnation) assignValues(columns []string, values []any) error
 			} else if value.Valid {
 				_m.TransferMode = value.String
 			}
+		case agentreincarnation.FieldHomeReset:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field home_reset", values[i])
+			} else if value.Valid {
+				_m.HomeReset = value.Bool
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -269,6 +279,9 @@ func (_m *AgentReincarnation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("transfer_mode=")
 	builder.WriteString(_m.TransferMode)
+	builder.WriteString(", ")
+	builder.WriteString("home_reset=")
+	builder.WriteString(fmt.Sprintf("%v", _m.HomeReset))
 	builder.WriteByte(')')
 	return builder.String()
 }

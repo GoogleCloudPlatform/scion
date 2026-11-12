@@ -47,6 +47,8 @@ const (
 	FieldSourceCleanup = "source_cleanup"
 	// FieldTransferMode holds the string denoting the transfer_mode field in the database.
 	FieldTransferMode = "transfer_mode"
+	// FieldHomeReset holds the string denoting the home_reset field in the database.
+	FieldHomeReset = "home_reset"
 	// Table holds the table name of the agentreincarnation in the database.
 	Table = "agent_reincarnations"
 )
@@ -70,6 +72,7 @@ var Columns = []string{
 	FieldTargetBrokerID,
 	FieldSourceCleanup,
 	FieldTransferMode,
+	FieldHomeReset,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -211,4 +214,9 @@ func BySourceCleanup(opts ...sql.OrderTermOption) OrderOption {
 // ByTransferMode orders the results by the transfer_mode field.
 func ByTransferMode(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTransferMode, opts...).ToFunc()
+}
+
+// ByHomeReset orders the results by the home_reset field.
+func ByHomeReset(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHomeReset, opts...).ToFunc()
 }

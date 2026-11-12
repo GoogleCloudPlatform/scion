@@ -25,12 +25,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // reincarnatePatchNeedsUpdateMsg is the 403 body for a user caller whose
 // reincarnate request has patch flags but who lacks agent.update.
-const reincarnatePatchNeedsUpdateMsg = "Reincarnate patch flags (--service-account, --role, --model, --thinking-level, --harness-auth, --image) need permission to update the agent (agent.update) in addition to lifecycle; a user access token also needs the agent:update scope"
+const reincarnatePatchNeedsUpdateMsg = "Reincarnate patch flags (--harness, --service-account, --role, --model, --thinking-level, --harness-auth, --image) need permission to update the agent (agent.update) in addition to lifecycle; a user access token also needs the agent:update scope"
 
 // maxHandoffBytes bounds the reincarnate request's handoff text (design §3.2).
 const maxHandoffBytes = 256 * 1024
@@ -78,9 +79,13 @@ type ReincarnateAgentRequest struct {
 	Model         string `json:"model,omitempty"`
 	ThinkingLevel *int   `json:"thinkingLevel,omitempty"`
 	HarnessAuth   string `json:"harnessAuth,omitempty"`
+	// HarnessConfig (`--harness`) moves the agent to another harness config
+	// and resets its home (ptone/scion#7757). It needs the
+	// hub.reincarnate_harness_switch experiment and is a patch for
+	// authorization.
+	HarnessConfig string `json:"harnessConfig,omitempty"`
 
 	// Overrides not yet supported; any non-zero value here is a 400.
-	HarnessConfig  string            `json:"harnessConfig,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TemplateHash   string            `json:"templateHash,omitempty"`
 	ResetOverrides bool              `json:"resetOverrides,omitempty"`
@@ -90,7 +95,7 @@ type ReincarnateAgentRequest struct {
 // hasUnsupportedOverrides reports whether the request sets any override
 // field that is not yet supported.
 func (r ReincarnateAgentRequest) hasUnsupportedOverrides() bool {
-	return r.HarnessConfig != "" || len(r.Env) > 0 || r.TemplateHash != "" || r.ResetOverrides || r.Rollback
+	return len(r.Env) > 0 || r.TemplateHash != "" || r.ResetOverrides || r.Rollback
 }
 
 // ReincarnateAgentResponse is the response body for a reincarnate request:
@@ -147,6 +152,14 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
+
+	// HomeReset is set when this reincarnation deletes and rebuilds the
+	// agent's home (a harness switch, ptone/scion#7757); Warnings[0] is
+	// then the home-reset warning. Harness is the harness-config name
+	// old→new, set when the request names a harness config (HarnessCfg is
+	// the content hash change).
+	HomeReset bool         `json:"homeReset,omitempty"`
+	Harness   *FieldChange `json:"harness,omitempty"`
 }
 
 // removedSharedDirBackendOptionError is the 400 message for a reincarnate
@@ -232,6 +245,13 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, fmt.Sprintf("handoff exceeds %d bytes", maxHandoffBytes), nil)
 		return
 	}
+	// A harness switch (ptone/scion#7757) is gated by its experiment, ahead
+	// of every other check, so a disabled hub gives a clear reason.
+	if req.HarnessConfig != "" && !s.experimentEnabled(experiments.ReincarnateHarnessSwitch) {
+		writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+			"--harness requires the "+experiments.ReincarnateHarnessSwitch+" experiment", nil)
+		return
+	}
 	if req.hasUnsupportedOverrides() {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"config overrides are not yet supported for scion reincarnate", nil)
@@ -240,6 +260,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if msg := removedSharedDirBackendOptionError(req); msg != "" {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, msg, nil)
 		return
+	}
+	if req.HarnessConfig != "" {
+		if !harnessConfigNameAllowed(req.HarnessConfig) {
+			ValidationError(w, fmt.Sprintf("invalid harnessConfig %q: must be a single harness-config name", req.HarnessConfig), nil)
+			return
+		}
+		if req.TargetBroker != "" {
+			ValidationError(w, "harnessConfig (--harness) cannot be combined with targetBroker (--broker): move the agent and switch its harness in separate requests", nil)
+			return
+		}
 	}
 	if !validateReincarnatePatchRequest(w, req) {
 		return
@@ -284,7 +314,25 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// broker and the agent state are examined and before anything is
 	// written, so a refused request claims nothing and a dry run reports
 	// the same refusal.
-	patch, ok := s.resolveReincarnatePatch(w, r, agent, project, req)
+	//
+	// A harness switch first resolves its target harness config; an
+	// unknown name is a 404 here, before anything is stopped, since a
+	// typo would otherwise reset the home for nothing (ptone/scion#7757).
+	var targetHC *store.HarnessConfig
+	if req.HarnessConfig != "" {
+		hc, err := s.resolveHarnessConfigBySlug(ctx, project.ID, req.HarnessConfig)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if hc == nil {
+			writeError(w, http.StatusNotFound, ErrCodeHarnessConfigNotFound,
+				fmt.Sprintf("harness config %q not found in this project or globally", req.HarnessConfig), nil)
+			return
+		}
+		targetHC = hc
+	}
+	patch, ok := s.resolveReincarnatePatch(w, r, agent, project, req, targetHC)
 	if !ok {
 		return
 	}
@@ -405,6 +453,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker", nil)
 		return
 	}
+	// A harness switch resets the home: the broker must be able to do that
+	// completely on the agent's runtime (ptone/scion#7757). Refused, like
+	// the capabilities above, before anything is planned or stopped, also
+	// for a dry run. An empty runtime (ambiguous profiles) is refused too.
+	if req.HarnessConfig != "" {
+		if msg := resetHomeRuntimeRefusal(effectiveAgentRuntime(agent, broker), broker.Capabilities.ReprovisionResetHomeRuntimes); msg != "" {
+			writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
+			return
+		}
+	}
 
 	// AC-8 / design §3.4 Amendment A3, moved ahead of the plan computation
 	// (design §3.4 Amendment A11 item 3): a reincarnation already in flight
@@ -425,9 +483,22 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
 	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, agent.RuntimeBrokerID), patch)
+	buildCtx := ctx
+	if patch != nil && patch.HarnessConfig != nil {
+		// A harness switch never falls back to no credentials on its own
+		// (ptone/scion#7757 §3.3.4): `--harness-auth none` asks for that
+		// explicitly.
+		buildCtx = withNoAuthFallbackForbidden(ctx)
+	}
+	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, agent.RuntimeBrokerID), patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
+		if errors.Is(err, errNoAuthFallbackRefused) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeHarnessCredentialsMissing,
+				fmt.Sprintf("harness config %q has no credentials available for this agent; set them as hub secrets, "+
+					"or pass --harness-auth (--harness-auth none runs the harness without credentials)", req.HarnessConfig), nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -447,6 +518,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addHarnessSwitchToPlan(&plan, agent.AppliedConfig, fresh, patch)
 	addAuthorityToPlan(&plan, auth)
 	targetGeneration := agent.Generation + 1
 
@@ -538,6 +610,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		SourceBrokerID:        moveSourceID(move),
 		TargetBrokerID:        moveTargetID(move),
 		TransferMode:          moveTransferMode(move),
+		HomeReset:             plan.HomeReset,
 	}
 	// A reincarnation starts the agent, so it is admitted like a start
 	// (ptone/scion#6033): reserve its project slot, and unless it moves its

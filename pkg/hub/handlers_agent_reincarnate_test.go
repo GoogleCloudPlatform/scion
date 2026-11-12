@@ -1384,8 +1384,8 @@ type httpReprovisionDispatcher struct {
 	http *HTTPAgentDispatcher
 }
 
-func (d *httpReprovisionDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
-	return d.http.DispatchAgentReprovision(ctx, agent)
+func (d *httpReprovisionDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent, opts ReprovisionOptions) error {
+	return d.http.DispatchAgentReprovision(ctx, agent, opts)
 }
 
 // TestReincarnateAgent_RowEnvMatchesFreshConfigAfterReprovision proves the
@@ -2325,12 +2325,12 @@ func (d *phaseObservingDispatcher) DispatchAgentStop(ctx context.Context, a *sto
 	return d.reincarnateTestDispatcher.DispatchAgentStop(ctx, a)
 }
 
-func (d *phaseObservingDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent) error {
+func (d *phaseObservingDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent, opts ReprovisionOptions) error {
 	cur, err := d.s.GetAgent(ctx, a.ID)
 	if err == nil {
 		d.phaseAtReprovision = cur.Phase
 	}
-	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a)
+	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a, opts)
 }
 
 // TestReincarnateAgent_WorkerDoesNotClobberReportedPhase: the worker's
@@ -4180,13 +4180,13 @@ func (d *gatedDispatcher) gate() error {
 	return nil
 }
 
-func (d *gatedDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent) error {
+func (d *gatedDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent, opts ReprovisionOptions) error {
 	if d.step == "reprovision" {
 		if err := d.gate(); err != nil {
 			return err
 		}
 	}
-	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a)
+	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a, opts)
 }
 
 func (d *gatedDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
@@ -4836,10 +4836,10 @@ type twoGateDispatcher struct {
 	inReprov, relReprov, inStart, relStart chan struct{}
 }
 
-func (d *twoGateDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent) error {
+func (d *twoGateDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent, opts ReprovisionOptions) error {
 	close(d.inReprov)
 	<-d.relReprov
-	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a)
+	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a, opts)
 }
 
 func (d *twoGateDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {

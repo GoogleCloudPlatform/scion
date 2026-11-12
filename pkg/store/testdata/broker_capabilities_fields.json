@@ -13,6 +13,7 @@
     "nodeImageRegistry",
     "reprovision",
     "reprovisionEmptyPerAgent",
+    "reprovisionResetHomeRuntimes",
     "startsInFlight",
     "sync",
     "templateTiers",

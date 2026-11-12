@@ -426,6 +426,13 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 // images it resolves.
 const ImageTagSetting = "hub.image_tag_setting"
 
+// ReincarnateHarnessSwitch gates `scion reincarnate --harness`
+// (ptone/scion#7757): moving an agent to another harness config in place,
+// with a full reset of its home. The hub checks it before anything else in
+// a request that names a harness config; brokers act only on an explicit
+// reset request, so they need no flag.
+const ReincarnateHarnessSwitch = "hub.reincarnate_harness_switch"
+
 // ImageTagVersionDefault gates the version default of image_tag
 // (ptone/scion#6625): while it is on and image_tag is unset, a release
 // build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) applies its
@@ -855,6 +862,17 @@ var compiled = []Experiment{
 		Owner:       "skills",
 		// ptone/scion#5995 makes it the default and removes the gate.
 		ReviewBy: "2027-01-24",
+	},
+	{
+		Name:        ReincarnateHarnessSwitch,
+		Title:       "Reincarnate harness switch",
+		Description: "Lets scion reincarnate --harness <harness-config> move an agent to another harness config in place, keeping its identity, workspace, branch, conversations and history. The agent's home directory is deleted and rebuilt for the new harness config: the harness session and transcripts, memory edits, tools and caches installed in the home, shell history and dotfile edits are lost, and there is no rollback; the handoff is the only continuity. The dry run and the real request both show this warning. Supported on the docker, podman and container runtimes. While it is off, a reincarnate request that names a harness config is refused with 400 experiment_disabled.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7757",
+		Owner:       "lifecycle",
+		ReviewBy:    "2027-05-31",
 	},
 	{
 		Name:        ImageTagSetting,

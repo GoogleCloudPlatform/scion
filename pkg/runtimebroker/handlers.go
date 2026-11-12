@@ -445,6 +445,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// Home reset on the local-disk runtimes (ptone/scion#7757).
+			ReprovisionResetHomeRuntimes: ReprovisionResetHomeRuntimes(),
 			// Provision-rendered keys listed in changed_fields are
 			// re-rendered at start (ptone/scion#3982).
 			ChangedFields: true,
@@ -958,6 +960,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	// Every error answer to a home-resetting request says whether the home
+	// was moved aside (ptone/scion#7757); only the reprovision below can
+	// move it, and it marks the reset applied there.
+	var homeReset *homeResetErrorWriter
+	if req.ResetHome {
+		homeReset = newHomeResetErrorWriter(w)
+		w = homeReset
+		defer homeReset.finish()
+	}
 	// The signed-URL workspace download asks the Hub the create came from.
 	if req.WorkspaceDownloadMode != "" {
 		req.workspaceHubConn = s.resolveHubNameForLaunch(r)
@@ -1024,6 +1035,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// request (checked again there with the fresh-agent-dir expectation).
 	if req.MoveReincarnationID != "" && !req.ProvisionOnly {
 		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
+		return
+	}
+	// A home reset belongs only on a reprovision (ptone/scion#7757), and its
+	// ID becomes part of a directory name.
+	if (req.ResetHome || req.ResetHomeID != "") && (!req.ProvisionOnly || !req.Reprovision || req.MoveReincarnationID != "") {
+		ValidationError(w, "resetHome is only valid on a provision-only reprovision request", nil)
+		return
+	}
+	if req.ResetHome != (req.ResetHomeID != "") || req.ResetHome && !api.ValidResetHomeID(req.ResetHomeID) {
+		ValidationError(w, "resetHome needs a resetHomeId of 1 to 64 characters of A-Z, a-z, 0-9 and '-'", nil)
 		return
 	}
 	// No volume in the request may reach a Runtime Broker control path;
@@ -1118,6 +1139,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 			case dispatchAttemptInProgress:
 				s.dispatchAttemptsMu.Unlock()
+				// The running attempt may be resetting the home.
+				homeReset.markUnknown()
 				writeError(w, http.StatusConflict, ErrCodeConflict, "create request already in progress", map[string]interface{}{
 					"requestId": req.RequestID,
 				})
@@ -2033,7 +2056,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if req.Reprovision {
+			opts.ResetHome = req.ResetHome
+			opts.ResetHomeID = req.ResetHomeID
 			cfg, err = sc.Manager.Reprovision(ctx, opts)
+			if err != nil && errors.Is(err, agent.ErrHomeResetApplied) {
+				homeReset.markApplied()
+			}
 		} else {
 			cfg, err = sc.Manager.Provision(ctx, opts)
 		}
@@ -2139,6 +2167,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// asked for it — the hub's dispatch fails closed when it asked
 			// for a reprovision and did not get this echo back.
 			Reprovisioned: req.Reprovision,
+			// A reprovision with ResetHome that succeeded always moved the
+			// previous home aside (or found it already moved by an earlier
+			// attempt of the same reset) and composed a fresh one.
+			HomeReset: req.Reprovision && req.ResetHome,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()

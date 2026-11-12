@@ -21,6 +21,7 @@ import (
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -43,15 +44,24 @@ type reincarnatePatch struct {
 	// GCPIdentity is the resolved service-account binding for
 	// --service-account; nil when the request did not set one.
 	GCPIdentity *store.GCPIdentityConfig
+	// HarnessConfigName and HarnessConfig are the harness config a
+	// --harness request switches to: the requested name and its resolved
+	// hub row. Nil when the request does not switch (ptone/scion#7757).
+	// A switch resets the agent's home and drops the old harness's image,
+	// model and harness auth unless the same request sets them
+	// (recordReincarnatePatchEdits).
+	HarnessConfigName string
+	HarnessConfig     *store.HarnessConfig
 }
 
 // reincarnatePatchFields lists the request fields that patch the next
 // generation, in display order.
-var reincarnatePatchFields = []string{"serviceAccount", "role", "image", "model", "thinkingLevel", "harnessAuth"}
+var reincarnatePatchFields = []string{"harness", "serviceAccount", "role", "image", "model", "thinkingLevel", "harnessAuth"}
 
-// hasPatch reports whether the request sets any patch field.
+// hasPatch reports whether the request sets any patch field. A harness
+// switch is a patch (ptone/scion#7757 D-a): it edits the agent's config.
 func (r ReincarnateAgentRequest) hasPatch() bool {
-	return r.ServiceAccount != "" || r.Role != "" || r.Image != "" || r.Model != "" ||
+	return r.HarnessConfig != "" || r.ServiceAccount != "" || r.Role != "" || r.Image != "" || r.Model != "" ||
 		r.ThinkingLevel != nil || r.HarnessAuth != ""
 }
 
@@ -59,6 +69,7 @@ func (r ReincarnateAgentRequest) hasPatch() bool {
 // reincarnatePatchFields order.
 func (r ReincarnateAgentRequest) patchedFields() []string {
 	set := map[string]bool{
+		"harness":        r.HarnessConfig != "",
 		"serviceAccount": r.ServiceAccount != "",
 		"role":           r.Role != "",
 		"image":          r.Image != "",
@@ -93,6 +104,13 @@ func validateReincarnatePatchRequest(w http.ResponseWriter, req ReincarnateAgent
 	if req.HarnessAuth != "" {
 		switch req.HarnessAuth {
 		case "api-key", "oauth-token", "auth-file", "vertex-ai":
+		case harness.AuthTypeNone:
+			// Only with a harness switch: the explicit way to run the new
+			// harness without credentials (ptone/scion#7757 §3.3.4).
+			if req.HarnessConfig == "" {
+				ValidationError(w, fmt.Sprintf("harnessAuth %q is only accepted with harnessConfig (--harness)", req.HarnessAuth), nil)
+				return false
+			}
 		default:
 			ValidationError(w, fmt.Sprintf("invalid harnessAuth %q: must be one of api-key, oauth-token, auth-file, vertex-ai", req.HarnessAuth), nil)
 			return false
@@ -176,7 +194,11 @@ func (s *Server) resolveReincarnateServiceAccount(w http.ResponseWriter, r *http
 // untouched. The role's CanDelegate and ceiling checks are not here; they
 // run in reincarnateAuthorityFor, which the caller invokes with the target
 // role. Returns (nil, true) when the request patches nothing.
-func (s *Server) resolveReincarnatePatch(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, req ReincarnateAgentRequest) (*reincarnatePatch, bool) {
+//
+// targetHC is the resolved harness config of a --harness request (nil
+// otherwise); --harness-auth is then validated against it, not against the
+// agent's current harness.
+func (s *Server) resolveReincarnatePatch(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, req ReincarnateAgentRequest, targetHC *store.HarnessConfig) (*reincarnatePatch, bool) {
 	if !req.hasPatch() {
 		return nil, true
 	}
@@ -185,6 +207,10 @@ func (s *Server) resolveReincarnatePatch(w http.ResponseWriter, r *http.Request,
 		Model:       req.Model,
 		HarnessAuth: req.HarnessAuth,
 		Role:        AgentRole(req.Role),
+	}
+	if targetHC != nil {
+		p.HarnessConfigName = req.HarnessConfig
+		p.HarnessConfig = targetHC
 	}
 	if req.ThinkingLevel != nil {
 		tl := *req.ThinkingLevel
@@ -200,10 +226,20 @@ func (s *Server) resolveReincarnatePatch(w http.ResponseWriter, r *http.Request,
 		}
 		p.GCPIdentity = gcp
 	}
-	if p.HarnessAuth != "" {
+	// "none" (a switch only) is a no-credentials request, not an auth
+	// type a harness declares support for.
+	if p.HarnessAuth != "" && p.HarnessAuth != harness.AuthTypeNone {
 		// The same harness-capability validation PATCH applies to
-		// auth_selectedType.
-		resolvedHarness, caps := s.resolveAgentHarnessCapabilities(r.Context(), agent)
+		// auth_selectedType, against the harness the next generation runs:
+		// the target of a switch, else the agent's current one.
+		var resolvedHarness string
+		var caps api.HarnessAdvancedCapabilities
+		if targetHC != nil {
+			resolvedHarness = targetHC.Harness
+			caps = harness.New(resolvedHarness).AdvancedCapabilities()
+		} else {
+			resolvedHarness, caps = s.resolveAgentHarnessCapabilities(r.Context(), agent)
+		}
 		if issues := validateConfigAgainstHarnessCapabilities(&api.ScionConfig{AuthSelectedType: p.HarnessAuth}, caps); len(issues) > 0 {
 			ValidationError(w, "harnessAuth is not supported by harness "+resolvedHarness, map[string]interface{}{
 				"harness": resolvedHarness,

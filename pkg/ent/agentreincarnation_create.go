@@ -224,6 +224,20 @@ func (_c *AgentReincarnationCreate) SetNillableTransferMode(v *string) *AgentRei
 	return _c
 }
 
+// SetHomeReset sets the "home_reset" field.
+func (_c *AgentReincarnationCreate) SetHomeReset(v bool) *AgentReincarnationCreate {
+	_c.mutation.SetHomeReset(v)
+	return _c
+}
+
+// SetNillableHomeReset sets the "home_reset" field if the given value is not nil.
+func (_c *AgentReincarnationCreate) SetNillableHomeReset(v *bool) *AgentReincarnationCreate {
+	if v != nil {
+		_c.SetHomeReset(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentReincarnationCreate) SetID(v uuid.UUID) *AgentReincarnationCreate {
 	_c.mutation.SetID(v)
@@ -420,6 +434,10 @@ func (_c *AgentReincarnationCreate) createSpec() (*AgentReincarnation, *sqlgraph
 	if value, ok := _c.mutation.TransferMode(); ok {
 		_spec.SetField(agentreincarnation.FieldTransferMode, field.TypeString, value)
 		_node.TransferMode = value
+	}
+	if value, ok := _c.mutation.HomeReset(); ok {
+		_spec.SetField(agentreincarnation.FieldHomeReset, field.TypeBool, value)
+		_node.HomeReset = value
 	}
 	return _node, _spec
 }
@@ -660,6 +678,9 @@ func (u *AgentReincarnationUpsertOne) UpdateNewValues() *AgentReincarnationUpser
 		}
 		if _, exists := u.create.mutation.TransferMode(); exists {
 			s.SetIgnore(agentreincarnation.FieldTransferMode)
+		}
+		if _, exists := u.create.mutation.HomeReset(); exists {
+			s.SetIgnore(agentreincarnation.FieldHomeReset)
 		}
 	}))
 	return u
@@ -1070,6 +1091,9 @@ func (u *AgentReincarnationUpsertBulk) UpdateNewValues() *AgentReincarnationUpse
 			}
 			if _, exists := b.mutation.TransferMode(); exists {
 				s.SetIgnore(agentreincarnation.FieldTransferMode)
+			}
+			if _, exists := b.mutation.HomeReset(); exists {
+				s.SetIgnore(agentreincarnation.FieldHomeReset)
 			}
 		}
 	}))

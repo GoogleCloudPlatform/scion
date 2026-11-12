@@ -166,7 +166,7 @@ func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store
 	return nil
 }
 
-func (d *recordingDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+func (d *recordingDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent, _ ReprovisionOptions) error {
 	return nil
 }
 func (d *recordingDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {

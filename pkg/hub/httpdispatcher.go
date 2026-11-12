@@ -2131,7 +2131,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
 	ctx = withOwnerChainMemo(ctx)
-	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "", ReprovisionOptions{})
 }
 
 // DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
@@ -2153,17 +2153,24 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // agent.Manager.Reprovision). It does not start the container; the caller
 // does that separately via DispatchAgentStart. Precondition: the agent's
 // container is already stopped.
-func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+//
+// With opts.ResetHome the broker also resets the agent's home (a harness
+// switch, ptone/scion#7757). A failure that certainly left the home intact
+// satisfies reprovisionLeftHomeIntact; any other failure may have reset it.
+func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent, opts ReprovisionOptions) error {
 	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
 	ctx = withOwnerChainMemo(ctx)
-	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "", "")
+	if opts.ResetHome && !api.ValidResetHomeID(opts.ResetID) {
+		return fmt.Errorf("DispatchAgentReprovision: invalid home reset ID %q", opts.ResetID)
+	}
+	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "", "", opts)
 }
 
 // dispatchProvision is the shared implementation behind DispatchAgentProvision
 // and DispatchAgentReprovision: build a provision-only create request, dispatch
 // it with the GatherEnv two-pass mechanism, and merge any resolved storage env
 // back into AppliedConfig.
-func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace, moveReincarnationID string) (err error) {
+func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace, moveReincarnationID string, reset ReprovisionOptions) (err error) {
 	// sent is set at the send boundary below. Every error returned once it
 	// is set is marked errProvisionSent (provisionSent), except a deferred
 	// route (ErrLifecycleDeferred), which sends nothing; an error returned
@@ -2230,6 +2237,10 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	req.Reprovision = reprovision
 	req.ExpectExistingNFSWorkspace = expectNFSWorkspace
 	req.MoveReincarnationID = moveReincarnationID
+	if reprovision && reset.ResetHome {
+		req.ResetHome = true
+		req.ResetHomeID = reset.ResetID
+	}
 	req.GatherEnv = true
 
 	// First pass: use CreateAgentWithGather so the broker can report which
@@ -2335,7 +2346,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	// an incomplete or unreplaced config and still report AC-1 success.
 	if reprovision {
 		if finalNeeds != nil && len(finalNeeds.Needs) > 0 {
-			return fmt.Errorf("%s: required env still missing after reprovision: %v", callerName, finalNeeds.Needs)
+			// The broker answered with env needs and did not reprovision,
+			// so a home reset did not happen either.
+			return fmt.Errorf("%s: required env still missing after reprovision: %v: %w", callerName, finalNeeds.Needs, errReprovisionHomeIntact)
 		}
 		if finalResp == nil {
 			return fmt.Errorf("%s: broker returned no confirmation for the reprovision request", callerName)
@@ -2347,6 +2360,13 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		if !finalResp.Reprovisioned {
 			return fmt.Errorf("%s: broker did not confirm the reprovision (it may not support reincarnate; its reported capabilities may be stale)", callerName)
 		}
+		// A broker that predates the home reset ignores ResetHome and
+		// re-renders the config over the old home: fail closed. The home
+		// was not reset.
+		if req.ResetHome && !finalResp.HomeReset {
+			return fmt.Errorf("%s: broker did not confirm the home reset (it may not support resetting an agent home; its reported capabilities may be stale): %w", callerName, errReprovisionHomeIntact)
+		}
+		d.log.InfoContext(ctx, callerName+": reprovision confirmed", "agent_id", agent.ID, "home_reset", finalResp.HomeReset)
 	}
 
 	// Merge resolved storage env vars back into AppliedConfig so they are

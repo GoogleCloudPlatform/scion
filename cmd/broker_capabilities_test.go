@@ -70,6 +70,15 @@ func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
 					continue
 				}
 				require.True(t, stored.IsValid(), "store.BrokerCapabilities has no %s", f.Name)
+				if f.Type.Kind() == reflect.Slice {
+					// A runtime list, registered as one name per runtime
+					// (reprovisionResetHome:<runtime>).
+					assert.Equal(t, hv.Field(i).Interface(), stored.Interface(), "embedded registration and heartbeat disagree on %s", f.Name)
+					for _, rt := range hv.Field(i).Interface().([]string) {
+						assert.Contains(t, names, runtimebroker.ReprovisionResetHomeCapabilityPrefix+rt, "registration names lack %s", rt)
+					}
+					continue
+				}
 				if f.Type.Kind() == reflect.String {
 					// A node configuration value, not a capability name.
 					assert.Equal(t, hv.Field(i).String(), stored.String(), "embedded registration and heartbeat disagree on %s", f.Name)

@@ -732,21 +732,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// timezone capture at the end of this function reads its env.
 	var resolvedHC *store.HarnessConfig
 	if hcName != "" && agent.AppliedConfig.HarnessConfigID == "" {
-		var hc *store.HarnessConfig
+		projectID := ""
 		if project != nil {
-			var err error
-			hc, err = s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeProject, project.ID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				s.agentLifecycleLog.Warn("failed to get project harness config by slug", "slug", hcName, "project_id", project.ID, "error", err)
-			}
+			projectID = project.ID
 		}
-		if hc == nil {
-			var err error
-			hc, err = s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeGlobal, "")
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				s.agentLifecycleLog.Warn("failed to get global harness config by slug", "slug", hcName, "error", err)
-			}
-		}
+		// A lookup error is logged by the resolver; the create goes on as
+		// for a name the hub does not know.
+		hc, _ := s.resolveHarnessConfigBySlug(ctx, projectID, hcName)
 		if hc != nil {
 			resolvedHC = hc
 			agent.AppliedConfig.HarnessConfigID = hc.ID
@@ -3029,4 +3021,32 @@ func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.Respo
 	}
 	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
 	return true
+}
+
+// resolveHarnessConfigBySlug looks up the hub harness config named name:
+// in the project's scope first (when projectID is set), then globally. It
+// returns (nil, nil) when neither scope has one. A store failure other than
+// not-found is logged and returned with a nil config, after the global scope
+// was still tried.
+func (s *Server) resolveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
+	var lookupErr error
+	if projectID != "" {
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeProject, projectID)
+		if err == nil && hc != nil {
+			return hc, nil
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("failed to get project harness config by slug", "slug", name, "project_id", projectID, "error", err)
+			lookupErr = err
+		}
+	}
+	hc, err := s.store.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
+	if err == nil && hc != nil {
+		return hc, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("failed to get global harness config by slug", "slug", name, "error", err)
+		lookupErr = err
+	}
+	return nil, lookupErr
 }

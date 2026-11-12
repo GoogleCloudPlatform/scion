@@ -52,6 +52,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
+		// This broker's reprovision resets an agent home on the local-disk
+		// runtimes (ptone/scion#7757).
+		ReprovisionResetHomeRuntimes: ReprovisionResetHomeRuntimes(),
 		// This broker re-renders the provision-rendered keys the hub lists
 		// in changed_fields at start (ptone/scion#3982).
 		ChangedFields: true,
@@ -127,10 +130,26 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.AgentMove, "agentMove")
 	add(c.AgentMoveRecreate, "agentMoveRecreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
+	for _, rt := range c.ReprovisionResetHomeRuntimes {
+		names = append(names, ReprovisionResetHomeCapabilityPrefix+rt)
+	}
 	add(c.ChangedFields, "changedFields")
 	add(c.ClearedFields, "clearedFields")
 	add(c.UnlimitedCountLimits, "unlimitedCountLimits")
 	add(c.ClearedResourceSubfields, "clearedResourceSubfields")
 	add(c.AttachmentDelivery, "attachmentDelivery")
 	return names
+}
+
+// ReprovisionResetHomeCapabilityPrefix starts the registration capability
+// name of each runtime in ReprovisionResetHomeRuntimes
+// ("reprovisionResetHome:docker").
+const ReprovisionResetHomeCapabilityPrefix = "reprovisionResetHome:"
+
+// ReprovisionResetHomeRuntimes returns the runtimes on which this broker's
+// reprovision resets an agent home completely: the runtimes whose home is
+// only the broker's own directory (ptone/scion#7757). Runtimes that keep a
+// copy of the home elsewhere (an NFS leaf) are added once they clear it.
+func ReprovisionResetHomeRuntimes() []string {
+	return []string{"docker", "podman", "container"}
 }

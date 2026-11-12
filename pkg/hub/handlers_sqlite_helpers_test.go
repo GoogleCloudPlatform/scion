@@ -626,6 +626,8 @@ type reincarnateTestDispatcher struct {
 	// reprovisionConfigs snapshots the AppliedConfig of every reprovision
 	// dispatch, in call order, as the worker sent it.
 	reprovisionConfigs []store.AgentAppliedConfig
+	// reprovisionOpts records the options of every reprovision dispatch.
+	reprovisionOpts []ReprovisionOptions
 }
 
 func newReincarnateTestDispatcher() *reincarnateTestDispatcher {
@@ -5227,9 +5229,10 @@ func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.
 func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
 }
-func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
+func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent, opts ReprovisionOptions) error {
 	d.mu.Lock()
 	d.reprovisionCalls++
+	d.reprovisionOpts = append(d.reprovisionOpts, opts)
 	if agent.AppliedConfig != nil {
 		d.reprovisionConfigs = append(d.reprovisionConfigs, *agent.AppliedConfig)
 	}
@@ -5396,6 +5399,7 @@ func (d *reincarnateTestDispatcher) resetReprovisions(reprovisionErr error) {
 	defer d.mu.Unlock()
 	d.reprovisionCalls = 0
 	d.reprovisionConfigs = nil
+	d.reprovisionOpts = nil
 	d.reprovisionErr = reprovisionErr
 }
 
@@ -5434,7 +5438,7 @@ func (d *createAgentDispatcher) DispatchAgentProvision(_ context.Context, agent 
 	return nil
 }
 
-func (d *createAgentDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
+func (d *createAgentDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent, _ ReprovisionOptions) error {
 	agent.Phase = string(state.PhaseCreated)
 	return nil
 }
@@ -6425,7 +6429,7 @@ func (d *def135Dispatcher) DispatchAgentProvision(_ context.Context, _ *store.Ag
 	return nil
 }
 
-func (d *def135Dispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+func (d *def135Dispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent, _ ReprovisionOptions) error {
 	return nil
 }
 func (d *def135Dispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {

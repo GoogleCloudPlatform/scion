@@ -52,6 +52,8 @@ const (
 	ErrCodeDiscoverFailed                   = apierr.ErrCodeDiscoverFailed
 	ErrCodeEmptyRoleSet                     = apierr.ErrCodeEmptyRoleSet
 	ErrCodeExperimentDisabled               = apierr.ErrCodeExperimentDisabled
+	ErrCodeHarnessConfigNotFound            = apierr.ErrCodeHarnessConfigNotFound
+	ErrCodeHarnessCredentialsMissing        = apierr.ErrCodeHarnessCredentialsMissing
 	ErrCodeExpiredJoinToken                 = apierr.ErrCodeExpiredJoinToken
 	ErrCodeForbidden                        = apierr.ErrCodeForbidden
 	ErrCodeHarnessConfigConflict            = apierr.ErrCodeHarnessConfigConflict

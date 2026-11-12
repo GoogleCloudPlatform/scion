@@ -582,3 +582,38 @@ func TestAgentReincarnation_TransferModeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", got.TransferMode)
 }
+
+// A home-resetting reincarnation's HomeReset is written at creation and
+// read back unchanged, also after a state advance; a record created without
+// it reads back false (ptone/scion#7757).
+func TestAgentReincarnation_HomeResetRoundTrip(t *testing.T) {
+	s := newTestAgentReincarnationStore(t)
+	ctx := context.Background()
+
+	reset := &store.AgentReincarnation{
+		AgentID: "agent-reset", FromGeneration: 1, ToGeneration: 2,
+		State:     store.AgentReincarnationStatePending,
+		HomeReset: true,
+	}
+	require.NoError(t, s.CreateAgentReincarnation(ctx, reset))
+	got, err := s.GetAgentReincarnation(ctx, reset.ID)
+	require.NoError(t, err)
+	assert.True(t, got.HomeReset)
+
+	got.State = store.AgentReincarnationStateCompleted
+	ok, err := s.TryAdvanceAgentReincarnation(ctx, got, store.AgentReincarnationStatePending, time.Time{})
+	require.NoError(t, err)
+	require.True(t, ok)
+	got, err = s.GetAgentReincarnation(ctx, reset.ID)
+	require.NoError(t, err)
+	assert.True(t, got.HomeReset, "later writes keep HomeReset")
+
+	plain := &store.AgentReincarnation{
+		AgentID: "agent-plain", FromGeneration: 1, ToGeneration: 2,
+		State: store.AgentReincarnationStatePending,
+	}
+	require.NoError(t, s.CreateAgentReincarnation(ctx, plain))
+	got, err = s.GetAgentReincarnation(ctx, plain.ID)
+	require.NoError(t, err)
+	assert.False(t, got.HomeReset)
+}

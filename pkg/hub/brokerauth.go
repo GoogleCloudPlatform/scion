@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -324,6 +325,14 @@ const JoinTokenPrefix = "scion_join_"
 func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 	caps := &store.BrokerCapabilities{}
 	for _, name := range names {
+		// "reprovisionResetHome:<runtime>" adds one runtime to
+		// ReprovisionResetHomeRuntimes (ptone/scion#7757).
+		if rt, ok := strings.CutPrefix(strings.TrimSpace(name), "reprovisionResetHome:"); ok {
+			if rt != "" && !slices.Contains(caps.ReprovisionResetHomeRuntimes, rt) {
+				caps.ReprovisionResetHomeRuntimes = append(caps.ReprovisionResetHomeRuntimes, rt)
+			}
+			continue
+		}
 		switch strings.ToLower(strings.TrimSpace(name)) {
 		case "webpty", "web_pty":
 			caps.WebPTY = true

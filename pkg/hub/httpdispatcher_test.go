@@ -766,7 +766,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
 		},
 	}
 
-	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{}); err != nil {
 		t.Fatalf("DispatchAgentReprovision failed: %v", err)
 	}
 
@@ -844,7 +844,7 @@ func resolvedEnvDispatcher(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrok
 func TestHTTPAgentDispatcher_ReprovisionDoesNotMergeResolvedEnv(t *testing.T) {
 	dispatcher, mockClient, agent := resolvedEnvDispatcher(t)
 
-	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent))
+	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent, ReprovisionOptions{}))
 
 	require.NotNil(t, mockClient.lastCreateReq)
 	assert.Equal(t, "stored-value", mockClient.lastCreateReq.ResolvedEnv["STORED_VAR"], "the broker must still receive the storage env var")
@@ -859,7 +859,7 @@ func TestHTTPAgentDispatcher_ReprovisionDoesNotMergeResolvedEnv(t *testing.T) {
 func TestHTTPAgentDispatcher_ReprovisionSkipHoldsForPlainKeys(t *testing.T) {
 	dispatcher, mockClient, agent := resolvedEnvDispatcher(t)
 
-	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent))
+	require.NoError(t, dispatcher.DispatchAgentReprovision(context.Background(), agent, ReprovisionOptions{}))
 
 	require.NotNil(t, mockClient.lastCreateReq)
 	kind, ok := api.ClassifyEnvKey(mockClient.lastCreateReq.EnvClassifications, "STORED_VAR")
@@ -935,7 +935,7 @@ func TestHTTPAgentDispatcher_ReprovisionCarriesAgentEndpointOverride(t *testing.
 				RuntimeBrokerID: tid("host-1"),
 				AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
 			}
-			require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent))
+			require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{}))
 
 			require.NotNil(t, mockClient.lastCreateReq)
 			assert.True(t, mockClient.lastCreateReq.Reprovision, "the captured request must be the reprovision request")
@@ -992,7 +992,7 @@ func TestHTTPAgentDispatcher_ReprovisionCarriesSkillDispatchMetadata(t *testing.
 	// The provision credential is delivered to the agent under the
 	// delivery credential, which needs its recorded edge.
 	grantLaunchDelivery(t, memStore, dispatcher, agent)
-	require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent))
+	require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{}))
 
 	req := mockClient.lastCreateReq
 	require.NotNil(t, req)
@@ -1041,7 +1041,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails(t *testin
 	}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err == nil {
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{}); err == nil {
 		t.Fatal("expected DispatchAgentReprovision to fail when the broker's response does not echo Reprovisioned=true")
 	}
 }
@@ -1073,7 +1073,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision_StillMissingEnvFails(t *te
 	}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchAgentReprovision(ctx, agent)
+	err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{})
 	if err == nil {
 		t.Fatal("expected DispatchAgentReprovision to fail when env is still missing after the retry")
 	}
@@ -1104,7 +1104,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision_NoBroker(t *testing.T) {
 		RuntimeBrokerID: "",
 	}
 
-	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err == nil {
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{}); err == nil {
 		t.Fatal("expected error when no runtime broker is assigned")
 	}
 	if mockClient.createCalled {
@@ -4042,7 +4042,7 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision_PropagatesSharedWorkspace(
 		},
 	}
 
-	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{}); err != nil {
 		t.Fatalf("DispatchAgentReprovision failed: %v", err)
 	}
 

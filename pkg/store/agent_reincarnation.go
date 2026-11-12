@@ -109,6 +109,11 @@ type AgentReincarnation struct {
 	// reader that branches on the mode reads "" on a move record as
 	// TransferModeExport.
 	TransferMode string `json:"transferMode,omitempty"`
+	// HomeReset is set, at creation, for a reincarnation that resets the
+	// agent's home (a harness switch, ptone/scion#7757). Once the broker
+	// may have reset the home, a failure keeps the agent on the new config
+	// instead of restoring the previous one (fail forward).
+	HomeReset bool `json:"homeReset,omitempty"`
 }
 
 // Workspace transfer modes of a cross-broker move.

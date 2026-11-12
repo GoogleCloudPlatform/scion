@@ -669,6 +669,7 @@ var (
 		{Name: "target_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "source_cleanup", Type: field.TypeString, Nullable: true},
 		{Name: "transfer_mode", Type: field.TypeString, Nullable: true},
+		{Name: "home_reset", Type: field.TypeBool, Nullable: true},
 	}
 	// AgentReincarnationsTable holds the schema information for the "agent_reincarnations" table.
 	AgentReincarnationsTable = &schema.Table{

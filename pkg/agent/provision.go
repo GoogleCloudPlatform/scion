@@ -1122,15 +1122,20 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //   - unrelated files already in the agent's home directory (only files the
 //     template/harness-config/platform-skill layers themselves own are
 //     overlaid — see ContextWithReprovision's ForceOverwrite wiring for
-//     platform skills specifically);
+//     platform skills specifically), unless opts.ResetHome asks for the home
+//     to be reset: then the whole home is moved aside after the checks and
+//     rebuilt fresh (resetAgentHome);
 //   - a sibling agent's directory (both branches resolve strictly this
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
-func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (_ *api.ScionConfig, err error) {
 	ctx = m.withWorkspaceLock(ctx)
 	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	hasGitClone := opts.GitClone != nil
 	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
 		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
+	}
+	if opts.ResetHome && !api.ValidResetHomeID(opts.ResetHomeID) {
+		return nil, fmt.Errorf("%w: a home reset needs a valid reset ID (got %q)", ErrReprovisionRefused, opts.ResetHomeID)
 	}
 	// Empty-per-agent combined with another workspace source is
 	// contradictory. ProvisionAgent refuses it too, but with an untyped
@@ -1269,6 +1274,24 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	ctx = api.ContextWithReprovision(ctx)
+
+	// A home reset (a harness switch, ptone/scion#7757) moves the home
+	// aside only now, after every precondition above has passed, so a
+	// refusal leaves the home intact. ProvisionAgent then composes a fresh
+	// home at the same path, exactly as for a create.
+	if opts.ResetHome {
+		resetHome := config.GetAgentHomePath(projectDir, opts.Name)
+		if err := resetAgentHome(ctx, agentDir, resetHome, opts.ResetHomeID); err != nil {
+			return nil, err
+		}
+		// From here on the previous home is gone: every failure says so.
+		defer func() {
+			if err != nil {
+				err = homeResetAppliedError{err}
+			}
+		}()
+		purgeResetHomeResidueAsync(ctx, filepath.Dir(resetHome))
+	}
 
 	agentHome, _, cfg, err := ProvisionAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {

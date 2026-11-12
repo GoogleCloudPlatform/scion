@@ -131,7 +131,7 @@ func TestDispatchProvisionForMove_SendBoundary(t *testing.T) {
 		return d.DispatchAgentProvisionForMove(ctx, a, fresh, "reincarnation-1")
 	}
 	direct := func(d *HTTPAgentDispatcher, a *store.Agent) error {
-		return d.dispatchProvision(ctx, a, "DispatchAgentProvisionForMove", false, fresh, "reincarnation-1")
+		return d.dispatchProvision(ctx, a, "DispatchAgentProvisionForMove", false, fresh, "reincarnation-1", ReprovisionOptions{})
 	}
 	withFixture := func(mutate func(d *HTTPAgentDispatcher, c *mockRuntimeBrokerClient, a *store.Agent)) func(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
 		return func(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
