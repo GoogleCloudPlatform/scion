@@ -237,6 +237,15 @@ export class ScionChatChoices extends LitElement {
       flex-wrap: nowrap;
     }
 
+    /*
+     * Shoelace draws a default button's label in neutral-700, which the dark
+     * theme maps to a slate barely lighter than the button itself, so an
+     * enabled choice read as disabled. Use the theme's text colour.
+     */
+    .choices sl-button[variant='default'] {
+      --sl-color-neutral-700: var(--scion-text, #1e293b);
+    }
+
     .opt {
       display: flex;
       align-items: flex-start;
@@ -393,9 +402,18 @@ export class ScionChatChoices extends LitElement {
       flex: 1;
     }
 
+    /*
+     * The app theme leaves Shoelace's panel background (neutral-50) and
+     * message text (neutral-700) at their light values in dark mode, which
+     * drew a white alert inside a dark card. Use the card's own surface and
+     * text colours.
+     */
     .card sl-alert.changed {
       display: block;
       margin: 0.6rem 0.75rem 0;
+      --sl-panel-background-color: var(--scion-surface, #fff);
+      --sl-panel-border-color: var(--scion-border, #e2e8f0);
+      --sl-color-neutral-700: var(--scion-text, #1e293b);
     }
 
     .note {
