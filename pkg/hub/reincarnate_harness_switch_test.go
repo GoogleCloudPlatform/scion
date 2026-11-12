@@ -320,6 +320,7 @@ func TestReincarnateHarness_NoAuthFallbackRefused(t *testing.T) {
 	for _, dryRun := range []bool{true, false} {
 		rec := reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{DryRun: dryRun, HarnessConfig: "codex-hc"})
 		requireHarnessSwitchError(t, rec, http.StatusUnprocessableEntity, ErrCodeHarnessCredentialsMissing)
+		assert.Contains(t, rec.Body.String(), "OPENAI_API_KEY_FOR_TEST_ONLY")
 	}
 	assertAgentUntouched(t, f.s, f.disp, f.agent.ID, before)
 
@@ -621,4 +622,110 @@ func TestReincarnateHarness_DropsHarnessSpecificInlineSettings(t *testing.T) {
 	assert.Empty(t, got.CommandArgs)
 	assert.Empty(t, got.TaskFlag)
 	assert.Empty(t, got.User)
+}
+
+// AC 5: the target harness is checked before either dry-run or real admission.
+// Include a partially satisfied requirement to ensure values never reach the error.
+func TestReincarnateHarness_CredentialPreflight(t *testing.T) {
+	for _, tc := range []struct {
+		file bool
+		auth string
+	}{
+		{false, ""}, {false, "api-key"}, {true, ""}, {true, "api-key"},
+	} {
+		t.Run(fmt.Sprintf("file=%t/auth=%s", tc.file, tc.auth), func(t *testing.T) {
+			f := newHarnessSwitchFixture(t, nil, func(hc *store.HarnessConfig) {
+				auth := api.HarnessAuthTypeMetadata{RequiredEnv: []api.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"TARGET_PRESENT_KEY"}},
+					{AnyOf: []string{"TARGET_MISSING_KEY", "TARGET_ALTERNATIVE_KEY"}},
+				}}
+				if tc.file {
+					auth.RequiredEnv = auth.RequiredEnv[:1]
+					auth.RequiredFiles = []api.HarnessAuthFileRequirement{{Name: "target-auth-file", Required: true, AlternativeEnvKeys: []string{"TARGET_FILE_KEY"}}}
+				}
+				hc.Config = &store.HarnessConfigData{AuthMeta: &api.HarnessAuthMetadata{
+					DefaultType: "api-key", Types: map[string]api.HarnessAuthTypeMetadata{
+						"api-key":     auth,
+						"oauth-token": {RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{"TARGET_OAUTH_KEY"}}}},
+					},
+				}}
+			})
+			a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+			require.NoError(t, err)
+			a.AppliedConfig.CreateInputs.InlineConfig.Env = map[string]string{"TARGET_PRESENT_KEY": "credential-value-must-stay-private"}
+			require.NoError(t, f.s.UpdateAgent(context.Background(), a))
+			before := snapshotAgent(t, f.s, f.agent.ID)
+			var dryBody string
+			for _, dryRun := range []bool{true, false} {
+				rec := reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{DryRun: dryRun, HarnessConfig: "codex-hc", HarnessAuth: tc.auth})
+				requireHarnessSwitchError(t, rec, http.StatusUnprocessableEntity, ErrCodeHarnessCredentialsMissing)
+				if dryRun {
+					dryBody = rec.Body.String()
+				} else {
+					assert.JSONEq(t, dryBody, rec.Body.String())
+				}
+				assert.Contains(t, rec.Body.String(), "codex-hc")
+				if tc.auth == "" {
+					assert.Contains(t, rec.Body.String(), "TARGET_OAUTH_KEY")
+				} else {
+					assert.NotContains(t, rec.Body.String(), "TARGET_OAUTH_KEY")
+				}
+				if tc.file {
+					assert.Contains(t, rec.Body.String(), "target-auth-file")
+					assert.Contains(t, rec.Body.String(), "TARGET_FILE_KEY")
+				} else {
+					assert.Contains(t, rec.Body.String(), "TARGET_MISSING_KEY")
+					assert.Contains(t, rec.Body.String(), "TARGET_ALTERNATIVE_KEY")
+				}
+				assert.Contains(t, rec.Body.String(), "hub secrets")
+				assert.Contains(t, rec.Body.String(), "--harness-auth")
+				assert.NotContains(t, rec.Body.String(), "credential-value-must-stay-private")
+				assertAgentUntouched(t, f.s, f.disp, f.agent.ID, before)
+			}
+		})
+	}
+}
+
+func TestReincarnateHarness_CredentialPreflightAllows(t *testing.T) {
+	for _, mode := range []string{"credentials", "secret", "none", "no-auth"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newHarnessSwitchFixture(t, nil, func(hc *store.HarnessConfig) {
+				hc.Config = &store.HarnessConfigData{AuthMeta: &api.HarnessAuthMetadata{
+					DefaultType: "api-key", Types: map[string]api.HarnessAuthTypeMetadata{
+						"api-key": {RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{"TARGET_REQUIRED_KEY"}}}},
+					},
+				}}
+			})
+			a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+			require.NoError(t, err)
+			req := ReincarnateAgentRequest{HarnessConfig: "codex-hc"}
+			switch mode {
+			case "credentials":
+				a.AppliedConfig.CreateInputs.InlineConfig.Env = map[string]string{"TARGET_REQUIRED_KEY": "private-value"}
+			case "secret":
+				require.NoError(t, f.s.CreateSecret(context.Background(), &store.Secret{
+					ID: tid("target-credential"), Key: "TARGET_REQUIRED_KEY", EncryptedValue: "private-value",
+					SecretType: store.SecretTypeEnvironment, Scope: store.ScopeProject, ScopeID: f.project.ID,
+					InjectionMode: store.InjectionModeAsNeeded,
+				}))
+			case "none":
+				req.HarnessAuth = "none"
+			case "no-auth":
+				a.AppliedConfig.CreateInputs.NoAuth = true
+				a.AppliedConfig.NoAuth = true
+			}
+			require.NoError(t, f.s.UpdateAgent(context.Background(), a))
+			before := snapshotAgent(t, f.s, f.agent.ID)
+			req.DryRun = true
+			rec := reincarnateAsDev(t, f.srv, f.agent.ID, req)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "private-value")
+			assertAgentUntouched(t, f.s, f.disp, f.agent.ID, before)
+			req.DryRun = false
+			rec = reincarnateAsDev(t, f.srv, f.agent.ID, req)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			settled := waitForReincarnationSettled(t, f.s, f.agent.ID)
+			require.Equal(t, store.AgentReincarnationStateCompleted, settled.State, settled.Error)
+		})
+	}
 }
