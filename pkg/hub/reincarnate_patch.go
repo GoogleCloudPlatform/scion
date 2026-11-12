@@ -232,7 +232,8 @@ func (s *Server) resolveReincarnatePatch(w http.ResponseWriter, r *http.Request,
 		// The same harness-capability validation PATCH applies to
 		// auth_selectedType, against the harness the next generation runs:
 		// the target of a switch, else the agent's current one.
-		resolvedHarness, caps := "", api.HarnessAdvancedCapabilities{}
+		var resolvedHarness string
+		var caps api.HarnessAdvancedCapabilities
 		if targetHC != nil {
 			resolvedHarness = targetHC.Harness
 			caps = harness.New(resolvedHarness).AdvancedCapabilities()
