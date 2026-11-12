@@ -594,7 +594,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // The fresh config must also carry AppliedConfig.GCPIdentity (a kept field,
 // copied from the outgoing generation) before deriveAgentConfig runs: the
 // auto-no-auth fallback below reads it, through
-// hasRequiredAuthCredentials -> agentHasGCPIdentityAssigned, and a config
+// hasRequiredAuthCredentials -> agentGCPCredentialsAvailable, and a config
 // missing it can flip NoAuth/HarnessAuth where create did not.
 //
 // For context, not as a substitute for reusing deriveAgentConfig: the
@@ -2647,14 +2647,45 @@ func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
 	return mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModePassthrough
 }
 
+// agentGCPCredentialsAvailable reports whether the agent will have GCP
+// credentials from the metadata server at runtime, so file requirements marked
+// SkippedWhenGCPServiceAccountAssigned can be treated as satisfied.
+//
+// An agent whose GCPIdentity is explicitly block gets no metadata server, so
+// the project's verified service accounts do not count (ptone/scion#7733):
+// the broker auto-detects a non-GCP auth type for it, and the hub must agree
+// or it skips the no-auth fallback. Otherwise a verified project-scope service
+// account or the agent's own assign/passthrough identity counts. A nil
+// GCPIdentity still counts the project SA, since the hub cannot see whether
+// the broker will default it to block or passthrough (see
+// agentHasGCPIdentityAssigned).
+func (s *Server) agentGCPCredentialsAvailable(ctx context.Context, agent *store.Agent) (bool, error) {
+	if agentGCPIdentityBlocked(agent) {
+		return false, nil
+	}
+	if agentHasGCPIdentityAssigned(agent) {
+		return true, nil
+	}
+	return s.projectHasVerifiedGCPSA(ctx, agent.ProjectID)
+}
+
+// agentGCPIdentityBlocked returns true when the agent's own GCPIdentity
+// config explicitly sets MetadataMode to block.
+func agentGCPIdentityBlocked(agent *store.Agent) bool {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
+		return false
+	}
+	return agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModeBlock
+}
+
 // hasRequiredAuthCredentials checks whether the required auth environment
 // variables and file secrets for the given harness type are available in the
 // agent's env, or in the hub's env/secret stores (user and project scopes).
 //
 // When authMeta is non-nil (config-driven harness), file requirements from
 // required_files are also evaluated. Files marked with
-// SkippedWhenGCPServiceAccountAssigned are treated as satisfied when the
-// agent's project has at least one verified GCP service account.
+// SkippedWhenGCPServiceAccountAssigned are treated as satisfied when
+// agentGCPCredentialsAvailable reports GCP credentials for the agent.
 func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string, authMeta *config.HarnessAuthMetadata) (bool, error) {
 	// One owner material chain verdict for the whole probe: every hasAnyKey
 	// call below decides the agent's chain on it.
@@ -2664,12 +2695,9 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 	// satisfiable. This prevents the compiled default (api-key) from
 	// short-circuiting before config-driven types like vertex-ai are checked.
 	if authMeta != nil && agent.AppliedConfig.HarnessAuth == "" && len(authMeta.Types) > 0 {
-		gcpSAAssigned, err := s.projectHasVerifiedGCPSA(ctx, agent.ProjectID)
+		gcpSAAssigned, err := s.agentGCPCredentialsAvailable(ctx, agent)
 		if err != nil {
 			return false, err
-		}
-		if !gcpSAAssigned {
-			gcpSAAssigned = agentHasGCPIdentityAssigned(agent)
 		}
 		for authType := range authMeta.Types {
 			satisfied, err := s.isAuthTypeSatisfied(ctx, agent, authMeta, authType, gcpSAAssigned)
@@ -2700,12 +2728,9 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 
 	// Check config-driven file requirements (e.g. gcloud-adc for vertex-ai).
 	if authMeta != nil {
-		gcpSAAssigned, err := s.projectHasVerifiedGCPSA(ctx, agent.ProjectID)
+		gcpSAAssigned, err := s.agentGCPCredentialsAvailable(ctx, agent)
 		if err != nil {
 			return false, err
-		}
-		if !gcpSAAssigned {
-			gcpSAAssigned = agentHasGCPIdentityAssigned(agent)
 		}
 		fileSecrets := harness.RequiredAuthSecretsFromConfig(authMeta, agent.AppliedConfig.HarnessAuth, gcpSAAssigned)
 		for _, fs := range fileSecrets {

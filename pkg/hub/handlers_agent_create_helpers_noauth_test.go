@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -344,4 +345,113 @@ func TestHasRequiredAuthCredentials_AgentGCPIdentityAutodetect(t *testing.T) {
 			t.Error("expected hasRequiredAuthCredentials to return true — explicit vertex-ai with assign mode should skip file secrets")
 		}
 	})
+}
+
+// TestHasRequiredAuthCredentials_ExplicitBlockIgnoresProjectSA is the
+// regression test for ptone/scion#7733: an agent whose GCP identity is
+// explicitly block must not count the project's verified service account,
+// because the broker will block the metadata server and auto-detect api-key.
+// Counting the project SA made the hub skip the no-auth fallback, so create
+// failed at the broker on a missing ANTHROPIC_API_KEY.
+func TestHasRequiredAuthCredentials_ExplicitBlockIgnoresProjectSA(t *testing.T) {
+	srv, memStore := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("gcp-proj-block-sa")
+	if err := memStore.CreateProject(ctx, &store.Project{ID: projectID, Name: "block-sa", Slug: "block-sa"}); err != nil {
+		t.Fatalf("CreateProject failed: %v", err)
+	}
+	if err := memStore.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID:                 tid("sa-block-sa"),
+		Scope:              "project",
+		ScopeID:            projectID,
+		Email:              "agent@proj.iam.gserviceaccount.com",
+		ProjectID:          "proj",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: "verified",
+		CreatedBy:          tid("user-1"),
+		CreatedAt:          time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateGCPServiceAccount failed: %v", err)
+	}
+
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]api.HarnessAuthTypeMetadata{
+			"vertex-ai": {
+				RequiredEnv: []api.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}},
+				},
+				RequiredFiles: []api.HarnessAuthFileRequirement{
+					{
+						Name:                                 "gcloud-adc",
+						Type:                                 "file",
+						AlternativeEnvKeys:                   []string{"GOOGLE_APPLICATION_CREDENTIALS"},
+						SkippedWhenGCPServiceAccountAssigned: true,
+						Required:                             true,
+					},
+				},
+			},
+			"api-key": {
+				RequiredEnv: []api.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"ANTHROPIC_API_KEY"}},
+				},
+			},
+		},
+	}
+
+	block := &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeBlock}
+	tests := []struct {
+		name string
+		cfg  *store.AgentAppliedConfig
+		want bool
+	}{
+		{
+			name: "auto-detect, explicit block: project SA ignored",
+			cfg:  &store.AgentAppliedConfig{GCPIdentity: block},
+			want: false,
+		},
+		{
+			name: "explicit vertex-ai, explicit block: gcloud-adc still required",
+			cfg: &store.AgentAppliedConfig{
+				HarnessAuth: "vertex-ai",
+				Env:         map[string]string{"GOOGLE_CLOUD_PROJECT": "proj"},
+				GCPIdentity: block,
+			},
+			want: false,
+		},
+		{
+			name: "auto-detect, assign: project SA still counts",
+			cfg: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode: store.GCPMetadataModeAssign,
+			}},
+			want: true,
+		},
+		{
+			// Unchanged by #7733: the hub cannot see the broker runtime, so a
+			// nil identity still counts the project SA.
+			name: "auto-detect, nil identity: project SA still counts",
+			cfg:  &store.AgentAppliedConfig{},
+			want: true,
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &store.Agent{
+				ID:            tid(fmt.Sprintf("agent-block-sa-%d", i)),
+				Name:          "block-sa-agent",
+				Slug:          "block-sa-agent",
+				OwnerID:       tid("user-1"),
+				ProjectID:     projectID,
+				AppliedConfig: tc.cfg,
+			}
+			got, err := srv.hasRequiredAuthCredentials(ctx, agent, "claude", authMeta)
+			if err != nil {
+				t.Fatalf("hasRequiredAuthCredentials failed: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("hasRequiredAuthCredentials = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
