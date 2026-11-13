@@ -328,3 +328,35 @@ func TestDeletionInfo_JSONKeys(t *testing.T) {
 		t.Fatalf("keys = %v, want 9 keys with stage=finalizing", full)
 	}
 }
+
+func TestDeletionPriorState_JSONRoundTripAndLegacyFallback(t *testing.T) {
+	p := DeletionPriorState{
+		Phase:     "running",
+		Activity:  "working",
+		LaunchID:  "launch-1",
+		RunIntent: string(RunIntentRunning),
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := (&Agent{DeletionPrior: string(b)}).ParseDeletionPrior()
+	if got != p {
+		t.Fatalf("got %+v, want %+v", got, p)
+	}
+
+	// Empty RunIntent is omitted so unset priors keep their wire shape.
+	noIntent, err := json.Marshal(DeletionPriorState{Phase: "created"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(noIntent) != `{"phase":"created"}` {
+		t.Fatalf("got %s, want {\"phase\":\"created\"}", string(noIntent))
+	}
+
+	// Legacy payloads written before ptone/scion#4961 decode with empty RunIntent.
+	legacy := (&Agent{DeletionPrior: `{"phase":"running","activity":"working"}`}).ParseDeletionPrior()
+	if legacy.Phase != "running" || legacy.Activity != "working" || legacy.RunIntent != "" {
+		t.Fatalf("legacy = %+v", legacy)
+	}
+}

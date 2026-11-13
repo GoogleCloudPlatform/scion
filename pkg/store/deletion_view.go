@@ -91,11 +91,13 @@ type DeletionInfo struct {
 const DeletionStageFinalizing = "finalizing"
 
 // DeletionPriorState is the JSON stored in Agent.DeletionPrior: the state a
-// failed delete restores (design §2.1 claim).
+// failed delete restores (design §2.1 claim; runIntent added in
+// ptone/scion#4961).
 type DeletionPriorState struct {
-	Phase    string `json:"phase,omitempty"`
-	Activity string `json:"activity,omitempty"`
-	LaunchID string `json:"launchId,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	Activity  string `json:"activity,omitempty"`
+	LaunchID  string `json:"launchId,omitempty"`
+	RunIntent string `json:"runIntent,omitempty"`
 }
 
 // DeletionRequestInfo is the JSON stored in Agent.DeletionRequest: the

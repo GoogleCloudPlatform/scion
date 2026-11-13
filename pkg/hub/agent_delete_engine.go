@@ -289,7 +289,11 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			// Capture prior once per delete attempt: a re-claim of an
 			// abandoned row keeps the original prior.
 			if cur.DeletionState == store.DeletionStateNone || cur.DeletionState == store.DeletionStateFailed {
-				prior := store.DeletionPriorState{Phase: cur.Phase, Activity: cur.Activity}
+				prior := store.DeletionPriorState{
+					Phase:     cur.Phase,
+					Activity:  cur.Activity,
+					RunIntent: string(cur.RunIntent),
+				}
 				if cur.LaunchState == store.LaunchStateActive {
 					prior.LaunchID = cur.LaunchID
 				}
@@ -408,9 +412,8 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 // dispatch, ptone/scion#2890). A deleting row is skipped too: it reaches
 // the claim only once its lease has expired (an abandoned engine), and the
 // re-claim's dispatch check then refuses it with a rollback that restores
-// its prior phase (the run intent the abandoned engine recorded stays
-// stopped), where a refusal here would leave it stuck in deleting and
-// stopping. A row that is gone is left to the claim,
+// its prior phase and run intent (ptone/scion#4961), where a refusal here
+// would leave it stuck in deleting and stopping. A row that is gone is left to the claim,
 // which then affects nothing. An unpinned agent with no Runtime Broker
 // passes, as before (checkAgentPinnedPlacement).
 func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) error {
@@ -1350,9 +1353,11 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 			}
 		},
 	}
-	// The run intent dispatch recorded (stopped) is put back to what it
-	// replaced, with a compare-and-set on the time dispatch wrote, so an
-	// agent restored to a live phase keeps a matching intent (the hub stops
+	// The run intent dispatch recorded (stopped) is put back to the pre-delete
+	// intent stored in DeletionPriorState (falling back to what this engine's
+	// dispatch replaced when a legacy prior carries no runIntent,
+	// ptone/scion#4961), with a compare-and-set on the time dispatch wrote, so
+	// an agent restored to a live phase keeps a matching intent (the hub stops
 	// an agent that runs with intent stopped) and a newer start or stop
 	// recorded meanwhile wins.
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateDeleting), set)
@@ -1364,8 +1369,12 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	if n == 0 {
 		return e.lost()
 	}
-	if e.intentRecorded && e.priorIntent.Valid() && e.priorIntent != store.RunIntentStopped {
-		if _, err := e.s.store.RevertRunIntent(ctx, e.agentID(), store.RunIntentStopped, e.intentAt, e.priorIntent); err != nil {
+	restoreIntent := e.priorIntent
+	if priorIntent := store.RunIntent(prior.RunIntent); priorIntent.Valid() {
+		restoreIntent = priorIntent
+	}
+	if e.intentRecorded && restoreIntent.Valid() && restoreIntent != store.RunIntentStopped {
+		if _, err := e.s.store.RevertRunIntent(ctx, e.agentID(), store.RunIntentStopped, e.intentAt, restoreIntent); err != nil {
 			e.s.agentLifecycleLog.Warn("delete engine: restoring the run intent failed",
 				"agent_id", e.agentID(), "error", err)
 		}

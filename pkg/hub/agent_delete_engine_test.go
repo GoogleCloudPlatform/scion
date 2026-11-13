@@ -531,3 +531,105 @@ func TestAgentDeleteEngine_ReclaimAbandoned(t *testing.T) {
 		assert.Equal(t, 1, pub.count("deleted"))
 	})
 }
+
+// ptone/scion#4961: claimAgentDeletion persists the pre-delete RunIntent in
+// DeletionPriorState, and rollback restores it across both a normal failed
+// delete and an abandoned delete re-claimed after the dead engine already
+// recorded RunIntent = stopped.
+func TestAgentDeleteEngine_RunIntentPersistedAndRestoredOnRollback(t *testing.T) {
+	cases := []struct {
+		name        string
+		phase       state.Phase
+		preIntent   store.RunIntent // "" means leave RunIntent unset before claim
+		wantPriorRI string
+		wantAfter   store.RunIntent
+	}{
+		{"running intent restored", state.PhaseRunning, store.RunIntentRunning, string(store.RunIntentRunning), store.RunIntentRunning},
+		{"stopped intent preserved", state.PhaseStopped, store.RunIntentStopped, string(store.RunIntentStopped), store.RunIntentStopped},
+		{"empty intent stays stopped after dispatch", state.PhaseRunning, "", "", store.RunIntentStopped},
+	}
+
+	for _, tc := range cases {
+		t.Run("normal rollback/"+tc.name, func(t *testing.T) {
+			srv, s, _, disp := engineTestServer(t)
+			disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker boom") })
+			agent := setupBrokerAgentInPhase(t, s, "ri-norm-"+string(tc.preIntent), tc.phase)
+			if tc.preIntent != "" {
+				_, err := s.SetRunIntent(context.Background(), agent.ID, tc.preIntent)
+				require.NoError(t, err)
+			}
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+
+			got := mustGetAgent(t, s, agent.ID)
+			assert.Equal(t, string(tc.phase), got.Phase)
+			assert.Equal(t, tc.wantPriorRI, got.ParseDeletionPrior().RunIntent)
+			assert.Equal(t, tc.wantAfter, got.RunIntent)
+		})
+
+		t.Run("abandoned re-claim rollback/"+tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, _, disp := engineTestServer(t)
+			disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker boom") })
+			agent := setupBrokerAgentInPhase(t, s, "ri-aband-"+string(tc.preIntent), tc.phase)
+			if tc.preIntent != "" {
+				_, err := s.SetRunIntent(ctx, agent.ID, tc.preIntent)
+				require.NoError(t, err)
+			}
+
+			// Engine 1 claims the delete (capturing DeletionPriorState), records
+			// RunIntent = stopped as dispatch() does, and dies before finishing.
+			plan1, err := srv.claimAgentDeletion(ctx, agent.ID, agentDeleteParams{requestedBy: "dead-engine"})
+			require.NoError(t, err)
+			require.NotNil(t, plan1)
+			assert.Equal(t, tc.wantPriorRI, plan1.prior.RunIntent)
+			_, _, err = srv.swapRunIntent(ctx, plan1.snapshot, store.RunIntentStopped)
+			require.NoError(t, err)
+			require.Equal(t, store.RunIntentStopped, mustGetAgent(t, s, agent.ID).RunIntent)
+
+			past := time.Now().Add(-time.Minute)
+			n, err := s.UpdateAgentDeletion(ctx, agent.ID, store.DeletionPredicate{Claim: &plan1.claim}, store.DeletionFields{
+				LeaseAt: &past,
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			// Engine 2 re-claims the abandoned deleting row, fails dispatch, and
+			// rolls back both Phase and pre-delete RunIntent.
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+
+			got := mustGetAgent(t, s, agent.ID)
+			assert.EqualValues(t, 2, got.DeletionClaim)
+			assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+			assert.Equal(t, string(tc.phase), got.Phase)
+			assert.Equal(t, tc.wantPriorRI, got.ParseDeletionPrior().RunIntent, "re-claim preserves original DeletionPrior")
+			assert.Equal(t, tc.wantAfter, got.RunIntent)
+		})
+	}
+
+	t.Run("legacy prior without runIntent after dead engine wrote stopped falls back cleanly", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, _, disp := engineTestServer(t)
+		disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker boom") })
+		agent := setupBrokerAgentInPhase(t, s, "ri-legacy", state.PhaseRunning)
+		_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		past := time.Now().Add(-time.Minute)
+		deleting := store.DeletionStateDeleting
+		stopping := string(state.PhaseStopping)
+		legacyPrior := `{"phase":"running","activity":"working"}`
+		n, err := s.UpdateAgentDeletion(ctx, agent.ID, store.DeletionPredicate{}, store.DeletionFields{
+			State: &deleting, BumpClaim: true, LeaseAt: &past, StartedAt: &past, Prior: &legacyPrior, Phase: &stopping,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+		got := mustGetAgent(t, s, agent.ID)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+	})
+}
