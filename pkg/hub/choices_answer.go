@@ -563,8 +563,8 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 }
 
 // publishChoiceUpdated tells every open card of the decision about its new
-// state: on project.<id>.choice.updated for a thread, and on
-// user.<id>.choice.updated for each user of a DM, so a DM's decisions reach
+// state: on project.<id>.chat.choice.updated for a thread, and on
+// user.<id>.chat.choice.updated for each user of a DM, so a DM's decisions reach
 // only its participants.
 func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message, view DecisionView) {
 	evt := map[string]interface{}{"decision": view, "messageId": prompt.ID, "threadId": prompt.ThreadID}
@@ -577,13 +577,13 @@ func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message
 					kind = parts[3]
 				}
 				if kind == "user" && id != "" {
-					s.events.PublishRaw("user."+id+".choice.updated", evt)
+					s.events.PublishRaw("user."+id+".chat.choice.updated", evt)
 				}
 			}
 		}
 		return
 	}
 	if prompt.ProjectID != "" {
-		s.events.PublishRaw("project."+prompt.ProjectID+".choice.updated", evt)
+		s.events.PublishRaw("project."+prompt.ProjectID+".chat.choice.updated", evt)
 	}
 }

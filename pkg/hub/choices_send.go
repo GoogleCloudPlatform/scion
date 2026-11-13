@@ -193,6 +193,33 @@ func (s *Server) storeChoicePrompt(ctx context.Context, cp *choicePromptSend, ag
 	return nil
 }
 
+// publishReplacedDecisions tells the open cards of every version a choice
+// send replaced (--update) that it is now replaced: chat.choice.updated for
+// the old row, on its own prompt's subjects (it may be in another thread or
+// DM than the new prompt), with a view that carries replacedBy. Best
+// effort: the send has committed, and history carries the state anyway.
+func (s *Server) publishReplacedDecisions(ctx context.Context, res *store.ChoicePromptResult) {
+	if res == nil {
+		return
+	}
+	for _, d := range res.Decisions {
+		if d.Replaced == nil || d.Replaced.RowID == "" {
+			continue
+		}
+		old, err := s.store.GetDecision(ctx, d.Replaced.RowID)
+		if err != nil {
+			s.messageLog.Warn("choices: replaced decision not found for choice.updated", "row_id", d.Replaced.RowID, "error", err)
+			continue
+		}
+		prompt, err := s.store.GetMessage(ctx, old.MessageID)
+		if err != nil {
+			s.messageLog.Warn("choices: replaced decision's prompt not found for choice.updated", "row_id", old.ID, "message_id", old.MessageID, "error", err)
+			continue
+		}
+		s.publishChoiceUpdated(ctx, prompt, s.decisionViewFor(ctx, old))
+	}
+}
+
 // ChoiceDecisionResult is one decision in a choice prompt send response.
 type ChoiceDecisionResult struct {
 	Key      string                  `json:"key"`

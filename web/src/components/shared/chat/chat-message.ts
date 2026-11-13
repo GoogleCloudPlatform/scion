@@ -64,6 +64,16 @@ import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import './chat-choices.js';
+import './chat-choice-response.js';
+import { ANSWERABLE, chatChoicesEnabled } from '../../../client/chat-choices.js';
+import type { AskerAnswerability } from '../../../client/chat-choices.js';
+import type {
+  ChoiceAnswerMode,
+  ChoiceResponseSetView,
+  ChoiceResponseView,
+  DecisionView,
+} from '../../../shared/types.js';
 import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
 
 /** Structured attachment reference from the W7 API. */
@@ -802,6 +812,30 @@ export class ScionChatMessage extends LitElement {
   @property()
   dispatchState = '';
 
+  /** A choice prompt's decisions (web.chat_choices; absent while off). */
+  @property({ type: Array })
+  decisions: DecisionView[] | undefined = undefined;
+
+  /** A choice prompt's intro, shown instead of the body when the card renders. */
+  @property()
+  choiceIntro: string | undefined = undefined;
+
+  /** A choice prompt's answer mode. */
+  @property()
+  answerMode: ChoiceAnswerMode | undefined = undefined;
+
+  /** Whether the viewer can answer the prompt's asker (design §4.5). */
+  @property({ attribute: false })
+  answerability: AskerAnswerability | undefined = undefined;
+
+  /** A choice-response's one-click answer (web.chat_choices; absent while off). */
+  @property({ attribute: false })
+  choiceResponse: ChoiceResponseView | undefined = undefined;
+
+  /** A choice-response's set submit (web.chat_choices; absent while off). */
+  @property({ attribute: false })
+  choiceResponseSet: ChoiceResponseSetView | undefined = undefined;
+
   /** Reason for dispatch failure. */
   @property()
   dispatchFailureReason = '';
@@ -972,6 +1006,27 @@ export class ScionChatMessage extends LitElement {
       max-width: min(70%, 600px);
       min-width: 3rem;
       position: relative;
+    }
+
+    /* A choice-response is a compact line in the answerer's lane (design §4.6). */
+    .choice-response-row {
+      display: flex;
+      padding: 0.25rem 1rem;
+    }
+
+    .choice-response-row.own {
+      justify-content: flex-end;
+    }
+
+    .choice-response-row.other {
+      justify-content: flex-start;
+      padding-left: 3.5rem;
+    }
+
+    /* A choice card needs room for its buttons (design §4.1). */
+    .bubble.choice {
+      max-width: min(100%, 640px);
+      width: 100%;
     }
 
     .bubble-header {
@@ -2000,6 +2055,15 @@ export class ScionChatMessage extends LitElement {
         padding-right: 0.5rem;
       }
 
+      .choice-response-row {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+      }
+
+      .choice-response-row.other {
+        padding-left: 3rem;
+      }
+
       .bubble-content {
         padding: 0.625rem 0.75rem;
       }
@@ -2053,7 +2117,14 @@ export class ScionChatMessage extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('body') || changed.has('plain')) {
+    const cardMode = this.showsChoiceCard;
+    if (
+      changed.has('body') ||
+      changed.has('plain') ||
+      changed.has('choiceIntro') ||
+      cardMode !== this.renderedCardMode
+    ) {
+      this.renderedCardMode = cardMode;
       void this.renderContent();
     }
     if (changed.has('renderedContent')) {
@@ -2355,8 +2426,27 @@ export class ScionChatMessage extends LitElement {
     });
   }
 
+  /** The card mode the rendered body was built for. */
+  private renderedCardMode = false;
+
+  /**
+   * Whether this message renders as a choice card (design §4.1): a
+   * choice-prompt with decisions, and the browser flag on. The hub omits
+   * the fields while the experiment is off; the flag gates presentation.
+   */
+  private get showsChoiceCard(): boolean {
+    const d = this.decisions;
+    return this.messageType === 'choice-prompt' && !!d && d.length > 0 && chatChoicesEnabled();
+  }
+
+  /** The text the bubble renders: the intro alone under a choice card. */
+  private get displayBody(): string {
+    return this.showsChoiceCard ? (this.choiceIntro ?? '') : this.body;
+  }
+
   private async renderContent(): Promise<void> {
-    if (!this.body || this.plain) {
+    const body = this.displayBody;
+    if (!body || this.plain) {
       this.renderedContent = null;
       return;
     }
@@ -2364,7 +2454,7 @@ export class ScionChatMessage extends LitElement {
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
-      const fragment = renderer.renderFragment(this.body);
+      const fragment = renderer.renderFragment(body);
       // gs:// links are gated on the server-reported feature flag AND the
       // message being agent-sent — a user-sent message never links, however
       // the body happens to be spelled.
@@ -2537,12 +2627,15 @@ export class ScionChatMessage extends LitElement {
   }
 
   override render() {
+    if (this.showsChoiceResponse && !this.deletedAt) return this.renderChoiceResponse();
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
     // An attachment-only message (ptone/scion#6146) has no text: its
     // attachments render without an empty text bubble above them.
+    const choiceCard = this.showsChoiceCard;
     const attachmentOnly =
+      !choiceCard &&
       !(this.body ?? '').trim() &&
       ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
     // The More actions dots sit inside the text bubble, in a reserved corner.
@@ -2564,7 +2657,7 @@ export class ScionChatMessage extends LitElement {
         <div
           class="bubble${attachmentOnly && !isDeleted && this.actionsEnabled
             ? ' actions-corner'
-            : ''}"
+            : ''}${choiceCard && !isDeleted ? ' choice' : ''}"
         >
           ${this.showHeader && this.fromAgent
             ? html`
@@ -2605,7 +2698,11 @@ export class ScionChatMessage extends LitElement {
             : attachmentOnly
               ? nothing
               : html`<div class="bubble-content${contentActions}">
-                  ${this.renderBody()}${this.renderActionsButton()}
+                  ${choiceCard && !this.displayBody.trim()
+                    ? nothing
+                    : this.renderBody()}${choiceCard
+                    ? this.renderChoiceCard()
+                    : nothing}${this.renderActionsButton()}
                 </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
           ${isDeleted ? nothing : this.renderArtifactChips()}
@@ -2822,9 +2919,48 @@ export class ScionChatMessage extends LitElement {
     }
   }
 
+  private renderChoiceCard(): TemplateResult {
+    return html`<scion-chat-choices
+      .messageId=${this.messageId}
+      .decisions=${this.decisions ?? []}
+      .answerMode=${this.answerMode}
+      .currentUserId=${this.currentUserId}
+      .answerability=${this.answerability ?? ANSWERABLE}
+    ></scion-chat-choices>`;
+  }
+
+  /**
+   * Whether this message renders as a compact choice-response line
+   * (design §4.6): a choice-response carrying its view, and the browser
+   * flag on (double gate, as for the card).
+   */
+  private get showsChoiceResponse(): boolean {
+    return (
+      this.messageType === 'choice-response' &&
+      !!(this.choiceResponse || this.choiceResponseSet) &&
+      chatChoicesEnabled()
+    );
+  }
+
+  /** The response line in the answerer's lane, without a bubble. */
+  private renderChoiceResponse(): TemplateResult {
+    const own = !this.fromAgent;
+    return html`<div class="choice-response-row ${own ? 'own' : 'other'}">
+      <scion-chat-choice-response
+        lane=${own ? 'own' : 'other'}
+        .response=${this.choiceResponse}
+        .responseSet=${this.choiceResponseSet}
+        answererName=${own ? 'you' : this.senderName || this.sender}
+        agentName=${this.routedTo}
+        timestamp=${this.timestamp}
+        dispatchState=${this.dispatchState}
+      ></scion-chat-choice-response>
+    </div>`;
+  }
+
   private renderBody() {
     if (this.plain || !this.renderedContent) {
-      return html`<div class="plain-text">${this.body}</div>`;
+      return html`<div class="plain-text">${this.displayBody}</div>`;
     }
     return this.renderedContent;
   }

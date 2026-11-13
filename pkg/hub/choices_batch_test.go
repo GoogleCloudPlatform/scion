@@ -215,6 +215,14 @@ func TestChoiceSetAnswer_ShapeAndIdempotency(t *testing.T) {
 	pairs := []string{r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "2"}
 	first := f.submitSet(t, f.bob, resp.MessageID, "k1", pairs...)
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
+	// The 200's wire keys are camelCase (design §6, Q9), like the single
+	// endpoint's; the struct round-trip below does not depend on the tags.
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &raw))
+	assert.Contains(t, raw, "responseMessageId")
+	assert.Contains(t, raw, "batchId")
+	assert.NotContains(t, raw, "response_message_id")
+	assert.NotContains(t, raw, "batch_id")
 	again := f.submitSet(t, f.bob, resp.MessageID, "k1", pairs...)
 	require.Equal(t, http.StatusOK, again.Code, "body: %s", again.Body.String())
 	a, b := decodeSetResponse(t, first), decodeSetResponse(t, again)
@@ -435,7 +443,7 @@ func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
 	f := newChoicesFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
-	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".choice.updated")
+	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
 	defer unsubUpdates()
 	chat, unsubChat := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.dm")
 	defer unsubChat()

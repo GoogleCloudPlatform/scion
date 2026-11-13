@@ -59,8 +59,8 @@ type ChoiceSetAnswerItem struct {
 // ChoiceSetAnswerResponse is the 200 body of a set submit: the one
 // choice-response message, the batch and every decision of the prompt.
 type ChoiceSetAnswerResponse struct {
-	ResponseMessageID string         `json:"response_message_id"`
-	BatchID           string         `json:"batch_id"`
+	ResponseMessageID string         `json:"responseMessageId"`
+	BatchID           string         `json:"batchId"`
 	Decisions         []DecisionView `json:"decisions"`
 	Replayed          bool           `json:"replayed,omitempty"`
 }
