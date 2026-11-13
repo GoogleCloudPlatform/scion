@@ -52,6 +52,14 @@ func (Decision) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Immutable(),
+		// chat_key is the prompt message's thread_id (topic key or canonical
+		// dm:... key), captured when the prompt is created so authorization and
+		// project listing keep working after chat retention purges the prompt.
+		field.String("chat_key").
+			Optional().
+			Nillable().
+			MaxLen(256).
+			Immutable(),
 		// message_id is the choice-prompt message that carried this version.
 		field.UUID("message_id", uuid.UUID{}).
 			Immutable(),
@@ -130,6 +138,8 @@ func (Decision) Indexes() []ent.Index {
 		index.Fields("asker_agent_id", "status"),
 		// The project's pending decisions.
 		index.Fields("project_id", "status"),
+		// Project-wide decisions scoped to readable conversation keys.
+		index.Fields("project_id", "chat_key", "status"),
 		// History pages load a page's decisions by message.
 		index.Fields("message_id", "position"),
 		index.Fields("conversation_id"),

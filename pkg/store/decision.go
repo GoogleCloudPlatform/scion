@@ -63,13 +63,14 @@ const (
 
 // Decision answer surfaces: where the user acted.
 const (
-	DecisionSurfaceNative     = "native"
-	DecisionSurfaceSlack      = "slack"
-	DecisionSurfaceGoogleChat = "google_chat"
-	DecisionSurfaceDiscord    = "discord"
-	DecisionSurfaceTelegram   = "telegram"
-	DecisionSurfaceTeams      = "teams"
-	DecisionSurfaceOther      = "other"
+	DecisionSurfaceNative        = "native"
+	DecisionSurfaceDecisionsPage = "decisions_page"
+	DecisionSurfaceSlack         = "slack"
+	DecisionSurfaceGoogleChat    = "google_chat"
+	DecisionSurfaceDiscord       = "discord"
+	DecisionSurfaceTelegram      = "telegram"
+	DecisionSurfaceTeams         = "teams"
+	DecisionSurfaceOther         = "other"
 )
 
 // MaxDecisionIdempotencyKeyLen bounds RecordAnswerInput.IdempotencyKey.
@@ -291,6 +292,7 @@ type Decision struct {
 	ID             string
 	ProjectID      string
 	ConversationID string // empty when the prompt had no conversation
+	ChatKey        string // prompt message thread_id; empty on legacy rows whose prompt was purged
 	MessageID      string
 	Position       int
 
@@ -492,6 +494,7 @@ type RecordAnswerSetInput struct {
 	AnsweredByUserID string // required
 	AnsweredByName   string
 	AnsweredByEmail  string
+	Surface          string // DecisionSurface*; empty defaults to DecisionSurfaceNative
 
 	Answers []AnswerSetItem
 

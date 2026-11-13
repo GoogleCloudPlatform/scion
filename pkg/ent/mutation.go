@@ -37863,6 +37863,7 @@ type DecisionMutation struct {
 	id                *uuid.UUID
 	project_id        *uuid.UUID
 	conversation_id   *uuid.UUID
+	chat_key          *string
 	message_id        *uuid.UUID
 	position          *int
 	addposition       *int
@@ -38077,6 +38078,55 @@ func (m *DecisionMutation) ConversationIDCleared() bool {
 func (m *DecisionMutation) ResetConversationID() {
 	m.conversation_id = nil
 	delete(m.clearedFields, decision.FieldConversationID)
+}
+
+// SetChatKey sets the "chat_key" field.
+func (m *DecisionMutation) SetChatKey(s string) {
+	m.chat_key = &s
+}
+
+// ChatKey returns the value of the "chat_key" field in the mutation.
+func (m *DecisionMutation) ChatKey() (r string, exists bool) {
+	v := m.chat_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChatKey returns the old "chat_key" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldChatKey(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChatKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChatKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChatKey: %w", err)
+	}
+	return oldValue.ChatKey, nil
+}
+
+// ClearChatKey clears the value of the "chat_key" field.
+func (m *DecisionMutation) ClearChatKey() {
+	m.chat_key = nil
+	m.clearedFields[decision.FieldChatKey] = struct{}{}
+}
+
+// ChatKeyCleared returns if the "chat_key" field was cleared in this mutation.
+func (m *DecisionMutation) ChatKeyCleared() bool {
+	_, ok := m.clearedFields[decision.FieldChatKey]
+	return ok
+}
+
+// ResetChatKey resets all changes to the "chat_key" field.
+func (m *DecisionMutation) ResetChatKey() {
+	m.chat_key = nil
+	delete(m.clearedFields, decision.FieldChatKey)
 }
 
 // SetMessageID sets the "message_id" field.
@@ -38852,12 +38902,15 @@ func (m *DecisionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 20)
 	if m.project_id != nil {
 		fields = append(fields, decision.FieldProjectID)
 	}
 	if m.conversation_id != nil {
 		fields = append(fields, decision.FieldConversationID)
+	}
+	if m.chat_key != nil {
+		fields = append(fields, decision.FieldChatKey)
 	}
 	if m.message_id != nil {
 		fields = append(fields, decision.FieldMessageID)
@@ -38922,6 +38975,8 @@ func (m *DecisionMutation) Field(name string) (ent.Value, bool) {
 		return m.ProjectID()
 	case decision.FieldConversationID:
 		return m.ConversationID()
+	case decision.FieldChatKey:
+		return m.ChatKey()
 	case decision.FieldMessageID:
 		return m.MessageID()
 	case decision.FieldPosition:
@@ -38969,6 +39024,8 @@ func (m *DecisionMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldProjectID(ctx)
 	case decision.FieldConversationID:
 		return m.OldConversationID(ctx)
+	case decision.FieldChatKey:
+		return m.OldChatKey(ctx)
 	case decision.FieldMessageID:
 		return m.OldMessageID(ctx)
 	case decision.FieldPosition:
@@ -39025,6 +39082,13 @@ func (m *DecisionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetConversationID(v)
+		return nil
+	case decision.FieldChatKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChatKey(v)
 		return nil
 	case decision.FieldMessageID:
 		v, ok := value.(uuid.UUID)
@@ -39217,6 +39281,9 @@ func (m *DecisionMutation) ClearedFields() []string {
 	if m.FieldCleared(decision.FieldConversationID) {
 		fields = append(fields, decision.FieldConversationID)
 	}
+	if m.FieldCleared(decision.FieldChatKey) {
+		fields = append(fields, decision.FieldChatKey)
+	}
 	if m.FieldCleared(decision.FieldDefaultChoiceID) {
 		fields = append(fields, decision.FieldDefaultChoiceID)
 	}
@@ -39246,6 +39313,9 @@ func (m *DecisionMutation) ClearField(name string) error {
 	case decision.FieldConversationID:
 		m.ClearConversationID()
 		return nil
+	case decision.FieldChatKey:
+		m.ClearChatKey()
+		return nil
 	case decision.FieldDefaultChoiceID:
 		m.ClearDefaultChoiceID()
 		return nil
@@ -39271,6 +39341,9 @@ func (m *DecisionMutation) ResetField(name string) error {
 		return nil
 	case decision.FieldConversationID:
 		m.ResetConversationID()
+		return nil
+	case decision.FieldChatKey:
+		m.ResetChatKey()
 		return nil
 	case decision.FieldMessageID:
 		m.ResetMessageID()
