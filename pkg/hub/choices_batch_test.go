@@ -685,3 +685,92 @@ func (f *choicesFixture) assertNoChoiceResponse(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, rows.Items, "no choice-response row is stored")
 }
+
+// ptone/scion#7775: ChoiceResponseSetView carries answerer identity,
+// outcome, per-answer promptMessageId, and previousChoiceLabel on both live
+// SSE and history reloads, and omits top-level promptMessageId when answers
+// span multiple prompts.
+func TestChoiceResponseSetView_AttributionAndOutcomes(t *testing.T) {
+	f := newChoicesFixture(t)
+	chat, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.message")
+	defer unsub()
+
+	msg, res := f.topicPrompt(t, threeDecisions, false)
+	r := res.Decisions
+	// Row 0 interpreted as "1" ("yes"), row 1 interpreted as "a" ("Extend"), row 2 pending.
+	f.recordInterpreted(t, f.alice, r[0].RowID, "1")
+	f.recordInterpreted(t, f.alice, r[1].RowID, "a")
+
+	// Alice submits: confirm row 0 ("1"), override row 1 ("b" = "New type"), answer row 2 ("2" = "no").
+	rr := f.submitSet(t, f.alice, msg.ID, "", r[0].RowID, "1", r[1].RowID, "b", r[2].RowID, "2")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	out := decodeSetResponse(t, rr)
+
+	var liveSet *ChoiceResponseSetView
+	for _, e := range collectEvents(chat) {
+		var evt UserMessageEvent
+		require.NoError(t, json.Unmarshal(e.Data, &evt))
+		if evt.ID == out.ResponseMessageID {
+			liveSet = evt.ChoiceResponseSet
+		}
+	}
+	require.NotNil(t, liveSet, "live SSE carries choiceResponseSet")
+
+	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var h chatHistoryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &h))
+	histSet, ok := h.MessageChoiceResponseSets[out.ResponseMessageID]
+	require.True(t, ok, "history carries choiceResponseSet")
+
+	for source, set := range map[string]ChoiceResponseSetView{"live": *liveSet, "history": histSet} {
+		assert.Equal(t, msg.ID, set.PromptMessageID, source)
+		require.Len(t, set.Answers, 3, source)
+		for i, a := range set.Answers {
+			assert.Equal(t, f.alice.ID, a.AnsweredByUserID, "%s[%d]", source, i)
+			assert.Equal(t, f.alice.DisplayName, a.AnsweredByName, "%s[%d]", source, i)
+			assert.Equal(t, msg.ID, a.PromptMessageID, "%s[%d]", source, i)
+		}
+		assert.Equal(t, store.DecisionOutcomeConfirm, set.Answers[0].Outcome, source)
+		assert.Empty(t, set.Answers[0].PreviousChoiceLabel, source)
+
+		assert.Equal(t, store.DecisionOutcomeOverride, set.Answers[1].Outcome, source)
+		assert.Equal(t, "New type", set.Answers[1].Label, source)
+		assert.Equal(t, "Extend", set.Answers[1].PreviousChoiceLabel, source)
+
+		assert.Equal(t, store.DecisionOutcomeAnswer, set.Answers[2].Outcome, source)
+		assert.Empty(t, set.Answers[2].PreviousChoiceLabel, source)
+	}
+
+	// Multi-prompt interpreted batch omits top-level promptMessageId while
+	// keeping per-answer promptMessageId, interpretedByAgentId, and sourceMessageId.
+	prompts := map[string]*store.Decision{
+		"row-a": {ID: "row-a", MessageID: "prompt-1", AskerAgentID: f.agent.ID, Key: "K1", Position: 0},
+		"row-b": {ID: "row-b", MessageID: "prompt-2", AskerAgentID: f.agent.ID, Key: "K2", Position: 1},
+	}
+	multi := choiceResponseSetViewOf([]*store.DecisionAnswer{
+		{
+			DecisionRowID: "row-a", AskerAgentID: f.agent.ID, Key: "K1", Version: 1,
+			ChoiceID: "1", ChoiceLabel: "Yes", Provenance: store.DecisionProvenanceAgentInterpreted,
+			Outcome: store.DecisionOutcomeAnswer, BatchID: "batch-multi",
+			AnsweredByUserID: f.alice.ID, AnsweredByName: f.alice.DisplayName,
+			InterpretedByAgentID: f.agent.ID, SourceMessageID: "src-1",
+		},
+		{
+			DecisionRowID: "row-b", AskerAgentID: f.agent.ID, Key: "K2", Version: 1,
+			ChoiceID: "2", ChoiceLabel: "No", Provenance: store.DecisionProvenanceAgentInterpreted,
+			Outcome: store.DecisionOutcomeAnswer, BatchID: "batch-multi",
+			AnsweredByUserID: f.alice.ID, AnsweredByName: f.alice.DisplayName,
+			InterpretedByAgentID: f.agent.ID, SourceMessageID: "src-1",
+		},
+	}, prompts)
+	assert.Empty(t, multi.PromptMessageID)
+	rawJSON, err := json.Marshal(multi)
+	require.NoError(t, err)
+	assert.NotContains(t, string(rawJSON), `"promptMessageId":""`)
+	require.Len(t, multi.Answers, 2)
+	assert.Equal(t, "prompt-1", multi.Answers[0].PromptMessageID)
+	assert.Equal(t, "prompt-2", multi.Answers[1].PromptMessageID)
+	assert.Equal(t, f.agent.ID, multi.Answers[0].InterpretedByAgentID)
+	assert.Equal(t, "src-1", multi.Answers[0].SourceMessageID)
+}

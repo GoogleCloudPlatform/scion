@@ -496,20 +496,9 @@ func truncateRunes(s string, n int) string {
 // publishChoiceResponse emits the chat events of the stored response,
 // carrying its ChoiceResponseView.
 func (s *Server) publishChoiceResponse(ctx context.Context, m *store.Message, d *store.Decision, a *store.DecisionAnswer) {
-	view := &ChoiceResponseView{
-		RowID:           d.ID,
-		Ref:             d.Ref(),
-		Key:             a.Key,
-		Version:         a.Version,
-		Question:        a.QuestionText,
-		ChoiceID:        a.ChoiceID,
-		Label:           a.ChoiceLabel,
-		Provenance:      a.Provenance,
-		PromptMessageID: d.MessageID,
-		SourceMessageID: a.SourceMessageID,
-	}
+	view := choiceResponseViewOf(a, d)
 	pubCtx := context.WithoutCancel(ctx)
-	opt := withChoiceEvent(&choiceEventPayload{Response: view})
+	opt := withChoiceEvent(&choiceEventPayload{Response: &view})
 	s.touchConversationActivity(pubCtx, m.ThreadID, m.ID)
 	s.events.PublishUserMessage(pubCtx, m, nil, nil, opt)
 	if !strings.HasPrefix(m.ThreadID, "dm:") {

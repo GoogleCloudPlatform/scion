@@ -31,7 +31,11 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
-import type { ChoiceResponseSetView, ChoiceResponseView } from '../../../shared/types.js';
+import type {
+  ChoiceResponseSetAnswer,
+  ChoiceResponseSetView,
+  ChoiceResponseView,
+} from '../../../shared/types.js';
 
 /** The provenance of an answer an agent recorded from a user's reply. */
 const INTERPRETED = 'agent_interpreted';
@@ -51,6 +55,13 @@ export class ScionChatChoiceResponse extends LitElement {
   /** Who answered, as the line names them ("you" for the viewer). */
   @property()
   answererName = '';
+
+  /**
+   * Whether the answerer is the signed-in viewer (`answeredByUserId === currentUserId`).
+   * When unset (standalone mounts), falls back to `answererName === 'you'`.
+   */
+  @property({ attribute: false })
+  isOwnAnswerer: boolean | undefined = undefined;
 
   /** The agent that recorded an interpreted answer. */
   @property()
@@ -100,6 +111,11 @@ export class ScionChatChoiceResponse extends LitElement {
       flex-shrink: 0;
     }
 
+    sl-icon.change {
+      color: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
+    }
+
     b {
       color: var(--scion-text, #1e293b);
       font-weight: 600;
@@ -120,7 +136,8 @@ export class ScionChatChoiceResponse extends LitElement {
     }
 
     time,
-    .sep {
+    .sep,
+    .muted {
       color: var(--scion-text-muted, #64748b);
     }
 
@@ -191,12 +208,15 @@ export class ScionChatChoiceResponse extends LitElement {
     return this.answererName || 'Someone';
   }
 
-  private jump(): void {
-    const id = this.responseSet?.promptMessageId || this.response?.promptMessageId;
-    if (!id) return;
+  private get own(): boolean {
+    return this.isOwnAnswerer ?? this.who === 'you';
+  }
+
+  private jumpTo(messageId: string | undefined): void {
+    if (!messageId) return;
     this.dispatchEvent(
       new CustomEvent<{ messageId: string }>('scroll-to-message', {
-        detail: { messageId: id },
+        detail: { messageId },
         bubbles: true,
         composed: true,
       })
@@ -222,36 +242,107 @@ export class ScionChatChoiceResponse extends LitElement {
       <span class="failed" data-state="not-delivered">not delivered (agent gone)</span>`;
   }
 
+  private renderJumpButton(messageId: string | undefined): TemplateResult | typeof nothing {
+    if (!messageId) return nothing;
+    return html`<span class="sep" aria-hidden="true">·</span>
+      <button
+        type="button"
+        class="link"
+        data-action="jump"
+        @click=${(): void => this.jumpTo(messageId)}
+      >
+        Jump
+      </button>`;
+  }
+
   private renderSingle(r: ChoiceResponseView): TemplateResult {
-    const interpreted = r.provenance === INTERPRETED;
+    if (r.provenance === INTERPRETED) {
+      const agent = this.agentName || 'the agent';
+      const whose = this.own ? 'your' : `${this.who}'s`;
+      const pronoun = this.own ? 'your' : 'their';
+      return html`<div class="line" data-kind="single" data-state="interpreted">
+        <sl-icon class="robot" name="robot" aria-hidden="true"></sl-icon>
+        <b>${agent}</b> recorded <b>${whose}</b> answer <b>${r.label}</b>
+        ${r.key ? html`for <span class="key">${r.key}</span>` : nothing} from ${pronoun} reply
+        ${this.renderTime()} ${this.renderNotDelivered()}
+        ${r.sourceMessageId
+          ? html`<span class="sep" aria-hidden="true">·</span>
+              <button
+                type="button"
+                class="link"
+                data-action="view-reply"
+                @click=${(): void => this.jumpTo(r.sourceMessageId)}
+              >
+                View reply
+              </button>`
+          : nothing}
+        ${this.renderJumpButton(r.promptMessageId)}
+      </div>`;
+    }
+
+    const outcome = r.outcome || 'answer';
+    if (outcome === 'confirm') {
+      return html`<div class="line" data-kind="single" data-outcome="confirm">
+        <sl-icon class="ok" name="patch-check" aria-hidden="true"></sl-icon>
+        <b>${this.who}</b> confirmed <b>${r.label}</b>
+        ${r.key ? html`for <span class="key">${r.key}</span>` : nothing} ${this.renderTime()}
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="muted" data-state="not-sent">not sent to the agent</span>
+        ${this.renderJumpButton(r.promptMessageId)}
+      </div>`;
+    }
+
+    if (outcome === 'override') {
+      return html`<div class="line" data-kind="single" data-outcome="override">
+        <sl-icon class="change" name="arrow-left-right" aria-hidden="true"></sl-icon>
+        <b>${this.who}</b> changed ${r.key ? html`<span class="key">${r.key}</span>` : nothing} to
+        <b>${r.label}</b>
+        ${r.previousChoiceLabel
+          ? html`<span class="muted">(was interpreted as ${r.previousChoiceLabel})</span>`
+          : nothing}
+        ${this.renderTime()} ${this.renderNotDelivered()}
+        ${this.renderJumpButton(r.promptMessageId)}
+      </div>`;
+    }
+
     const question = r.question?.trim();
     return html`<div class="line" data-kind="single">
-      <sl-icon
-        class=${interpreted ? 'robot' : 'ok'}
-        name=${interpreted ? 'robot' : 'check-circle-fill'}
-        aria-hidden="true"
-      ></sl-icon>
+      <sl-icon class="ok" name="check-circle-fill" aria-hidden="true"></sl-icon>
       <b>${this.who}</b> chose <b>${r.label}</b> for
       ${r.key ? html`<span class="key">${r.key}</span>` : nothing}
-      ${question ? html`<span class="q">${question}</span>` : nothing}
-      ${interpreted
-        ? html`<span class="sep" aria-hidden="true">·</span>
-            <span data-state="interpreted"
-              >recorded from ${this.who}'s reply by ${this.agentName || 'the agent'}</span
-            >`
-        : nothing}
-      ${this.renderTime()} ${this.renderNotDelivered()}
-      <span class="sep" aria-hidden="true">·</span>
-      <button type="button" class="link" data-action="jump" @click=${(): void => this.jump()}>
-        Jump
-      </button>
+      ${question ? html`<span class="q">${question}</span>` : nothing} ${this.renderTime()}
+      ${this.renderNotDelivered()} ${this.renderJumpButton(r.promptMessageId)}
     </div>`;
+  }
+
+  private renderSetItemNote(a: ChoiceResponseSetAnswer): TemplateResult | typeof nothing {
+    if (a.provenance !== INTERPRETED) {
+      if (a.outcome === 'confirm') {
+        return html` <i>(confirmed)</i>`;
+      }
+      if (a.outcome === 'override') {
+        return html` <i
+          >(${a.previousChoiceLabel ? `changed from ${a.previousChoiceLabel}` : 'changed'})</i
+        >`;
+      }
+    }
+    if (a.matchedDefault) {
+      return html` <i>(recommended)</i>`;
+    }
+    return nothing;
   }
 
   private renderSet(rs: ChoiceResponseSetView): TemplateResult {
     const answers = rs.answers ?? [];
     const n = answers.length;
     const interpreted = answers.some((a) => a.provenance === INTERPRETED);
+    const allConfirm = !interpreted && n > 0 && answers.every((a) => a.outcome === 'confirm');
+    const agent = this.agentName || 'the agent';
+    const whose = this.own ? 'your' : `${this.who}'s`;
+    const pronoun = this.own ? 'your' : 'their';
+    const sourceMsgId = interpreted ? answers[0]?.sourceMessageId : undefined;
+    const promptMsgId = rs.promptMessageId || undefined;
+    const multiPrompt = !promptMsgId;
     return html`<details
       data-kind="set"
       ?open=${this.open}
@@ -262,17 +353,24 @@ export class ScionChatChoiceResponse extends LitElement {
       <summary>
         <sl-icon
           class=${interpreted ? 'robot' : 'ok'}
-          name=${interpreted ? 'robot' : 'check-circle-fill'}
+          name=${interpreted ? 'robot' : allConfirm ? 'patch-check' : 'check-circle-fill'}
           aria-hidden="true"
         ></sl-icon>
-        <b>${this.who}</b> answered ${n} ${n === 1 ? 'decision' : 'decisions'}
         ${interpreted
-          ? html`<span class="sep" aria-hidden="true">·</span>
-              <span data-state="interpreted"
-                >recorded from ${this.who}'s reply by ${this.agentName || 'the agent'}</span
-              >`
-          : nothing}
-        ${this.renderTime()} ${this.renderNotDelivered()}
+          ? html`<span data-state="interpreted"
+              ><b>${agent}</b> recorded <b>${whose}</b> ${n === 1
+                ? 'answer'
+                : `answers to ${n} decisions`}
+              from ${pronoun} reply</span
+            >`
+          : html`<b>${this.who}</b> answered ${n} ${n === 1 ? 'decision' : 'decisions'}`}
+        ${this.renderTime()}
+        ${this.dispatchState === 'failed'
+          ? this.renderNotDelivered()
+          : allConfirm
+            ? html`<span class="sep" aria-hidden="true">·</span>
+                <span class="muted" data-state="not-sent">not sent to the agent</span>`
+            : nothing}
         <span class="sep" aria-hidden="true">·</span>
         <span class="link">${this.open ? 'Hide answers ▾' : 'Show answers ▸'}</span>
       </summary>
@@ -282,23 +380,52 @@ export class ScionChatChoiceResponse extends LitElement {
             html`<li data-row=${a.rowId}>
               <span class="key">${a.key}</span>
               <span class="lbl"
-                >${a.label}${a.matchedDefault ? html` <i>(recommended)</i>` : nothing}</span
+                >${a.label}${this.renderSetItemNote(a)}${multiPrompt &&
+                a.promptMessageId &&
+                a.promptMessageId !== answers[0]?.promptMessageId
+                  ? html` <span class="muted">(other question)</span>`
+                  : nothing}${multiPrompt && a.promptMessageId
+                  ? html`<span class="sep" aria-hidden="true"> · </span
+                      ><button
+                        type="button"
+                        class="link"
+                        data-action="jump"
+                        @click=${(): void => this.jumpTo(a.promptMessageId)}
+                      >
+                        Jump
+                      </button>`
+                  : nothing}</span
               >
             </li>`
         )}
-        <li>
-          <span></span>
-          <span
-            ><button
-              type="button"
-              class="link"
-              data-action="jump"
-              @click=${(): void => this.jump()}
-            >
-              Jump to question
-            </button></span
-          >
-        </li>
+        ${sourceMsgId || promptMsgId
+          ? html`<li>
+              <span></span>
+              <span
+                >${sourceMsgId
+                  ? html`<button
+                      type="button"
+                      class="link"
+                      data-action="view-reply"
+                      @click=${(): void => this.jumpTo(sourceMsgId)}
+                    >
+                      View reply
+                    </button>`
+                  : nothing}${sourceMsgId && promptMsgId
+                  ? html`<span class="sep" aria-hidden="true"> · </span>`
+                  : nothing}${promptMsgId
+                  ? html`<button
+                      type="button"
+                      class="link"
+                      data-action="jump"
+                      @click=${(): void => this.jumpTo(promptMsgId)}
+                    >
+                      Jump to question
+                    </button>`
+                  : nothing}</span
+              >
+            </li>`
+          : nothing}
       </ul>
     </details>`;
   }

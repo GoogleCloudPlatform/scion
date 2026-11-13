@@ -274,7 +274,15 @@ export function replacedThread(): ChoiceThread {
 
 /** Mock s12: single (own, Bob's), set (own), and an undelivered single. */
 export function responsesThread(): ChoiceThread {
-  const single = (id: string, label: string, key: string, q: string, choiceId: string) => ({
+  const single = (
+    id: string,
+    label: string,
+    key: string,
+    q: string,
+    choiceId: string,
+    answeredByUserId: string,
+    answeredByName: string
+  ) => ({
     rowId: `${id}-row`,
     ref: key,
     key,
@@ -283,6 +291,9 @@ export function responsesThread(): ChoiceThread {
     choiceId,
     label,
     provenance: 'direct',
+    outcome: 'answer',
+    answeredByUserId,
+    answeredByName,
     promptMessageId: 'prompt-resp',
   });
   const set = {
@@ -303,6 +314,9 @@ export function responsesThread(): ChoiceThread {
       provenance: 'direct',
       outcome: 'answer',
       matchedDefault: a.matchedDefault,
+      answeredByUserId: SELF_ID,
+      answeredByName: 'Fixture User',
+      promptMessageId: 'prompt-resp',
     })),
   };
   const prompt = shipDecision('prompt-resp', {
@@ -324,11 +338,131 @@ export function responsesThread(): ChoiceThread {
     messageChoiceIntros: { 'prompt-resp': 'One call before I tag it.' },
     messageChoiceAnswerModes: { 'prompt-resp': 'single' },
     messageChoiceResponses: {
-      'resp-own': single('own', 'Yes', 'D234', 'Ship v0.9 today?', 'yes'),
-      'resp-bob': single('bob', 'New waiting state', '17', 'Which approach?', 'b'),
-      'resp-failed': single('failed', 'Yes', 'D234', '', 'yes'),
+      'resp-own': single('own', 'Yes', 'D234', 'Ship v0.9 today?', 'yes', SELF_ID, 'Fixture User'),
+      'resp-bob': single('bob', 'New waiting state', '17', 'Which approach?', 'b', BOB_ID, 'Bob'),
+      'resp-failed': single('failed', 'Yes', 'D234', '', 'yes', SELF_ID, 'Fixture User'),
     },
     messageChoiceResponseSets: { 'resp-set': set },
+  };
+}
+
+/** Mock P2-7: interpreted (own & Bob's set), confirmed, and overridden response lines. */
+export function responsesPhase2Thread(): ChoiceThread {
+  const otherPrompt = shipDecision('prompt-other', {
+    key: 'D9',
+    ref: 'D9',
+    question: 'When?',
+    status: 'decided',
+    decision: answer('2', '2 · Later', BOB_ID, 'Bob', 5),
+  });
+  const prompt = shipDecision('prompt-p27', {
+    status: 'decided',
+    decision: answer('no', 'No', SELF_ID, 'Fixture User', 11),
+  });
+  return {
+    messages: [
+      row('prompt-other', 0, 'choice-prompt', 'Schedule check.\n\n(fallback)', 'asker'),
+      row('prompt-p27', 1, 'choice-prompt', 'One call before I tag it.\n\n(fallback)', 'asker'),
+      row('reply-self', 2, 'instruction', 'Yes, ship D234 today.', 'self'),
+      row('resp-interp-own', 3, 'choice-response', 'recorded answer', 'asker'),
+      row('resp-interp-bob-set', 5, 'choice-response', 'recorded Bob answers', 'asker'),
+      row('resp-confirm', 11, 'choice-response', 'confirmed Yes', 'self'),
+      row('resp-override', 12, 'choice-response', 'changed D234 to No', 'self'),
+    ],
+    messageDecisions: { 'prompt-other': [otherPrompt], 'prompt-p27': [prompt] },
+    messageChoiceIntros: {
+      'prompt-other': 'Schedule check.',
+      'prompt-p27': 'One call before I tag it.',
+    },
+    messageChoiceAnswerModes: { 'prompt-other': 'single', 'prompt-p27': 'single' },
+    messageChoiceResponses: {
+      'resp-interp-own': {
+        rowId: 'interp-own-row',
+        ref: 'D234',
+        key: 'D234',
+        version: 1,
+        question: 'Ship v0.9 today?',
+        choiceId: 'yes',
+        label: 'Yes',
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        answeredByUserId: SELF_ID,
+        answeredByName: 'Fixture User',
+        interpretedByAgentId: ASKER_ID,
+        promptMessageId: 'prompt-p27',
+        sourceMessageId: 'reply-self',
+      },
+      'resp-confirm': {
+        rowId: 'confirm-row',
+        ref: 'D234',
+        key: 'D234',
+        version: 1,
+        question: 'Ship v0.9 today?',
+        choiceId: 'yes',
+        label: 'Yes',
+        provenance: 'direct',
+        outcome: 'confirm',
+        answeredByUserId: SELF_ID,
+        answeredByName: 'Fixture User',
+        promptMessageId: 'prompt-p27',
+      },
+      'resp-override': {
+        rowId: 'override-row',
+        ref: 'D234',
+        key: 'D234',
+        version: 1,
+        question: 'Ship v0.9 today?',
+        choiceId: 'no',
+        label: 'No',
+        provenance: 'direct',
+        outcome: 'override',
+        answeredByUserId: SELF_ID,
+        answeredByName: 'Fixture User',
+        promptMessageId: 'prompt-p27',
+        previousChoiceLabel: 'Yes',
+      },
+    },
+    messageChoiceResponseSets: {
+      'resp-interp-bob-set': {
+        batchId: 'batch-interp-bob',
+        answers: [
+          {
+            rowId: 'bob-r1',
+            ref: 'ship-now',
+            key: 'ship-now',
+            version: 1,
+            question: 'Deploy?',
+            choiceId: 'yes',
+            label: 'Yes',
+            provenance: 'agent_interpreted',
+            outcome: 'answer',
+            matchedDefault: false,
+            answeredByUserId: BOB_ID,
+            answeredByName: 'Bob',
+            interpretedByAgentId: ASKER_ID,
+            promptMessageId: 'prompt-p27',
+            sourceMessageId: 'reply-self',
+          },
+          {
+            rowId: 'bob-r2',
+            ref: 'D9',
+            key: 'D9',
+            version: 1,
+            question: 'When?',
+            choiceId: '2',
+            label: '2 · Later',
+            provenance: 'agent_interpreted',
+            outcome: 'answer',
+            matchedDefault: false,
+            answeredByUserId: BOB_ID,
+            answeredByName: 'Bob',
+            interpretedByAgentId: ASKER_ID,
+            promptMessageId: 'prompt-other',
+            sourceMessageId: 'reply-self',
+          },
+        ],
+      },
+    },
   };
 }
 

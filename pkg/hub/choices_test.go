@@ -999,3 +999,146 @@ func TestChoicesSend_WithoutIntro(t *testing.T) {
 	require.Len(t, decs[resp.MessageID], 1)
 	assert.Equal(t, 0, decs[resp.MessageID][0].IntroLength, "no intro")
 }
+
+// ptone/scion#7775: ChoiceResponseView carries the answerer identity,
+// outcome, interpreted provenance metadata, and overridden interpreted
+// label identically on live SSE events and history reloads.
+func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
+	f := newChoicesFixture(t)
+	ctx := context.Background()
+	chat, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.message")
+	defer unsub()
+
+	conv, err := f.store.GetConversationByExternalRef(ctx, "native", "thread:"+f.project.ID+":"+f.topicID)
+	require.NoError(t, err)
+
+	recordTopicInterpreted := func(u *store.User, row, choiceID string) (srcID, respID string) {
+		srcID = api.NewUUID()
+		respID = api.NewUUID()
+		_, _, err := f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID: row, ChoiceID: choiceID,
+			AnsweredByUserID: u.ID, AnsweredByName: u.DisplayName, AnsweredByEmail: u.Email,
+			Provenance: store.DecisionProvenanceAgentInterpreted, InterpretedByAgentID: f.agent.ID,
+			SourceMessageID: srcID, Surface: store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{
+				ID: respID, ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+				Recipient: "user:" + u.Email, RecipientID: u.ID, ConversationID: conv.ID,
+				AgentID: f.agent.ID, Channel: "web", ThreadID: f.topicID, Msg: "interpreted", CreatedAt: time.Now().UTC(),
+				DispatchState: store.MessageDispatchDispatched,
+			},
+		})
+		require.NoError(t, err)
+		return srcID, respID
+	}
+
+	// 1. Direct answer by Bob.
+	directPrompt, directRes := f.topicPrompt(t, `[{"id":"D-direct","question":"Direct?","choices":["yes","no"]}]`, false)
+	rr := f.answer(t, f.bob, directRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var directAns DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &directAns))
+
+	// 2. Agent-interpreted answer for Alice.
+	interpPrompt, interpRes := f.topicPrompt(t, `[{"id":"D-interp","question":"Interp?","choices":["yes","no"]}]`, false)
+	srcID, interpRespID := recordTopicInterpreted(f.alice, interpRes.Decisions[0].RowID, "1")
+
+	// 3. Confirmed answer by Alice.
+	confirmPrompt, confirmRes := f.topicPrompt(t, `[{"id":"D-confirm","question":"Confirm?","choices":["yes","no"]}]`, false)
+	recordTopicInterpreted(f.alice, confirmRes.Decisions[0].RowID, "1")
+	rr = f.answer(t, f.alice, confirmRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var confirmAns DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &confirmAns))
+
+	// 4. Overridden answer by Alice (interpreted as "yes", overridden to "no").
+	overridePrompt, overrideRes := f.topicPrompt(t, `[{"id":"D-override","question":"Override?","choices":["yes","no"]}]`, false)
+	recordTopicInterpreted(f.alice, overrideRes.Decisions[0].RowID, "1")
+	rr = f.answer(t, f.alice, overrideRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "2"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var overrideAns DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &overrideAns))
+
+	liveByID := map[string]ChoiceResponseView{}
+	for _, e := range collectEvents(chat) {
+		var evt UserMessageEvent
+		require.NoError(t, json.Unmarshal(e.Data, &evt))
+		if evt.ChoiceResponse != nil {
+			liveByID[evt.ID] = *evt.ChoiceResponse
+		}
+	}
+
+	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var h chatHistoryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &h))
+
+	for source, views := range map[string]map[string]ChoiceResponseView{"live": liveByID, "history": h.MessageChoiceResponses} {
+		direct := views[directAns.ResponseMessageID]
+		assert.Equal(t, f.bob.ID, direct.AnsweredByUserID, source)
+		assert.Equal(t, f.bob.DisplayName, direct.AnsweredByName, source)
+		assert.Equal(t, store.DecisionProvenanceDirect, direct.Provenance, source)
+		assert.Equal(t, store.DecisionOutcomeAnswer, direct.Outcome, source)
+		assert.Equal(t, directPrompt.ID, direct.PromptMessageID, source)
+		assert.Empty(t, direct.PreviousChoiceLabel, source)
+		assert.Empty(t, direct.InterpretedByAgentID, source)
+
+		confirm := views[confirmAns.ResponseMessageID]
+		assert.Equal(t, f.alice.ID, confirm.AnsweredByUserID, source)
+		assert.Equal(t, f.alice.DisplayName, confirm.AnsweredByName, source)
+		assert.Equal(t, store.DecisionProvenanceDirect, confirm.Provenance, source)
+		assert.Equal(t, store.DecisionOutcomeConfirm, confirm.Outcome, source)
+		assert.Equal(t, "yes", confirm.Label, source)
+		assert.Equal(t, confirmPrompt.ID, confirm.PromptMessageID, source)
+		assert.Empty(t, confirm.PreviousChoiceLabel, source)
+
+		override := views[overrideAns.ResponseMessageID]
+		assert.Equal(t, f.alice.ID, override.AnsweredByUserID, source)
+		assert.Equal(t, f.alice.DisplayName, override.AnsweredByName, source)
+		assert.Equal(t, store.DecisionProvenanceDirect, override.Provenance, source)
+		assert.Equal(t, store.DecisionOutcomeOverride, override.Outcome, source)
+		assert.Equal(t, "no", override.Label, source)
+		assert.Equal(t, "yes", override.PreviousChoiceLabel, source)
+		assert.Equal(t, overridePrompt.ID, override.PromptMessageID, source)
+	}
+
+	// History also enriches stored agent_interpreted choice-response rows.
+	interp := h.MessageChoiceResponses[interpRespID]
+	assert.Equal(t, f.alice.ID, interp.AnsweredByUserID)
+	assert.Equal(t, f.alice.DisplayName, interp.AnsweredByName)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, interp.Provenance)
+	assert.Equal(t, store.DecisionOutcomeAnswer, interp.Outcome)
+	assert.Equal(t, f.agent.ID, interp.InterpretedByAgentID)
+	assert.Equal(t, srcID, interp.SourceMessageID)
+	assert.Equal(t, interpPrompt.ID, interp.PromptMessageID)
+	assert.Empty(t, interp.PreviousChoiceLabel)
+
+	// Empty or whitespace-only AnsweredByName falls back to AnsweredByEmail.
+	for _, blank := range []string{"", "   \t "} {
+		emailAns := &store.DecisionAnswer{
+			DecisionRowID: "row-email", AskerAgentID: f.agent.ID, Key: "D-email", Version: 1,
+			QuestionText: "Email fallback?", ChoiceID: "1", ChoiceLabel: "yes",
+			Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer,
+			AnsweredByUserID: "u-no-name", AnsweredByName: blank, AnsweredByEmail: "noname@example.test",
+		}
+		assert.Equal(t, "noname@example.test", choiceResponseViewOf(emailAns, nil).AnsweredByName)
+		assert.Equal(t, "noname@example.test", choiceResponseSetAnswerOf(emailAns, nil).AnsweredByName)
+	}
+
+	// Deleted answerer (AnsweredByUserID empty, snapshot AnsweredByName retained)
+	// omits answeredByUserId on the wire while keeping answeredByName.
+	deletedAns := &store.DecisionAnswer{
+		DecisionRowID: "row-del", AskerAgentID: f.agent.ID, Key: "D-del", Version: 1,
+		QuestionText: "Deleted user?", ChoiceID: "1", ChoiceLabel: "yes",
+		Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer,
+		AnsweredByUserID: "", AnsweredByName: "Old User", AnsweredByEmail: "old@example.test",
+	}
+	singleJSON, err := json.Marshal(choiceResponseViewOf(deletedAns, nil))
+	require.NoError(t, err)
+	assert.NotContains(t, string(singleJSON), `"answeredByUserId"`)
+	assert.Contains(t, string(singleJSON), `"answeredByName":"Old User"`)
+
+	setItemJSON, err := json.Marshal(choiceResponseSetAnswerOf(deletedAns, nil))
+	require.NoError(t, err)
+	assert.NotContains(t, string(setItemJSON), `"answeredByUserId"`)
+	assert.Contains(t, string(setItemJSON), `"answeredByName":"Old User"`)
+}

@@ -1769,8 +1769,14 @@ export interface ChoiceResponseView {
   choiceId: string;
   label: string;
   provenance: string;
+  /** "answer", "confirm" or "override". */
+  outcome?: string;
+  answeredByUserId?: string;
+  answeredByName?: string;
+  interpretedByAgentId?: string;
   promptMessageId: string;
   sourceMessageId?: string;
+  previousChoiceLabel?: string;
 }
 
 /** One answer of a ChoiceResponseSetView. */
@@ -1785,11 +1791,17 @@ export interface ChoiceResponseSetAnswer {
   provenance: string;
   outcome: string;
   matchedDefault: boolean;
+  answeredByUserId?: string;
+  answeredByName?: string;
+  interpretedByAgentId?: string;
+  sourceMessageId?: string;
+  promptMessageId?: string;
+  previousChoiceLabel?: string;
 }
 
 /** What the choice-response row of a set submit carries, in position order. */
 export interface ChoiceResponseSetView {
-  promptMessageId: string;
+  promptMessageId?: string;
   batchId: string;
   answers: ChoiceResponseSetAnswer[];
 }

@@ -162,6 +162,7 @@ const USED_ICONS = [
   'lock',
   'moon',
   'paperclip',
+  'patch-check',
   'pencil',
   'pencil-square',
   'people',

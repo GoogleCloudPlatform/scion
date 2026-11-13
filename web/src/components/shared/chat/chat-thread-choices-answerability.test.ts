@@ -393,6 +393,9 @@ describe('choice-response lines', () => {
         choiceId: 'yes',
         label: 'Yes',
         provenance: 'direct',
+        outcome: 'answer',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Me',
         promptMessageId: 'p1',
       },
     };
@@ -412,6 +415,8 @@ describe('choice-response lines', () => {
             provenance: 'direct',
             outcome: 'answer',
             matchedDefault: true,
+            answeredByUserId: 'u-bob',
+            answeredByName: 'Bob',
           },
         ],
       },
