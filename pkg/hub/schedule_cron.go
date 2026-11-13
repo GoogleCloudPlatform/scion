@@ -194,6 +194,7 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 // scheduler, so the evaluator's first tick never sees an active prefixed row.
 func (s *Server) startScheduler(ctx context.Context) {
 	s.pauseZonePrefixedSchedules(ctx)
+	s.recoverAbandonedWakeFiresOnStart(ctx)
 	s.scheduler.Start(ctx)
 }
 

@@ -584,23 +584,39 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// from the initiator recorded on evt. Covers one-shot fires and restart
 	// replay of overdue events alike, since both paths call fireEvent.
 	ctx = ContextWithExecutor(ctx, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID})
+	wakeFire := evt.EventType == "message" && scheduledPayloadWakes(evt.Payload)
+	var scope *oneShotFireScope
+	if wakeFire {
+		// Registered before handlerCtx and before final persistence so
+		// runningWakeFires / scheduledWakeFires stay held until the final
+		// status write completes (ptone/scion#7791 b1).
+		ctx, scope = withOneShotFireScope(ctx)
+		defer scope.finish()
+	}
 	handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	status := store.ScheduledEventFired
+	finalStatus := store.ScheduledEventFired
 	if wasExpired {
-		status = store.ScheduledEventExpired
+		finalStatus = store.ScheduledEventExpired
+	}
+	claimStatus := finalStatus
+	if wakeFire {
+		// Claim wake events into provisional "firing" status so an unrecorded
+		// shutdown abandonment never looks like a completed delivery
+		// (ptone/scion#7791 c).
+		claimStatus = store.ScheduledEventFiring
 	}
 
 	// Multi-replica dedup (P3-5): several replicas may each recover the same
 	// pending event from the database on startup and arm a timer for it. Claim
-	// the event atomically (pending -> status) before running its side effect so
-	// exactly one replica delivers it. If the store supports claiming and we
-	// lose the race (already claimed/cancelled), skip silently. Backends without
-	// the capability fall through to the legacy run-then-mark behavior, which is
-	// correct for a single replica.
+	// the event atomically (pending -> claimStatus) before running its side
+	// effect so exactly one replica delivers it. If the store supports claiming
+	// and we lose the race (already claimed/cancelled), skip silently. Backends
+	// without the capability fall through to the legacy run-then-mark behavior,
+	// marking wake events firing first so CompleteFiringScheduledEvent matches.
 	if claimer, ok := s.store.(store.ScheduledEventClaimer); ok {
-		claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, status)
+		claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, claimStatus)
 		if err != nil {
 			s.log.Warn("Scheduler: failed to claim scheduled event; skipping to avoid duplicate",
 				"eventID", evt.ID, "type", evt.EventType, "error", err)
@@ -609,6 +625,13 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		if !claimed {
 			s.log.Debug("Scheduler: scheduled event already claimed by another replica, skipping",
 				"eventID", evt.ID, "type", evt.EventType)
+			return
+		}
+	} else if wakeFire && s.store != nil {
+		claimedAt := time.Now()
+		if err := s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFiring, &claimedAt, ""); err != nil {
+			s.log.Warn("Scheduler: failed to mark wake event firing; skipping",
+				"eventID", evt.ID, "type", evt.EventType, "error", err)
 			return
 		}
 	}
@@ -633,25 +656,46 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		}
 	}()
 
+	var run *wakeFireRun
+	if scope != nil {
+		var aborted bool
+		run, aborted = scope.state()
+		if errMsg != "" && aborted {
+			errMsg = errScheduledWakeShutdown.Error()
+		}
+	}
+
 	// If the handler returned an error or panicked, record the event as
-	// failed rather than fired. The atomic claim (when available) already
-	// transitioned pending→fired for dedup; this final write transitions
-	// fired→failed so the persisted status reflects the actual outcome.
+	// failed rather than fired/expired.
+	status := finalStatus
 	if errMsg != "" {
 		status = store.ScheduledEventFailed
 	}
 
 	// Record the outcome on a bounded context of its own: the event was
-	// claimed (fired) before the handler ran, and a shutdown that cancelled
-	// ctx meanwhile (halt) must not leave it fired with the failure
-	// unrecorded, for example a scheduled wake that never delivered
-	// (ptone/scion#7734).
-	now := time.Now()
-	if s.store != nil {
+	// claimed before the handler ran, and a shutdown that cancelled ctx
+	// meanwhile (halt) must not leave the failure unrecorded
+	// (ptone/scion#7734). When tracked via wakeFireRun, share its single-claim
+	// coordination with recordAbandonedWakeFires so teardown and fireEvent
+	// never double-write or overwrite each other (ptone/scion#7791 b2).
+	if s.store == nil {
+		return
+	}
+	persist := func() {
+		now := time.Now()
 		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelRecord()
+		if wakeFire {
+			_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, status, now, errMsg, "", time.Time{})
+			return
+		}
 		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &now, errMsg)
 	}
+	if run != nil {
+		run.tryRecord(persist)
+		return
+	}
+	persist()
 }
 
 // executeEvent dispatches the event to the appropriate handler based on its

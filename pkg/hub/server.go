@@ -6949,6 +6949,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 func (s *Server) evaluateSchedulesHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		now := time.Now().UTC()
+		s.recoverAbandonedWakeFires(ctx, now, false)
 		dueSchedules, err := s.store.ListDueSchedules(ctx, now)
 		if err != nil {
 			slog.Error("schedule-evaluator: failed to list due schedules",
@@ -7032,15 +7033,15 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		AuthorityCeiling: sched.AuthorityCeiling,
 	}
 
-	// A wake fire's event (ptone/scion#7734) is created already fired, not
-	// pending: the fire can run for minutes, and a pending event would be
-	// replayed by loadPersistedTimers if the hub restarted, or another
-	// replica started, meanwhile (one late duplicate wake and delivery).
-	// Created fired, it is never pending, so there is no claim to race. Its
-	// outcome write sets the final status.
+	// A wake fire's event (ptone/scion#7734, ptone/scion#7791 c) is created in
+	// provisional status "firing", not pending and not prematurely fired: the
+	// fire can run for minutes, and a pending event would be replayed by
+	// loadPersistedTimers if the hub restarted or another replica started
+	// meanwhile, whereas creating it as "fired" would leave an unrecorded
+	// shutdown abandonment indistinguishable from a completed delivery.
 	wakeFire := sched.EventType == "message" && scheduledPayloadWakes(sched.Payload)
 	if wakeFire {
-		evt.Status = store.ScheduledEventFired
+		evt.Status = store.ScheduledEventFiring
 		firedAt := now
 		evt.FiredAt = &firedAt
 	}
@@ -7096,9 +7097,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		log.Warn("schedule-evaluator: " + msg)
 		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelRecord()
-		failedAt := time.Now()
-		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, store.ScheduledEventFailed, &failedAt, msg)
-		_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, msg)
+		_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, store.ScheduledEventFailed, time.Now(), msg, sched.ID, now)
 		return
 	}
 	s.runScheduleFire(ctx, log, sched, evt, now, nextRunAt, nil)
@@ -7174,11 +7173,10 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 	// may have run (and reserved the run after it) while this one was
 	// waking: record the outcome without touching next_run_at, so a late
 	// completion cannot rewind it.
-	run.record(func() {
+	run.tryRecord(func() {
 		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelRecord()
-		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &firedAt, errMsg)
-		_ = s.store.RecordScheduleRun(recordCtx, sched.ID, now, errMsg)
+		_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, status, firedAt, errMsg, sched.ID, now)
 	})
 }
 
